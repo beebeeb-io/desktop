@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Beebeeb — Hi-fi</title>
+<link rel="stylesheet" href="hifi-styles.css?v=2" />
+<style>
+  html, body { background: oklch(0.93 0.008 82); min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="hifi-components.jsx"></script>
+<script type="text/babel" src="hifi-onboarding.jsx"></script>
+<script type="text/babel" src="hifi-drive.jsx"></script>
+<script type="text/babel" src="hifi-upload-share.jsx"></script>
+<script type="text/babel" src="hifi-team-photos.jsx"></script>
+<script type="text/babel" src="hifi-mobile-sync.jsx"></script>
+<script type="text/babel" src="hifi-security.jsx"></script>
+<script type="text/babel" src="hifi-empty-errors.jsx"></script>
+<script type="text/babel" src="hifi-billing.jsx"></script>
+<script type="text/babel" src="hifi-landing.jsx"></script>
+<script type="text/babel" src="hifi-marketing.jsx"></script>
+<script type="text/babel" src="hifi-compliance.jsx"></script>
+<script type="text/babel" src="hifi-brand-system.jsx"></script>
+<script type="text/babel" src="hifi-auth.jsx"></script>
+<script type="text/babel" src="hifi-preview.jsx"></script>
+<script type="text/babel" src="hifi-actions.jsx"></script>
+<script type="text/babel" src="hifi-settings.jsx"></script>
+<script type="text/babel" src="hifi-ios-app.jsx"></script>
+<script type="text/babel" src="hifi-android-app.jsx"></script>
+<script type="text/babel" src="hifi-desktop.jsx"></script>
+<script type="text/babel" src="hifi-cli.jsx"></script>
+<script type="text/babel" src="hifi-web-extra.jsx"></script>
+<script type="text/babel" src="hifi-web-details.jsx"></script>
+<script type="text/babel" src="hifi-web-admin.jsx"></script>
+<script type="text/babel" src="hifi-web-invite.jsx"></script>
+<script type="text/babel" src="hifi-enterprise.jsx"></script>
+<script type="text/babel" src="hifi-public-extra.jsx"></script>
+<script type="text/babel" src="hifi-mobile-extra.jsx"></script>
+<script type="text/babel" src="hifi-misc.jsx"></script>
+<script type="text/babel" src="hifi-tweaks.jsx"></script>
+
+<script type="text/babel">
+function App() {
+  return (
+    <TweakProvider>
+    <DesignCanvas title="Beebeeb — Hi-fi" subtitle="Picked directions, polished. Tweaks → swap persona live.">
+      <DCSection id="brand-system" title="Brand system">
+        <DCArtboard id="brand-system-doc" label="Design system — one-pager" width={1220} height={2380}>
+          <div style={{ padding: 20 }}><HiBrandSystem /></div>
+        </DCArtboard>
+        <DCArtboard id="persona-overview" label="Current persona — changes with Tweaks" width={1020} height={620}>
+          <HiPersonaOverview />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="auth" title="Auth flows">
+        <DCArtboard id="auth-signup" label="Signup" width={500} height={640}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSignup /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-login" label="Login" width={500} height={560}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiLogin /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-verify" label="Email verification" width={500} height={420}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiEmailVerify /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-2fa" label="2FA · TOTP setup" width={520} height={560}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiTwoFactor /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-passkey" label="Passkey enrollment" width={500} height={540}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiPasskey /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-forgot" label="Forgot password · the honest dead-end" width={540} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiForgotPassword /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-sessions" label="Session management" width={740} height={480}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSessions /></div>
+        </DCArtboard>
+        <DCArtboard id="auth-delete" label="Account deletion" width={540} height={780}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiAccountDelete /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-onboard" title="Web app · Onboarding">
+        <DCArtboard id="onboard" label="Onboarding · Recovery phrase (C)" width={820} height={560}>
+          <div style={{ padding: 24, display: 'flex', justifyContent: 'center' }}><HiOnboarding /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-drive" title="Web app · Drive & files">
+        <DCArtboard id="drive" label="Drive · All files" width={1040} height={640}>
+          <div style={{ padding: 0 }}><HiDrive /></div>
+        </DCArtboard>
+        <DCArtboard id="upload" label="Upload · Drop + timeline" width={520} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiUpload /></div>
+        </DCArtboard>
+        <DCArtboard id="move-modal" label="Move / copy — folder picker" width={560} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiMoveModal /></div>
+        </DCArtboard>
+        <DCArtboard id="trash" label="Trash — with shred countdown" width={960} height={540}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiTrash /></div>
+        </DCArtboard>
+        <DCArtboard id="versions" label="Version history — diff view" width={900} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiVersionHistory /></div>
+        </DCArtboard>
+        <DCArtboard id="search-results" label="Search results — encrypted, device-only" width={860} height={560}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSearchResults /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-preview" title="Web app · File preview">
+        <DCArtboard id="prev-image" label="Preview · Image (raw photo)" width={1100} height={680}>
+          <div style={{ padding: 0, height: 680 }}><HiPreviewImage /></div>
+        </DCArtboard>
+        <DCArtboard id="prev-pdf" label="Preview · PDF (redacted)" width={1100} height={680}>
+          <div style={{ padding: 0, height: 680 }}><HiPreviewPDF /></div>
+        </DCArtboard>
+        <DCArtboard id="prev-video" label="Preview · Video" width={1100} height={680}>
+          <div style={{ padding: 0, height: 680 }}><HiPreviewVideo /></div>
+        </DCArtboard>
+        <DCArtboard id="prev-doc" label="Preview · Document / markdown" width={1100} height={680}>
+          <div style={{ padding: 0, height: 680 }}><HiPreviewDoc /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-share" title="Web app · Sharing & team">
+        <DCArtboard id="share" label="Share · Key-separated link" width={500} height={700}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiShare /></div>
+        </DCArtboard>
+        <DCArtboard id="team" label="Team · Members + access" width={880} height={440}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiTeam /></div>
+        </DCArtboard>
+        <DCArtboard id="shared-with-me" label="Shared with me" width={940} height={460}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSharedWithMe /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-photos" title="Web app · Photos">
+        <DCArtboard id="photos" label="Photos · Date grid" width={900} height={620}>
+          <div style={{ padding: 0 }}><HiPhotos /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-settings" title="Web app · Settings & activity">
+        <DCArtboard id="settings-profile" label="Settings · Profile" width={1080} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSettingsProfile /></div>
+        </DCArtboard>
+        <DCArtboard id="settings-devices" label="Settings · Devices" width={1080} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSettingsDevices /></div>
+        </DCArtboard>
+        <DCArtboard id="settings-notifications" label="Settings · Notifications" width={1080} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSettingsNotifications /></div>
+        </DCArtboard>
+        <DCArtboard id="settings-language" label="Settings · Language & region" width={1080} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSettingsLanguage /></div>
+        </DCArtboard>
+        <DCArtboard id="activity" label="Activity feed" width={820} height={780}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiActivity /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-security" title="Web app · Account security">
+        <DCArtboard id="security-center" label="Security center — overview" width={1040} height={760}>
+          <div style={{ padding: 0 }}><HiSecurity /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="states" title="Empty & error states">
+        <DCArtboard id="empty-drive" label="Empty drive — first file" width={880} height={520}>
+          <div style={{ padding: 0 }}><HiEmptyDrive /></div>
+        </DCArtboard>
+        <DCArtboard id="empty-search" label="Search — no results" width={560} height={360}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiEmptySearch /></div>
+        </DCArtboard>
+        <DCArtboard id="upload-error" label="Upload — connection dropped" width={520} height={500}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiUploadError /></div>
+        </DCArtboard>
+        <DCArtboard id="link-expired" label="Shared link — expired (recipient)" width={560} height={520}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiLinkExpired /></div>
+        </DCArtboard>
+        <DCArtboard id="forgot-phrase" label="Lost recovery phrase — the dead-end" width={620} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiForgotPhrase /></div>
+        </DCArtboard>
+        <DCArtboard id="offline" label="Offline — desktop sync" width={360} height={360}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiOfflineState /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="marketing" title="Public website">
+        <DCArtboard id="landing" label="Landing — home" width={1320} height={3400}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiLanding /></div>
+        </DCArtboard>
+        <DCArtboard id="marketing-security" label="Security — how it works" width={1320} height={2400}>
+          <div style={{ padding: 0, display: 'flex', justifyContent: 'center' }}><HiSecurityPage /></div>
+        </DCArtboard>
+        <DCArtboard id="marketing-compare" label="Compare vs Google/Dropbox/iCloud" width={1320} height={1800}>
+          <div style={{ padding: 0, display: 'flex', justifyContent: 'center' }}><HiComparePage /></div>
+        </DCArtboard>
+        <DCArtboard id="marketing-about" label="About · Made in Europe" width={1320} height={1900}>
+          <div style={{ padding: 0, display: 'flex', justifyContent: 'center' }}><HiAboutPage /></div>
+        </DCArtboard>
+        <DCArtboard id="marketing-developers" label="Developers · SDK, CLI, rclone" width={1320} height={1900}>
+          <div style={{ padding: 0, display: 'flex', justifyContent: 'center' }}><HiDevelopersPage /></div>
+        </DCArtboard>
+        <DCArtboard id="marketing-legal" label="Legal · warrant canary + transparency" width={1320} height={1600}>
+          <div style={{ padding: 0, display: 'flex', justifyContent: 'center' }}><HiLegalPage /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="billing" title="Plans & billing">
+        <DCArtboard id="pricing" label="Pricing — public page (€5 / 2 TB)" width={1180} height={820}>
+          <div style={{ padding: 0 }}><HiPricing /></div>
+        </DCArtboard>
+        <DCArtboard id="upgrade" label="Upgrade — Team trial flow" width={600} height={760}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiUpgradeFlow /></div>
+        </DCArtboard>
+        <DCArtboard id="billing-panel" label="Billing — management" width={960} height={700}>
+          <div style={{ padding: 0 }}><HiBilling /></div>
+        </DCArtboard>
+        <DCArtboard id="invoice" label="Invoice — PDF example" width={820} height={1120}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiInvoice /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="ios-section" title="iOS app">
+        <DCArtboard id="ios" label="iOS · Drive (A)" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiIOS /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-home" label="iOS · Home / Files" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSHome /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-photos" label="iOS · Photos grid" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSPhotos /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-preview" label="iOS · File preview" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSPreview /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-share" label="iOS · Share sheet" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSShareSheet /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-settings" label="iOS · Settings" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSSettings /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-lock" label="iOS · Biometric lock" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSBiometricLock /></div>
+        </DCArtboard>
+        <DCArtboard id="ios-backup" label="iOS · Camera backup" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><IOSAutoBackup /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="android-section" title="Android app">
+        <DCArtboard id="android" label="Android · Quick actions (B)" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiAndroid /></div>
+        </DCArtboard>
+        <DCArtboard id="and-home" label="Android · Home" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><AndHome /></div>
+        </DCArtboard>
+        <DCArtboard id="and-preview" label="Android · File preview" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><AndPreview /></div>
+        </DCArtboard>
+        <DCArtboard id="and-photos" label="Android · Photos" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><AndPhotos /></div>
+        </DCArtboard>
+        <DCArtboard id="and-share" label="Android · Share sheet" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><AndShareSheet /></div>
+        </DCArtboard>
+        <DCArtboard id="and-settings" label="Android · Settings" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><AndSettings /></div>
+        </DCArtboard>
+        <DCArtboard id="and-lock" label="Android · Fingerprint lock" width={340} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><AndFingerprint /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="desktop" title="Desktop sync — macOS">
+        <DCArtboard id="sync-active" label="Menu-bar · Syncing (A)" width={440} height={360}>
+          <div style={{ padding: 10 }}><HiSyncActive /></div>
+        </DCArtboard>
+        <DCArtboard id="sync-idle" label="Menu-bar · Up to date (B)" width={440} height={360}>
+          <div style={{ padding: 10 }}><HiSyncIdle /></div>
+        </DCArtboard>
+        <DCArtboard id="desktop-prefs" label="Preferences · General (mac)" width={820} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiDesktopPrefs /></div>
+        </DCArtboard>
+        <DCArtboard id="selective-sync" label="Selective sync · folder tree" width={820} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiSelectiveSync /></div>
+        </DCArtboard>
+        <DCArtboard id="conflict" label="Conflict resolver · two versions" width={860} height={600}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiConflict /></div>
+        </DCArtboard>
+        <DCArtboard id="first-run" label="First-run setup · step 3 of 4" width={800} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiFirstRun /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="desktop-windows" title="Desktop sync — Windows">
+        <DCArtboard id="windows-explorer" label="Windows 11 · File Explorer integration" width={1040} height={680}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiWindowsExplorer /></div>
+        </DCArtboard>
+        <DCArtboard id="windows-tray" label="Windows 11 · Tray notification" width={460} height={320}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiWindowsTray /></div>
+        </DCArtboard>
+        <DCArtboard id="windows-settings" label="Windows 11 · Settings (Fluent)" width={1040} height={720}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><HiWindowsSettings /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="cli" title="bb CLI & integrations">
+        <DCArtboard id="cli-help" label="bb --help · overview" width={840} height={580}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliHelp /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-upload" label="bb push · progress" width={840} height={580}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliUpload /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-share" label="bb share · one-time link" width={840} height={580}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliShare /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-rotate" label="bb rotate · key rotation" width={840} height={580}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliRotate /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-rclone" label="rclone remote · bb backend config" width={840} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliRclone /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-archive" label="bb archive · cold storage + verify" width={840} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliArchive /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-sdk" label="Node SDK · code snippet" width={840} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliSDK /></div>
+        </DCArtboard>
+        <DCArtboard id="cli-cron" label="Engineer · cron backup pipeline" width={840} height={620}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><CliCron /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="compliance" title="Compliance dashboard">
+        <DCArtboard id="compliance-overview" label="Compliance — overview (Business tier)" width={1180} height={1380}>
+          <div style={{ padding: 0 }}><HiCompliance /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="web-orphans" title="Web app · detail surfaces">
+        <DCArtboard id="recipient-share" label="Share recipient · public link view" width={1080} height={700}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiRecipientShare /></div>
+        </DCArtboard>
+        <DCArtboard id="recipient-password" label="Share recipient · password prompt" width={1080} height={640}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiRecipientPassword /></div>
+        </DCArtboard>
+        <DCArtboard id="file-details" label="File details · right rail" width={420} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiFileDetails /></div>
+        </DCArtboard>
+        <DCArtboard id="context-menu" label="Right-click context menu" width={320} height={520}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiContextMenu /></div>
+        </DCArtboard>
+        <DCArtboard id="notifications" label="Notifications inbox (dropdown)" width={440} height={620}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiNotifications /></div>
+        </DCArtboard>
+        <DCArtboard id="team-admin" label="Team admin dashboard" width={1100} height={820}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiTeamAdmin /></div>
+        </DCArtboard>
+        <DCArtboard id="migration" label="Migration wizard — from Google/Dropbox" width={760} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiMigrationWizard /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="enterprise" title="Enterprise & admin">
+        <DCArtboard id="audit-log" label="Audit log — exportable" width={1120} height={760}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiAuditLog /></div>
+        </DCArtboard>
+        <DCArtboard id="sso-setup" label="SSO / SAML setup" width={880} height={800}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSSOSetup /></div>
+        </DCArtboard>
+        <DCArtboard id="data-export" label="Data export · pack my vault" width={680} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiDataExport /></div>
+        </DCArtboard>
+        <DCArtboard id="api-tokens" label="Connected apps / API tokens" width={880} height={640}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiApiTokens /></div>
+        </DCArtboard>
+        <DCArtboard id="ip-allowlist" label="IP allowlist / network restrictions" width={780} height={620}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiIPAllowlist /></div>
+        </DCArtboard>
+        <DCArtboard id="dpa-flow" label="DPA (Data Processing Agreement) flow" width={820} height={720}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiDPAFlow /></div>
+        </DCArtboard>
+        <DCArtboard id="bulk-import" label="Bulk user import · CSV / SCIM" width={820} height={660}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiBulkImport /></div>
+        </DCArtboard>
+        <DCArtboard id="impersonate" label="Admin impersonate user (with consent)" width={600} height={560}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiImpersonate /></div>
+        </DCArtboard>
+        <DCArtboard id="billing-roles" label="Billing owner vs admin · role split" width={920} height={580}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiBillingRoles /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="onboard-power" title="Onboarding & power-user">
+        <DCArtboard id="accept-invite" label="Accept invite — join a workspace" width={580} height={620}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiAcceptInvite /></div>
+        </DCArtboard>
+        <DCArtboard id="welcome-tour" label="Welcome tour — post-signup checklist" width={740} height={520}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiWelcomeTour /></div>
+        </DCArtboard>
+        <DCArtboard id="install-desktop" label="Install desktop · cross-platform" width={780} height={540}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiInstallDesktop /></div>
+        </DCArtboard>
+        <DCArtboard id="command-palette" label="Command palette ⌘K" width={700} height={540}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiCommandPalette /></div>
+        </DCArtboard>
+        <DCArtboard id="search-full" label="Global search — full results" width={1220} height={620}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiSearchFull /></div>
+        </DCArtboard>
+        <DCArtboard id="shortcuts" label="Keyboard shortcuts cheatsheet" width={780} height={520}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiShortcuts /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="public-extra" title="Public site — extras">
+        <DCArtboard id="status" label="Status page" width={1340} height={1120}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiStatusPage /></div>
+        </DCArtboard>
+        <DCArtboard id="docs-landing" label="Docs landing" width={1340} height={780}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiDocsLanding /></div>
+        </DCArtboard>
+        <DCArtboard id="changelog" label="Changelog" width={1340} height={880}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiChangelog /></div>
+        </DCArtboard>
+        <DCArtboard id="careers" label="Careers" width={1340} height={960}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiCareers /></div>
+        </DCArtboard>
+        <DCArtboard id="bug-bounty" label="Bug bounty · responsible disclosure" width={1340} height={1000}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiBugBounty /></div>
+        </DCArtboard>
+        <DCArtboard id="audits" label="Third-party security audits" width={1340} height={760}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiAuditsPage /></div>
+        </DCArtboard>
+        <DCArtboard id="error-404" label="404 — not found" width={880} height={580}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiError code={404} /></div>
+        </DCArtboard>
+        <DCArtboard id="error-500" label="500 — server error" width={880} height={580}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiError code={500} /></div>
+        </DCArtboard>
+        <DCArtboard id="contact-sales" label="Contact sales form" width={980} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiContactSales /></div>
+        </DCArtboard>
+        <DCArtboard id="enterprise-demo" label="Book a demo · enterprise" width={880} height={680}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiEnterpriseDemo /></div>
+        </DCArtboard>
+        <DCArtboard id="newsletter-confirm" label="Newsletter · check inbox" width={620} height={460}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiNewsletterConfirm /></div>
+        </DCArtboard>
+        <DCArtboard id="cookie-banner" label="Cookie banner (minimal)" width={620} height={200}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiCookieBanner /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="mobile-extra" title="Mobile · extras">
+        <DCArtboard id="mob-offline" label="Mobile · offline indicator" width={360} height={700}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><MobOffline /></div>
+        </DCArtboard>
+        <DCArtboard id="mob-upgrade" label="Mobile · in-app upgrade" width={360} height={700}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><MobUpgrade /></div>
+        </DCArtboard>
+        <DCArtboard id="mob-share-ext" label="Mobile · share extension receive" width={360} height={700}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><MobShareExt /></div>
+        </DCArtboard>
+        <DCArtboard id="mob-push" label="Mobile · push notifications (lockscreen)" width={360} height={700}>
+          <div style={{ padding: 10, display: 'flex', justifyContent: 'center' }}><MobPush /></div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="misc" title="Edge cases · email, storage, downgrade, Linux">
+        <DCArtboard id="email-change" label="Email change (E2EE-aware)" width={620} height={640}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiEmailChange /></div>
+        </DCArtboard>
+        <DCArtboard id="storage-full" label="Storage full — degraded state" width={740} height={660}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiStorageFull /></div>
+        </DCArtboard>
+        <DCArtboard id="plan-downgrade" label="Plan downgrade — over-limit timeline" width={680} height={620}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiPlanDowngrade /></div>
+        </DCArtboard>
+        <DCArtboard id="encrypted-email" label="Encrypted-aware email notification" width={680} height={820}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiEncryptedEmail /></div>
+        </DCArtboard>
+        <DCArtboard id="linux-tray" label="Linux · GNOME tray" width={780} height={520}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiLinuxTray /></div>
+        </DCArtboard>
+        <DCArtboard id="desktop-uninstall" label="Desktop · sign out & uninstall" width={620} height={620}>
+          <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}><HiDesktopUninstall /></div>
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+    </TweakProvider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

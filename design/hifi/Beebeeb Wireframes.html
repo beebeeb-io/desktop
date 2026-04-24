@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Beebeeb.io — Wireframes</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #f0eee9; font-family: 'Inter', system-ui, sans-serif; }
+    .brief {
+      padding: 28px 32px; max-width: 860px; margin: 0 auto;
+      color: #1a1a1a;
+    }
+    .brief h1 { font-family: 'Kalam', cursive; font-size: 44px; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .brief .kicker { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #6a6a6a; text-transform: uppercase; letter-spacing: 1px; }
+    .brief p { font-size: 14px; line-height: 1.6; color: #3a3a3a; }
+    .brief .pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 18px; }
+    .brief .pill { font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 3px 8px; border: 1px solid #1a1a1a; border-radius: 2px; background: #fff; }
+    .brief .pill.amber { background: #fde68a; }
+  </style>
+</head>
+<body>
+  <div class="brief">
+    <div class="kicker">Wireframe exploration · v1</div>
+    <h1>Beebeeb.io</h1>
+    <p style="font-family: 'Kalam', cursive; font-size: 20px; color: #1a1a1a; margin: 4px 0 14px;">
+      End-to-end encrypted cloud, made in Europe.
+    </p>
+    <div class="pills">
+      <span class="pill amber">⬡ trust infrastructure for EU teams</span>
+      <span class="pill">calm &amp; precise</span>
+      <span class="pill">3 variations per screen</span>
+      <span class="pill">web · iOS · android · desktop sync</span>
+    </div>
+    <p>
+      Below: a low-fi canvas exploring how the core product feels across surfaces.
+      Drag artboards to reorder, click the ⤢ corner to focus any one fullscreen.
+      Every artboard is a different take — pick pieces you like from each and
+      we'll tighten into hi-fi next.
+    </p>
+    <p style="font-family: 'Kalam', cursive; font-size: 16px;">
+      Note — the "copy filen.io but better" goal: we're going to build something
+      <em>original</em> (legally safer, strategically sharper) inspired by the
+      category, not a clone. Beebeeb's own personality: calm Linear-energy,
+      honeycomb nods, amber accents, jurisdiction transparency surfaced everywhere.
+    </p>
+  </div>
+
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="android-frame.jsx"></script>
+  <script type="text/babel" src="macos-window.jsx"></script>
+  <script type="text/babel" src="browser-window.jsx"></script>
+
+  <script type="text/babel" src="primitives.jsx"></script>
+  <script type="text/babel" src="flows-onboarding.jsx"></script>
+  <script type="text/babel" src="flows-drive.jsx"></script>
+  <script type="text/babel" src="flows-upload-share.jsx"></script>
+  <script type="text/babel" src="flows-team-photos.jsx"></script>
+  <script type="text/babel" src="flows-mobile-desktop.jsx"></script>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    function App() {
+      return (
+        <DesignCanvas>
+          <DCSection id="onboarding" title="Signup + Recovery Phrase" subtitle="The hardest E2EE UX problem — 3 takes">
+            <DCArtboard id="onb-a" label="A · Progressive / standard" width={560} height={580}>
+              <div style={{ padding: 20 }}><OnboardingA /></div>
+            </DCArtboard>
+            <DCArtboard id="onb-b" label="B · Honeycomb grid" width={560} height={580}>
+              <div style={{ padding: 20 }}><OnboardingB /></div>
+            </DCArtboard>
+            <DCArtboard id="onb-c" label="C · Side-by-side + why ★ picked" width={680} height={580}>
+              <div style={{ padding: 20 }}><OnboardingC /></div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="drive" title="Web · File Browser" subtitle="The core screen — everything hangs off this">
+            <DCArtboard id="drv-a" label="A · Sidebar + list ★ picked" width={800} height={520}>
+              <div style={{ padding: 20 }}><DriveA /></div>
+            </DCArtboard>
+            <DCArtboard id="drv-b" label="B · Honeycomb tiles (distinctive)" width={800} height={520}>
+              <div style={{ padding: 20, position: 'relative' }}><DriveB /></div>
+            </DCArtboard>
+            <DCArtboard id="drv-c" label="C · Two-pane with jurisdiction preview" width={800} height={520}>
+              <div style={{ padding: 20 }}><DriveC /></div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="upload" title="Upload + Encryption Progress" subtitle="Make E2EE visible without being noisy">
+            <DCArtboard id="up-ab" label="A+B · Drop zone + timeline ★ picked" width={540} height={640}>
+              <div style={{ padding: 20 }}><UploadAB /></div>
+            </DCArtboard>
+            <DCArtboard id="up-a" label="A · Timeline (original)" width={500} height={420}>
+              <div style={{ padding: 20 }}><UploadA /></div>
+            </DCArtboard>
+            <DCArtboard id="up-b" label="B · Drop zone + queue" width={500} height={520}>
+              <div style={{ padding: 20 }}><UploadB /></div>
+            </DCArtboard>
+            <DCArtboard id="up-c" label="C · Cryptographic inspector" width={500} height={420}>
+              <div style={{ padding: 20 }}><UploadC /></div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="share" title="Link Sharing" subtitle="Password, expiry, decryption key handling">
+            <DCArtboard id="sh-a" label="A · Compact link card" width={460} height={440}>
+              <div style={{ padding: 20 }}><ShareA /></div>
+            </DCArtboard>
+            <DCArtboard id="sh-b" label="B · Key-separated (zero-knowledge) ★ picked" width={500} height={680}>
+              <div style={{ padding: 20 }}><ShareB /></div>
+            </DCArtboard>
+            <DCArtboard id="sh-c" label="C · Recipient / client-portal" width={460} height={520}>
+              <div style={{ padding: 20 }}><ShareC /></div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="team" title="Team Sharing &amp; Permissions" subtitle="Where business tier monetization lives">
+            <DCArtboard id="tm-a" label="A · Member table + folder access ★ picked" width={720} height={440}>
+              <div style={{ padding: 20 }}><TeamA /></div>
+            </DCArtboard>
+            <DCArtboard id="tm-b" label="B · Permission matrix" width={680} height={440}>
+              <div style={{ padding: 20 }}><TeamB /></div>
+            </DCArtboard>
+            <DCArtboard id="tm-c" label="C · People-first cards" width={680} height={440}>
+              <div style={{ padding: 20 }}><TeamC /></div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="photos" title="Photos / Gallery" subtitle="Consumer hook — makes the product lovable">
+            <DCArtboard id="ph-a" label="A · Classic date-grouped grid ★ picked" width={680} height={460}>
+              <div style={{ padding: 20 }}><PhotosA /></div>
+            </DCArtboard>
+            <DCArtboard id="ph-b" label="B · Timeline + places map" width={680} height={460}>
+              <div style={{ padding: 20 }}><PhotosB /></div>
+            </DCArtboard>
+            <DCArtboard id="ph-c" label="C · Honeycomb albums" width={680} height={460}>
+              <div style={{ padding: 20 }}><PhotosC /></div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="ios" title="iOS App" subtitle="Primary mobile surface">
+            <DCArtboard id="ios-a" label="A · List · familiar ★ picked" width={360} height={780}>
+              <div style={{ padding: 10, transform: 'scale(0.82)', transformOrigin: 'top left' }}>
+                <IOSDevice width={340} height={740}><IOSDrive variant="A" /></IOSDevice>
+              </div>
+            </DCArtboard>
+            <DCArtboard id="ios-b" label="B · Card grid" width={360} height={780}>
+              <div style={{ padding: 10, transform: 'scale(0.82)', transformOrigin: 'top left' }}>
+                <IOSDevice width={340} height={740}><IOSDrive variant="B" /></IOSDevice>
+              </div>
+            </DCArtboard>
+            <DCArtboard id="ios-c" label="C · Hive tiles · distinctive" width={360} height={780}>
+              <div style={{ padding: 10, transform: 'scale(0.82)', transformOrigin: 'top left' }}>
+                <IOSDevice width={340} height={740}><IOSDrive variant="C" /></IOSDevice>
+              </div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="android" title="Android App" subtitle="Adaptation of iOS language">
+            <DCArtboard id="an-a" label="A · Shortcut home" width={360} height={780}>
+              <div style={{ padding: 10, transform: 'scale(0.82)', transformOrigin: 'top left' }}>
+                <AndroidDevice width={340} height={740}><AndroidDrive variant="A" /></AndroidDevice>
+              </div>
+            </DCArtboard>
+            <DCArtboard id="an-b" label="B · Quick-actions home ★ picked" width={360} height={780}>
+              <div style={{ padding: 10, transform: 'scale(0.82)', transformOrigin: 'top left' }}>
+                <AndroidDevice width={340} height={740}><AndroidDrive variant="B" /></AndroidDevice>
+              </div>
+            </DCArtboard>
+            <DCArtboard id="an-c" label="C · Activity-first" width={360} height={780}>
+              <div style={{ padding: 10, transform: 'scale(0.82)', transformOrigin: 'top left' }}>
+                <AndroidDevice width={340} height={740}><AndroidDrive variant="C" /></AndroidDevice>
+              </div>
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="sync" title="Desktop Sync Client" subtitle="macOS / Windows / Linux menu-bar">
+            <DCArtboard id="sy-a" label="A · Activity popover ★ picked" width={360} height={400}>
+              <div style={{ padding: 20 }}><SyncTray variant="A" /></div>
+            </DCArtboard>
+            <DCArtboard id="sy-b" label="B · Status-at-a-glance ★ idle state" width={360} height={400}>
+              <div style={{ padding: 20 }}><SyncTray variant="B" /></div>
+            </DCArtboard>
+            <DCArtboard id="sy-c" label="C · CLI / power-user" width={360} height={400}>
+              <div style={{ padding: 20 }}><SyncTray variant="C" /></div>
+            </DCArtboard>
+          </DCSection>
+        </DesignCanvas>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

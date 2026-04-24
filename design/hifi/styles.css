@@ -1,0 +1,206 @@
+/* Beebeeb.io — wireframe aesthetic
+   Sketchy-but-structured: handwritten-feeling headings, clean mono for UI,
+   mostly B&W with amber accent + subtle hex motifs. */
+
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;500;600;700&family=Kalam:wght@300;400;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --ink: #1a1a1a;
+  --ink-2: #3a3a3a;
+  --ink-3: #6a6a6a;
+  --ink-4: #9a9a9a;
+  --paper: #fbfaf6;
+  --paper-2: #f5f3ec;
+  --rule: #1a1a1a;
+  --rule-soft: rgba(26,26,26,0.18);
+  --amber: #f5b800;
+  --amber-soft: #fde68a;
+  --amber-deep: #b07a00;
+  --hand: 'Kalam', 'Caveat', cursive;
+  --script: 'Caveat', cursive;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sans: 'Inter', system-ui, sans-serif;
+}
+
+/* Sketchy rule — slightly wobbly border via multiple box-shadows */
+.wf-card {
+  background: var(--paper);
+  border: 1.2px solid var(--ink);
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+  font-family: var(--sans);
+  color: var(--ink);
+}
+.wf-card.tilt-l { transform: rotate(-0.25deg); }
+.wf-card.tilt-r { transform: rotate(0.2deg); }
+
+.wf-hand { font-family: var(--hand); font-weight: 400; }
+.wf-script { font-family: var(--script); font-weight: 500; }
+.wf-mono { font-family: var(--mono); }
+.wf-sans { font-family: var(--sans); }
+
+.wf-rule { border: 1.1px solid var(--ink); }
+.wf-rule-soft { border: 1px dashed rgba(26,26,26,0.35); }
+.wf-rule-b { border-bottom: 1.1px solid var(--ink); }
+.wf-rule-t { border-top: 1.1px solid var(--ink); }
+
+/* Sketchy filled block — placeholder for an image/preview */
+.wf-ph {
+  background-image:
+    repeating-linear-gradient(
+      135deg,
+      rgba(26,26,26,0.08) 0 1px,
+      transparent 1px 7px
+    );
+  border: 1.1px solid var(--ink);
+}
+.wf-ph-amber {
+  background-image:
+    repeating-linear-gradient(
+      135deg,
+      rgba(176,122,0,0.22) 0 1px,
+      transparent 1px 7px
+    );
+  background-color: rgba(245,184,0,0.08);
+  border: 1.1px solid var(--ink);
+}
+
+/* Honeycomb pattern — tasteful nod */
+.wf-hex {
+  background-color: var(--paper);
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(245,184,0,0.22) 1.2px, transparent 1.5px);
+  background-size: 14px 14px;
+}
+.wf-hex-faint {
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(26,26,26,0.12) 1px, transparent 1.3px);
+  background-size: 12px 12px;
+}
+
+.wf-shadow {
+  box-shadow: 2px 2px 0 rgba(26,26,26,0.9);
+}
+.wf-shadow-soft {
+  box-shadow: 3px 3px 0 rgba(26,26,26,0.12);
+}
+
+.wf-btn {
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 12px;
+  padding: 7px 12px;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1.2px solid var(--ink);
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+.wf-btn.alt {
+  background: var(--paper);
+  color: var(--ink);
+}
+.wf-btn.amber {
+  background: var(--amber);
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.wf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  background: var(--paper);
+  color: var(--ink);
+  white-space: nowrap;
+}
+.wf-chip.amber { background: var(--amber-soft); }
+.wf-chip.filled { background: var(--ink); color: var(--paper); }
+
+.wf-annot {
+  font-family: var(--hand);
+  font-size: 14px;
+  color: var(--ink-2);
+  line-height: 1.2;
+}
+
+/* Dotted arrow for annotations */
+.wf-arrow {
+  stroke: var(--ink);
+  stroke-width: 1.2;
+  stroke-dasharray: 2 3;
+  fill: none;
+}
+
+.wf-divider-squiggle {
+  height: 8px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 8'><path d='M0 4 Q 5 0 10 4 T 20 4 T 30 4 T 40 4' fill='none' stroke='%231a1a1a' stroke-width='1'/></svg>");
+  background-repeat: repeat-x;
+  background-size: 40px 8px;
+}
+
+.wf-row { display: flex; align-items: center; }
+.wf-col { display: flex; flex-direction: column; }
+
+/* Tiny bee mark */
+.wf-bee {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--sans);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+/* Hex shape used as small motif */
+.wf-hexmark {
+  width: 14px;
+  height: 16px;
+  background: var(--amber);
+  border: 1.2px solid var(--ink);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
+
+/* Scrollable list that hides scrollbar */
+.wf-scroll { overflow: auto; }
+.wf-scroll::-webkit-scrollbar { display: none; }
+.wf-scroll { scrollbar-width: none; }
+
+/* file row */
+.wf-file-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-bottom: 1px dashed rgba(26,26,26,0.2);
+}
+.wf-file-row:last-child { border-bottom: none; }
+.wf-file-row .name { font-family: var(--sans); }
+.wf-file-row .meta { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+
+/* mobile status bar */
+.wf-status {
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* small hex icon (outline) */
+.wf-hex-outline {
+  width: 14px; height: 16px;
+  background: transparent;
+  border: 1.2px solid var(--ink);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
