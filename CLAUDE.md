@@ -19,3 +19,8 @@ Beebeeb desktop sync for macOS, Windows, and Linux. Native shells wrapping the R
 - Selective sync: folders can be online-only (placeholders until opened)
 - Conflict resolution: NEVER silently drop a version. Default: KeepBoth, rename loser as "file (Device, HH:MM).ext"
 - Debounced file watching (100ms) — ignores .DS_Store, Thumbs.db, temp files
+
+
+## Keep shared docs in sync
+
+When you add/change/remove endpoints, types, build commands, or dependencies: update the relevant skill file in `/home/guus/code/beebeeb.io/.claude/skills/` (beebeeb-api.md, beebeeb-designs.md, beebeeb-stack.md, beebeeb-dev.md). Other agents depend on these being accurate.
