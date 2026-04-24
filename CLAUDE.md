@@ -9,6 +9,32 @@ Beebeeb desktop sync for macOS, Windows, and Linux. Native shells wrapping the R
 - Windows: WinUI 3 / C++ shell, File Explorer overlay, tray notifications
 - Linux: Rust + GTK4 tray, FUSE mount
 
+## Platform breakdown
+
+### Windows (`windows/`)
+
+Rust sync daemon (`beebeeb-desktop-windows`) + WinUI 3 / C++ shell.
+
+- `Cargo.toml` — Rust project depending on `beebeeb-sync` and `beebeeb-core` from the core repo
+- `src/main.rs` — Entry point: CLI args (--start-minimized, --sync-path), tracing, sync engine, Ctrl+C shutdown
+- Shell (future): WinUI 3 Fluent-style settings UI, system tray flyout, File Explorer overlay icons (IShellIconOverlay COM DLL)
+- Build: Visual Studio 2022 17.8+, Windows SDK 10.0.22621+, Windows App SDK 1.5+, Rust stable
+
+### macOS (`macos/`)
+
+Rust dylib (C FFI via cbindgen) + Swift/SwiftUI shell.
+
+- Menu bar app (NSStatusItem), Finder extension (FinderSync), preferences window
+- Build: Xcode 15+, macOS SDK 14.0+, Rust stable, cbindgen
+
+### Linux (`linux/`)
+
+Pure Rust binary: sync daemon + GTK4 tray + FUSE mount.
+
+- GTK4/libadwaita tray indicator, FUSE filesystem for online-only files
+- Runs as systemd user unit or XDG autostart
+- Build: Rust stable, libgtk-4-dev, libadwaita-1-dev, libfuse3-dev
+
 ## Design references
 
 - `../../design/hifi/hifi-desktop.jsx` — macOS preferences, selective sync, conflict resolver, first-run, Windows Explorer, Windows tray, Windows settings
