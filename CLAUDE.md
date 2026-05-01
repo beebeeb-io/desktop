@@ -52,6 +52,9 @@ Pure Rust binary: sync daemon + GTK4 tray + FUSE mount.
 This repo has a knowledge graph at graphify-out/.
 - Before exploring code, read graphify-out/GRAPH_REPORT.md for module structure and relationships
 - After modifying code, run `graphify update .` and commit the updated graphify-out/
+- The graph tracks modules, functions, types, and their relationships (calls, imports, inherits)
+- Use `graphify query "<question>"` to ask questions about the codebase
+- Use `graphify path "<A>" "<B>"` to find connections between two concepts
 
 ## Keep shared docs in sync
 
