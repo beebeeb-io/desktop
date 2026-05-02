@@ -1,60 +1,94 @@
 # beebeeb-io/desktop
 
-Beebeeb desktop sync for macOS, Windows, and Linux. Native shells wrapping the Rust sync engine from `core`.
+Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus the Rust sync engine from `core`. One codebase, three OS targets (macOS, Windows, Linux).
 
 ## Architecture
 
-- Sync engine: `beebeeb-sync` crate from the `core` repo (file watcher, conflict resolution, selective sync)
-- macOS: Swift shell, menu bar app, Finder extension
-- Windows: WinUI 3 / C++ shell, File Explorer overlay, tray notifications
-- Linux: Rust + GTK4 tray, FUSE mount
+```mermaid
+graph TD
+    WEB["repos/web (React 19 + Vite 6)<br/>UI for files, settings, sharing"]
+    TAURI["src-tauri (Rust)<br/>WebView host, IPC, OS integration"]
+    SYNC["beebeeb-sync (Rust, from core)<br/>File watcher, conflicts, selective sync"]
+    CORE["beebeeb-core (Rust, from core)<br/>AES-256-GCM, Argon2id, HKDF, BIP39"]
+    OS["macOS / Windows / Linux<br/>Native menu bar, tray, notifications, autostart"]
 
-## Platform breakdown
+    WEB --> TAURI
+    TAURI -- "Cargo dep" --> SYNC
+    SYNC --> CORE
+    TAURI --> OS
+```
 
-### Windows (`windows/`)
+Why Tauri (not Electron): native OS WebView (~10MB binaries vs ~150MB), Rust backend that imports `beebeeb-core` directly, no Node runtime in production builds.
 
-Rust sync daemon (`beebeeb-desktop-windows`) + WinUI 3 / C++ shell.
+## Layout
 
-- `Cargo.toml` — Rust project depending on `beebeeb-sync` and `beebeeb-core` from the core repo
-- `src/main.rs` — Entry point: CLI args (--start-minimized, --sync-path), tracing, sync engine, Ctrl+C shutdown
-- Shell (future): WinUI 3 Fluent-style settings UI, system tray flyout, File Explorer overlay icons (IShellIconOverlay COM DLL)
-- Build: Visual Studio 2022 17.8+, Windows SDK 10.0.22621+, Windows App SDK 1.5+, Rust stable
+```
+desktop/
+├── src-tauri/            Rust app (Tauri v2)
+│   ├── Cargo.toml
+│   ├── build.rs
+│   ├── tauri.conf.json   App config (window, bundle, identifier)
+│   ├── capabilities/     Permission grants per window
+│   ├── icons/            Bundle icons (PNG, ICNS, ICO)
+│   └── src/
+│       ├── main.rs       Entry — calls into lib::run()
+│       └── lib.rs        Tauri Builder, command handlers
+├── src/                  Placeholder frontend (replaced by repos/web)
+├── index.html            Vite entry
+├── package.json          Dev/build scripts (bun)
+├── vite.config.ts        Frontend bundler config
+└── tsconfig.json
+```
 
-### macOS (`macos/`)
+The `linux/`, `macos/`, `windows/` folders are pre-Tauri scaffolds (separate native shells per OS). They are kept for reference but the Tauri shell supersedes them — new work goes in `src-tauri/`.
 
-Rust dylib (C FFI via cbindgen) + Swift/SwiftUI shell.
+## Build & run
 
-- Menu bar app (NSStatusItem), Finder extension (FinderSync), preferences window
-- Build: Xcode 15+, macOS SDK 14.0+, Rust stable, cbindgen
+Requires Rust stable, bun, and Tauri's per-OS prerequisites (https://tauri.app/start/prerequisites/).
 
-### Linux (`linux/`)
+```sh
+bun install
+bun run tauri:dev      # spawns vite on :5173, opens native window
+bun run tauri:build    # produces .dmg / .msi / .deb / .AppImage
+```
 
-Pure Rust binary: sync daemon + GTK4 tray + FUSE mount.
+To develop against the real web client instead of the placeholder:
+- Run `repos/web` separately (`cd ../web && bun dev`) on :5173.
+- The Tauri window will load it automatically (`devUrl` in `tauri.conf.json`).
+- For production bundles, the web client is built and copied to `../dist/` (or `tauri.conf.json` is repointed at `../web/dist/`).
 
-- GTK4/libadwaita tray indicator, FUSE filesystem for online-only files
-- Runs as systemd user unit or XDG autostart
-- Build: Rust stable, libgtk-4-dev, libadwaita-1-dev, libfuse3-dev
+`cargo check` from `src-tauri/` validates the Rust side without the frontend.
 
-## Design references
+## Key files
 
-- `../../design/hifi/hifi-desktop.jsx` — macOS preferences, selective sync, conflict resolver, first-run, Windows Explorer, Windows tray, Windows settings
-- `../../design/hifi/hifi-misc.jsx` — Linux tray, uninstall flow
+- `src-tauri/tauri.conf.json` — identifier `io.beebeeb.desktop`, 1200×800 default window.
+- `src-tauri/src/lib.rs` — `run()` builds the Tauri app and registers `#[tauri::command]` handlers. Add new commands here.
+- `src-tauri/capabilities/default.json` — permissions the frontend can invoke. Add explicit permissions before exposing new tauri APIs.
 
-## Sync engine key behaviors
+## Adding commands (Rust → JS bridge)
 
-- Selective sync: folders can be online-only (placeholders until opened)
-- Conflict resolution: NEVER silently drop a version. Default: KeepBoth, rename loser as "file (Device, HH:MM).ext"
-- Debounced file watching (100ms) — ignores .DS_Store, Thumbs.db, temp files
+1. Add a `#[tauri::command]` function in `src-tauri/src/lib.rs`.
+2. Register it in the `invoke_handler!` macro.
+3. Call from JS: `import { invoke } from "@tauri-apps/api/core"; await invoke("my_cmd", { arg })`.
+4. If it touches an OS API (fs, dialog, notification…), add the matching permission to `capabilities/default.json`.
 
+## Sync engine (future)
+
+Once `beebeeb-sync` integration lands: `src-tauri/Cargo.toml` will pull `beebeeb-sync = { git = "https://github.com/beebeeb-io/core" }` and a background tokio task in `lib.rs` will own the engine. Conflict resolution policy: never silently drop a version — default `KeepBoth` (rename loser as `file (Device, HH:MM).ext`). File watcher debounce: 100ms.
+
+## Brand
+
+- Icons: amber rounded square with lowercase `b` (`icons/icon.png`). Replace with the production icon set via `bunx tauri icon path/to/source.png` once ready.
+- App name: "Beebeeb". Identifier: `io.beebeeb.desktop`.
 
 ## Graphify
 
 This repo has a knowledge graph at graphify-out/.
-- Before exploring code, read graphify-out/GRAPH_REPORT.md for module structure and relationships
-- After modifying code, run `graphify update .` and commit the updated graphify-out/
-- The graph tracks modules, functions, types, and their relationships (calls, imports, inherits)
-- Use `graphify query "<question>"` to ask questions about the codebase
-- Use `graphify path "<A>" "<B>"` to find connections between two concepts
+- Before exploring code, read graphify-out/GRAPH_REPORT.md for module structure and relationships.
+- After modifying code, run `graphify update .` and commit the updated graphify-out/.
+- The graph tracks modules, functions, types, and their relationships.
+- `graphify query "<question>"` to ask questions about the codebase.
+- `graphify path "<A>" "<B>"` to find connections between two concepts.
 
 ## Keep shared docs in sync
 

@@ -6,7 +6,8 @@ bun.lockb
 
 # Build artifacts
 target/
-dist/
+dist/*
+!dist/index.html
 build/
 .next/
 .astro/
@@ -71,3 +72,6 @@ playwright-report/
 # Graphify local files (not committed)
 graphify-out/.graphify_root
 graphify-out/cache/
+
+# Tauri generated schemas
+src-tauri/gen/
