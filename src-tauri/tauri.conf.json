@@ -31,6 +31,17 @@
       "iconAsTemplate": true
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://releases.beebeeb.io/desktop/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "PLACEHOLDER — replace with output of: cargo tauri signer generate -w ~/.tauri/beebeeb.key\nThe .pub file contents go here as a single-line base64 string.",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
