@@ -358,6 +358,7 @@ pub fn run() {
         .setup(|app| {
             setup_native_menu(app)?;
             setup_tray(app)?;
+            attach_tray_status_listener(&app.handle().clone());
 
             // Spawn background update checker
             let handle = app.handle().clone();
@@ -525,6 +526,55 @@ fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
         manager,
         &[&show_item, &hide_item, &sep1, &autostart_item, &sep2, &quit_item],
     )
+}
+
+/// Attach a Tauri event listener that updates the tray tooltip when
+/// the engine emits an `engine-status` event. Spec 030 §5.
+///
+/// We use tooltip-only animation in v1 — different icon variants
+/// (idle / syncing / error PNGs) are a follow-up once design ships
+/// the colored set. Updating the tooltip on every tick is cheap and
+/// lets the user see "Syncing 5 files…" change as work progresses.
+fn attach_tray_status_listener(app: &tauri::AppHandle) {
+    use tauri::Listener;
+    let app_for_listener = app.clone();
+    app.listen("engine-status", move |event| {
+        let payload: serde_json::Value = match serde_json::from_str(event.payload()) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "engine-status payload not valid JSON");
+                return;
+            }
+        };
+        let state = payload.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let files_remaining = payload
+            .get("files_remaining")
+            .and_then(|v| v.as_u64());
+        let error = payload.get("error").and_then(|v| v.as_str());
+
+        let tooltip = match state {
+            "idle" => "Beebeeb · Synced".to_string(),
+            "syncing" => match files_remaining {
+                Some(0) | None => "Beebeeb · Syncing…".to_string(),
+                Some(1) => "Beebeeb · Syncing 1 file…".to_string(),
+                Some(n) => format!("Beebeeb · Syncing {n} files…"),
+            },
+            "paused" => "Beebeeb · Paused".to_string(),
+            "offline" => "Beebeeb · Offline".to_string(),
+            "error" => match error {
+                Some(msg) if !msg.is_empty() => format!("Beebeeb · Error: {msg}"),
+                _ => "Beebeeb · Error".to_string(),
+            },
+            "stopped" => "Beebeeb · Not signed in".to_string(),
+            other => format!("Beebeeb · {other}"),
+        };
+
+        if let Some(tray) = app_for_listener.tray_by_id("tray")
+            && let Err(e) = tray.set_tooltip(Some(&tooltip))
+        {
+            tracing::warn!(error = %e, "failed to update tray tooltip");
+        }
+    });
 }
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {

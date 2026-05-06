@@ -25,10 +25,11 @@
 //! with `listen("engine-status", …)` and updates its UI. Tray-icon
 //! state animation (spec 030 §5) consumes the same stream.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use beebeeb_sync::{SyncConfig, SyncEngine};
+use beebeeb_sync::SyncStatus;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -137,7 +138,7 @@ async fn run(
         );
         return;
     }
-    emit_status(&app, "running", Some(&sync_root), None);
+    emit_engine_status(&app, &sync_root, engine.state().status.clone());
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
 
@@ -152,6 +153,13 @@ async fn run(
                     // continue. The next tick retries.
                     tracing::warn!(error = %e, "sync cycle failed");
                 }
+                // Mirror the engine's own status to the WebView and
+                // tray. Each tick currently produces an event even
+                // if the status didn't change — the listener side
+                // is cheap (tooltip update + JSON parse) and this
+                // lets the tray "tick" visibly during sustained
+                // sync activity. Optimise to dedup if needed later.
+                emit_engine_status(&app, &sync_root, engine.state().status.clone());
             }
         }
     }
@@ -159,6 +167,28 @@ async fn run(
     engine.stop();
     emit_status(&app, "stopped", Some(&sync_root), None);
     // _lock dropped here releases .beebeeb-sync.lock
+}
+
+/// Translate a `SyncStatus` into the shape the WebView + tray expect.
+fn emit_engine_status(app: &AppHandle, sync_root: &Path, status: SyncStatus) {
+    let (state, error, files_remaining) = match status {
+        SyncStatus::Idle => ("idle", None, None),
+        SyncStatus::Syncing { files_remaining, .. } => {
+            ("syncing", None, Some(files_remaining))
+        }
+        SyncStatus::Paused => ("paused", None, None),
+        SyncStatus::Error(msg) => ("error", Some(msg), None),
+        SyncStatus::Offline => ("offline", None, None),
+    };
+    let payload = serde_json::json!({
+        "state": state,
+        "sync_root": sync_root.to_string_lossy(),
+        "error": error,
+        "files_remaining": files_remaining,
+    });
+    if let Err(e) = app.emit("engine-status", payload) {
+        tracing::warn!(error = %e, "failed to emit engine-status event");
+    }
 }
 
 /// Emit an engine-status event the WebView can listen to. Best-effort:
