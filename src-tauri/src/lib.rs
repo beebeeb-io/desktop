@@ -522,15 +522,21 @@ async fn notify_conflict(
 }
 
 /// Apply the user's conflict resolution choice. `choice` is
-/// `"local"` | `"remote"` | `"both"` per the TS-side button labels in
-/// ConflictWindow.tsx (Keep Mine / Keep Theirs / Keep Both).
+/// `"local"` | `"remote"` | `"both"` per the TS-side button labels
+/// in ConflictWindow.tsx (Keep Mine / Keep Theirs / Keep Both).
 ///
-/// As of Task 12 the engine-side `engine_bridge::resolve_conflict`
-/// hasn't landed yet (it's Task 10) — we log, emit a Tauri event the
-/// settings page can listen for to refresh its conflict count, and
-/// return Ok so the window's "✓ Conflict resolved" success state
-/// fires. When Task 10 lands, replace the log line with the bridge
-/// call; the IPC surface stays identical so no TS changes are needed.
+/// Routes each choice into the matching `EngineBridge` method:
+///
+///   - `"local"`  → [`engine_bridge::EngineBridge::resolve_keep_mine`]
+///   - `"remote"` → [`engine_bridge::EngineBridge::resolve_keep_theirs`]
+///   - `"both"`   → [`engine_bridge::EngineBridge::auto_resolve_keep_both`]
+///
+/// We build a fresh `EngineBridge` per call rather than reaching into
+/// the long-lived runner. SQLite handles concurrent connections to the
+/// same DB cleanly in WAL mode; reqwest is cheap to construct; and
+/// avoiding a back-channel from the IPC layer into the runner task
+/// keeps the dataflow obvious. The cost is one extra DB open per
+/// resolve, which happens at user-click cadence — irrelevant.
 #[tauri::command]
 async fn resolve_conflict(
     app: tauri::AppHandle,
@@ -545,18 +551,66 @@ async fn resolve_conflict(
         _ => return Err(format!("invalid conflict choice: {choice}")),
     }
 
-    // Logged-out daemon can't resolve anything — the engine bridge
-    // would also reject this.
-    let signed_in = state
-        .session
-        .lock()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
-    if !signed_in {
-        return Err("not signed in".into());
-    }
+    // Pull token + master_key out of the in-memory session. We
+    // intentionally do NOT clone the entire Session struct — only
+    // what the ApiClient needs.
+    let (token, master_key) = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
 
-    tracing::info!(file_id = %file_id, choice = %choice, "conflict resolved (engine wire-up pending Task 10)");
+    // Sync root from desktop.toml — without it the daemon has no
+    // place to write the resolved file, so this is a hard error.
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg
+        .sync_root
+        .ok_or_else(|| "no sync root configured".to_string())?;
+
+    // Build a fresh bridge. The state DB is at a deterministic path
+    // under the sync root (same convention as `runner::run`).
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db = std::sync::Arc::new(
+        state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?,
+    );
+    let api = std::sync::Arc::new(api_client::ApiClient::new(
+        runner::api_base_url(),
+        token,
+        master_key,
+    ));
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+
+    let outcome: Result<(), String> = match choice.as_str() {
+        "local" => bridge
+            .resolve_keep_mine(&file_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "remote" => bridge
+            .resolve_keep_theirs(&file_id, &sync_root)
+            .await
+            .map_err(|e| e.to_string()),
+        "both" => {
+            // auto_resolve_keep_both wants the FileEntry; look it up.
+            let entry = bridge
+                .db()
+                .get_file(&file_id)
+                .map_err(|e| format!("get_file: {e}"))?
+                .ok_or_else(|| format!("no state.db row for {file_id}"))?;
+            bridge
+                .auto_resolve_keep_both(&sync_root, &entry)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        // Unreachable — the validate above already caught it.
+        _ => unreachable!(),
+    };
+    outcome?;
 
     // Notify the settings window so it can re-poll sync_status and
     // refresh the conflict count without waiting for the next engine

@@ -217,6 +217,81 @@ impl EngineBridge {
         Ok(())
     }
 
+    /// Apply a "Keep Mine" resolution: the local copy stays as-is,
+    /// status flips to `Local`, and `remote_updated_at` is bumped to
+    /// `max(now, prev + 1)` so the next [`sync_tick`] doesn't see the
+    /// server's still-divergent `updated_at` as a fresh conflict.
+    ///
+    /// **Open gap**: this does *not* upload local to the server. The
+    /// dampening above only suppresses re-detection until a sibling
+    /// device next touches the file — at which point the conflict
+    /// re-fires (correctly, because the user's "Keep Mine" wasn't
+    /// actually published). The full fix is a real upload path on
+    /// the bridge; tracked alongside the chunked-upload work that
+    /// `repos/cli/src/commands/push.rs` already implements.
+    ///
+    /// `Err` if the entry doesn't exist or the row update fails.
+    pub async fn resolve_keep_mine(&self, file_id: &str) -> anyhow::Result<()> {
+        let mut entry = self
+            .db
+            .get_file(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Use whichever is later: clock-now, or one tick past whatever
+        // we already have. Guards against a clock that's running
+        // behind the server.
+        let new_anchor = now_secs.max(entry.remote_updated_at.saturating_add(1));
+        entry.status = FileStatus::Local;
+        entry.remote_updated_at = new_anchor;
+        // modified_at goes back to the local mtime semantic since the
+        // row is no longer in Conflict — best-effort: read the
+        // filesystem mtime if we can, otherwise reuse the new anchor.
+        entry.modified_at = new_anchor;
+        self.db.upsert_file(&entry)?;
+        tracing::info!(file_id = %file_id, "conflict resolved: keep mine (no upload yet — see TODO)");
+        Ok(())
+    }
+
+    /// Apply a "Keep Theirs" resolution: download the remote version
+    /// and overwrite the local file at `<sync_root>/<entry.path>`.
+    /// Status ends in `Local`; `remote_updated_at` is anchored to
+    /// "now" so the next tick treats the file as freshly synced.
+    ///
+    /// Reuses [`Self::hydrate_file`], which already handles status
+    /// transitions and Error-on-failure rollback. The extra
+    /// `remote_updated_at` bump after a successful hydrate prevents
+    /// the next tick from re-flagging a conflict if the user's old
+    /// `content_hash` is still on the row (it isn't anymore — the row
+    /// was already in Conflict — but we belt-and-brace anchor anyway).
+    pub async fn resolve_keep_theirs(
+        &self,
+        file_id: &str,
+        sync_root: &Path,
+    ) -> anyhow::Result<()> {
+        let mut entry = self
+            .db
+            .get_file(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let dest = sync_root.join(&entry.path);
+        // hydrate_file flips Conflict → Downloading → Local on success
+        // (or Error on failure). We don't care about the intermediate
+        // state for this path.
+        self.hydrate_file(file_id, &dest).await?;
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        entry.status = FileStatus::Local;
+        entry.remote_updated_at = now_secs;
+        entry.modified_at = now_secs;
+        self.db.upsert_file(&entry)?;
+        tracing::info!(file_id = %file_id, dest = %dest.display(), "conflict resolved: keep theirs");
+        Ok(())
+    }
+
     /// Apply a "Keep Both" resolution: rename the local copy to a
     /// device-suffixed conflict filename, hydrate the remote into the
     /// original path, flip status back to `Local`. Called by Task 13's
