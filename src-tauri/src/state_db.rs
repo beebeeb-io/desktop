@@ -65,8 +65,27 @@ pub struct FileEntry {
     pub path: String,
     pub status: FileStatus,
     pub size_bytes: i64,
+    /// Seconds since Unix epoch. Conflated meaning today: usually the
+    /// server's `updated_at` from the last sweep, but Task 10's
+    /// conflict detector overwrites this with `now` when it flips a
+    /// file to `Conflict` so the auto-resolution deadline (Task 13)
+    /// can read it as "detected_at." This conflation is acceptable
+    /// for MVP — the value is only meaningful in the context of the
+    /// row's current `status`.
     pub modified_at: i64,
     pub content_hash: Option<String>,
+    /// Server's `updated_at` snapshot at the time we last considered
+    /// this file fully synced (status transitioned to `Local`). Used
+    /// by [`crate::engine_bridge::sync_tick`] as the "base version"
+    /// in [`crate::conflict::is_conflict`]: a remote `updated_at` past
+    /// this value means a sibling device has touched the file since
+    /// our last sync.
+    ///
+    /// Defaults to `0` for rows that pre-date this column — those
+    /// will look like "remote always changed" until the next
+    /// successful sync re-anchors them, which is the safe direction
+    /// (over-detect rather than miss a real conflict).
+    pub remote_updated_at: i64,
 }
 
 /// Owned handle to the local SQLite state database.
@@ -85,6 +104,9 @@ impl StateDb {
     /// are cheap.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // Base schema. `CREATE TABLE IF NOT EXISTS` covers both the
+        // first-run case and subsequent opens against an existing DB
+        // that already has every column we need.
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -94,11 +116,31 @@ impl StateDb {
                 status TEXT NOT NULL DEFAULT 'cloud_only',
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 modified_at INTEGER NOT NULL DEFAULT 0,
-                content_hash TEXT
+                content_hash TEXT,
+                remote_updated_at INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_status ON files(status);
         ",
         )?;
+        // Forward-migration for DBs created before `remote_updated_at`
+        // existed (Task 10). SQLite's `ALTER TABLE ... ADD COLUMN` has
+        // no `IF NOT EXISTS` clause, so we read pragma + only attempt
+        // the alter when the column is absent. Failures here are
+        // surfaced; the daemon is useless against a half-migrated DB.
+        let has_col = {
+            let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            names.iter().any(|n| n == "remote_updated_at")
+        };
+        if !has_col {
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN remote_updated_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -107,19 +149,21 @@ impl StateDb {
     pub fn upsert_file(&self, e: &FileEntry) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(file_id) DO UPDATE SET
                path=excluded.path, status=excluded.status,
                size_bytes=excluded.size_bytes, modified_at=excluded.modified_at,
-               content_hash=excluded.content_hash",
+               content_hash=excluded.content_hash,
+               remote_updated_at=excluded.remote_updated_at",
             params![
                 e.file_id,
                 e.path,
                 e.status.as_str(),
                 e.size_bytes,
                 e.modified_at,
-                e.content_hash
+                e.content_hash,
+                e.remote_updated_at
             ],
         )?;
         Ok(())
@@ -129,7 +173,7 @@ impl StateDb {
     pub fn get_file(&self, file_id: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
              FROM files WHERE file_id = ?1",
         )?;
         let mut rows = stmt.query(params![file_id])?;
@@ -141,6 +185,7 @@ impl StateDb {
                 size_bytes: row.get(3)?,
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
             }))
         } else {
             Ok(None)
@@ -153,7 +198,7 @@ impl StateDb {
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
              FROM files WHERE path = ?1",
         )?;
         let mut rows = stmt.query(params![path])?;
@@ -165,6 +210,7 @@ impl StateDb {
                 size_bytes: row.get(3)?,
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
             }))
         } else {
             Ok(None)
@@ -189,7 +235,7 @@ impl StateDb {
     pub fn list_by_status(&self, status: FileStatus) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
              FROM files WHERE status = ?1",
         )?;
         let rows = stmt.query_map(params![status.as_str()], |row| {
@@ -200,6 +246,7 @@ impl StateDb {
                 size_bytes: row.get(3)?,
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -210,7 +257,7 @@ impl StateDb {
     pub fn list_files(&self) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
              FROM files ORDER BY path ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -221,6 +268,7 @@ impl StateDb {
                 size_bytes: row.get(3)?,
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -243,11 +291,13 @@ mod tests {
             size_bytes: 1024,
             modified_at: 1700000000,
             content_hash: None,
+            remote_updated_at: 1700000000,
         };
         db.upsert_file(&entry).unwrap();
         let got = db.get_file("abc123").unwrap().unwrap();
         assert_eq!(got.status, FileStatus::CloudOnly);
         assert_eq!(got.size_bytes, 1024);
+        assert_eq!(got.remote_updated_at, 1700000000);
     }
 
     #[test]
@@ -261,6 +311,7 @@ mod tests {
             size_bytes: 0,
             modified_at: 0,
             content_hash: None,
+            remote_updated_at: 0,
         };
         db.upsert_file(&e).unwrap();
         let conflicts = db.list_by_status(FileStatus::Conflict).unwrap();

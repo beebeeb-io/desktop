@@ -9,6 +9,7 @@
     "window-state:default",
     "updater:default",
     "autostart:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "notification:default"
   ]
 }

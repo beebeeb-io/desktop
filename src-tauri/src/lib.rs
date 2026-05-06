@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api_client;
 mod config;
+mod conflict;
 mod engine_bridge;
 mod ipc_socket;
 #[cfg(target_os = "linux")]
@@ -409,25 +410,16 @@ fn account_email(_state: State<'_, AppState>) -> Result<Option<String>, String> 
 
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
 
-/// Open a conflict-resolution window for a single file. The label is
-/// `conflict-<file_id>` so multiple simultaneous conflicts each get
-/// their own window without colliding (re-opening the same conflict
-/// is a soft-noop — Tauri returns an error which we coerce to Ok).
-///
-/// The URL contract matches `repos/desktop/src/ConflictWindow.tsx`:
-/// `index.html?window=conflict&fileId=<uuid>&fileName=<utf8>&isText=<bool>`.
-/// `main.tsx` reads `?window=conflict` and mounts `ConflictWindow`
-/// instead of the default settings shell.
-///
-/// Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
-/// Phase 4 Task 12. Wired to engine-side conflict detection in Task 10
-/// (engine_bridge::detect_conflicts emits an `engine-conflict` event;
-/// either the WebView or a Rust listener calls this command).
-#[tauri::command]
-async fn open_conflict_window(
-    app: tauri::AppHandle,
-    file_id: String,
-    file_name: String,
+/// Internal helper that does the actual window-building work. Called
+/// by both the [`open_conflict_window`] IPC command (when the user or
+/// frontend triggers it) and by [`crate::runner`]'s tick loop (when
+/// the engine bridge detects a fresh conflict in Task 10). Splitting
+/// this out lets us call directly from Rust without going through the
+/// IPC dispatcher; the IPC command is just a thin wrapper.
+pub(crate) fn open_conflict_window_impl(
+    app: &tauri::AppHandle,
+    file_id: &str,
+    file_name: &str,
     is_text: bool,
 ) -> Result<(), String> {
     let label = format!("conflict-{file_id}");
@@ -444,10 +436,10 @@ async fn open_conflict_window(
 
     let url = format!(
         "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}",
-        enc_name = urlencoding::encode(&file_name),
+        enc_name = urlencoding::encode(file_name),
     );
 
-    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
         .title(format!("Conflict — {file_name}"))
         .inner_size(720.0, 480.0)
         .resizable(true)
@@ -455,6 +447,78 @@ async fn open_conflict_window(
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Open a conflict-resolution window for a single file. The label is
+/// `conflict-<file_id>` so multiple simultaneous conflicts each get
+/// their own window without colliding (re-opening the same conflict
+/// is a soft-noop — show + focus instead of error).
+///
+/// The URL contract matches `repos/desktop/src/ConflictWindow.tsx`:
+/// `index.html?window=conflict&fileId=<uuid>&fileName=<utf8>&isText=<bool>`.
+/// `main.tsx` reads `?window=conflict` and mounts `ConflictWindow`
+/// instead of the default settings shell.
+///
+/// Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
+/// Phase 4 Task 12. Also called internally by Task 10's conflict
+/// detection path via [`open_conflict_window_impl`].
+#[tauri::command]
+async fn open_conflict_window(
+    app: tauri::AppHandle,
+    file_id: String,
+    file_name: String,
+    is_text: bool,
+) -> Result<(), String> {
+    open_conflict_window_impl(&app, &file_id, &file_name, is_text)
+}
+
+/// Show a native OS notification announcing a fresh conflict. Used
+/// by `repos/desktop/src-tauri/src/runner.rs` when `sync_tick`
+/// flags a divergent file, and exposed as an IPC command for the
+/// settings page in case it ever wants to manually re-surface a
+/// conflict that's been sitting in the queue.
+///
+/// We respect the user's `notify_conflicts` toggle in
+/// `desktop.toml` (Task 9) — a `false` there short-circuits to Ok
+/// without raising the OS notification.
+///
+/// Spec: Phase 4 Task 11.
+pub(crate) fn notify_conflict_impl(
+    app: &tauri::AppHandle,
+    file_name: &str,
+) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    // Honour the user's preference. Best-effort load — if the config
+    // file is unreadable we fall back to "show", matching the
+    // documented Default of `notify_conflicts: true`.
+    let want = DesktopConfig::load()
+        .map(|c| c.notify_conflicts)
+        .unwrap_or(true);
+    if !want {
+        return Ok(());
+    }
+
+    app.notification()
+        .builder()
+        .title("Conflict detected")
+        .body(format!("Conflict in {file_name} — open Beebeeb to resolve"))
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+/// IPC wrapper around [`notify_conflict_impl`]. Mostly here so the
+/// frontend can trigger a notification on demand (e.g. for a
+/// "remind me later" UI we may add); the engine's auto-detection
+/// path calls the impl directly.
+#[tauri::command]
+async fn notify_conflict(
+    app: tauri::AppHandle,
+    file_name: String,
+    file_id: String,
+) -> Result<(), String> {
+    let _ = file_id; // reserved for future click-to-open wiring
+    notify_conflict_impl(&app, &file_name)
 }
 
 /// Apply the user's conflict resolution choice. `choice` is
@@ -603,6 +667,10 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
+        // Native OS notifications — Task 11. The first conflict
+        // notification on macOS triggers Apple's "allow notifications?"
+        // permission prompt; we surface that, not a custom UI.
+        .plugin(tauri_plugin_notification::init())
         // Auto-updater — endpoints + pubkey configured in tauri.conf.json
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Autostart — LaunchAgent on macOS (no elevated privileges required),
@@ -629,6 +697,8 @@ pub fn run() {
             // Task 12 — conflict window IPC
             open_conflict_window,
             resolve_conflict,
+            // Task 11 — native conflict notification
+            notify_conflict,
         ])
         .setup(|app| {
             setup_native_menu(app)?;

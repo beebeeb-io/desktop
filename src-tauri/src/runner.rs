@@ -32,16 +32,17 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::api_client::ApiClient;
-use crate::engine_bridge::{sync_tick, EngineBridge};
+use crate::conflict::auto_resolution_deadline;
+use crate::engine_bridge::{sync_tick, ConflictDetected, EngineBridge};
 use crate::lockfile::LockFile;
-use crate::state_db::StateDb;
+use crate::state_db::{FileStatus, StateDb};
 
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. Same cadence as the previous engine; small
@@ -193,7 +194,24 @@ async fn run(
             _ = &mut cancel => break,
             _ = tick.tick() => {
                 match sync_tick(&*bridge).await {
-                    Ok(()) => emit_status(&app, "idle", Some(&sync_root), None),
+                    Ok(conflicts) => {
+                        // Task 10 — surface freshly detected conflicts.
+                        // The engine bridge already flipped status to
+                        // Conflict; we own the UI side: open a window
+                        // per file, fire a notification, emit a Tauri
+                        // event so the settings page can refresh its
+                        // counts immediately.
+                        for c in &conflicts {
+                            handle_new_conflict(&app, c);
+                        }
+                        // Task 13 — sweep for conflicts past their 24h
+                        // deadline and apply Keep Both. Done after the
+                        // detection step so a freshly-detected conflict
+                        // (timestamp ≈ now) doesn't get auto-resolved
+                        // on the very same tick.
+                        sweep_auto_resolutions(&app, &bridge, &sync_root).await;
+                        emit_status(&app, "idle", Some(&sync_root), None);
+                    }
                     Err(e) => {
                         // Network blips and 401s during token rotation
                         // are normal — log and continue, surface the
@@ -227,6 +245,109 @@ fn emit_status(
     });
     if let Err(e) = app.emit("engine-status", payload) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
+    }
+}
+
+// ── Task 10 + 11: per-conflict UI fan-out ─────────────────────────────────────
+
+/// Surface a freshly-detected conflict to the user: open the
+/// resolution window, fire a native notification, emit a Tauri event
+/// so any open settings page can refresh its conflict counter without
+/// waiting for the next 5 s tick. All three are best-effort — a failure
+/// in any one path is logged and the others still run, since the
+/// underlying state DB has already been updated and the conflict won't
+/// be silently dropped.
+fn handle_new_conflict(app: &AppHandle, c: &ConflictDetected) {
+    if let Err(e) = crate::open_conflict_window_impl(app, &c.file_id, &c.file_name, c.is_text) {
+        tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");
+    }
+    if let Err(e) = crate::notify_conflict_impl(app, &c.file_name) {
+        // Don't escalate — Linux without a notification daemon, or
+        // macOS where the user denied the permission prompt, will
+        // both fail here. The window + event still fired.
+        tracing::warn!(error = %e, file_id = %c.file_id, "notify_conflict failed");
+    }
+    if let Err(e) = app.emit(
+        "engine-conflict",
+        serde_json::json!({
+            "file_id": c.file_id,
+            "file_name": c.file_name,
+            "is_text": c.is_text,
+        }),
+    ) {
+        tracing::warn!(error = %e, "failed to emit engine-conflict event");
+    }
+}
+
+// ── Task 13: 24-hour auto-resolution timer ────────────────────────────────────
+
+/// Walk every file currently in `Conflict` status. For any whose
+/// detection timestamp (stored in `modified_at` after Task 10 anchored
+/// it on detect) is past the 24 h deadline, apply Keep Both: the local
+/// copy gets a `(conflict - <hostname> - <date>)` suffix, the remote
+/// becomes the new authoritative file, status flips back to `Local`.
+///
+/// Errors are logged per-file and do not stop the sweep — one bad file
+/// shouldn't keep the rest from being resolved. The bridge's
+/// [`crate::engine_bridge::EngineBridge::auto_resolve_keep_both`] is
+/// engineered so that a partial failure leaves the local copy on disk
+/// (renamed) plus the row in `Error` status — the user never loses
+/// data, the next tick retries the remote hydrate.
+async fn sweep_auto_resolutions(app: &AppHandle, bridge: &Arc<EngineBridge>, sync_root: &Path) {
+    let conflicts = match bridge.db().list_by_status(FileStatus::Conflict) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "list_by_status(Conflict) failed");
+            return;
+        }
+    };
+    if conflicts.is_empty() {
+        return;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for entry in conflicts {
+        // `modified_at` was anchored to the detection time when the
+        // tick flipped this row to Conflict. A 0 here would mean
+        // "detected at epoch" which is also fine (immediate auto-
+        // resolve on launch is not a real scenario, since the row
+        // had to be written by an earlier sync_tick).
+        let detected = entry.modified_at as u64;
+        if now < auto_resolution_deadline(detected) {
+            continue;
+        }
+
+        tracing::info!(
+            file_id = %entry.file_id,
+            path = %entry.path,
+            elapsed_secs = now.saturating_sub(detected),
+            "auto-resolving conflict (24h elapsed) via Keep Both"
+        );
+        match bridge.auto_resolve_keep_both(sync_root, &entry).await {
+            Ok(conflict_copy_name) => {
+                if let Err(e) = app.emit(
+                    "conflict-auto-resolved",
+                    serde_json::json!({
+                        "file_id": entry.file_id,
+                        "file_name": entry.path,
+                        "conflict_copy_name": conflict_copy_name,
+                    }),
+                ) {
+                    tracing::warn!(error = %e, "failed to emit conflict-auto-resolved event");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    file_id = %entry.file_id,
+                    error = %e,
+                    "auto_resolve_keep_both failed — file kept on disk; will retry next tick"
+                );
+            }
+        }
     }
 }
 

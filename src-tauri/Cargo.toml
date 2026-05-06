@@ -20,6 +20,10 @@ tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
 # Folder picker for the first-launch sync-root chooser (spec 030 step 2)
 tauri-plugin-dialog = "2"
+# Native OS notifications — Phase 4 Task 11 of the desktop sync client
+# plan. Used by the daemon to alert the user when a conflict is
+# detected (banner on macOS, toast on Windows, libnotify on Linux).
+tauri-plugin-notification = "2"
 # desktop.toml config persistence
 toml = "0.8"
 # `dirs::config_dir()` to locate ~/.config/beebeeb/ (or platform equivalent)

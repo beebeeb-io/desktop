@@ -31,10 +31,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use beebeeb_types::EncryptedBlob;
 
 use crate::api_client::ApiClient;
+use crate::conflict::{is_conflict, is_text_file, VersionInfo};
 use crate::state_db::{FileEntry, FileStatus, StateDb};
 
 // ── Per-file state machine ────────────────────────────────────────────────────
@@ -214,38 +216,217 @@ impl EngineBridge {
 
         Ok(())
     }
+
+    /// Apply a "Keep Both" resolution: rename the local copy to a
+    /// device-suffixed conflict filename, hydrate the remote into the
+    /// original path, flip status back to `Local`. Called by Task 13's
+    /// auto-resolution timer in [`crate::runner`] and (eventually) by
+    /// the user-driven `resolve_conflict` IPC when the user picks
+    /// "Keep Both" from the conflict window.
+    ///
+    /// Filesystem ops are done in this order so a partial failure
+    /// leaves recoverable state:
+    ///
+    ///   1. Rename local → conflict copy (cheap, instantaneous)
+    ///   2. Hydrate remote into the original path (network — may
+    ///      fail; if it does, the user still has both their original
+    ///      *and* the conflict copy on disk, so no data is lost; we
+    ///      flip status to `Error` so the next tick retries).
+    ///
+    /// `sync_root` is supplied by the caller because the bridge
+    /// itself doesn't know it (the runner owns that).
+    pub async fn auto_resolve_keep_both(
+        &self,
+        sync_root: &Path,
+        entry: &FileEntry,
+    ) -> anyhow::Result<String> {
+        let original = sync_root.join(&entry.path);
+
+        // If the local file no longer exists on disk (user deleted it
+        // outside the daemon), Keep Both collapses to Keep Remote.
+        if !original.exists() {
+            self.hydrate_file(&entry.file_id, &original).await?;
+            self.db.set_status(&entry.file_id, FileStatus::Local)?;
+            return Ok(entry.path.clone());
+        }
+
+        let host = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "device".into());
+        let date = chrono::Utc::now().format("%Y-%m-%d");
+        let stem = original
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file");
+        let ext = original
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        let conflict_name = format!("{stem} (conflict - {host} - {date}){ext}");
+        let conflict_path = original.with_file_name(&conflict_name);
+
+        std::fs::rename(&original, &conflict_path).map_err(|e| {
+            anyhow::anyhow!(
+                "rename {} -> {}: {e}",
+                original.display(),
+                conflict_path.display()
+            )
+        })?;
+
+        // Hydrate remote into the now-vacant original path. On failure
+        // we mark Error rather than Conflict — the conflict copy is
+        // safe on disk, the remote download just needs a retry.
+        if let Err(e) = self.hydrate_file(&entry.file_id, &original).await {
+            self.db.set_status(&entry.file_id, FileStatus::Error)?;
+            return Err(e);
+        }
+        self.db.set_status(&entry.file_id, FileStatus::Local)?;
+        Ok(conflict_name)
+    }
 }
 
 // ── Periodic sync tick ────────────────────────────────────────────────────────
 
-/// Pull the user's file list from the API and insert any unknown
-/// entries into the state DB as `cloud_only`. Called from
-/// [`crate::runner`]'s tick loop. Idempotent — files we already know
-/// about are left alone (status, hash, etc. are local truth and must
-/// not be clobbered by a remote sweep).
-pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<()> {
+/// One file the latest tick noticed has diverged on both sides.
+/// Returned from [`sync_tick`] so [`crate::runner`] can fan it out
+/// to UI: open a conflict window + fire a notification.
+#[derive(Debug, Clone)]
+pub struct ConflictDetected {
+    pub file_id: String,
+    pub file_name: String,
+    pub is_text: bool,
+}
+
+/// Pull the user's file list from the API, refresh the state DB, and
+/// flag any newly-divergent files. Called from [`crate::runner`]'s
+/// tick loop.
+///
+/// Three-way decision per remote file:
+///
+/// 1. **New to us** — no row exists. Insert as `cloud_only`. The OS
+///    extension surfaces it as a placeholder; the user gets it on
+///    demand.
+///
+/// 2. **Known and locally `Local`, remote moved** — the row exists,
+///    its status is `Local`, and the server's `updated_at` is past
+///    `remote_updated_at`. We use the
+///    [`crate::conflict::is_conflict`] predicate to decide whether
+///    that's a one-sided update we can quietly accept (no local edit
+///    since base) or a divergent edit that needs the user. The
+///    "hashes" we feed are synthetic right now: the server doesn't
+///    expose a content hash on file metadata yet, so we compose
+///    `<size>-<updated_at>` for remote and reuse the local
+///    `content_hash` for local. False negatives (different bytes,
+///    same size + mtime) are theoretically possible but rare; the
+///    engine bridge will catch them on the next chunk diff once that
+///    code lands.
+///
+/// 3. **Known and not in `Local`** — pending download/upload, etc.
+///    Leave alone; the upload/download path owns those transitions.
+pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDetected>> {
     let files = bridge.api().list_files(None).await?;
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut conflicts: Vec<ConflictDetected> = Vec::new();
+
     for f in &files {
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
         }
-        if bridge.db().get_file(file_id)?.is_some() {
-            continue;
-        }
         let size = f["size_bytes"].as_i64().unwrap_or(0);
-        let modified = f["updated_at"].as_i64().unwrap_or(0);
+        let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
         let path = f["path"].as_str().unwrap_or("").to_string();
-        bridge.db().upsert_file(&FileEntry {
-            file_id: file_id.to_string(),
-            path,
-            status: FileStatus::CloudOnly,
-            size_bytes: size,
-            modified_at: modified,
-            content_hash: None,
-        })?;
+
+        match bridge.db().get_file(file_id)? {
+            None => {
+                // (1) New file — insert as cloud_only. base = remote
+                // (next-tick conflicts compare against this).
+                bridge.db().upsert_file(&FileEntry {
+                    file_id: file_id.to_string(),
+                    path,
+                    status: FileStatus::CloudOnly,
+                    size_bytes: size,
+                    modified_at: remote_updated,
+                    content_hash: None,
+                    remote_updated_at: remote_updated,
+                })?;
+            }
+            Some(entry) if entry.status == FileStatus::Local => {
+                // (2) Local copy + remote moved? Nothing to check if
+                // the timestamps haven't drifted past base.
+                if remote_updated <= entry.remote_updated_at {
+                    continue;
+                }
+
+                // Synthesise version triplet. We don't have the
+                // server's content hash on file metadata, so we hash
+                // by `size-mtime` as an opaque-but-stable surrogate.
+                // Treating the surrogate's equality as "same version"
+                // is conservative — a file edited to the same
+                // size+mtime won't be flagged, but those collisions
+                // are vanishingly rare in practice.
+                let local = VersionInfo {
+                    hash: entry.content_hash.clone().unwrap_or_default(),
+                    modified_at: entry.modified_at as u64,
+                };
+                let remote = VersionInfo {
+                    hash: format!("{size}-{remote_updated}"),
+                    modified_at: remote_updated as u64,
+                };
+                let base = VersionInfo {
+                    hash: entry.content_hash.clone().unwrap_or_default(),
+                    modified_at: entry.remote_updated_at as u64,
+                };
+                // Local matches base → only remote changed. Quietly
+                // re-anchor and let a future hydrate replace bytes
+                // when the user opens it.
+                if !is_conflict(&local, &remote, &base) {
+                    let mut updated = entry.clone();
+                    updated.remote_updated_at = remote_updated;
+                    updated.size_bytes = size;
+                    updated.modified_at = remote_updated;
+                    bridge.db().upsert_file(&updated)?;
+                    continue;
+                }
+
+                // True conflict. Flip status, anchor `modified_at` to
+                // "now" so Task 13's auto-resolution clock starts
+                // from detection rather than from whatever the row
+                // happened to carry before.
+                let mut updated = entry.clone();
+                updated.status = FileStatus::Conflict;
+                updated.modified_at = now_secs;
+                bridge.db().upsert_file(&updated)?;
+
+                let file_name = std::path::Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&entry.path)
+                    .to_string();
+                let is_text = is_text_file(&file_name);
+                tracing::warn!(
+                    file_id = %entry.file_id,
+                    name = %file_name,
+                    "conflict detected on tick — both sides moved past base"
+                );
+                conflicts.push(ConflictDetected {
+                    file_id: entry.file_id.clone(),
+                    file_name,
+                    is_text,
+                });
+            }
+            Some(_) => {
+                // (3) Pending download/upload/conflict/error — let
+                // the dedicated path own its transitions.
+                continue;
+            }
+        }
     }
-    Ok(())
+    Ok(conflicts)
 }
 
 #[cfg(test)]
