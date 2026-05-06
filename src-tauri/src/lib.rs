@@ -11,6 +11,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
+mod api_client;
 mod config;
 mod lockfile;
 mod runner;

@@ -39,6 +39,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Per-file sync state tracking (Phase 1 Task 1 — desktop sync client plan).
 # `bundled` ships SQLite source so we don't depend on a system libsqlite3.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# HTTP client for the API client extracted from repos/cli/ (Phase 1 Task 2).
+# `stream` is reserved for streaming chunk uploads in a later task.
+reqwest = { version = "0.12", features = ["json"] }
+# Convenience error type for the daemon's surface — the plan signs API
+# methods with `anyhow::Result` (Phase 1 Task 2).
+anyhow = "1"
 
 # Sync engine + crypto from the core repo. Path deps so we build against
 # the local checkout; `[patch."https://github.com/beebeeb-io/core"]`
