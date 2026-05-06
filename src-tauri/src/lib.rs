@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 mod api_client;
 mod config;
 mod engine_bridge;
+mod ipc_socket;
 mod lockfile;
 mod runner;
 mod state_db;
