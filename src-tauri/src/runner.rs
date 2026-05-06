@@ -161,7 +161,28 @@ async fn run(
     };
 
     let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
-    let bridge = EngineBridge::new(db, api);
+    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+
+    // Spawn the Unix-socket IPC server alongside the sync loop. It
+    // shares the same StateDb + EngineBridge handles, so OS extensions
+    // (macOS File Provider, Windows Cloud Files, Linux FUSE) can query
+    // status and trigger hydrations without waiting for the next tick.
+    //
+    // We don't keep an explicit cancel handle on this task: serve_ipc
+    // owns the listener, on the next runner spawn the listener bind
+    // calls remove_file() first to clear stale sockets. When the
+    // process exits, the OS reaps the task. Logout-time cleanup is
+    // best-effort — the in-flight hydrates would only succeed if they
+    // already had the master key from the previous session, and the
+    // socket re-binds on the next login.
+    {
+        let db_for_ipc = db.clone();
+        let bridge_for_ipc = bridge.clone();
+        tokio::spawn(async move {
+            crate::ipc_socket::serve_ipc(db_for_ipc, bridge_for_ipc).await;
+        });
+    }
+
     emit_status(&app, "running", Some(&sync_root), None);
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
@@ -171,7 +192,7 @@ async fn run(
             biased;
             _ = &mut cancel => break,
             _ = tick.tick() => {
-                match sync_tick(&bridge).await {
+                match sync_tick(&*bridge).await {
                     Ok(()) => emit_status(&app, "idle", Some(&sync_root), None),
                     Err(e) => {
                         // Network blips and 401s during token rotation
