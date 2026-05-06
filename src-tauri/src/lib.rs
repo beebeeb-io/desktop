@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 mod config;
 mod lockfile;
 mod runner;
+mod state_db;
 use config::DesktopConfig;
 use runner::EngineRunner;
 

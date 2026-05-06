@@ -28,10 +28,6 @@ dirs = "6"
 # agent's pid (`libc::kill(pid, 0)`) and hostname recording.
 chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"
-# Unix-only liveness check; on Windows we currently fall back to a
-# conservative "always alive" — see lockfile.rs.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 # `time` for the existing update-loop sleeps; `rt`/`rt-multi-thread` to
 # spawn the sync engine on a background task; `sync` for the eventual
 # cancellation channel between Tauri lifecycle and the engine.
@@ -40,6 +36,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Per-file sync state tracking (Phase 1 Task 1 — desktop sync client plan).
+# `bundled` ships SQLite source so we don't depend on a system libsqlite3.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Sync engine + crypto from the core repo. Path deps so we build against
 # the local checkout; `[patch."https://github.com/beebeeb-io/core"]`
@@ -48,6 +47,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 beebeeb-sync = { path = "../../core/beebeeb-sync" }
 beebeeb-core = { path = "../../core/beebeeb-core" }
 beebeeb-types = { path = "../../core/beebeeb-types" }
+
+# Unix-only liveness check; on Windows we currently fall back to a
+# conservative "always alive" — see lockfile.rs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [patch."https://github.com/beebeeb-io/core"]
 beebeeb-core = { path = "../../core/beebeeb-core" }
