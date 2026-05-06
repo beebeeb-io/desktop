@@ -48,6 +48,12 @@ anyhow = "1"
 # UUID parsing used by `EngineBridge::hydrate_file` to convert a string
 # file_id into bytes for `beebeeb_core::kdf::derive_file_key`.
 uuid = { version = "1", features = ["v4", "serde"] }
+# URL-encode the file name before stuffing it into the conflict
+# window's `index.html?fileName=...` query string (Task 12). The
+# WebView side parses this back through `URLSearchParams` which expects
+# percent-encoding — without it, names with `&`, `?`, `#`, or spaces
+# break the parse.
+urlencoding = "2"
 
 # Sync engine + crypto from the core repo. Path deps so we build against
 # the local checkout; `[patch."https://github.com/beebeeb-io/core"]`

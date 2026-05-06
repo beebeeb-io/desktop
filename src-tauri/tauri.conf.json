@@ -4,22 +4,22 @@
   "version": "0.1.0",
   "identifier": "io.beebeeb.desktop",
   "build": {
-    "devUrl": "http://localhost:5173"
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "label": "main",
+        "label": "settings",
         "title": "Beebeeb",
-        "url": "https://app.beebeeb.io",
-        "width": 1200,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
-        "resizable": true,
+        "url": "index.html",
+        "width": 680,
+        "height": 540,
+        "resizable": false,
         "fullscreen": false,
-        "visible": true,
-        "center": true
+        "visible": false,
+        "center": true,
+        "decorations": true
       }
     ],
     "security": {

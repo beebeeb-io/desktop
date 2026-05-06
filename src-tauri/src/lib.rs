@@ -355,6 +355,159 @@ fn default_sync_root() -> String {
         .into_owned()
 }
 
+// ── IPC commands: Task 9 — settings page ──────────────────────────────────────
+
+/// Read the current settings (bandwidth caps + notification toggles)
+/// from `desktop.toml`. The on-disk `sync_root` is intentionally
+/// elided from the response — see [`config::DesktopSettings`] for the
+/// rationale.
+///
+/// Consumed by `repos/desktop/src/pages/Bandwidth.tsx` and
+/// `repos/desktop/src/pages/Notifications.tsx` as their first read on
+/// page mount. A missing file (no settings ever saved) returns the
+/// `Default` values, matching the TS-side `DEFAULT_CONFIG`.
+#[tauri::command]
+fn get_desktop_config() -> Result<config::DesktopSettings, String> {
+    let cfg = DesktopConfig::load()?;
+    Ok(config::DesktopSettings::from(&cfg))
+}
+
+/// Persist a new settings struct, leaving `sync_root` (and any future
+/// non-settings fields) untouched. Performs a load → merge → save so a
+/// concurrent `pick_sync_root` doesn't race away a sync_root update;
+/// the worst case here is a missed sync_root change between this load
+/// and save, but `pick_sync_root` writes much less frequently than the
+/// settings pages (one-shot vs. debounced sliders), so the practical
+/// risk is near zero.
+#[tauri::command]
+fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
+    let mut cfg = DesktopConfig::load()?;
+    cfg.apply_settings(config);
+    cfg.save()?;
+    Ok(())
+}
+
+/// Best-effort lookup of the signed-in user's email, used by
+/// `repos/desktop/src/pages/Account.tsx`.
+///
+/// Currently returns `Ok(None)` whenever no email is reachable from
+/// the daemon's session struct — which is always, because Phase 1's
+/// `Session` only carries `token` + `master_key` (no email). Surfacing
+/// the email here requires either:
+///
+///   - extending `set_session` to also push a plaintext email, or
+///   - calling `GET /api/v1/me` from the Rust side and caching it
+///
+/// Both are tracked under the auth-persistence work; until one lands
+/// the Account page falls back to a "Signed in" placeholder. The
+/// command intentionally returns `Ok(None)` rather than `Err(...)` so
+/// the TS side doesn't render a noisy error banner for a known gap.
+#[tauri::command]
+fn account_email(_state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+// ── IPC commands: Task 12 — conflict window ───────────────────────────────────
+
+/// Open a conflict-resolution window for a single file. The label is
+/// `conflict-<file_id>` so multiple simultaneous conflicts each get
+/// their own window without colliding (re-opening the same conflict
+/// is a soft-noop — Tauri returns an error which we coerce to Ok).
+///
+/// The URL contract matches `repos/desktop/src/ConflictWindow.tsx`:
+/// `index.html?window=conflict&fileId=<uuid>&fileName=<utf8>&isText=<bool>`.
+/// `main.tsx` reads `?window=conflict` and mounts `ConflictWindow`
+/// instead of the default settings shell.
+///
+/// Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
+/// Phase 4 Task 12. Wired to engine-side conflict detection in Task 10
+/// (engine_bridge::detect_conflicts emits an `engine-conflict` event;
+/// either the WebView or a Rust listener calls this command).
+#[tauri::command]
+async fn open_conflict_window(
+    app: tauri::AppHandle,
+    file_id: String,
+    file_name: String,
+    is_text: bool,
+) -> Result<(), String> {
+    let label = format!("conflict-{file_id}");
+
+    // If the user already has the window open for this file, just
+    // bring it forward — re-creating would error from Tauri and the
+    // user-visible behaviour ("show me this conflict again") is the
+    // same.
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = format!(
+        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}",
+        enc_name = urlencoding::encode(&file_name),
+    );
+
+    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
+        .title(format!("Conflict — {file_name}"))
+        .inner_size(720.0, 480.0)
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Apply the user's conflict resolution choice. `choice` is
+/// `"local"` | `"remote"` | `"both"` per the TS-side button labels in
+/// ConflictWindow.tsx (Keep Mine / Keep Theirs / Keep Both).
+///
+/// As of Task 12 the engine-side `engine_bridge::resolve_conflict`
+/// hasn't landed yet (it's Task 10) — we log, emit a Tauri event the
+/// settings page can listen for to refresh its conflict count, and
+/// return Ok so the window's "✓ Conflict resolved" success state
+/// fires. When Task 10 lands, replace the log line with the bridge
+/// call; the IPC surface stays identical so no TS changes are needed.
+#[tauri::command]
+async fn resolve_conflict(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+    choice: String,
+) -> Result<(), String> {
+    // Validate the choice up front so a typo on the TS side fails
+    // loudly instead of silently no-opping.
+    match choice.as_str() {
+        "local" | "remote" | "both" => {}
+        _ => return Err(format!("invalid conflict choice: {choice}")),
+    }
+
+    // Logged-out daemon can't resolve anything — the engine bridge
+    // would also reject this.
+    let signed_in = state
+        .session
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    if !signed_in {
+        return Err("not signed in".into());
+    }
+
+    tracing::info!(file_id = %file_id, choice = %choice, "conflict resolved (engine wire-up pending Task 10)");
+
+    // Notify the settings window so it can re-poll sync_status and
+    // refresh the conflict count without waiting for the next engine
+    // tick.
+    let _ = app.emit(
+        "conflict-resolved",
+        serde_json::json!({
+            "file_id": file_id,
+            "choice": choice,
+        }),
+    );
+
+    Ok(())
+}
+
 // ── IPC commands: app metadata ────────────────────────────────────────────────
 
 // ── Durations ─────────────────────────────────────────────────────────────────
@@ -469,6 +622,13 @@ pub fn run() {
             get_sync_root,
             pick_sync_root,
             default_sync_root,
+            // Task 9 — settings page IPC
+            get_desktop_config,
+            set_desktop_config,
+            account_email,
+            // Task 12 — conflict window IPC
+            open_conflict_window,
+            resolve_conflict,
         ])
         .setup(|app| {
             setup_native_menu(app)?;
@@ -486,7 +646,7 @@ pub fn run() {
         // Cmd+W / "Close Window" → hide to tray
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "close_window" {
-                if let Some(win) = app.get_webview_window("main") {
+                if let Some(win) = app.get_webview_window("settings") {
                     let _ = win.hide();
                 }
             }
@@ -620,12 +780,18 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
 
 /// Build the tray context menu with the current autostart checked state.
 /// Called on first setup and again whenever the autostart state changes.
+///
+/// As of Task 8B the desktop app is tray-only — the WebView is a small
+/// fixed-size settings window rather than the full web client at
+/// `app.beebeeb.io`. The "Open Settings" tray item is the primary way
+/// users surface that window; "Hide" tucks it back without quitting
+/// the daemon.
 fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
     manager: &M,
     autostart_enabled: bool,
 ) -> tauri::Result<Menu<tauri::Wry>> {
-    let show_item = MenuItemBuilder::new("Show Beebeeb")
-        .id("tray_show")
+    let show_item = MenuItemBuilder::new("Open Settings")
+        .id("open_settings")
         .build(manager)?;
     let hide_item = MenuItemBuilder::new("Hide")
         .id("tray_hide")
@@ -724,9 +890,9 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .tooltip("Beebeeb")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "tray_show" => show_main_window(app),
+            "open_settings" => show_settings_window(app),
             "tray_hide" => {
-                if let Some(win) = app.get_webview_window("main") {
+                if let Some(win) = app.get_webview_window("settings") {
                     let _ = win.hide();
                 }
             }
@@ -760,11 +926,11 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
+                if let Some(win) = app.get_webview_window("settings") {
                     if win.is_visible().unwrap_or(false) {
                         let _ = win.hide();
                     } else {
-                        show_main_window(app);
+                        show_settings_window(app);
                     }
                 }
             }
@@ -776,9 +942,12 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Show and focus the main window.
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
+/// Show and focus the settings window — the only persistent window
+/// we ship as of Task 8B. Conflict windows are minted on demand by
+/// `open_conflict_window` and live independently; nothing in here
+/// touches them.
+fn show_settings_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
     }

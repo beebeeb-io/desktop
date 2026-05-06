@@ -30,15 +30,122 @@ const APP_CONFIG_DIR: &str = "beebeeb";
 /// Field order mirrors the TOML file the user might hand-edit. New
 /// fields should be added with `#[serde(default)]` so older files
 /// still load.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopConfig {
     /// Local folder mirrored against the vault. `None` until the user
     /// completes the first-launch picker.
     #[serde(default)]
     pub sync_root: Option<PathBuf>,
+
+    // ── Task 9 settings (Bandwidth.tsx + Notifications.tsx) ───────
+    //
+    // All six settings are flat fields rather than a nested table
+    // so the TOML stays readable when a user hand-edits the file
+    // (`upload_kbps_limit = 200` rather than
+    // `[bandwidth] upload_kbps_limit = 200`). Defaults match the
+    // TS-side DEFAULT_CONFIG so a missing file produces the same
+    // user-visible behaviour as a fresh install.
+    /// Upload bandwidth ceiling, KB/s. `0` = unlimited.
+    #[serde(default)]
+    pub upload_kbps_limit: u64,
+    /// Download bandwidth ceiling, KB/s. `0` = unlimited.
+    #[serde(default)]
+    pub download_kbps_limit: u64,
+    /// User-toggled global pause. The engine still tracks remote
+    /// state when paused; it just stops actively syncing.
+    #[serde(default)]
+    pub pause_sync: bool,
+    /// Surface a native OS notification when a conflict is created.
+    /// Defaults true because conflicts that go unnoticed cause silent
+    /// data divergence — the worst kind of failure mode.
+    #[serde(default = "default_true")]
+    pub notify_conflicts: bool,
+    /// Notify the user once a sync settles to "all caught up". Off
+    /// by default — most users don't want a chime on every settle,
+    /// only on the noteworthy events.
+    #[serde(default)]
+    pub notify_sync_complete: bool,
+    /// Surface quota-warning notifications (80% / 95% / full). On by
+    /// default because hitting a hard quota mid-upload silently
+    /// leaves a partial sync, which is also a worst-case failure.
+    #[serde(default = "default_true")]
+    pub notify_quota_warnings: bool,
     // NOTE: persisted session deferred to a later step. For now the
     // session is in-memory only (set_session IPC). Adding it here
     // requires the OS-keychain wrapping called out in spec 030 §1.
+}
+
+/// `#[serde(default = ...)]` needs a function returning the default.
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DesktopConfig {
+    /// Mirror the `#[serde(default = ...)]` annotations so a fresh
+    /// in-memory config produces the same notification-on defaults
+    /// as one parsed from a TOML file with those keys missing.
+    /// Important: a missing on-disk config and a missing key inside
+    /// the on-disk config must agree, otherwise users see a different
+    /// initial state on first launch vs. on a subsequent partial-edit
+    /// reload.
+    fn default() -> Self {
+        Self {
+            sync_root: None,
+            upload_kbps_limit: 0,
+            download_kbps_limit: 0,
+            pause_sync: false,
+            notify_conflicts: true,
+            notify_sync_complete: false,
+            notify_quota_warnings: true,
+        }
+    }
+}
+
+/// Settings-only DTO for the `get_desktop_config` / `set_desktop_config`
+/// IPC commands. Does NOT include `sync_root` — the WebView never
+/// edits the sync root through these commands (the `pick_sync_root`
+/// IPC owns that), and including it here would risk the TS side
+/// accidentally clobbering the on-disk path on a settings save when
+/// the load failed and DEFAULT_CONFIG was substituted.
+///
+/// The shape mirrors `DesktopConfig` (the TypeScript `DesktopConfig`
+/// interface in Bandwidth.tsx / Notifications.tsx) for everything
+/// except `sync_root`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopSettings {
+    pub upload_kbps_limit: u64,
+    pub download_kbps_limit: u64,
+    pub pause_sync: bool,
+    pub notify_conflicts: bool,
+    pub notify_sync_complete: bool,
+    pub notify_quota_warnings: bool,
+}
+
+impl From<&DesktopConfig> for DesktopSettings {
+    fn from(c: &DesktopConfig) -> Self {
+        Self {
+            upload_kbps_limit: c.upload_kbps_limit,
+            download_kbps_limit: c.download_kbps_limit,
+            pause_sync: c.pause_sync,
+            notify_conflicts: c.notify_conflicts,
+            notify_sync_complete: c.notify_sync_complete,
+            notify_quota_warnings: c.notify_quota_warnings,
+        }
+    }
+}
+
+impl DesktopConfig {
+    /// Overlay a settings DTO onto this config without touching
+    /// `sync_root`. Used by the `set_desktop_config` IPC to merge a
+    /// settings save into whatever's already on disk.
+    pub fn apply_settings(&mut self, s: DesktopSettings) {
+        self.upload_kbps_limit = s.upload_kbps_limit;
+        self.download_kbps_limit = s.download_kbps_limit;
+        self.pause_sync = s.pause_sync;
+        self.notify_conflicts = s.notify_conflicts;
+        self.notify_sync_complete = s.notify_sync_complete;
+        self.notify_quota_warnings = s.notify_quota_warnings;
+    }
 }
 
 impl DesktopConfig {
