@@ -36,7 +36,7 @@
       "endpoints": [
         "https://releases.beebeeb.io/desktop/{{target}}/{{arch}}/{{current_version}}"
       ],
-      "pubkey": "PLACEHOLDER — replace with output of: cargo tauri signer generate -w ~/.tauri/beebeeb.key\nThe .pub file contents go here as a single-line base64 string.",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU0NUQ3QkE3N0VERUE3RTEKUldUaHA5NStwM3RkVkkzaW50Z0dmVGhNQkxzakN0bENGN2VWMGhUWTQ3OFNNMUJvTEt3VTRGbDQK",
       "windows": {
         "installMode": "passive"
       }

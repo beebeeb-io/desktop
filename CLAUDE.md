@@ -76,6 +76,35 @@ To develop against the real web client instead of the placeholder:
 
 Once `beebeeb-sync` integration lands: `src-tauri/Cargo.toml` will pull `beebeeb-sync = { git = "https://github.com/beebeeb-io/core" }` and a background tokio task in `lib.rs` will own the engine. Conflict resolution policy: never silently drop a version — default `KeepBoth` (rename loser as `file (Device, HH:MM).ext`). File watcher debounce: 100ms.
 
+## Auto-update signing
+
+Tauri's updater verifies update bundles with minisign. The keypair was
+generated with `bunx tauri signer generate -w ~/.tauri/beebeeb-desktop.key`
+on 2026-05-07.
+
+- **Public key** lives in `src-tauri/tauri.conf.json` under
+  `plugins.updater.pubkey`. Safe to commit; it's the verification key.
+- **Private key** lives at `~/.tauri/beebeeb-desktop.key` on the build
+  machine, mode `0600`. **Never commit it.** It's not in any `.gitignore`
+  because it's not in the repo — it sits in the user's home dir.
+- The key was generated **without a password** for initial pre-launch
+  setup (the `-p ""` flag). Before public release, regenerate with a
+  strong password, update the pubkey in tauri.conf.json, and rotate the
+  CI secret. Track this work in `.claude/tasks/` if not already.
+
+**For CI** (GitHub Actions, EAS, etc.) building signed updates:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — the *contents* of `~/.tauri/beebeeb-desktop.key`,
+  set as a repository secret (not the file path)
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password if the key has one;
+  unset for the current passwordless setup
+
+To inspect the public key locally: `cat ~/.tauri/beebeeb-desktop.key.pub`.
+The fingerprint at time of generation is `545D7BA77EDEA7E1`.
+
+If the key is lost, no clients with already-installed builds can verify
+new updates — they'll need a manual reinstall to onboard the new pubkey.
+
 ## Brand
 
 - Icons: amber rounded square with lowercase `b` (`icons/icon.png`). Replace with the production icon set via `bunx tauri icon path/to/source.png` once ready.
