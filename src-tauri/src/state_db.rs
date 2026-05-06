@@ -21,6 +21,7 @@
 
 use rusqlite::{Connection, Result, params};
 use std::path::Path;
+use std::sync::Mutex;
 
 /// High-level sync status for a single file. Maps 1:1 to the icon
 /// overlays rendered by the platform extensions.
@@ -70,11 +71,13 @@ pub struct FileEntry {
 
 /// Owned handle to the local SQLite state database.
 ///
-/// One instance per running daemon process. Cheap to construct (it
-/// opens the file + runs IF-NOT-EXISTS DDL on every open), but the
-/// connection is not internally synchronised — wrap in a `Mutex` /
-/// `parking_lot::Mutex` if multiple tasks need it.
-pub struct StateDb(Connection);
+/// One instance per running daemon process. The inner `Connection` is
+/// wrapped in a `Mutex` so `StateDb: Send + Sync` and an `Arc<StateDb>`
+/// can be shared with `tokio::spawn`-ed futures (rusqlite's
+/// `Connection` is `Send` but `!Sync` on its own). Lock contention is
+/// fine for our access pattern: the daemon does one tick every 5
+/// seconds and OS-extension callbacks are infrequent.
+pub struct StateDb(Mutex<Connection>);
 
 impl StateDb {
     /// Open or create the state database at `path`. Idempotent — the
@@ -96,13 +99,14 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_status ON files(status);
         ",
         )?;
-        Ok(Self(conn))
+        Ok(Self(Mutex::new(conn)))
     }
 
     /// Insert or update a row keyed by `file_id`. ON CONFLICT replaces
     /// the entire row except the primary key.
     pub fn upsert_file(&self, e: &FileEntry) -> Result<()> {
-        self.0.execute(
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
             "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(file_id) DO UPDATE SET
@@ -123,7 +127,8 @@ impl StateDb {
 
     /// Fetch a single row by `file_id`. `Ok(None)` if absent.
     pub fn get_file(&self, file_id: &str) -> Result<Option<FileEntry>> {
-        let mut stmt = self.0.prepare(
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
             "SELECT file_id, path, status, size_bytes, modified_at, content_hash
              FROM files WHERE file_id = ?1",
         )?;
@@ -146,7 +151,8 @@ impl StateDb {
     /// `file_id` doesn't exist; callers should pair with `upsert_file`
     /// when they want create-or-update semantics.
     pub fn set_status(&self, file_id: &str, status: FileStatus) -> Result<()> {
-        self.0.execute(
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
             "UPDATE files SET status = ?1 WHERE file_id = ?2",
             params![status.as_str(), file_id],
         )?;
@@ -157,7 +163,8 @@ impl StateDb {
     /// resolution UI (status = Conflict) and the daemon's
     /// "what still needs uploading?" sweep (status = Uploading).
     pub fn list_by_status(&self, status: FileStatus) -> Result<Vec<FileEntry>> {
-        let mut stmt = self.0.prepare(
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
             "SELECT file_id, path, status, size_bytes, modified_at, content_hash
              FROM files WHERE status = ?1",
         )?;

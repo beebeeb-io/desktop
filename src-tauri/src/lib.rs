@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api_client;
 mod config;
+mod engine_bridge;
 mod lockfile;
 mod runner;
 mod state_db;
@@ -76,6 +77,7 @@ async fn set_session(
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&master_key);
     let token_clone = token.clone();
+    let key_clone = arr;
 
     {
         let mut guard = state
@@ -96,7 +98,7 @@ async fn set_session(
             // (handles re-login and session rotation cleanly).
             prev.abort().await;
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token_clone));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token_clone, key_clone));
     }
     Ok(())
 }
@@ -216,17 +218,17 @@ async fn pick_sync_root(
     // If a session is already loaded, start syncing immediately.
     // (Common path: WebView calls set_session before pick_sync_root,
     //  so the engine couldn't start there; it starts here instead.)
-    let session_token = state
+    let session = state
         .session
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|s| s.token.clone()));
-    if let Some(token) = session_token {
+        .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
+    if let Some((token, key)) = session {
         let mut engine_slot = state.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             prev.abort().await;
         }
-        *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token));
+        *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key));
     }
 
     Ok(Some(path.to_string_lossy().into_owned()))
