@@ -24,6 +24,14 @@ tauri-plugin-dialog = "2"
 toml = "0.8"
 # `dirs::config_dir()` to locate ~/.config/beebeeb/ (or platform equivalent)
 dirs = "6"
+# Used by the .beebeeb-sync.lock helper for liveness checks of a prior
+# agent's pid (`libc::kill(pid, 0)`) and hostname recording.
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+# Unix-only liveness check; on Windows we currently fall back to a
+# conservative "always alive" — see lockfile.rs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 # `time` for the existing update-loop sleeps; `rt`/`rt-multi-thread` to
 # spawn the sync engine on a background task; `sync` for the eventual
 # cancellation channel between Tauri lifecycle and the engine.

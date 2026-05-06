@@ -12,7 +12,10 @@ use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
 mod config;
+mod lockfile;
+mod runner;
 use config::DesktopConfig;
+use runner::EngineRunner;
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
 
@@ -39,6 +42,9 @@ pub struct Session {
 #[derive(Default)]
 pub struct AppState {
     pub session: Mutex<Option<Session>>,
+    /// Active engine runner, if any. `set_session` spawns one when a
+    /// sync_root is also configured; `clear_session` aborts it.
+    pub engine: tokio::sync::Mutex<Option<EngineRunner>>,
 }
 
 // ── IPC commands: session ─────────────────────────────────────────────────────
@@ -47,10 +53,14 @@ pub struct AppState {
 /// immediately after a successful OPAQUE (or legacy) login on the
 /// frontend side. Idempotent — overwrites any previous session.
 ///
+/// If a sync_root is also configured, spawns the engine runner.
+/// Otherwise the engine waits for `pick_sync_root` to land first.
+///
 /// Returns `Err` if `master_key` is not exactly 32 bytes; the WebView
 /// should treat that as a programming bug and surface it loudly.
 #[tauri::command]
-fn set_session(
+async fn set_session(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
     master_key: Vec<u8>,
@@ -63,21 +73,39 @@ fn set_session(
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&master_key);
+    let token_clone = token.clone();
 
-    let mut guard = state
-        .session
-        .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?;
-    *guard = Some(Session { token, master_key: arr });
+    {
+        let mut guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        *guard = Some(Session { token, master_key: arr });
+    }
     tracing::info!("session installed via IPC");
+
+    // If we already know the sync_root, kick off the engine. Otherwise
+    // it'll start when the first-launch picker resolves.
+    let sync_root = DesktopConfig::load().ok().and_then(|c| c.sync_root);
+    if let Some(root) = sync_root {
+        let mut engine_slot = state.engine.lock().await;
+        if let Some(prev) = engine_slot.take() {
+            // Tear down the prior engine before installing a new one
+            // (handles re-login and session rotation cleanly).
+            prev.abort().await;
+        }
+        *engine_slot = Some(EngineRunner::spawn(app, root, token_clone));
+    }
     Ok(())
 }
 
-/// Drop any cached session. Called by the WebView on logout. Best-effort
-/// — a poisoned mutex is logged but not surfaced as an error to the JS
-/// side because logout should always appear to succeed.
+/// Drop any cached session and abort the engine if running. Called by
+/// the WebView on logout. Returns `Ok(())` even if the session mutex
+/// was poisoned, because logout should always appear to succeed from
+/// the user's POV — the only error path Tauri requires here is for
+/// the macro's async-with-state contract.
 #[tauri::command]
-fn clear_session(state: State<'_, AppState>) {
+async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     match state.session.lock() {
         Ok(mut guard) => {
             guard.take();
@@ -87,14 +115,24 @@ fn clear_session(state: State<'_, AppState>) {
             tracing::warn!("session mutex poisoned during clear_session");
         }
     }
+    // Stop the engine if one is running.
+    let mut engine_slot = state.engine.lock().await;
+    if let Some(prev) = engine_slot.take() {
+        prev.abort().await;
+        tracing::info!("engine aborted on logout");
+    }
+    Ok(())
 }
 
 /// Lightweight status endpoint for the WebView's settings page.
 /// Reports whether the Rust side has a session, where the sync root
-/// is on disk, and (eventually, once the engine ships) what the sync
-/// engine is doing.
+/// is on disk, and whether the engine task is currently running.
+///
+/// For richer state (Idle / Syncing / Error) the WebView should
+/// listen to the `engine-status` Tauri event instead — this command
+/// is just a coarse poll for first-paint UI.
 #[tauri::command]
-fn sync_status(state: State<'_, AppState>) -> serde_json::Value {
+async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let logged_in = state
         .session
         .lock()
@@ -104,12 +142,12 @@ fn sync_status(state: State<'_, AppState>) -> serde_json::Value {
         .ok()
         .and_then(|c| c.sync_root)
         .map(|p| p.to_string_lossy().into_owned());
-    serde_json::json!({
+    let engine_running = state.engine.lock().await.is_some();
+    Ok(serde_json::json!({
         "logged_in": logged_in,
         "sync_root": sync_root,
-        // Placeholder until the engine is wired in (spec 030 step 4).
-        "engine": "not_started",
-    })
+        "engine_running": engine_running,
+    }))
 }
 
 // ── IPC commands: sync-root config ────────────────────────────────────────────
@@ -129,9 +167,15 @@ fn get_sync_root() -> Result<Option<String>, String> {
 /// On success, persists the chosen path to desktop.toml and returns
 /// the absolute string. On user cancel, returns `Ok(None)`.
 ///
-/// Spec 030 §2.
+/// If a session is already in memory (user logged in before picking a
+/// root), the engine runner is also spawned at this point.
+///
+/// Spec 030 §2 + §3 (lock acquired by the spawned engine).
 #[tauri::command]
-async fn pick_sync_root(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn pick_sync_root(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
     let suggestion = config::default_sync_root_suggestion();
     // Best-effort create — the dialog still opens even if this fails,
     // pointed at the parent dir.
@@ -166,6 +210,23 @@ async fn pick_sync_root(app: tauri::AppHandle) -> Result<Option<String>, String>
     cfg.save()?;
 
     tracing::info!(path = %path.display(), "sync root set");
+
+    // If a session is already loaded, start syncing immediately.
+    // (Common path: WebView calls set_session before pick_sync_root,
+    //  so the engine couldn't start there; it starts here instead.)
+    let session_token = state
+        .session
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| s.token.clone()));
+    if let Some(token) = session_token {
+        let mut engine_slot = state.engine.lock().await;
+        if let Some(prev) = engine_slot.take() {
+            prev.abort().await;
+        }
+        *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token));
+    }
+
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
