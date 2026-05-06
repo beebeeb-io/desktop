@@ -18,11 +18,27 @@ tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
-tokio = { version = "1", features = ["time"] }
+# `time` for the existing update-loop sleeps; `rt`/`rt-multi-thread` to
+# spawn the sync engine on a background task; `sync` for the eventual
+# cancellation channel between Tauri lifecycle and the engine.
+tokio = { version = "1", features = ["time", "rt", "rt-multi-thread", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Sync engine + crypto from the core repo. Path deps so we build against
+# the local checkout; `[patch."https://github.com/beebeeb-io/core"]`
+# keeps git-dep references inside sub-crates pointing at the same tree
+# (mirrors the pattern in repos/cli/Cargo.toml).
+beebeeb-sync = { path = "../../core/beebeeb-sync" }
+beebeeb-core = { path = "../../core/beebeeb-core" }
+beebeeb-types = { path = "../../core/beebeeb-types" }
+
+[patch."https://github.com/beebeeb-io/core"]
+beebeeb-core = { path = "../../core/beebeeb-core" }
+beebeeb-sync = { path = "../../core/beebeeb-sync" }
+beebeeb-types = { path = "../../core/beebeeb-types" }
 
 [features]
 default = ["custom-protocol"]
