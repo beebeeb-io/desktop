@@ -9,7 +9,7 @@
       "source_file": "vite.config.ts",
       "source_location": "L1",
       "id": "vite_config_ts",
-      "community": 57,
+      "community": 58,
       "norm_label": "vite.config.ts"
     },
     {
@@ -1611,7 +1611,7 @@
       "source_file": "design/hifi/hifi-onboarding.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_onboarding_jsx",
-      "community": 53,
+      "community": 54,
       "norm_label": "hifi-onboarding.jsx"
     },
     {
@@ -1620,7 +1620,7 @@
       "source_file": "design/hifi/hifi-onboarding.jsx",
       "source_location": "L9",
       "id": "hifi_hifi_onboarding_hionboarding",
-      "community": 53,
+      "community": 54,
       "norm_label": "hionboarding()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L1",
       "id": "src_tauri_build_rs",
-      "community": 54,
+      "community": 55,
       "norm_label": "build.rs"
     },
     {
@@ -2727,7 +2727,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L1",
       "id": "src_tauri_build_main",
-      "community": 54,
+      "community": 55,
       "norm_label": "main()"
     },
     {
@@ -3013,16 +3013,25 @@
       "label": "AppState",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L59",
+      "source_location": "L58",
       "id": "src_lib_appstate",
       "community": 0,
       "norm_label": "appstate"
     },
     {
-      "label": "set_session()",
+      "label": ".default()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L78",
+      "id": "src_lib_appstate_default",
+      "community": 0,
+      "norm_label": ".default()"
+    },
+    {
+      "label": "set_session()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L101",
       "id": "src_lib_set_session",
       "community": 0,
       "norm_label": "set_session()"
@@ -3031,7 +3040,7 @@
       "label": "clear_session()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L125",
+      "source_location": "L148",
       "id": "src_lib_clear_session",
       "community": 0,
       "norm_label": "clear_session()"
@@ -3040,16 +3049,16 @@
       "label": "sync_status()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L152",
+      "source_location": "L185",
       "id": "src_lib_sync_status",
-      "community": 0,
+      "community": 3,
       "norm_label": "sync_status()"
     },
     {
       "label": "get_sync_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L175",
+      "source_location": "L273",
       "id": "src_lib_get_sync_root",
       "community": 0,
       "norm_label": "get_sync_root()"
@@ -3058,7 +3067,7 @@
       "label": "pick_sync_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L192",
+      "source_location": "L290",
       "id": "src_lib_pick_sync_root",
       "community": 0,
       "norm_label": "pick_sync_root()"
@@ -3067,7 +3076,7 @@
       "label": "default_sync_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L254",
+      "source_location": "L352",
       "id": "src_lib_default_sync_root",
       "community": 0,
       "norm_label": "default_sync_root()"
@@ -3076,7 +3085,7 @@
       "label": "app_version()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L271",
+      "source_location": "L369",
       "id": "src_lib_app_version",
       "community": 0,
       "norm_label": "app_version()"
@@ -3085,7 +3094,7 @@
       "label": "install_update()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L280",
+      "source_location": "L378",
       "id": "src_lib_install_update",
       "community": 0,
       "norm_label": "install_update()"
@@ -3094,7 +3103,7 @@
       "label": "toggle_autostart()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L318",
+      "source_location": "L416",
       "id": "src_lib_toggle_autostart",
       "community": 0,
       "norm_label": "toggle_autostart()"
@@ -3103,7 +3112,7 @@
       "label": "autostart_enabled()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L333",
+      "source_location": "L431",
       "id": "src_lib_autostart_enabled",
       "community": 0,
       "norm_label": "autostart_enabled()"
@@ -3112,7 +3121,7 @@
       "label": "run()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L342",
+      "source_location": "L440",
       "id": "src_lib_run",
       "community": 0,
       "norm_label": "run()"
@@ -3121,7 +3130,7 @@
       "label": "run_update_loop()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L410",
+      "source_location": "L508",
       "id": "src_lib_run_update_loop",
       "community": 0,
       "norm_label": "run_update_loop()"
@@ -3130,7 +3139,7 @@
       "label": "check_for_update()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L423",
+      "source_location": "L521",
       "id": "src_lib_check_for_update",
       "community": 0,
       "norm_label": "check_for_update()"
@@ -3139,7 +3148,7 @@
       "label": "setup_native_menu()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L464",
+      "source_location": "L562",
       "id": "src_lib_setup_native_menu",
       "community": 0,
       "norm_label": "setup_native_menu()"
@@ -3148,7 +3157,7 @@
       "label": "build_tray_menu()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L525",
+      "source_location": "L623",
       "id": "src_lib_build_tray_menu",
       "community": 0,
       "norm_label": "build_tray_menu()"
@@ -3157,16 +3166,16 @@
       "label": "attach_tray_status_listener()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L555",
+      "source_location": "L653",
       "id": "src_lib_attach_tray_status_listener",
-      "community": 0,
+      "community": 3,
       "norm_label": "attach_tray_status_listener()"
     },
     {
       "label": "setup_tray()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L597",
+      "source_location": "L707",
       "id": "src_lib_setup_tray",
       "community": 0,
       "norm_label": "setup_tray()"
@@ -3175,7 +3184,7 @@
       "label": "show_main_window()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L670",
+      "source_location": "L780",
       "id": "src_lib_show_main_window",
       "community": 0,
       "norm_label": "show_main_window()"
@@ -4050,7 +4059,7 @@
       "source_file": "src/App.tsx",
       "source_location": "L1",
       "id": "src_app_tsx",
-      "community": 58,
+      "community": 59,
       "norm_label": "app.tsx"
     },
     {
@@ -4059,8 +4068,35 @@
       "source_file": "src/main.tsx",
       "source_location": "L1",
       "id": "src_main_tsx",
-      "community": 59,
+      "community": 60,
       "norm_label": "main.tsx"
+    },
+    {
+      "label": "ConflictWindow.tsx",
+      "file_type": "code",
+      "source_file": "src/ConflictWindow.tsx",
+      "source_location": "L1",
+      "id": "src_conflictwindow_tsx",
+      "community": 51,
+      "norm_label": "conflictwindow.tsx"
+    },
+    {
+      "label": "DiffLine()",
+      "file_type": "code",
+      "source_file": "src/ConflictWindow.tsx",
+      "source_location": "L36",
+      "id": "src_conflictwindow_diffline",
+      "community": 51,
+      "norm_label": "diffline()"
+    },
+    {
+      "label": "resolve()",
+      "file_type": "code",
+      "source_file": "src/ConflictWindow.tsx",
+      "source_location": "L71",
+      "id": "src_conflictwindow_resolve",
+      "community": 51,
+      "norm_label": "resolve()"
     },
     {
       "label": "Account.tsx",
@@ -4068,7 +4104,7 @@
       "source_file": "src/pages/Account.tsx",
       "source_location": "L1",
       "id": "src_pages_account_tsx",
-      "community": 51,
+      "community": 52,
       "norm_label": "account.tsx"
     },
     {
@@ -4077,7 +4113,7 @@
       "source_file": "src/pages/Account.tsx",
       "source_location": "L47",
       "id": "pages_account_openwebapp",
-      "community": 51,
+      "community": 52,
       "norm_label": "openwebapp()"
     },
     {
@@ -4086,7 +4122,7 @@
       "source_file": "src/pages/Account.tsx",
       "source_location": "L60",
       "id": "pages_account_signout",
-      "community": 51,
+      "community": 52,
       "norm_label": "signout()"
     },
     {
@@ -4095,7 +4131,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L1",
       "id": "src_pages_bandwidth_tsx",
-      "community": 52,
+      "community": 53,
       "norm_label": "bandwidth.tsx"
     },
     {
@@ -4104,7 +4140,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L39",
       "id": "pages_bandwidth_formatlimit",
-      "community": 52,
+      "community": 53,
       "norm_label": "formatlimit()"
     },
     {
@@ -4113,7 +4149,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L67",
       "id": "pages_bandwidth_writeback",
-      "community": 52,
+      "community": 53,
       "norm_label": "writeback()"
     },
     {
@@ -4122,7 +4158,7 @@
       "source_file": "src/pages/Notifications.tsx",
       "source_location": "L1",
       "id": "src_pages_notifications_tsx",
-      "community": 60,
+      "community": 61,
       "norm_label": "notifications.tsx"
     },
     {
@@ -4131,7 +4167,7 @@
       "source_file": "src/pages/Status.tsx",
       "source_location": "L1",
       "id": "src_pages_status_tsx",
-      "community": 55,
+      "community": 56,
       "norm_label": "status.tsx"
     },
     {
@@ -4140,7 +4176,7 @@
       "source_file": "src/pages/Status.tsx",
       "source_location": "L29",
       "id": "pages_status_refresh",
-      "community": 55,
+      "community": 56,
       "norm_label": "refresh()"
     },
     {
@@ -4149,7 +4185,7 @@
       "source_file": "src/pages/SyncFolder.tsx",
       "source_location": "L1",
       "id": "src_pages_syncfolder_tsx",
-      "community": 56,
+      "community": 57,
       "norm_label": "syncfolder.tsx"
     },
     {
@@ -4158,7 +4194,7 @@
       "source_file": "src/pages/SyncFolder.tsx",
       "source_location": "L23",
       "id": "pages_syncfolder_changefolderclick",
-      "community": 56,
+      "community": 57,
       "norm_label": "changefolderclick()"
     }
   ],
@@ -7302,8 +7338,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L351",
       "weight": 1.0,
-      "_src": "src_lib_run",
-      "_tgt": "beebeebfileprovider_fileprovideritem_fileprovideritem_init",
+      "_src": "beebeebfileprovider_fileprovideritem_fileprovideritem_init",
+      "_tgt": "src_lib_run",
       "source": "beebeebfileprovider_fileprovideritem_fileprovideritem_init",
       "target": "src_lib_run"
     },
@@ -7458,8 +7494,8 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L68",
       "weight": 1.0,
-      "_src": "src_config_desktopconfig_load",
-      "_tgt": "src_state_db_filestatus_from_str",
+      "_src": "src_state_db_filestatus_from_str",
+      "_tgt": "src_config_desktopconfig_load",
       "source": "src_state_db_filestatus_from_str",
       "target": "src_config_desktopconfig_load"
     },
@@ -7470,8 +7506,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L559",
       "weight": 1.0,
-      "_src": "src_lib_attach_tray_status_listener",
-      "_tgt": "src_state_db_filestatus_from_str",
+      "_src": "src_state_db_filestatus_from_str",
+      "_tgt": "src_lib_attach_tray_status_listener",
       "source": "src_state_db_filestatus_from_str",
       "target": "src_lib_attach_tray_status_listener"
     },
@@ -7482,8 +7518,8 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L63",
       "weight": 1.0,
-      "_src": "src_config_load_config",
-      "_tgt": "src_state_db_filestatus_from_str",
+      "_src": "src_state_db_filestatus_from_str",
+      "_tgt": "src_config_load_config",
       "source": "src_state_db_filestatus_from_str",
       "target": "src_config_load_config"
     },
@@ -7494,8 +7530,8 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L143",
       "weight": 1.0,
-      "_src": "src_api_parse_response",
-      "_tgt": "src_state_db_filestatus_from_str",
+      "_src": "src_state_db_filestatus_from_str",
+      "_tgt": "src_api_parse_response",
       "source": "src_state_db_filestatus_from_str",
       "target": "src_api_parse_response"
     },
@@ -7623,11 +7659,23 @@
       "relation": "calls",
       "confidence": "INFERRED",
       "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L228",
+      "weight": 1.0,
+      "_src": "src_lib_sync_status",
+      "_tgt": "src_state_db_statedb_open",
+      "source": "src_state_db_statedb_open",
+      "target": "src_lib_sync_status"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L153",
       "weight": 1.0,
-      "_src": "src_runner_run",
-      "_tgt": "src_state_db_statedb_open",
+      "_src": "src_state_db_statedb_open",
+      "_tgt": "src_runner_run",
       "source": "src_state_db_statedb_open",
       "target": "src_runner_run"
     },
@@ -7794,8 +7842,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L106",
       "weight": 1.0,
-      "_src": "src_lib_set_session",
-      "_tgt": "src_config_desktopconfig_load",
+      "_src": "src_config_desktopconfig_load",
+      "_tgt": "src_lib_set_session",
       "source": "src_config_desktopconfig_load",
       "target": "src_lib_set_session"
     },
@@ -7806,8 +7854,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L158",
       "weight": 1.0,
-      "_src": "src_lib_sync_status",
-      "_tgt": "src_config_desktopconfig_load",
+      "_src": "src_config_desktopconfig_load",
+      "_tgt": "src_lib_sync_status",
       "source": "src_config_desktopconfig_load",
       "target": "src_lib_sync_status"
     },
@@ -7818,8 +7866,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L176",
       "weight": 1.0,
-      "_src": "src_lib_get_sync_root",
-      "_tgt": "src_config_desktopconfig_load",
+      "_src": "src_config_desktopconfig_load",
+      "_tgt": "src_lib_get_sync_root",
       "source": "src_config_desktopconfig_load",
       "target": "src_lib_get_sync_root"
     },
@@ -7830,8 +7878,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L225",
       "weight": 1.0,
-      "_src": "src_lib_pick_sync_root",
-      "_tgt": "src_config_desktopconfig_load",
+      "_src": "src_config_desktopconfig_load",
+      "_tgt": "src_lib_pick_sync_root",
       "source": "src_config_desktopconfig_load",
       "target": "src_lib_pick_sync_root"
     },
@@ -7842,8 +7890,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L196",
       "weight": 1.0,
-      "_src": "src_lib_pick_sync_root",
-      "_tgt": "src_config_default_sync_root_suggestion",
+      "_src": "src_config_default_sync_root_suggestion",
+      "_tgt": "src_lib_pick_sync_root",
       "source": "src_config_default_sync_root_suggestion",
       "target": "src_lib_pick_sync_root"
     },
@@ -7854,8 +7902,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L255",
       "weight": 1.0,
-      "_src": "src_lib_default_sync_root",
-      "_tgt": "src_config_default_sync_root_suggestion",
+      "_src": "src_config_default_sync_root_suggestion",
+      "_tgt": "src_lib_default_sync_root",
       "source": "src_config_default_sync_root_suggestion",
       "target": "src_lib_default_sync_root"
     },
@@ -7866,8 +7914,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L199",
       "weight": 1.0,
-      "_src": "src_lib_pick_sync_root",
-      "_tgt": "src_config_ensure_directory",
+      "_src": "src_config_ensure_directory",
+      "_tgt": "src_lib_pick_sync_root",
       "source": "src_config_ensure_directory",
       "target": "src_lib_pick_sync_root"
     },
@@ -7974,8 +8022,8 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L135",
       "weight": 1.0,
-      "_src": "src_runner_run",
-      "_tgt": "src_lockfile_lockfile_acquire",
+      "_src": "src_lockfile_lockfile_acquire",
+      "_tgt": "src_runner_run",
       "source": "src_lockfile_lockfile_acquire",
       "target": "src_runner_run"
     },
@@ -7995,7 +8043,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L59",
+      "source_location": "L58",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_appstate",
@@ -8007,7 +8055,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L78",
+      "source_location": "L101",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_set_session",
@@ -8019,7 +8067,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L125",
+      "source_location": "L148",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_clear_session",
@@ -8031,7 +8079,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L152",
+      "source_location": "L185",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_sync_status",
@@ -8043,7 +8091,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L175",
+      "source_location": "L273",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_get_sync_root",
@@ -8055,7 +8103,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L192",
+      "source_location": "L290",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_pick_sync_root",
@@ -8067,7 +8115,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L254",
+      "source_location": "L352",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_default_sync_root",
@@ -8079,7 +8127,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L271",
+      "source_location": "L369",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_app_version",
@@ -8091,7 +8139,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L280",
+      "source_location": "L378",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_install_update",
@@ -8103,7 +8151,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L318",
+      "source_location": "L416",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_toggle_autostart",
@@ -8115,7 +8163,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L333",
+      "source_location": "L431",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_autostart_enabled",
@@ -8127,7 +8175,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L342",
+      "source_location": "L440",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_run",
@@ -8139,7 +8187,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L410",
+      "source_location": "L508",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_run_update_loop",
@@ -8151,7 +8199,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L423",
+      "source_location": "L521",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_check_for_update",
@@ -8163,7 +8211,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L464",
+      "source_location": "L562",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_setup_native_menu",
@@ -8175,7 +8223,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L525",
+      "source_location": "L623",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_build_tray_menu",
@@ -8187,7 +8235,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L555",
+      "source_location": "L653",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_attach_tray_status_listener",
@@ -8199,7 +8247,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L597",
+      "source_location": "L707",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_setup_tray",
@@ -8211,13 +8259,61 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L670",
+      "source_location": "L780",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_show_main_window",
       "source": "src_tauri_src_lib_rs",
       "target": "src_lib_show_main_window",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L78",
+      "weight": 1.0,
+      "_src": "src_lib_appstate",
+      "_tgt": "src_lib_appstate_default",
+      "source": "src_lib_appstate",
+      "target": "src_lib_appstate_default",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L445",
+      "weight": 1.0,
+      "_src": "src_lib_run",
+      "_tgt": "src_lib_appstate_default",
+      "source": "src_lib_appstate_default",
+      "target": "src_lib_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L572",
+      "weight": 1.0,
+      "_src": "src_lib_setup_native_menu",
+      "_tgt": "src_lib_appstate_default",
+      "source": "src_lib_appstate_default",
+      "target": "src_lib_setup_native_menu",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L80",
+      "weight": 1.0,
+      "_src": "src_lib_appstate_default",
+      "_tgt": "src_api_apiclient_new",
+      "source": "src_lib_appstate_default",
+      "target": "src_api_apiclient_new"
     },
     {
       "relation": "calls",
@@ -8247,7 +8343,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L376",
+      "source_location": "L474",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_setup_native_menu",
@@ -8259,7 +8355,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L377",
+      "source_location": "L475",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_setup_tray",
@@ -8271,7 +8367,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L378",
+      "source_location": "L476",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_attach_tray_status_listener",
@@ -8283,25 +8379,13 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L383",
+      "source_location": "L481",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_run_update_loop",
       "source": "src_lib_run",
       "target": "src_lib_run_update_loop",
       "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "INFERRED",
-      "confidence_score": 0.8,
-      "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L347",
-      "weight": 1.0,
-      "_src": "src_lib_run",
-      "_tgt": "src_config_config_default",
-      "source": "src_lib_run",
-      "target": "src_config_config_default"
     },
     {
       "relation": "calls",
@@ -8329,27 +8413,27 @@
     },
     {
       "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L347",
+      "weight": 1.0,
+      "_src": "src_lib_run",
+      "_tgt": "src_config_config_default",
+      "source": "src_lib_run",
+      "target": "src_config_config_default"
+    },
+    {
+      "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L415",
+      "source_location": "L513",
       "weight": 1.0,
       "_src": "src_lib_run_update_loop",
       "_tgt": "src_lib_check_for_update",
       "source": "src_lib_run_update_loop",
       "target": "src_lib_check_for_update",
       "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "INFERRED",
-      "confidence_score": 0.8,
-      "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L474",
-      "weight": 1.0,
-      "_src": "src_lib_setup_native_menu",
-      "_tgt": "src_config_config_default",
-      "source": "src_lib_setup_native_menu",
-      "target": "src_config_config_default"
     },
     {
       "relation": "calls",
@@ -8365,9 +8449,21 @@
     },
     {
       "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L474",
+      "weight": 1.0,
+      "_src": "src_lib_setup_native_menu",
+      "_tgt": "src_config_config_default",
+      "source": "src_lib_setup_native_menu",
+      "target": "src_config_config_default"
+    },
+    {
+      "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L603",
+      "source_location": "L713",
       "weight": 1.0,
       "_src": "src_lib_setup_tray",
       "_tgt": "src_lib_build_tray_menu",
@@ -8391,7 +8487,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L617",
+      "source_location": "L727",
       "weight": 1.0,
       "_src": "src_lib_setup_tray",
       "_tgt": "src_lib_show_main_window",
@@ -8766,8 +8862,8 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L44",
       "weight": 1.0,
-      "_src": "src_ipc_socket_serve_ipc",
-      "_tgt": "src_runner_enginerunner_spawn",
+      "_src": "src_runner_enginerunner_spawn",
+      "_tgt": "src_ipc_socket_serve_ipc",
       "source": "src_runner_enginerunner_spawn",
       "target": "src_ipc_socket_serve_ipc"
     },
@@ -8826,8 +8922,8 @@
       "source_file": "src-tauri/src/main.rs",
       "source_location": "L4",
       "weight": 1.0,
-      "_src": "src_main_main",
-      "_tgt": "src_runner_run",
+      "_src": "src_runner_run",
+      "_tgt": "src_main_main",
       "source": "src_runner_run",
       "target": "src_main_main"
     },
@@ -9042,8 +9138,8 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L235",
       "weight": 1.0,
-      "_src": "src_api_apiclient_new",
-      "_tgt": "src_main_main",
+      "_src": "src_main_main",
+      "_tgt": "src_api_apiclient_new",
       "source": "src_main_main",
       "target": "src_api_apiclient_new"
     },
@@ -9198,8 +9294,8 @@
       "source_file": "src-tauri/src/windows_cf/callbacks.rs",
       "source_location": "L88",
       "weight": 1.0,
-      "_src": "windows_cf_callbacks_fetch_data_callback",
-      "_tgt": "windows_cf_mod_bridge",
+      "_src": "windows_cf_mod_bridge",
+      "_tgt": "windows_cf_callbacks_fetch_data_callback",
       "source": "windows_cf_mod_bridge",
       "target": "windows_cf_callbacks_fetch_data_callback"
     },
@@ -9522,8 +9618,8 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L134",
       "weight": 1.0,
-      "_src": "src_main_upload_file",
-      "_tgt": "linux_fuse_mod_beebeebfs_read",
+      "_src": "linux_fuse_mod_beebeebfs_read",
+      "_tgt": "src_main_upload_file",
       "source": "linux_fuse_mod_beebeebfs_read",
       "target": "src_main_upload_file"
     },
@@ -9882,8 +9978,8 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L427",
       "weight": 1.0,
-      "_src": "src_api_apiclient_new",
-      "_tgt": "src_main_futures_task_noop_waker",
+      "_src": "src_main_futures_task_noop_waker",
+      "_tgt": "src_api_apiclient_new",
       "source": "src_main_futures_task_noop_waker",
       "target": "src_api_apiclient_new"
     },
@@ -10149,6 +10245,30 @@
       "_tgt": "src_api_parse_response",
       "source": "src_api_apiclient_verify_session",
       "target": "src_api_parse_response",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/ConflictWindow.tsx",
+      "source_location": "L36",
+      "weight": 1.0,
+      "_src": "src_conflictwindow_tsx",
+      "_tgt": "src_conflictwindow_diffline",
+      "source": "src_conflictwindow_tsx",
+      "target": "src_conflictwindow_diffline",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/ConflictWindow.tsx",
+      "source_location": "L71",
+      "weight": 1.0,
+      "_src": "src_conflictwindow_tsx",
+      "_tgt": "src_conflictwindow_resolve",
+      "source": "src_conflictwindow_tsx",
+      "target": "src_conflictwindow_resolve",
       "confidence_score": 1.0
     },
     {
