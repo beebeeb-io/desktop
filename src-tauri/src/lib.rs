@@ -55,12 +55,35 @@ pub struct Session {
 /// Tauri-managed shared state. Held behind a `Mutex` because the web
 /// thread (IPC handlers) and the future sync-engine task both need
 /// access. Cheap to lock — sessions change rarely.
-#[derive(Default)]
 pub struct AppState {
     pub session: Mutex<Option<Session>>,
     /// Active engine runner, if any. `set_session` spawns one when a
     /// sync_root is also configured; `clear_session` aborts it.
     pub engine: tokio::sync::Mutex<Option<EngineRunner>>,
+    /// Latest `state` field from the runner's `engine-status` events.
+    /// Updated by `attach_tray_status_listener`; read by `sync_status`
+    /// so the WebView can render the tri-state indicator (running /
+    /// stopped / error) on the settings Status page without having to
+    /// subscribe to the event stream itself for first-paint.
+    ///
+    /// Possible values match the runner's emit calls in
+    /// `runner::emit_status` (`"running"`, `"idle"`, `"syncing"`,
+    /// `"error"`, `"stopped"`). The `sync_status` handler collapses
+    /// `"idle"` and `"syncing"` to `"running"` for the WebView's
+    /// simpler tri-state expectation.
+    pub engine_state: Mutex<String>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            session: Mutex::new(None),
+            engine: tokio::sync::Mutex::new(None),
+            // Default to "stopped" — once the runner spawns and emits
+            // its first event, the listener overwrites this.
+            engine_state: Mutex::new("stopped".to_string()),
+        }
+    }
 }
 
 // ── IPC commands: session ─────────────────────────────────────────────────────
@@ -143,27 +166,102 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Lightweight status endpoint for the WebView's settings page.
 /// Reports whether the Rust side has a session, where the sync root
-/// is on disk, and whether the engine task is currently running.
+/// is on disk, whether the engine task is currently running, and the
+/// per-status file counts the Status / SyncFolder pages render.
 ///
-/// For richer state (Idle / Syncing / Error) the WebView should
-/// listen to the `engine-status` Tauri event instead — this command
-/// is just a coarse poll for first-paint UI.
+/// For richer state (per-tick `idle` / `syncing` transitions) the
+/// WebView should still listen to the `engine-status` Tauri event —
+/// this command is the first-paint poll the settings UI uses while
+/// the event stream is still ramping up.
+///
+/// File counts are read from the SQLite state DB at
+/// `<sync_root>/.beebeeb/state.db` via a fresh connection per call.
+/// SQLite is happy to share read access with the runner's connection
+/// (default journal mode supports many concurrent readers); a poll
+/// takes well under a millisecond on a typical vault. If the DB
+/// doesn't exist yet (first launch, sync root not picked, or DB not
+/// initialised because no engine has run yet) we return zeros.
 #[tauri::command]
 async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    use state_db::FileStatus;
+
     let logged_in = state
         .session
         .lock()
         .map(|g| g.is_some())
         .unwrap_or(false);
-    let sync_root = DesktopConfig::load()
-        .ok()
-        .and_then(|c| c.sync_root)
+    let sync_root_path = DesktopConfig::load().ok().and_then(|c| c.sync_root);
+    let sync_root = sync_root_path
+        .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
     let engine_running = state.engine.lock().await.is_some();
+
+    // Collapse the runner's five-state stream into the tri-state
+    // string the WebView's settings pages render. `idle` and
+    // `syncing` both mean "engine is alive and doing work" — UI
+    // wants a single "running" pill for either; the per-tick
+    // distinction is on the engine-status event stream.
+    let engine = {
+        let raw = state
+            .engine_state
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "stopped".to_string());
+        match raw.as_str() {
+            "running" | "idle" | "syncing" => "running",
+            "error" => "error",
+            _ => "stopped",
+        }
+        .to_string()
+    };
+
+    // Count files by status, opening a short-lived connection at the
+    // canonical state.db path. Wrap in a closure so an early `None`
+    // on any step cleanly degrades to zeros without unwraps.
+    let counts = sync_root_path
+        .as_ref()
+        .and_then(|root| {
+            let db_path = root.join(".beebeeb").join("state.db");
+            if !db_path.exists() {
+                return None;
+            }
+            let db = state_db::StateDb::open(&db_path).ok()?;
+            // Downloading + Uploading both count toward "in-flight
+            // sync work" for the WebView's syncing pill — there's no
+            // user-meaningful difference between "we're pulling" and
+            // "we're pushing" at the indicator level.
+            let downloading = db
+                .list_by_status(FileStatus::Downloading)
+                .ok()
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let uploading = db
+                .list_by_status(FileStatus::Uploading)
+                .ok()
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let cloud_only = db
+                .list_by_status(FileStatus::CloudOnly)
+                .ok()
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let conflicts = db
+                .list_by_status(FileStatus::Conflict)
+                .ok()
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            Some((downloading + uploading, cloud_only, conflicts))
+        })
+        .unwrap_or((0, 0, 0));
+
     Ok(serde_json::json!({
         "logged_in": logged_in,
         "sync_root": sync_root,
         "engine_running": engine_running,
+        "engine": engine,
+        "syncing": counts.0,
+        "cloud_only": counts.1,
+        "conflicts": counts.2,
     }))
 }
 
@@ -568,6 +666,18 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
             .get("files_remaining")
             .and_then(|v| v.as_u64());
         let error = payload.get("error").and_then(|v| v.as_str());
+
+        // Mirror the latest state into AppState so the `sync_status`
+        // command can return it on first paint without subscribing
+        // to the event stream itself. Failures here (poisoned mutex,
+        // state not registered yet) are non-fatal — the tray tooltip
+        // update below still runs.
+        if !state.is_empty()
+            && let Some(app_state) = app_for_listener.try_state::<AppState>()
+            && let Ok(mut guard) = app_state.engine_state.lock()
+        {
+            *guard = state.to_string();
+        }
 
         let tooltip = match state {
             "idle" => "Beebeeb · Synced".to_string(),
