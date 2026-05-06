@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for the BeebeebFileProvider extension target.
+
+  Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md Phase 2 Task 5.
+
+  Wired into Xcode by:
+    1. Adding "BeebeebFileProvider" as a File Provider Extension target
+    2. Pointing its Info.plist build setting at this file
+    3. Setting the bundle identifier to io.beebeeb.desktop.FileProvider
+       (parent app + ".FileProvider" suffix per Apple's convention)
+    4. Setting deployment target — see scaffold notes in
+       FileProviderItem.swift / FileProviderExtension.swift
+
+  The CFBundleVersion / CFBundleShortVersionString are deliberately the
+  same as the parent app's so the extension is signed and updated as a
+  unit.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleDisplayName</key>
+    <string>Beebeeb File Provider</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+
+    <!--
+      Extension declaration. NSExtensionPointIdentifier tells macOS
+      which extension point this binary plugs into; the principal
+      class is the Swift class that gets instantiated when Finder
+      asks for an item.
+    -->
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.fileprovider-nonui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
+    </dict>
+
+    <!--
+      Shown to the user when macOS first asks them to grant the
+      File Provider domain. Keep brand voice ("encrypted", not
+      "secure"; "Finder" capitalised because it's the product
+      name).
+    -->
+    <key>NSFileProviderDomainUsageDescription</key>
+    <string>Beebeeb uses this to sync your encrypted files in Finder.</string>
+</dict>
+</plist>
