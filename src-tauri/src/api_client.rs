@@ -84,6 +84,22 @@ impl ApiClient {
         Ok(body["files"].as_array().cloned().unwrap_or_default())
     }
 
+    /// `GET /api/v1/files/:id` — single-file metadata. Used by
+    /// `EngineBridge::hydrate_file` to learn how many chunks to fetch
+    /// and to recover the encrypted name when the local mirror entry
+    /// is sparse (e.g. fresh placeholder).
+    pub async fn get_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}/api/v1/files/{}", self.base_url, file_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
     /// chunk bytes. Decryption is the caller's job (`beebeeb_core`).
     pub async fn download_chunk(

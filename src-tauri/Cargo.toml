@@ -45,6 +45,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # Convenience error type for the daemon's surface — the plan signs API
 # methods with `anyhow::Result` (Phase 1 Task 2).
 anyhow = "1"
+# UUID parsing used by `EngineBridge::hydrate_file` to convert a string
+# file_id into bytes for `beebeeb_core::kdf::derive_file_key`.
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Sync engine + crypto from the core repo. Path deps so we build against
 # the local checkout; `[patch."https://github.com/beebeeb-io/core"]`
