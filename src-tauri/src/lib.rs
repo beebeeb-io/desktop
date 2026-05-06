@@ -15,6 +15,13 @@ mod api_client;
 mod config;
 mod engine_bridge;
 mod ipc_socket;
+#[cfg(target_os = "linux")]
+mod linux_fuse;
+#[cfg(all(test, not(target_os = "linux")))]
+mod linux_fuse {
+    #[path = "inode_map.rs"]
+    pub mod inode_map;
+}
 mod lockfile;
 mod runner;
 mod state_db;

@@ -147,6 +147,30 @@ impl StateDb {
         }
     }
 
+    /// Fetch a single row by its path inside the sync root. `Ok(None)`
+    /// if absent. Used by OS virtual-filesystem layers that receive
+    /// path/inode callbacks instead of server UUIDs.
+    pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash
+             FROM files WHERE path = ?1",
+        )?;
+        let mut rows = stmt.query(params![path])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(FileEntry {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                size_bytes: row.get(3)?,
+                modified_at: row.get(4)?,
+                content_hash: row.get(5)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Update just the `status` column for a known file. No-op if
     /// `file_id` doesn't exist; callers should pair with `upsert_file`
     /// when they want create-or-update semantics.
@@ -169,6 +193,27 @@ impl StateDb {
              FROM files WHERE status = ?1",
         )?;
         let rows = stmt.query_map(params![status.as_str()], |row| {
+            Ok(FileEntry {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                size_bytes: row.get(3)?,
+                modified_at: row.get(4)?,
+                content_hash: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Return every tracked file. Used by virtual filesystem directory
+    /// enumeration to expose known cloud-only and local files.
+    pub fn list_files(&self) -> Result<Vec<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash
+             FROM files ORDER BY path ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
             Ok(FileEntry {
                 file_id: row.get(0)?,
                 path: row.get(1)?,
