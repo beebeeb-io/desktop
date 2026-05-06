@@ -1,11 +1,107 @@
+use std::sync::Mutex;
+
 use tauri::{
     menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
+    Emitter, Manager, State,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tracing_subscriber::EnvFilter;
+
+// ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
+
+/// Authenticated session pushed in from the WebView after login.
+///
+/// `master_key` is the user's 32-byte vault root key, derived from the
+/// OPAQUE export_key (or, for legacy accounts, from Argon2id over the
+/// password). It is the input to per-file `derive_file_key()` calls
+/// inside `beebeeb-sync` — the engine cannot do anything without it.
+///
+/// The struct is intentionally NOT `Clone`: there should be exactly one
+/// authoritative copy of the master key in this process at any moment.
+/// `take()` removes it from the registry on logout; everything else
+/// reads it through a borrow under the `Mutex`.
+#[derive(Debug)]
+pub struct Session {
+    pub token: String,
+    pub master_key: [u8; 32],
+}
+
+/// Tauri-managed shared state. Held behind a `Mutex` because the web
+/// thread (IPC handlers) and the future sync-engine task both need
+/// access. Cheap to lock — sessions change rarely.
+#[derive(Default)]
+pub struct AppState {
+    pub session: Mutex<Option<Session>>,
+}
+
+// ── IPC commands: session ─────────────────────────────────────────────────────
+
+/// Stash an authenticated session in app state. Called by the WebView
+/// immediately after a successful OPAQUE (or legacy) login on the
+/// frontend side. Idempotent — overwrites any previous session.
+///
+/// Returns `Err` if `master_key` is not exactly 32 bytes; the WebView
+/// should treat that as a programming bug and surface it loudly.
+#[tauri::command]
+fn set_session(
+    state: State<'_, AppState>,
+    token: String,
+    master_key: Vec<u8>,
+) -> Result<(), String> {
+    if master_key.len() != 32 {
+        return Err(format!(
+            "master_key must be 32 bytes, got {}",
+            master_key.len()
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&master_key);
+
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "session mutex poisoned".to_string())?;
+    *guard = Some(Session { token, master_key: arr });
+    tracing::info!("session installed via IPC");
+    Ok(())
+}
+
+/// Drop any cached session. Called by the WebView on logout. Best-effort
+/// — a poisoned mutex is logged but not surfaced as an error to the JS
+/// side because logout should always appear to succeed.
+#[tauri::command]
+fn clear_session(state: State<'_, AppState>) {
+    match state.session.lock() {
+        Ok(mut guard) => {
+            guard.take();
+            tracing::info!("session cleared via IPC");
+        }
+        Err(_) => {
+            tracing::warn!("session mutex poisoned during clear_session");
+        }
+    }
+}
+
+/// Lightweight status endpoint for the WebView's settings page.
+/// Reports whether the Rust side has a session and (eventually, once
+/// the engine ships) what the sync engine is doing.
+#[tauri::command]
+fn sync_status(state: State<'_, AppState>) -> serde_json::Value {
+    let logged_in = state
+        .session
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    serde_json::json!({
+        "logged_in": logged_in,
+        // Placeholder until the engine is wired in (spec 030 step 4).
+        "engine": "not_started",
+    })
+}
+
+// ── IPC commands: app metadata ────────────────────────────────────────────────
 
 // ── Durations ─────────────────────────────────────────────────────────────────
 
@@ -13,8 +109,6 @@ use tracing_subscriber::EnvFilter;
 const UPDATE_CHECK_STARTUP_DELAY_SECS: u64 = 5;
 /// How often to re-check for updates while the app is running.
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 4;
-
-// ── IPC commands ──────────────────────────────────────────────────────────────
 
 /// Returns the app version string — displayed in the web UI Settings page.
 #[tauri::command]
@@ -95,6 +189,9 @@ pub fn run() {
         .try_init();
 
     tauri::Builder::default()
+        // Shared state — session pushed in by the WebView via set_session
+        // IPC after login. The future sync engine task reads from this.
+        .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         // Auto-updater — endpoints + pubkey configured in tauri.conf.json
@@ -110,6 +207,9 @@ pub fn run() {
             install_update,
             toggle_autostart,
             autostart_enabled,
+            set_session,
+            clear_session,
+            sync_status,
         ])
         .setup(|app| {
             setup_native_menu(app)?;
