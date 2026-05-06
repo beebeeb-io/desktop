@@ -25,6 +25,11 @@ mod linux_fuse {
 mod lockfile;
 mod runner;
 mod state_db;
+// Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
+// the module's own files start with `#![cfg(target_os = "windows")]`
+// so this `mod` declaration plus the conditional are belt-and-braces.
+#[cfg(target_os = "windows")]
+mod windows_cf;
 use config::DesktopConfig;
 use runner::EngineRunner;
 

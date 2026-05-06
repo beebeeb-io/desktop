@@ -66,6 +66,23 @@ libc = "0.2"
 fuser = "0.14"
 libc = "0.2"
 
+# Windows Cloud Files API — Phase 2 Task 6 of the desktop sync client
+# plan. The `windows` crate ships generated bindings to Win32 APIs;
+# we only pull in the modules we actually use:
+#   - Win32_Storage_CloudFilters: CfRegisterSyncRoot, CfCreatePlaceholders,
+#     CF_CALLBACK_INFO and friends.
+#   - Win32_Storage_FileSystem: FILE_BASIC_INFO struct used inside
+#     CF_FS_METADATA when minting a placeholder.
+#   - Win32_Foundation: PCWSTR / HRESULT / HANDLE.
+#   - Win32_System_Com: GUID type used for the provider id.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_Com",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 
