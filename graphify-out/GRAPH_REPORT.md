@@ -1,12 +1,12 @@
 # Graph Report - desktop  (2026-05-07)
 
 ## Corpus Check
-- 71 files · ~100,913 words
+- 71 files · ~102,300 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 466 nodes · 512 edges · 11 communities detected
-- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 42 edges (avg confidence: 0.8)
+- 476 nodes · 531 edges · 11 communities detected
+- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 49 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -25,44 +25,44 @@
 ## God Nodes (most connected - your core abstractions)
 1. `run()` - 10 edges
 2. `run()` - 9 edges
-3. `StateDb` - 8 edges
-4. `ApiClient` - 8 edges
-5. `main()` - 8 edges
+3. `main()` - 9 edges
+4. `StateDb` - 8 edges
+5. `ApiClient` - 8 edges
 6. `BeebeebFS` - 8 edges
 7. `ApiClient` - 8 edges
 8. `FileProviderItem` - 6 edges
-9. `EngineBridge` - 6 edges
-10. `parse_response()` - 6 edges
+9. `DesktopConfig` - 6 edges
+10. `EngineBridge` - 6 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `run()` --calls--> `main()`  [INFERRED]
   src-tauri/src/runner.rs → windows/src/main.rs
 - `ensure_directory()` --calls--> `pick_sync_root()`  [INFERRED]
   src-tauri/src/config.rs → src-tauri/src/lib.rs
+- `main()` --calls--> `load_config()`  [INFERRED]
+  windows/src/main.rs → windows/src/config.rs
 - `default_sync_root_suggestion()` --calls--> `pick_sync_root()`  [INFERRED]
   src-tauri/src/config.rs → src-tauri/src/lib.rs
 - `default_sync_root_suggestion()` --calls--> `default_sync_root()`  [INFERRED]
   src-tauri/src/config.rs → src-tauri/src/lib.rs
-- `run()` --calls--> `serve_ipc()`  [INFERRED]
-  src-tauri/src/runner.rs → src-tauri/src/ipc_socket.rs
 
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.08
-Nodes (25): default_sync_root_suggestion(), DesktopConfig, ensure_directory(), handle_connection(), ipc_socket_path(), IpcRequest, IpcResponse, serve_ipc() (+17 more)
+Cohesion: 0.07
+Nodes (24): Config, config_path(), default_sync_root_suggestion(), DesktopConfig, DesktopSettings, ensure_directory(), load_config(), save_config() (+16 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.15
-Nodes (13): Config, config_path(), load_config(), save_config(), Args, b64(), futures_task_noop_waker(), is_ignored_file() (+5 more)
+Cohesion: 0.1
+Nodes (19): handle_connection(), ipc_socket_path(), IpcRequest, IpcResponse, serve_ipc(), open_conflict_window(), set_session(), Args (+11 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.18
 Nodes (6): XPCBridge, BeebeebFS, dir_attr(), file_attr(), mount(), reply_read_slice()
 
 ### Community 3 - "Community 3"
-Cohesion: 0.19
-Nodes (7): attach_tray_status_listener(), sync_status(), FileEntry, FileStatus, StateDb, test_list_by_status(), test_upsert_and_get_file()
+Cohesion: 0.21
+Nodes (6): sync_status(), FileEntry, FileStatus, StateDb, test_list_by_status(), test_upsert_and_get_file()
 
 ### Community 4 - "Community 4"
 Cohesion: 0.19
@@ -105,17 +105,17 @@ Nodes (2): fetch_data_callback(), bridge()
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `run()` connect `Community 0` to `Community 1`, `Community 3`, `Community 13`?**
+- **Why does `run()` connect `Community 0` to `Community 1`, `Community 13`?**
   _High betweenness centrality (0.019) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 0` to `Community 33`, `Community 3`, `Community 1`?**
+- **Why does `run()` connect `Community 1` to `Community 33`, `Community 3`?**
   _High betweenness centrality (0.016) - this node is a cross-community bridge._
 - **Why does `main()` connect `Community 1` to `Community 0`?**
-  _High betweenness centrality (0.012) - this node is a cross-community bridge._
+  _High betweenness centrality (0.015) - this node is a cross-community bridge._
 - **Are the 4 inferred relationships involving `run()` (e.g. with `.init()` and `.new()`) actually correct?**
   _`run()` has 4 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 5 inferred relationships involving `run()` (e.g. with `.acquire()` and `.open()`) actually correct?**
   _`run()` has 5 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 3 inferred relationships involving `main()` (e.g. with `run()` and `.new()`) actually correct?**
-  _`main()` has 3 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 4 inferred relationships involving `main()` (e.g. with `run()` and `.new()`) actually correct?**
+  _`main()` has 4 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `FileEntry`, `LockContents`, `Session` to the rest of the system?**
   _8 weakly-connected nodes found - possible documentation gaps or missing edges._
