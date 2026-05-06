@@ -18,6 +18,12 @@ tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
+# Folder picker for the first-launch sync-root chooser (spec 030 step 2)
+tauri-plugin-dialog = "2"
+# desktop.toml config persistence
+toml = "0.8"
+# `dirs::config_dir()` to locate ~/.config/beebeeb/ (or platform equivalent)
+dirs = "6"
 # `time` for the existing update-loop sleeps; `rt`/`rt-multi-thread` to
 # spawn the sync engine on a background task; `sync` for the eventual
 # cancellation channel between Tauri lifecycle and the engine.

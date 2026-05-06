@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::{
@@ -7,7 +8,11 @@ use tauri::{
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
+
+mod config;
+use config::DesktopConfig;
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
 
@@ -85,8 +90,9 @@ fn clear_session(state: State<'_, AppState>) {
 }
 
 /// Lightweight status endpoint for the WebView's settings page.
-/// Reports whether the Rust side has a session and (eventually, once
-/// the engine ships) what the sync engine is doing.
+/// Reports whether the Rust side has a session, where the sync root
+/// is on disk, and (eventually, once the engine ships) what the sync
+/// engine is doing.
 #[tauri::command]
 fn sync_status(state: State<'_, AppState>) -> serde_json::Value {
     let logged_in = state
@@ -94,11 +100,83 @@ fn sync_status(state: State<'_, AppState>) -> serde_json::Value {
         .lock()
         .map(|g| g.is_some())
         .unwrap_or(false);
+    let sync_root = DesktopConfig::load()
+        .ok()
+        .and_then(|c| c.sync_root)
+        .map(|p| p.to_string_lossy().into_owned());
     serde_json::json!({
         "logged_in": logged_in,
+        "sync_root": sync_root,
         // Placeholder until the engine is wired in (spec 030 step 4).
         "engine": "not_started",
     })
+}
+
+// ── IPC commands: sync-root config ────────────────────────────────────────────
+
+/// Read the persisted sync root from `~/.config/beebeeb/desktop.toml`.
+/// Returns `None` if the user hasn't picked one yet (first launch).
+#[tauri::command]
+fn get_sync_root() -> Result<Option<String>, String> {
+    let cfg = DesktopConfig::load()?;
+    Ok(cfg.sync_root.map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Open the native folder picker so the user can choose a sync root.
+/// Pre-points the dialog at `~/Beebeeb` (creates that directory first
+/// if missing) so accepting the default is a single click.
+///
+/// On success, persists the chosen path to desktop.toml and returns
+/// the absolute string. On user cancel, returns `Ok(None)`.
+///
+/// Spec 030 §2.
+#[tauri::command]
+async fn pick_sync_root(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let suggestion = config::default_sync_root_suggestion();
+    // Best-effort create — the dialog still opens even if this fails,
+    // pointed at the parent dir.
+    let _ = config::ensure_directory(&suggestion);
+
+    let dialog = app.dialog().clone();
+    // Tauri's blocking_pick_folder is synchronous from the JS caller's
+    // perspective but runs the OS dialog modally. We're already on a
+    // tokio task because the IPC fn is async, so this is safe.
+    let chosen: Option<PathBuf> = dialog
+        .file()
+        .set_directory(&suggestion)
+        .set_title("Choose your Beebeeb sync folder")
+        .blocking_pick_folder()
+        .and_then(|fp| fp.into_path().ok());
+
+    let Some(path) = chosen else {
+        // User cancelled. Don't write anything.
+        return Ok(None);
+    };
+
+    if !path.is_absolute() {
+        return Err(format!(
+            "picker returned a non-absolute path: {} (please report)",
+            path.display()
+        ));
+    }
+    config::ensure_directory(&path)?;
+
+    let mut cfg = DesktopConfig::load()?;
+    cfg.sync_root = Some(path.clone());
+    cfg.save()?;
+
+    tracing::info!(path = %path.display(), "sync root set");
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Suggested default path for the sync root, used by the WebView to
+/// show "We'll create ~/Beebeeb if you accept" before opening the
+/// native picker.
+#[tauri::command]
+fn default_sync_root() -> String {
+    config::default_sync_root_suggestion()
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ── IPC commands: app metadata ────────────────────────────────────────────────
@@ -194,6 +272,8 @@ pub fn run() {
         .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Native folder picker for the first-launch sync-root chooser.
+        .plugin(tauri_plugin_dialog::init())
         // Auto-updater — endpoints + pubkey configured in tauri.conf.json
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Autostart — LaunchAgent on macOS (no elevated privileges required),
@@ -210,6 +290,9 @@ pub fn run() {
             set_session,
             clear_session,
             sync_status,
+            get_sync_root,
+            pick_sync_root,
+            default_sync_root,
         ])
         .setup(|app| {
             setup_native_menu(app)?;
