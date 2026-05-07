@@ -51,6 +51,7 @@ use runner::EngineRunner;
 pub struct Session {
     pub token: String,
     pub master_key: [u8; 32],
+    pub email: Option<String>,
 }
 
 /// Tauri-managed shared state. Held behind a `Mutex` because the web
@@ -104,6 +105,7 @@ async fn set_session(
     state: State<'_, AppState>,
     token: String,
     master_key: Vec<u8>,
+    email: Option<String>,
 ) -> Result<(), String> {
     if master_key.len() != 32 {
         return Err(format!(
@@ -121,7 +123,7 @@ async fn set_session(
             .session
             .lock()
             .map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(Session { token, master_key: arr });
+        *guard = Some(Session { token, master_key: arr, email });
     }
     tracing::info!("session installed via IPC");
 
@@ -570,8 +572,9 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
 /// command intentionally returns `Ok(None)` rather than `Err(...)` so
 /// the TS side doesn't render a noisy error banner for a known gap.
 #[tauri::command]
-fn account_email(_state: State<'_, AppState>) -> Result<Option<String>, String> {
-    Ok(None)
+fn account_email(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    Ok(guard.as_ref().and_then(|s| s.email.clone()))
 }
 
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
