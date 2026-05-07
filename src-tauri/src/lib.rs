@@ -388,6 +388,139 @@ fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
     Ok(())
 }
 
+// ── IPC commands: Task 0090 — selective sync ──────────────────────────────────
+
+/// Read the persisted list of top-level folder IDs the user has chosen
+/// to keep cloud-only on this device. Returns an empty `Vec` (not
+/// `Err`) when the key is missing from `desktop.toml`, which is the
+/// common case on a fresh install.
+///
+/// The shape mirrors what `repos/desktop/src/pages/SelectiveSync.tsx`
+/// renders: the page only needs the IDs, then cross-references them
+/// against the folder list returned by [`list_vault_folders`] to mark
+/// the matching checkboxes off.
+#[tauri::command]
+fn get_selective_sync() -> Result<Vec<String>, String> {
+    let cfg = DesktopConfig::load()?;
+    Ok(cfg.excluded_folder_ids.unwrap_or_default())
+}
+
+/// Persist a new list of excluded top-level folder IDs to
+/// `desktop.toml`. An empty incoming list is normalised to `None` so
+/// the on-disk file stays free of `excluded_folder_ids = []` clutter
+/// when the user has nothing excluded.
+///
+/// Round-trips through `DesktopConfig::load` → mutate → `save` so a
+/// concurrent settings save (Bandwidth/Notifications page) doesn't
+/// race away the new exclusion list — same merge pattern as
+/// [`set_desktop_config`].
+///
+/// Note: changing the excluded list does NOT immediately tear down
+/// in-flight syncs for newly excluded folders. The engine reads this
+/// list on its next tick and de-prioritises matching files; cleaning
+/// up already-downloaded local copies is a follow-up task. Surfacing
+/// this gap in the UI (a "Files already downloaded will stay until
+/// you remove them" hint) is the SelectiveSync page's job.
+#[tauri::command]
+fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
+    let mut cfg = DesktopConfig::load()?;
+    cfg.excluded_folder_ids = if excluded.is_empty() {
+        None
+    } else {
+        Some(excluded)
+    };
+    cfg.save()
+}
+
+/// Plain-old-data view of one top-level vault item the SelectiveSync
+/// page renders as a row. We deliberately keep this small: only the
+/// fields the checkbox UI needs.
+///
+/// `name` is best-effort: name decryption requires per-file HKDF +
+/// AES-GCM with the master key, plus parsing the encrypted-blob
+/// envelope the server stores in `name_encrypted`. That code lives in
+/// `beebeeb-sync` and is non-trivial to plumb into a synchronous IPC
+/// command without duplicating it. For this MVP scaffolding we fall
+/// back to a short id-derived label (e.g. `"Folder 7f3a1c…"`) so the
+/// user still gets a stable, distinguishable handle on each folder
+/// even before name decryption lands. A follow-up task can wire in
+/// proper decryption once the engine exposes a helper.
+#[derive(Debug, Clone, serde::Serialize)]
+struct VaultItem {
+    id: String,
+    name: String,
+    is_folder: bool,
+}
+
+/// Fetch the top-level entries in the user's vault (parent_id =
+/// None) and return only the folders. Used by the SelectiveSync page
+/// to populate its checkbox list.
+///
+/// Returns an empty list — not `Err` — when:
+///   - the user is not signed in (no in-memory session)
+///   - the API call fails for any reason
+///
+/// The page treats an empty list as "nothing to choose from yet" and
+/// renders a friendly empty state. Surfacing every transient network
+/// blip as a red error banner would be noisy for a settings page that
+/// re-opens every time the user clicks the tab.
+#[tauri::command]
+async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>, String> {
+    // Lift the session pieces we need without holding the mutex over
+    // the async API call.
+    let creds = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        guard.as_ref().map(|s| (s.token.clone(), s.master_key))
+    };
+    let Some((token, master_key)) = creds else {
+        // Not signed in — surface as empty rather than an error.
+        return Ok(Vec::new());
+    };
+
+    let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
+    let raw = match api.list_files(None).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "list_vault_folders: list_files failed");
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut out: Vec<VaultItem> = Vec::with_capacity(raw.len());
+    for f in &raw {
+        let is_folder = f.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !is_folder {
+            continue;
+        }
+        let Some(id) = f.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        // Display name: prefer a server-provided plaintext `path`
+        // (the engine bridge reads this today) when present and
+        // non-empty. Otherwise fall back to a short, stable id-based
+        // label so the user can still tell folders apart. Proper
+        // name decryption is a follow-up — see VaultItem doc-comment.
+        let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let display = if !path.is_empty() {
+            path.trim_start_matches('/').to_string()
+        } else {
+            let short = id.get(..8).unwrap_or(id);
+            format!("Folder {short}…")
+        };
+
+        out.push(VaultItem {
+            id: id.to_string(),
+            name: display,
+            is_folder: true,
+        });
+    }
+    Ok(out)
+}
+
 /// Best-effort lookup of the signed-in user's email, used by
 /// `repos/desktop/src/pages/Account.tsx`.
 ///
@@ -748,6 +881,10 @@ pub fn run() {
             get_desktop_config,
             set_desktop_config,
             account_email,
+            // Task 0090 — selective sync
+            get_selective_sync,
+            set_selective_sync,
+            list_vault_folders,
             // Task 12 — conflict window IPC
             open_conflict_window,
             resolve_conflict,

@@ -70,6 +70,20 @@ pub struct DesktopConfig {
     /// leaves a partial sync, which is also a worst-case failure.
     #[serde(default = "default_true")]
     pub notify_quota_warnings: bool,
+
+    // ── Task 0090 — selective sync (SelectiveSync.tsx) ─────────────
+    //
+    // List of top-level vault folder IDs the user has chosen to keep
+    // cloud-only on this device. Stored as `Option` so the absence of
+    // the key in `desktop.toml` round-trips cleanly: an empty list is
+    // serialised back as a missing key (see `set_selective_sync` IPC)
+    // rather than `excluded_folder_ids = []`, which keeps hand-edited
+    // config files tidy.
+    /// Folder IDs excluded from local sync. `None` (or omitted) means
+    /// "sync everything," matching the default behaviour before this
+    /// field existed.
+    #[serde(default)]
+    pub excluded_folder_ids: Option<Vec<String>>,
     // NOTE: persisted session deferred to a later step. For now the
     // session is in-memory only (set_session IPC). Adding it here
     // requires the OS-keychain wrapping called out in spec 030 §1.
@@ -97,6 +111,7 @@ impl Default for DesktopConfig {
             notify_conflicts: true,
             notify_sync_complete: false,
             notify_quota_warnings: true,
+            excluded_folder_ids: None,
         }
     }
 }

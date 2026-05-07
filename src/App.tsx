@@ -18,6 +18,7 @@ import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import Status from './pages/Status'
 import SyncFolder from './pages/SyncFolder'
+import SelectiveSync from './pages/SelectiveSync'
 import Bandwidth from './pages/Bandwidth'
 import Notifications from './pages/Notifications'
 import Account from './pages/Account'
@@ -28,7 +29,13 @@ import Account from './pages/Account'
 // future shell-level IPC (e.g. an "Open log directory" footer link).
 void invoke
 
-type Page = 'status' | 'sync-folder' | 'bandwidth' | 'notifications' | 'account'
+type Page =
+  | 'status'
+  | 'sync-folder'
+  | 'selective-sync'
+  | 'bandwidth'
+  | 'notifications'
+  | 'account'
 
 export default function App() {
   const [page, setPage] = useState<Page>('status')
@@ -70,6 +77,7 @@ export default function App() {
         </div>
         {nav('status', 'Status')}
         {nav('sync-folder', 'Sync Folder')}
+        {nav('selective-sync', 'Sync Folders')}
         {nav('bandwidth', 'Bandwidth')}
         {nav('notifications', 'Notifications')}
         {nav('account', 'Account')}
@@ -77,6 +85,7 @@ export default function App() {
       <main style={{ flex: 1, padding: 24, overflowY: 'auto' }}>
         {page === 'status' && <Status />}
         {page === 'sync-folder' && <SyncFolder />}
+        {page === 'selective-sync' && <SelectiveSync />}
         {page === 'bandwidth' && <Bandwidth />}
         {page === 'notifications' && <Notifications />}
         {page === 'account' && <Account />}
