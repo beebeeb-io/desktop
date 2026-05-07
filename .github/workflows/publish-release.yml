@@ -1,0 +1,62 @@
+name: Publish release manifest
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate latest.json
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+          NOTES: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG=$VERSION
+          VER=${TAG#v}
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+
+          cat > latest.json << MANIFEST
+          {
+            "version": "$VER",
+            "notes": "$NOTES",
+            "pub_date": "$DATE",
+            "platforms": {
+              "darwin-aarch64": {
+                "url": "$BASE_URL/Beebeeb_${VER}_aarch64.dmg",
+                "signature": ""
+              },
+              "darwin-x86_64": {
+                "url": "$BASE_URL/Beebeeb_${VER}_x86_64.dmg",
+                "signature": ""
+              },
+              "linux-x86_64": {
+                "url": "$BASE_URL/Beebeeb_${VER}_amd64.AppImage",
+                "signature": ""
+              },
+              "windows-x86_64": {
+                "url": "$BASE_URL/Beebeeb_${VER}_x64-setup.exe",
+                "signature": ""
+              }
+            }
+          }
+          MANIFEST
+
+      - name: Commit and push
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add latest.json
+          git diff --cached --quiet || git commit -m "Update manifest: ${{ github.event.release.tag_name }}"
+          git push
