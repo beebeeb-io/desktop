@@ -1,5 +1,4 @@
 name: Publish release manifest
-
 on:
   release:
     types: [published]
@@ -8,26 +7,30 @@ jobs:
   update-manifest:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
-      - name: Checkout gh-pages branch
+      - name: Checkout releases repo
         uses: actions/checkout@v4
         with:
-          ref: gh-pages
-          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: beebeeb-io/releases
+          ref: main
+          token: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          path: releases-repo
 
-      - name: Generate latest.json
+      - name: Generate desktop/latest.json
         env:
-          VERSION: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name }}
           NOTES: ${{ github.event.release.body }}
           REPO: ${{ github.repository }}
         run: |
-          TAG=$VERSION
+          TAG=${{ github.event.release.tag_name }}
           VER=${TAG#v}
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 
-          cat > latest.json << MANIFEST
+          mkdir -p releases-repo/desktop
+
+          cat > releases-repo/desktop/latest.json << MANIFEST
           {
             "version": "$VER",
             "notes": "$NOTES",
@@ -53,10 +56,11 @@ jobs:
           }
           MANIFEST
 
-      - name: Commit and push
+      - name: Commit and push to releases repo
+        working-directory: releases-repo
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add latest.json
-          git diff --cached --quiet || git commit -m "Update manifest: ${{ github.event.release.tag_name }}"
+          git add desktop/latest.json
+          git diff --cached --quiet || git commit -m "desktop: update manifest ${{ github.event.release.tag_name }}"
           git push
