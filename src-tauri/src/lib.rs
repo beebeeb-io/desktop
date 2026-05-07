@@ -436,20 +436,47 @@ fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
 /// page renders as a row. We deliberately keep this small: only the
 /// fields the checkbox UI needs.
 ///
-/// `name` is best-effort: name decryption requires per-file HKDF +
-/// AES-GCM with the master key, plus parsing the encrypted-blob
-/// envelope the server stores in `name_encrypted`. That code lives in
-/// `beebeeb-sync` and is non-trivial to plumb into a synchronous IPC
-/// command without duplicating it. For this MVP scaffolding we fall
-/// back to a short id-derived label (e.g. `"Folder 7f3a1c…"`) so the
-/// user still gets a stable, distinguishable handle on each folder
-/// even before name decryption lands. A follow-up task can wire in
-/// proper decryption once the engine exposes a helper.
+/// `name` is decrypted from the server's `name_encrypted` blob via
+/// [`try_decrypt_name`] when possible, falling back to a stable
+/// id-derived label (e.g. `"Folder 7f3a1c…"`) when decryption is not
+/// possible (missing field, bad envelope, wrong key…). This mirrors
+/// the canonical decrypt path used by `repos/cli/src/commands/pull.rs`.
 #[derive(Debug, Clone, serde::Serialize)]
 struct VaultItem {
     id: String,
     name: String,
     is_folder: bool,
+}
+
+/// Try to decrypt a single file/folder's `name_encrypted` blob using
+/// the master key. Returns `None` on any failure — caller falls back
+/// to a stable id-derived label. We deliberately swallow errors here
+/// because the SelectiveSync page treats these as best-effort: a
+/// folder created by an older client with a missing/garbled blob, or
+/// an entry encrypted under a different key, should still appear in
+/// the list (with a fallback name) rather than abort the whole call.
+///
+/// Mirrors the decrypt flow in `repos/cli/src/commands/pull.rs`:
+///   - parse `id` as a UUID for the HKDF info
+///   - parse `name_encrypted` (a JSON-encoded `EncryptedBlob` string)
+///   - derive per-file key, decrypt to UTF-8
+fn try_decrypt_name(
+    file_meta: &serde_json::Value,
+    id: &str,
+    master_key: &[u8; 32],
+) -> Option<String> {
+    let file_uuid = uuid::Uuid::parse_str(id).ok()?;
+
+    let name_enc_str = file_meta.get("name_encrypted").and_then(|v| v.as_str())?;
+    let blob: beebeeb_types::EncryptedBlob = serde_json::from_str(name_enc_str).ok()?;
+
+    // MasterKey::from_bytes consumes the array (it zeroizes on drop),
+    // so copy from the borrow first.
+    let mk_bytes: [u8; 32] = *master_key;
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+    let file_key = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.as_bytes());
+
+    beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob).ok()
 }
 
 /// Fetch the top-level entries in the user's vault (parent_id =
@@ -499,18 +526,24 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
             continue;
         };
 
-        // Display name: prefer a server-provided plaintext `path`
-        // (the engine bridge reads this today) when present and
-        // non-empty. Otherwise fall back to a short, stable id-based
-        // label so the user can still tell folders apart. Proper
-        // name decryption is a follow-up — see VaultItem doc-comment.
-        let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let display = if !path.is_empty() {
-            path.trim_start_matches('/').to_string()
-        } else {
-            let short = id.get(..8).unwrap_or(id);
-            format!("Folder {short}…")
-        };
+        // Display name: prefer the decrypted `name_encrypted` blob
+        // (the canonical zero-knowledge path), then fall back to a
+        // server-provided plaintext `path` if present (some legacy
+        // entries surface plaintext here), then to a stable, short
+        // id-based label so the user can still tell folders apart.
+        let display = try_decrypt_name(f, id, &master_key)
+            .or_else(|| {
+                let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(path.trim_start_matches('/').to_string())
+                }
+            })
+            .unwrap_or_else(|| {
+                let short = id.get(..8).unwrap_or(id);
+                format!("Folder {short}…")
+            });
 
         out.push(VaultItem {
             id: id.to_string(),
