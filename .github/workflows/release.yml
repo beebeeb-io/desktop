@@ -44,6 +44,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout beebeeb-io/core (path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: beebeeb-io/core
+          path: ../core
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
