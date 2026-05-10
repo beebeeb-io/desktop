@@ -58,6 +58,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # percent-encoding — without it, names with `&`, `?`, `#`, or spaces
 # break the parse.
 urlencoding = "2"
+# base64 decoding for the Argon2id salt returned by /api/v1/auth/login.
+# The web client passes salt as standard base64; desktop_login decodes it
+# before feeding it to beebeeb_core::kdf::derive_master_key.
+base64 = "0.22"
 
 # Sync engine + crypto from the core repo. Path deps so we build against
 # the local checkout; `[patch."https://github.com/beebeeb-io/core"]`

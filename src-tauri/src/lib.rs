@@ -88,6 +88,171 @@ impl Default for AppState {
     }
 }
 
+// ── IPC commands: first-launch onboarding ────────────────────────────────────
+
+/// Open the first-launch onboarding window.
+///
+/// The window is 480×580, non-resizable, and centred. It mounts
+/// `Onboarding.tsx` (via `?window=onboarding`) which walks the user
+/// through three steps: sign-in, sync-folder selection, and a first-sync
+/// progress view. Called from `setup` if no sync_root is configured and
+/// no session is loaded (i.e., fresh install or post-uninstall run).
+///
+/// Re-calling when the window already exists is a no-op (focus only).
+pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window("onboarding") {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "onboarding",
+        tauri::WebviewUrl::App("index.html?window=onboarding".into()),
+    )
+    .title("Welcome to Beebeeb")
+    .inner_size(480.0, 600.0)
+    .resizable(false)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// IPC wrapper so the frontend can also open the onboarding window
+/// (e.g., from Account page → "Switch account").
+#[tauri::command]
+async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_onboarding_window_impl(&app)
+}
+
+/// Show the settings window — called by `Onboarding.tsx` after the user
+/// completes the 3-step flow and closes the onboarding window.
+#[tauri::command]
+fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
+    show_settings_window(&app);
+    Ok(())
+}
+
+/// Authenticate with the Beebeeb API using email + password, derive the
+/// master key from the returned Argon2id salt, and install the session
+/// in `AppState` (same as `set_session` but in one round-trip from the UI).
+///
+/// Uses the legacy `/api/v1/auth/login` endpoint (email + password → salt
+/// + session_token). OPAQUE login is handled by the web client — the desktop
+/// onboarding uses legacy login because it doesn't have WASM crypto available.
+///
+/// The master key is derived on the Rust side using `beebeeb_core::kdf::derive_master_key`
+/// (Argon2id, 4 MiB / 1 iter / 1 thread — same params as the WASM path).
+///
+/// On success the session is stored in `AppState`. If a sync_root is already
+/// configured (unusual on first launch but possible on re-login), the engine
+/// runner is also started.
+///
+/// Returns `Err` on HTTP errors (wrong password → 401), network failures,
+/// or missing `salt` field in the response (account may be OPAQUE-only).
+///
+/// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
+#[tauri::command]
+async fn desktop_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    // POST /api/v1/auth/login
+    let base_url = runner::api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+
+    let resp = client
+        .post(format!("{base_url}/api/v1/auth/login"))
+        .json(&serde_json::json!({ "email": email, "password": password }))
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Invalid email or password".to_string());
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Login failed ({status}): {body}"));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("parse response: {e}"))?;
+
+    // Require 2FA? Surface a clear message rather than silently failing.
+    if body.get("requires_2fa").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io and use the sync client feature there.".to_string());
+    }
+
+    let session_token = body
+        .get("session_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No session_token in login response".to_string())?
+        .to_string();
+
+    // Derive master key from salt (legacy Argon2id path).
+    // OPAQUE accounts don't have a `salt` field — those users must use
+    // the web client for now.
+    let salt_b64 = body
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "This account uses a newer sign-in method. Please sign in at app.beebeeb.io instead.".to_string()
+        })?
+        .to_string();
+
+    // Decode base64 salt (the web client passes it as standard base64)
+    let salt_bytes = decode_base64(&salt_b64)
+        .map_err(|e| format!("invalid salt encoding: {e}"))?;
+
+    let master_key_struct = beebeeb_core::kdf::derive_master_key(&password, &salt_bytes)
+        .map_err(|e| format!("key derivation failed: {e}"))?;
+    let master_key: [u8; 32] = master_key_struct.to_bytes();
+
+    // Store session — same path as `set_session` IPC.
+    {
+        let mut guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        *guard = Some(Session {
+            token: session_token.clone(),
+            master_key,
+            email: Some(email.clone()),
+        });
+    }
+    tracing::info!(email = %email, "session installed via desktop_login");
+
+    // Start the engine if sync_root is already configured (uncommon on
+    // first launch — onboarding's folder-picker step does it normally).
+    let sync_root = DesktopConfig::load().ok().and_then(|c| c.sync_root);
+    if let Some(root) = sync_root {
+        let mut engine_slot = state.engine.lock().await;
+        if let Some(prev) = engine_slot.take() {
+            prev.abort().await;
+        }
+        *engine_slot = Some(EngineRunner::spawn(app, root, session_token, master_key));
+    }
+
+    Ok(())
+}
+
+/// Decode a base64 string (standard alphabet, with or without padding).
+fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .map_err(|e| e.to_string())
+}
+
 // ── IPC commands: session ─────────────────────────────────────────────────────
 
 /// Stash an authenticated session in app state. Called by the WebView
@@ -926,6 +1091,10 @@ pub fn run() {
             resolve_conflict,
             // Task 11 — native conflict notification
             notify_conflict,
+            // First-launch onboarding (login + folder picker + sync status)
+            desktop_login,
+            open_onboarding_window,
+            show_settings,
         ])
         .setup(|app| {
             setup_native_menu(app)?;
@@ -937,6 +1106,31 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 run_update_loop(handle).await;
             });
+
+            // First-launch detection: if no sync_root is configured and no
+            // session is present, open the onboarding window automatically.
+            // The settings window stays hidden (visible:false in tauri.conf.json)
+            // until the user completes onboarding.
+            let no_sync_root = DesktopConfig::load()
+                .map(|c| c.sync_root.is_none())
+                .unwrap_or(true);
+            if no_sync_root {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Small delay so the tray and menu are fully initialised first.
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if let Err(e) = open_onboarding_window_impl(&h) {
+                        tracing::warn!(error = %e, "failed to open onboarding window");
+                    }
+                });
+            } else {
+                // Already configured — show the settings window immediately
+                // (same as left-click on the tray).
+                if let Some(win) = app.get_webview_window("settings") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
 
             Ok(())
         })
