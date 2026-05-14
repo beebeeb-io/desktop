@@ -1,7 +1,10 @@
 name: Publish release manifest
+
 on:
   release:
     types: [published]
+
+permissions: {}
 
 jobs:
   update-manifest:
@@ -10,11 +13,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout releases repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: beebeeb-io/releases
           ref: main
           token: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          persist-credentials: false
           path: releases-repo
 
       - name: Generate desktop/latest.json
@@ -23,44 +27,47 @@ jobs:
           NOTES: ${{ github.event.release.body }}
           REPO: ${{ github.repository }}
         run: |
-          TAG=${{ github.event.release.tag_name }}
-          VER=${TAG#v}
+          VER=${TAG#desktop-v}
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 
           mkdir -p releases-repo/desktop
 
-          cat > releases-repo/desktop/latest.json << MANIFEST
-          {
-            "version": "$VER",
-            "notes": "$NOTES",
-            "pub_date": "$DATE",
-            "platforms": {
-              "darwin-aarch64": {
-                "url": "$BASE_URL/Beebeeb_${VER}_aarch64.dmg",
-                "signature": ""
-              },
-              "darwin-x86_64": {
-                "url": "$BASE_URL/Beebeeb_${VER}_x86_64.dmg",
-                "signature": ""
-              },
-              "linux-x86_64": {
-                "url": "$BASE_URL/Beebeeb_${VER}_amd64.AppImage",
-                "signature": ""
-              },
-              "windows-x86_64": {
-                "url": "$BASE_URL/Beebeeb_${VER}_x64-setup.exe",
-                "signature": ""
+          jq -n \
+            --arg ver "$VER" \
+            --arg notes "$NOTES" \
+            --arg date "$DATE" \
+            --arg base_url "$BASE_URL" \
+            '{
+              version: $ver,
+              notes: $notes,
+              pub_date: $date,
+              platforms: {
+                "darwin-aarch64": {
+                  url: ($base_url + "/Beebeeb_" + $ver + "_aarch64.dmg"),
+                  signature: ""
+                },
+                "darwin-x86_64": {
+                  url: ($base_url + "/Beebeeb_" + $ver + "_x86_64.dmg"),
+                  signature: ""
+                },
+                "linux-x86_64": {
+                  url: ($base_url + "/Beebeeb_" + $ver + "_amd64.AppImage"),
+                  signature: ""
+                },
+                "windows-x86_64": {
+                  url: ($base_url + "/Beebeeb_" + $ver + "_x64-setup.exe"),
+                  signature: ""
+                }
               }
-            }
-          }
-          MANIFEST
+            }' > releases-repo/desktop/latest.json
 
       - name: Commit and push to releases repo
         working-directory: releases-repo
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
+          git remote set-url origin "https://x-access-token:${{ secrets.RELEASES_PUSH_TOKEN }}@github.com/beebeeb-io/releases.git"
           git add desktop/latest.json
           git diff --cached --quiet || git commit -m "desktop: update manifest ${{ github.event.release.tag_name }}"
           git push
