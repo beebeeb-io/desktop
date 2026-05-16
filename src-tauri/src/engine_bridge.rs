@@ -29,15 +29,16 @@
 //! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
 //! was a stub returning `anyhow::Err`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use beebeeb_types::EncryptedBlob;
+use serde::{Deserialize, Serialize};
 
 use crate::api_client::ApiClient;
-use crate::conflict::{is_conflict, is_text_file, VersionInfo};
-use crate::state_db::{FileEntry, FileStatus, StateDb};
+use crate::conflict::{VersionInfo, is_conflict, is_text_file};
+use crate::state_db::{FileEntry, FileStatus, OperationKind, PendingOperation, StateDb};
 
 // ── Per-file state machine ────────────────────────────────────────────────────
 
@@ -99,6 +100,37 @@ pub struct EngineBridge {
     api: Arc<ApiClient>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinderWriteItemKind {
+    File,
+    Folder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinderWriteTarget {
+    pub file_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub filename: String,
+    pub kind: FinderWriteItemKind,
+    pub contents_path: Option<String>,
+    pub content_type: Option<String>,
+    pub base_version_identifier: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FinderWriteOutcome {
+    Queued {
+        op_id: String,
+        file_id: Option<String>,
+        kind: OperationKind,
+        ignored: bool,
+        message: String,
+    },
+    Ignored {
+        message: String,
+    },
+}
+
 impl EngineBridge {
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
         Self { db, api }
@@ -114,6 +146,197 @@ impl EngineBridge {
     /// Borrow the API client for the same reason.
     pub fn api(&self) -> &ApiClient {
         &self.api
+    }
+
+    pub fn queue_finder_create(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        if is_ignored_finder_name(&target.filename) {
+            return Ok(FinderWriteOutcome::Ignored {
+                message: format!("ignored temporary Finder item {}", target.filename),
+            });
+        }
+
+        let file_id = uuid::Uuid::new_v4().to_string();
+        match target.kind {
+            FinderWriteItemKind::Folder => {
+                let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                self.enqueue_finder_operation(
+                    OperationKind::CreateFolder,
+                    Some(file_id),
+                    target.parent_id,
+                    Some(target.filename),
+                    serde_json::json!({
+                        "operation": "create_folder",
+                        "name_encrypted": metadata,
+                    }),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            FinderWriteItemKind::File => {
+                let contents_path = target
+                    .contents_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Finder create file callback did not include contents"))?;
+                let staged_path = stage_finder_payload(contents_path)?;
+                let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
+                let mime = target
+                    .content_type
+                    .as_deref()
+                    .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
+                let name_encrypted =
+                    encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+                self.db.upsert_file(&FileEntry {
+                    file_id: file_id.clone(),
+                    path: target.filename.clone(),
+                    status: FileStatus::Uploading,
+                    size_bytes,
+                    modified_at: now_secs(),
+                    content_hash: None,
+                    remote_updated_at: 0,
+                })?;
+                self.enqueue_finder_operation(
+                    OperationKind::UploadVersion,
+                    Some(file_id),
+                    target.parent_id,
+                    Some(target.filename),
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": name_encrypted,
+                        "content_type": target.content_type,
+                    }),
+                    Some(staged_path),
+                    None,
+                    None,
+                )
+            }
+        }
+    }
+
+    pub fn queue_finder_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        if is_ignored_finder_name(&target.filename) {
+            return Ok(FinderWriteOutcome::Ignored {
+                message: format!("ignored temporary Finder item {}", target.filename),
+            });
+        }
+
+        let file_id = target
+            .file_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Finder modify callback did not include a file id"))?;
+
+        if let Some(contents_path) = target.contents_path.as_deref() {
+            let staged_path = stage_finder_payload(contents_path)?;
+            let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
+            let mime = target
+                .content_type
+                .as_deref()
+                .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
+            let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+            self.db.set_status(&file_id, FileStatus::Uploading)?;
+            self.enqueue_finder_operation(
+                OperationKind::UploadVersion,
+                Some(file_id),
+                target.parent_id,
+                Some(target.filename),
+                serde_json::json!({
+                    "operation": "upload_version",
+                    "name_encrypted": name_encrypted,
+                    "content_type": target.content_type,
+                    "size_bytes": size_bytes,
+                    "base_version_identifier": target.base_version_identifier,
+                }),
+                Some(staged_path),
+                parse_base_version_number(target.base_version_identifier.as_deref()),
+                None,
+            )
+        } else {
+            let name_encrypted = encrypted_metadata_for_name(
+                self.api.master_key(),
+                &file_id,
+                &target.filename,
+                target.content_type.as_deref(),
+            )?;
+            let kind = if target.parent_id.is_some() {
+                OperationKind::MoveFile
+            } else {
+                OperationKind::RenameFile
+            };
+            self.enqueue_finder_operation(
+                kind,
+                Some(file_id),
+                target.parent_id,
+                Some(target.filename),
+                serde_json::json!({
+                    "operation": "metadata_update",
+                    "name_encrypted": name_encrypted,
+                    "base_version_identifier": target.base_version_identifier,
+                }),
+                None,
+                None,
+                None,
+            )
+        }
+    }
+
+    pub fn queue_finder_delete(
+        &self,
+        file_id: &str,
+        base_version_identifier: Option<String>,
+    ) -> anyhow::Result<FinderWriteOutcome> {
+        self.enqueue_finder_operation(
+            OperationKind::TrashFile,
+            Some(file_id.to_string()),
+            None,
+            None,
+            serde_json::json!({
+                "operation": "trash",
+                "base_version_identifier": base_version_identifier,
+            }),
+            None,
+            parse_base_version_number(base_version_identifier.as_deref()),
+            None,
+        )
+    }
+
+    fn enqueue_finder_operation(
+        &self,
+        kind: OperationKind,
+        file_id: Option<String>,
+        parent_id: Option<String>,
+        target_path: Option<String>,
+        metadata: serde_json::Value,
+        payload_path: Option<String>,
+        base_version: Option<i64>,
+        base_object_version_id: Option<String>,
+    ) -> anyhow::Result<FinderWriteOutcome> {
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let now = now_secs();
+        let op = PendingOperation {
+            op_id: op_id.clone(),
+            kind: kind.clone(),
+            file_id: file_id.clone(),
+            parent_id,
+            target_path,
+            metadata_json: Some(serde_json::to_string(&metadata)?),
+            payload_path,
+            base_version,
+            base_object_version_id,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: now,
+            last_error: Some("queued from Finder; upload worker not yet attached".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        self.db.enqueue_operation(&op)?;
+        Ok(FinderWriteOutcome::Queued {
+            op_id,
+            file_id,
+            kind,
+            ignored: false,
+            message: "queued for encrypted sync".to_string(),
+        })
     }
 
     /// Download `file_id` from the vault, decrypt, write to `dest_path`.
@@ -138,11 +361,7 @@ impl EngineBridge {
     ///
     /// On any error the status is flipped to `Error` so the overlay can
     /// render a problem indicator, then the error is bubbled.
-    pub async fn hydrate_file(
-        &self,
-        file_id: &str,
-        dest_path: &Path,
-    ) -> anyhow::Result<()> {
+    pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
         // RAII-style: any early return below the status flip should
         // leave the file in `Error`, not `Downloading`. We do that by
         // wrapping the body in an inner async fn whose Err branch we
@@ -175,8 +394,7 @@ impl EngineBridge {
         let chunk_count = meta
             .get("chunk_count")
             .and_then(|v| v.as_i64())
-            .ok_or_else(|| anyhow::anyhow!("server response missing chunk_count"))?
-            as u32;
+            .ok_or_else(|| anyhow::anyhow!("server response missing chunk_count"))? as u32;
 
         // Derive the per-file key. MasterKey::from_bytes consumes the
         // array (it zeroizes on drop), so we copy from the borrow.
@@ -187,10 +405,7 @@ impl EngineBridge {
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
         // ciphertext is always larger than plaintext anyway.
-        let approx_size = meta
-            .get("size_bytes")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let mut plaintext: Vec<u8> = Vec::with_capacity(approx_size);
 
         for i in 0..chunk_count {
@@ -211,8 +426,7 @@ impl EngineBridge {
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
         }
-        std::fs::write(dest_path, &plaintext)
-            .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()))?;
+        std::fs::write(dest_path, &plaintext).map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()))?;
 
         Ok(())
     }
@@ -266,11 +480,7 @@ impl EngineBridge {
     /// the next tick from re-flagging a conflict if the user's old
     /// `content_hash` is still on the row (it isn't anymore — the row
     /// was already in Conflict — but we belt-and-brace anchor anyway).
-    pub async fn resolve_keep_theirs(
-        &self,
-        file_id: &str,
-        sync_root: &Path,
-    ) -> anyhow::Result<()> {
+    pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
         let mut entry = self
             .db
             .get_file(file_id)?
@@ -310,11 +520,7 @@ impl EngineBridge {
     ///
     /// `sync_root` is supplied by the caller because the bridge
     /// itself doesn't know it (the runner owns that).
-    pub async fn auto_resolve_keep_both(
-        &self,
-        sync_root: &Path,
-        entry: &FileEntry,
-    ) -> anyhow::Result<String> {
+    pub async fn auto_resolve_keep_both(&self, sync_root: &Path, entry: &FileEntry) -> anyhow::Result<String> {
         let original = sync_root.join(&entry.path);
 
         // If the local file no longer exists on disk (user deleted it
@@ -329,10 +535,7 @@ impl EngineBridge {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "device".into());
         let date = chrono::Utc::now().format("%Y-%m-%d");
-        let stem = original
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file");
+        let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
         let ext = original
             .extension()
             .and_then(|e| e.to_str())
@@ -341,13 +544,8 @@ impl EngineBridge {
         let conflict_name = format!("{stem} (conflict - {host} - {date}){ext}");
         let conflict_path = original.with_file_name(&conflict_name);
 
-        std::fs::rename(&original, &conflict_path).map_err(|e| {
-            anyhow::anyhow!(
-                "rename {} -> {}: {e}",
-                original.display(),
-                conflict_path.display()
-            )
-        })?;
+        std::fs::rename(&original, &conflict_path)
+            .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", original.display(), conflict_path.display()))?;
 
         // Hydrate remote into the now-vacant original path. On failure
         // we mark Error rather than Conflict — the conflict copy is
@@ -359,6 +557,97 @@ impl EngineBridge {
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
         Ok(conflict_name)
     }
+}
+
+pub fn is_ignored_finder_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    matches!(
+        trimmed,
+        ".DS_Store" | ".DocumentRevisions-V100" | ".Spotlight-V100" | ".TemporaryItems" | ".Trashes" | "TemporaryItems"
+    ) || trimmed.starts_with("._")
+        || trimmed.starts_with("~$")
+        || trimmed.ends_with('~')
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".temp")
+        || lower.ends_with(".swp")
+        || lower.ends_with(".swo")
+        || lower.ends_with(".part")
+        || lower.ends_with(".crdownload")
+}
+
+fn encrypted_metadata_for_name(
+    master_key_bytes: &[u8; 32],
+    file_id: &str,
+    filename: &str,
+    mime_type: Option<&str>,
+) -> anyhow::Result<String> {
+    let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key_bytes);
+    beebeeb_core::encrypt::encrypt_name(&master_key, file_id, filename, mime_type)
+        .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
+}
+
+fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
+    stage_finder_payload_with_root(contents_path, default_finder_staging_root())
+}
+
+fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) -> anyhow::Result<String> {
+    let source = Path::new(contents_path);
+    if !source.is_file() {
+        return Err(anyhow::anyhow!(
+            "Finder content path is not a file: {}",
+            source.display()
+        ));
+    }
+    std::fs::create_dir_all(&staging_root)
+        .map_err(|e| anyhow::anyhow!("create Finder staging dir {}: {e}", staging_root.display()))?;
+    let op_id = uuid::Uuid::new_v4();
+    let safe_name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(sanitize_staging_name)
+        .unwrap_or_else(|| "payload".to_string());
+    let dest = staging_root.join(format!("{op_id}-{safe_name}"));
+    std::fs::copy(source, &dest)
+        .map_err(|e| anyhow::anyhow!("copy Finder payload {} -> {}: {e}", source.display(), dest.display()))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+fn default_finder_staging_root() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("beebeeb")
+        .join("finder-writes")
+}
+
+fn sanitize_staging_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '_',
+            _ if c.is_control() => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
+    version_identifier.and_then(|value| {
+        value
+            .split(':')
+            .next()
+            .and_then(|part| part.parse::<i64>().ok())
+            .filter(|version| *version > 0)
+    })
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 // ── Periodic sync tick ────────────────────────────────────────────────────────
@@ -522,5 +811,144 @@ mod tests {
     fn test_invalid_transition_rejected() {
         let mut sm = FileSM::new(FileStatus::CloudOnly);
         assert!(sm.transition(FileEvent::UploadStart).is_err());
+    }
+
+    #[test]
+    fn test_temp_file_filter_covers_editor_and_system_names() {
+        for name in [
+            ".DS_Store",
+            "._report.pdf",
+            "~$budget.xlsx",
+            "draft.txt~",
+            ".report.swp",
+            "upload.tmp",
+            "video.crdownload",
+        ] {
+            assert!(is_ignored_finder_name(name), "{name} should be ignored");
+        }
+        assert!(!is_ignored_finder_name("report.pdf"));
+        assert!(!is_ignored_finder_name(".env.sample"));
+    }
+
+    #[test]
+    fn test_base_version_parser_reads_current_version_prefix() {
+        assert_eq!(parse_base_version_number(Some("7:1700000000:1024")), Some(7));
+        assert_eq!(parse_base_version_number(Some("0:1700000000:1024")), None);
+        assert_eq!(parse_base_version_number(Some("local:1700000000")), None);
+        assert_eq!(parse_base_version_number(None), None);
+    }
+
+    #[test]
+    fn test_staging_payload_copies_to_durable_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("report.txt");
+        std::fs::write(&source, b"finder data").unwrap();
+        let staged = stage_finder_payload_with_root(source.to_str().unwrap(), dir.path().join("staging")).unwrap();
+        assert_eq!(std::fs::read(staged).unwrap(), b"finder data");
+    }
+
+    fn test_bridge(db_path: &Path) -> EngineBridge {
+        let db = Arc::new(StateDb::open(db_path).unwrap());
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [7u8; 32],
+        ));
+        EngineBridge::new(db, api)
+    }
+
+    #[test]
+    fn test_create_file_queues_upload_version_and_preserves_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("report.txt");
+        std::fs::write(&source, b"queued payload").unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+
+        let outcome = bridge
+            .queue_finder_create(FinderWriteTarget {
+                file_id: None,
+                parent_id: None,
+                filename: "report.txt".into(),
+                kind: FinderWriteItemKind::File,
+                contents_path: Some(source.to_string_lossy().into_owned()),
+                content_type: Some("text/plain".into()),
+                base_version_identifier: None,
+            })
+            .unwrap();
+
+        let FinderWriteOutcome::Queued {
+            file_id: Some(file_id),
+            kind,
+            ..
+        } = outcome
+        else {
+            panic!("expected queued file upload");
+        };
+        assert_eq!(kind, OperationKind::UploadVersion);
+
+        let queued = bridge.db.list_due_operations(now_secs()).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, OperationKind::UploadVersion);
+        assert_eq!(queued[0].file_id.as_deref(), Some(file_id.as_str()));
+        let payload_path = queued[0].payload_path.as_deref().unwrap();
+        assert_eq!(std::fs::read(payload_path).unwrap(), b"queued payload");
+
+        let metadata: serde_json::Value = serde_json::from_str(queued[0].metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["operation"], "create_file");
+        assert!(metadata["name_encrypted"].as_str().unwrap().starts_with('{'));
+        assert_eq!(
+            bridge.db.get_file(&file_id).unwrap().unwrap().status,
+            FileStatus::Uploading
+        );
+    }
+
+    #[test]
+    fn test_metadata_modify_does_not_queue_content_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+
+        let outcome = bridge
+            .queue_finder_modify(FinderWriteTarget {
+                file_id: Some("file-1".into()),
+                parent_id: Some("folder-1".into()),
+                filename: "renamed.txt".into(),
+                kind: FinderWriteItemKind::File,
+                contents_path: None,
+                content_type: Some("text/plain".into()),
+                base_version_identifier: Some("4:1700000000:12".into()),
+            })
+            .unwrap();
+        let FinderWriteOutcome::Queued { kind, .. } = outcome else {
+            panic!("expected queued metadata op");
+        };
+        assert_eq!(kind, OperationKind::MoveFile);
+
+        let queued = bridge.db.list_due_operations(now_secs()).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, OperationKind::MoveFile);
+        assert!(queued[0].payload_path.is_none());
+        let metadata: serde_json::Value = serde_json::from_str(queued[0].metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["operation"], "metadata_update");
+        assert!(metadata["name_encrypted"].as_str().unwrap().starts_with('{'));
+    }
+
+    #[test]
+    fn test_delete_maps_to_trash_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+
+        let outcome = bridge
+            .queue_finder_delete("file-1", Some("9:1700000000:100".into()))
+            .unwrap();
+        let FinderWriteOutcome::Queued { kind, .. } = outcome else {
+            panic!("expected queued trash op");
+        };
+        assert_eq!(kind, OperationKind::TrashFile);
+
+        let queued = bridge.db.list_due_operations(now_secs()).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, OperationKind::TrashFile);
+        assert_eq!(queued[0].base_version, Some(9));
+        assert!(queued[0].payload_path.is_none());
     }
 }

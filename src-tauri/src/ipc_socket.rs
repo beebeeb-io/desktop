@@ -4,10 +4,40 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcRequest {
-    GetFileStatus { file_id: String },
-    SetFileStatus { file_id: String, status: String },
-    HydrateFile { file_id: String, dest_path: String },
-    ListFileProviderItems { container_id: String },
+    GetFileStatus {
+        file_id: String,
+    },
+    SetFileStatus {
+        file_id: String,
+        status: String,
+    },
+    HydrateFile {
+        file_id: String,
+        dest_path: String,
+    },
+    ListFileProviderItems {
+        container_id: String,
+    },
+    QueueFinderCreate {
+        parent_id: Option<String>,
+        filename: String,
+        kind: String,
+        contents_path: Option<String>,
+        content_type: Option<String>,
+    },
+    QueueFinderModify {
+        file_id: String,
+        parent_id: Option<String>,
+        filename: String,
+        kind: String,
+        contents_path: Option<String>,
+        content_type: Option<String>,
+        base_version_identifier: Option<String>,
+    },
+    QueueFinderDelete {
+        file_id: String,
+        base_version_identifier: Option<String>,
+    },
     GetSyncSummary,
 }
 
@@ -19,6 +49,11 @@ pub enum IpcResponse {
     },
     Ok,
     Error {
+        message: String,
+    },
+    WriteQueued {
+        item: Option<FileProviderItemPayload>,
+        ignored: bool,
         message: String,
     },
     SyncSummary {
@@ -113,6 +148,48 @@ async fn handle_connection(
                     Err(e) => IpcResponse::Error { message: e.to_string() },
                 }
             }
+            IpcRequest::QueueFinderCreate {
+                parent_id,
+                filename,
+                kind,
+                contents_path,
+                content_type,
+            } => {
+                let target = crate::engine_bridge::FinderWriteTarget {
+                    file_id: None,
+                    parent_id: normalize_parent_id(parent_id),
+                    filename,
+                    kind: parse_write_kind(&kind),
+                    contents_path,
+                    content_type,
+                    base_version_identifier: None,
+                };
+                write_outcome_response(&db, bridge.queue_finder_create(target))
+            }
+            IpcRequest::QueueFinderModify {
+                file_id,
+                parent_id,
+                filename,
+                kind,
+                contents_path,
+                content_type,
+                base_version_identifier,
+            } => {
+                let target = crate::engine_bridge::FinderWriteTarget {
+                    file_id: Some(file_id),
+                    parent_id: normalize_parent_id(parent_id),
+                    filename,
+                    kind: parse_write_kind(&kind),
+                    contents_path,
+                    content_type,
+                    base_version_identifier,
+                };
+                write_outcome_response(&db, bridge.queue_finder_modify(target))
+            }
+            IpcRequest::QueueFinderDelete {
+                file_id,
+                base_version_identifier,
+            } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
             IpcRequest::GetSyncSummary => {
                 let syncing = db
                     .list_by_status(crate::state_db::FileStatus::Downloading)
@@ -132,9 +209,55 @@ async fn handle_connection(
                     conflicts,
                 }
             }
-            _ => IpcResponse::Ok,
+            IpcRequest::SetFileStatus { .. } => IpcResponse::Ok,
         };
         let _ = stream.write_all(&serde_json::to_vec(&resp).unwrap()).await;
+    }
+}
+
+fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
+    if kind.eq_ignore_ascii_case("folder") || kind.eq_ignore_ascii_case("namespace") {
+        crate::engine_bridge::FinderWriteItemKind::Folder
+    } else {
+        crate::engine_bridge::FinderWriteItemKind::File
+    }
+}
+
+fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {
+    parent_id.and_then(|value| {
+        let trimmed = value.trim();
+        if is_file_provider_root(trimmed) || trimmed.starts_with("namespace:") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn write_outcome_response(
+    db: &crate::state_db::StateDb,
+    result: anyhow::Result<crate::engine_bridge::FinderWriteOutcome>,
+) -> IpcResponse {
+    match result {
+        Ok(crate::engine_bridge::FinderWriteOutcome::Ignored { message }) => IpcResponse::WriteQueued {
+            item: None,
+            ignored: true,
+            message,
+        },
+        Ok(crate::engine_bridge::FinderWriteOutcome::Queued {
+            file_id,
+            ignored,
+            message,
+            ..
+        }) => IpcResponse::WriteQueued {
+            item: file_id
+                .as_deref()
+                .and_then(|id| db.get_file(id).ok().flatten())
+                .map(|entry| file_entry_payload(&entry, NAMESPACE_MY_FILES)),
+            ignored,
+            message,
+        },
+        Err(e) => IpcResponse::Error { message: e.to_string() },
     }
 }
 

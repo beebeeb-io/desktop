@@ -1,5 +1,6 @@
 import FileProvider
 import Foundation
+import UniformTypeIdentifiers
 
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private let ipc = XPCBridge()
@@ -68,7 +69,29 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
-        unsupportedWrite(completionHandler: completionHandler)
+        let progress = Progress(totalUnitCount: 1)
+        do {
+            let contentType = itemTemplate.contentType
+            let kind: BeebeebItemKind = contentType?.conforms(to: .folder) == true ? .folder : .file
+            let result = try ipc.queueCreateItem(
+                parentIdentifier: itemTemplate.parentItemIdentifier,
+                filename: itemTemplate.filename,
+                kind: kind,
+                contentsURL: url,
+                contentType: kind == .file ? contentType?.identifier : nil
+            )
+            if result.ignored {
+                completionHandler(nil, [], false, nil)
+            } else if let model = result.item {
+                completionHandler(FileProviderItem(model: model), [], true, nil)
+            } else {
+                completionHandler(nil, [], true, nil)
+            }
+        } catch {
+            completionHandler(nil, [], false, error)
+        }
+        progress.completedUnitCount = 1
+        return progress
     }
 
     func modifyItem(
@@ -80,7 +103,31 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
-        unsupportedWrite(completionHandler: completionHandler)
+        let progress = Progress(totalUnitCount: 1)
+        do {
+            let contentType = item.contentType
+            let kind: BeebeebItemKind = contentType?.conforms(to: .folder) == true ? .folder : .file
+            let result = try ipc.queueModifyItem(
+                itemIdentifier: item.itemIdentifier,
+                parentIdentifier: item.parentItemIdentifier,
+                filename: item.filename,
+                kind: kind,
+                contentsURL: newContents,
+                contentType: kind == .file ? contentType?.identifier : nil,
+                baseVersionIdentifier: Self.versionIdentifier(version)
+            )
+            if result.ignored {
+                completionHandler(nil, [], false, nil)
+            } else if let model = result.item {
+                completionHandler(FileProviderItem(model: model), [], true, nil)
+            } else {
+                completionHandler(nil, [], true, nil)
+            }
+        } catch {
+            completionHandler(nil, [], false, error)
+        }
+        progress.completedUnitCount = 1
+        return progress
     }
 
     func deleteItem(
@@ -91,7 +138,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-        completionHandler(BeebeebIPCError.invalidResponse("Finder writes are not wired yet."))
+        do {
+            _ = try ipc.queueDeleteItem(
+                itemIdentifier: identifier,
+                baseVersionIdentifier: Self.versionIdentifier(version)
+            )
+            completionHandler(nil)
+        } catch {
+            completionHandler(error)
+        }
         progress.completedUnitCount = 1
         return progress
     }
@@ -100,13 +155,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         _ = domain
     }
 
-    private func unsupportedWrite(
-        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
-    ) -> Progress {
-        let progress = Progress(totalUnitCount: 1)
-        completionHandler(nil, [], false, BeebeebIPCError.invalidResponse("Finder writes are not wired yet."))
-        progress.completedUnitCount = 1
-        return progress
+    private static func versionIdentifier(_ version: NSFileProviderItemVersion) -> String? {
+        String(data: version.contentVersion, encoding: .utf8)
     }
 }
 

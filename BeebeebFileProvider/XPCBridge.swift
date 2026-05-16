@@ -87,6 +87,67 @@ final class XPCBridge {
         }
     }
 
+    func queueCreateItem(
+        parentIdentifier: NSFileProviderItemIdentifier,
+        filename: String,
+        kind: BeebeebItemKind,
+        contentsURL: URL?,
+        contentType: String?
+    ) throws -> WriteQueueResult {
+        var payload: [String: Any] = [
+            "parent_id": parentIdentifier.rawValue,
+            "filename": filename,
+            "kind": kind.rawValue,
+        ]
+        if let contentsURL {
+            payload["contents_path"] = contentsURL.path
+        }
+        if let contentType {
+            payload["content_type"] = contentType
+        }
+        return try decodeWriteResponse(sendRequest(["QueueFinderCreate": payload]))
+    }
+
+    func queueModifyItem(
+        itemIdentifier: NSFileProviderItemIdentifier,
+        parentIdentifier: NSFileProviderItemIdentifier,
+        filename: String,
+        kind: BeebeebItemKind,
+        contentsURL: URL?,
+        contentType: String?,
+        baseVersionIdentifier: String?
+    ) throws -> WriteQueueResult {
+        var payload: [String: Any] = [
+            "file_id": itemIdentifier.rawValue,
+            "parent_id": parentIdentifier.rawValue,
+            "filename": filename,
+            "kind": kind.rawValue,
+        ]
+        if let contentsURL {
+            payload["contents_path"] = contentsURL.path
+        }
+        if let contentType {
+            payload["content_type"] = contentType
+        }
+        if let baseVersionIdentifier {
+            payload["base_version_identifier"] = baseVersionIdentifier
+        }
+        return try decodeWriteResponse(sendRequest(["QueueFinderModify": payload]))
+    }
+
+    func queueDeleteItem(
+        itemIdentifier: NSFileProviderItemIdentifier,
+        baseVersionIdentifier: String?
+    ) throws -> WriteQueueResult {
+        var payload: [String: Any] = [
+            "file_id": itemIdentifier.rawValue,
+        ]
+        if let baseVersionIdentifier {
+            payload["base_version_identifier"] = baseVersionIdentifier
+        }
+        return try decodeWriteResponse(sendRequest(["QueueFinderDelete": payload]))
+    }
+
     private static func decodeItem(_ dictionary: [String: Any]) -> BeebeebProviderItem? {
         guard let identifier = dictionary["identifier"] as? String,
               let parentIdentifier = dictionary["parent_identifier"] as? String,
@@ -107,6 +168,26 @@ final class XPCBridge {
             status: status,
             capabilities: (dictionary["capabilities"] as? NSNumber)?.intValue ?? BeebeebProviderItem.read,
             versionIdentifier: dictionary["version_identifier"] as? String
+        )
+    }
+
+    private func decodeWriteResponse(_ response: [String: Any]) throws -> WriteQueueResult {
+        if let error = response["Error"] as? [String: Any] {
+            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "Finder write failed")
+        }
+        guard let payload = response["WriteQueued"] as? [String: Any] else {
+            throw BeebeebIPCError.invalidResponse("daemon response did not include WriteQueued")
+        }
+        let item: BeebeebProviderItem?
+        if let rawItem = payload["item"] as? [String: Any] {
+            item = Self.decodeItem(rawItem)
+        } else {
+            item = nil
+        }
+        return WriteQueueResult(
+            item: item,
+            ignored: (payload["ignored"] as? NSNumber)?.boolValue ?? false,
+            message: payload["message"] as? String ?? ""
         )
     }
 
@@ -147,4 +228,10 @@ final class XPCBridge {
         }
         return response
     }
+}
+
+struct WriteQueueResult {
+    let item: BeebeebProviderItem?
+    let ignored: Bool
+    let message: String
 }
