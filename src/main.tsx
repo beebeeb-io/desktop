@@ -19,11 +19,12 @@
  * See docs/superpowers/plans/2026-05-07-desktop-sync-client.md (Task 8 + 12).
  */
 
-import { StrictMode } from 'react'
+import { StrictMode, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import ConflictWindow from './ConflictWindow'
 import Onboarding from './Onboarding'
+import './design.css'
 
 const container = document.getElementById('root')
 if (!container) {
@@ -33,7 +34,7 @@ if (!container) {
 const params = new URLSearchParams(window.location.search)
 const which = params.get('window')
 
-let component: React.ReactElement
+let component: ReactElement
 if (which === 'conflict') {
   component = <ConflictWindow />
 } else if (which === 'onboarding') {

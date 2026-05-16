@@ -1,92 +1,181 @@
-/**
- * Sync status — primary settings page.
- *
- * Reads `sync_status` IPC every 3 s and surfaces the engine state
- * (running / paused / signed-out), in-flight count, conflicts, and
- * the configured sync root. The IPC shape lives in
- * `src-tauri/src/lib.rs::sync_status`; keep the SyncStatus interface
- * below in sync with the Rust serde struct.
- *
- * See docs/superpowers/plans/2026-05-07-desktop-sync-client.md (Task 9).
- */
+import { useEffect, useMemo, useState } from 'react'
+import {
+  command,
+  commandUnavailableLabel,
+  formatBytes,
+  loadSyncStatus,
+  type StorageSummary,
+  type SyncStatus,
+} from '../desktopApi'
 
-import { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+type PageLink = 'versions' | 'selective-sync' | 'finder' | 'account'
 
-interface SyncStatus {
-  logged_in: boolean
-  engine: string
-  sync_root: string | null
-  syncing: number
-  cloud_only: number
-  conflicts: number
-}
-
-export default function Status() {
+export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) => void }) {
   const [status, setStatus] = useState<SyncStatus | null>(null)
+  const [storage, setStorage] = useState<StorageSummary | null>(null)
+  const [storageNotice, setStorageNotice] = useState<string | null>(null)
 
   useEffect(() => {
-    const refresh = () =>
-      invoke<SyncStatus>('sync_status').then(setStatus).catch(console.warn)
-    refresh()
-    const id = setInterval(refresh, 3000)
-    return () => clearInterval(id)
+    let cancelled = false
+    const refresh = async () => {
+      const next = await loadSyncStatus()
+      if (!cancelled) setStatus(next)
+    }
+    void refresh()
+    const id = window.setInterval(refresh, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
   }, [])
 
-  if (!status) return <p style={{ color: '#9ca3af' }}>Loading…</p>
+  useEffect(() => {
+    command<StorageSummary>('desktop_storage_summary').then((result) => {
+      if (result.ok) {
+        setStorage(result.value)
+        return
+      }
+      setStorageNotice(
+        result.unsupported ? commandUnavailableLabel('desktop_storage_summary') : result.reason,
+      )
+    })
+  }, [])
 
-  const stateLabel =
-    status.engine === 'running'
-      ? status.syncing > 0
-        ? `Syncing ${status.syncing} file${status.syncing === 1 ? '' : 's'}…`
-        : 'Synced'
-      : status.logged_in
-        ? 'Paused'
-        : 'Not signed in'
+  const health = useMemo(() => {
+    if (!status) return { label: 'Loading', className: '', detail: 'Waiting for daemon status.' }
+    if (!status.logged_in) {
+      return { label: 'Signed out', className: 'warn', detail: 'Sign in to start the drive.' }
+    }
+    if (status.conflicts > 0) {
+      return { label: 'Needs review', className: 'error', detail: 'Resolve conflicts before assuming all files are current.' }
+    }
+    if (status.engine === 'running' && status.syncing > 0) {
+      return { label: 'Syncing', className: 'ok', detail: `${status.syncing} item${status.syncing === 1 ? '' : 's'} in the queue.` }
+    }
+    if (status.engine === 'running') {
+      return { label: 'Up to date', className: 'ok', detail: 'Metadata and transfer loops are idle.' }
+    }
+    return { label: 'Locked or paused', className: 'warn', detail: 'Unlock the vault or resume sync from Account & security.' }
+  }, [status])
 
-  const dot = status.engine === 'running' ? '#22c55e' : '#9ca3af'
+  const storagePct =
+    storage && storage.quota_bytes > 0
+      ? Math.min(100, Math.round((storage.used_bytes / storage.quota_bytes) * 100))
+      : 0
+
+  if (!status) {
+    return (
+      <section className="page">
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">Drive status</h1>
+            <p className="page-copy">Loading daemon status…</p>
+          </div>
+        </div>
+      </section>
+    )
+  }
 
   return (
-    <div>
-      <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>Sync Status</h2>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          marginBottom: 20,
-        }}
-      >
-        <div
-          style={{
-            width: 10,
-            height: 10,
-            borderRadius: '50%',
-            background: dot,
-          }}
-        />
-        <span style={{ fontWeight: 500 }}>{stateLabel}</span>
-      </div>
-      <div
-        style={{
-          background: '#f3f4f6',
-          borderRadius: 8,
-          padding: 12,
-          fontSize: 13,
-        }}
-      >
+    <section className="page">
+      <div className="page-header">
         <div>
-          Cloud-only files: <strong>{status.cloud_only}</strong>
+          <h1 className="page-title">Drive status</h1>
+          <p className="page-copy">
+            Beebeeb Desktop is the control center. Finder is the file surface; this page shows
+            whether the daemon can hydrate, upload, and keep versions safe.
+          </p>
         </div>
-        {status.conflicts > 0 && (
-          <div style={{ color: '#ef4444' }}>
-            Conflicts: <strong>{status.conflicts}</strong>
-          </div>
-        )}
-        {status.sync_root && (
-          <div style={{ marginTop: 8, color: '#6b7280' }}>{status.sync_root}</div>
-        )}
+        <span className="status-pill">
+          <span className={`dot ${health.className}`} />
+          {health.label}
+        </span>
       </div>
-    </div>
+
+      <div className="grid three">
+        <div className="metric">
+          <div className="metric-label">Transfer queue</div>
+          <div className="metric-value">{status.syncing}</div>
+          <div className="metric-detail">Hydrates and uploads waiting now</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Online-only</div>
+          <div className="metric-value">{status.cloud_only}</div>
+          <div className="metric-detail">Visible without local bytes</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Conflicts</div>
+          <div className="metric-value">{status.conflicts}</div>
+          <div className="metric-detail">Version reviews needing action</div>
+        </div>
+      </div>
+
+      <div className="grid two" style={{ marginTop: 14 }}>
+        <div className="panel">
+          <h2 className="section-title">Sync health</h2>
+          <p className="page-copy" style={{ margin: '0 0 14px' }}>
+            {health.detail}
+          </p>
+          <div className="row">
+            <div>
+              <div className="row-title">Finder location</div>
+              <div className="row-detail mono">{status.sync_root ?? 'Not installed'}</div>
+            </div>
+            <button className="button" onClick={() => onNavigate?.('finder')}>
+              Open setup
+            </button>
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-title">Vault access</div>
+              <div className="row-detail">
+                {status.logged_in ? 'Session present' : 'No session token'} · engine {status.engine}
+              </div>
+            </div>
+            <button className="button" onClick={() => onNavigate?.('account')}>
+              Account
+            </button>
+          </div>
+        </div>
+
+        <div className="panel">
+          <h2 className="section-title">Storage</h2>
+          {storage ? (
+            <>
+              <div className="progress-track" aria-label={`Storage ${storagePct}% full`}>
+                <div className="progress-fill" style={{ width: `${storagePct}%` }} />
+              </div>
+              <div className="row" style={{ marginTop: 14 }}>
+                <div>
+                  <div className="row-title">
+                    {formatBytes(storage.used_bytes)} of {formatBytes(storage.quota_bytes)}
+                  </div>
+                  <div className="row-detail">
+                    Cache {formatBytes(storage.cache_bytes)} · pinned {formatBytes(storage.pinned_bytes)}
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="notice">{storageNotice ?? 'Loading storage summary…'}</div>
+          )}
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 14 }}>
+        <h2 className="section-title">Queue, errors, versions</h2>
+        <div className="grid three">
+          <button className="button" onClick={() => onNavigate?.('versions')}>
+            Review version center
+          </button>
+          <button className="button" onClick={() => onNavigate?.('selective-sync')}>
+            Manage offline folders
+          </button>
+          <button className="button" onClick={() => onNavigate?.('account')}>
+            Diagnostics and lock state
+          </button>
+        </div>
+      </div>
+    </section>
   )
 }

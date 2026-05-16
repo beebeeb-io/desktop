@@ -1,65 +1,28 @@
-/**
- * Selective Sync — choose which top-level folders sync to this device.
- *
- * The desktop's default behaviour is to mirror every file in the vault.
- * On a small SSD or a metered-bandwidth machine that's the wrong
- * default; this page lets the user opt individual top-level folders
- * out so they stay cloud-only and only download on demand.
- *
- * Wire-up:
- *   - `get_selective_sync`   → list of excluded folder IDs (Vec<String>)
- *   - `set_selective_sync`   → persist a new exclusion list
- *   - `list_vault_folders`   → top-level folders to render as checkboxes
- *
- * All three IPC commands live in `src-tauri/src/lib.rs`. The exclusion
- * list is stored in `~/.config/beebeeb/desktop.toml` under the
- * `excluded_folder_ids` key (see `config::DesktopConfig`).
- *
- * Style mirrors the rest of `pages/` — inline styles, no Tailwind, so
- * the settings shell renders the same in dev and in the Tauri WebView.
- *
- * Spec: `.claude/tasks/in-development/0090-desktop-selective-sync-ui.md`.
- */
-
-import { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
-
-interface VaultItem {
-  id: string
-  name: string
-  is_folder: boolean
-}
+import { useEffect, useMemo, useState } from 'react'
+import { command, commandUnavailableLabel, type VaultItem } from '../desktopApi'
 
 export default function SelectiveSync() {
   const [items, setItems] = useState<VaultItem[]>([])
-  const [excluded, setExcluded] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      try {
-        // Excluded list is the source of truth; default to empty if
-        // the config key is missing so the page renders even on first
-        // launch before any save has happened.
-        const excl = await invoke<string[]>('get_selective_sync').catch(() => [])
-        if (cancelled) return
-        setExcluded(excl)
-
-        // Vault folders come from the in-memory session via Rust.
-        // The IPC returns [] when the user isn't signed in or the
-        // API call fails — both render as the empty state below.
-        const vault = await invoke<VaultItem[]>('list_vault_folders').catch(() => [])
-        if (cancelled) return
-        setItems(vault)
-      } catch (e: unknown) {
-        if (cancelled) return
-        setError(e instanceof Error ? e.message : 'Failed to load')
-      } finally {
-        if (!cancelled) setLoading(false)
+      const tree = await command<VaultItem[]>('list_remote_tree')
+      if (cancelled) return
+      if (tree.ok) {
+        setItems(tree.value)
+        setLoading(false)
+        return
       }
+
+      const folders = await command<VaultItem[]>('list_vault_folders')
+      if (cancelled) return
+      if (folders.ok) setItems(folders.value)
+      setNotice(tree.unsupported ? commandUnavailableLabel('list_remote_tree') : tree.reason)
+      setLoading(false)
     }
     void load()
     return () => {
@@ -67,152 +30,106 @@ export default function SelectiveSync() {
     }
   }, [])
 
-  const toggleFolder = async (folderId: string) => {
-    const next = excluded.includes(folderId)
-      ? excluded.filter((id) => id !== folderId)
-      : [...excluded, folderId]
-    setExcluded(next)
-    setSaving(true)
-    setError(null)
-    try {
-      await invoke('set_selective_sync', { excluded: next })
-    } catch (e: unknown) {
-      // Roll back the optimistic toggle so the UI matches what's on
-      // disk if the save failed.
-      setExcluded(excluded)
-      setError(e instanceof Error ? e.message : 'Failed to save')
-    } finally {
-      setSaving(false)
-    }
-  }
+  const folderItems = useMemo(() => flatten(items).filter((item) => item.is_folder), [items])
+  const pinnedCount = folderItems.filter((item) => item.pinned).length
 
-  if (loading) {
-    return (
-      <div>
-        <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>
-          Sync Folders
-        </h2>
-        <p style={{ color: '#9ca3af', fontSize: 13 }}>Loading folders…</p>
-      </div>
-    )
+  const toggleFolder = async (folder: VaultItem) => {
+    setSavingId(folder.id)
+    setNotice(null)
+    const nextPinned = !folder.pinned
+    const result = await command<void>('set_recursive_pin', {
+      itemId: folder.id,
+      pinned: nextPinned,
+    })
+    setSavingId(null)
+    if (!result.ok) {
+      setNotice(result.unsupported ? commandUnavailableLabel('set_recursive_pin') : result.reason)
+      return
+    }
+    setItems((current) => updateItem(current, folder.id, { pinned: nextPinned }))
   }
 
   return (
-    <div>
-      <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>
-        Sync Folders
-      </h2>
-      <p
-        style={{
-          color: '#6b7280',
-          fontSize: 13,
-          marginBottom: 16,
-          lineHeight: 1.5,
-        }}
-      >
-        Choose which folders sync to this device. Unchecked folders stay
-        cloud-only and download on demand.
-      </p>
-
-      {error && (
-        <div
-          style={{
-            background: '#fee2e2',
-            color: '#991b1b',
-            border: '1px solid #fecaca',
-            borderRadius: 6,
-            padding: '8px 12px',
-            fontSize: 12,
-            marginBottom: 12,
-          }}
-        >
-          {error}
+    <section className="page">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Selective sync</h1>
+          <p className="page-copy">
+            The drive is online-only by default. Pin a folder to recursively keep it hydrated on
+            this Mac; unpinning returns it to remote-first behavior after pending uploads settle.
+          </p>
         </div>
-      )}
+        <span className="status-pill">
+          <span className={`dot ${pinnedCount > 0 ? 'ok' : ''}`} />
+          {pinnedCount} pinned
+        </span>
+      </div>
 
-      {saving && (
-        <div style={{ color: '#9ca3af', fontSize: 11, marginBottom: 8 }}>
-          Saving…
+      {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
+
+      <div className="panel" style={{ marginBottom: 14 }}>
+        <div className="grid three">
+          <div>
+            <div className="metric-label">Default</div>
+            <div className="metric-detail">No folders pinned</div>
+          </div>
+          <div>
+            <div className="metric-label">Scope</div>
+            <div className="metric-detail">Recursive folder toggles</div>
+          </div>
+          <div>
+            <div className="metric-label">Persisted by</div>
+            <div className="metric-detail">Local daemon state</div>
+          </div>
         </div>
-      )}
+      </div>
 
-      {items.length === 0 ? (
-        <div
-          style={{
-            background: '#f3f4f6',
-            borderRadius: 8,
-            padding: 16,
-            color: '#6b7280',
-            fontSize: 13,
-          }}
-        >
-          No folders to choose from yet. Create folders in your vault and
-          they'll appear here.
+      {loading ? (
+        <div className="empty-state">Loading remote tree…</div>
+      ) : folderItems.length === 0 ? (
+        <div className="empty-state">
+          No remote tree is available. The UI is ready for `list_remote_tree` and
+          `set_recursive_pin`, but this build has no folder data to pin yet.
         </div>
       ) : (
-        <ul
-          style={{
-            listStyle: 'none',
-            margin: 0,
-            padding: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 4,
-          }}
-        >
-          {items
-            .filter((i) => i.is_folder)
-            .map((item) => {
-              const checked = !excluded.includes(item.id)
-              return (
-                <li
-                  key={item.id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                    padding: '8px 12px',
-                    background: '#f9fafb',
-                    borderRadius: 6,
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    id={`folder-${item.id}`}
-                    checked={checked}
-                    disabled={saving}
-                    onChange={() => void toggleFolder(item.id)}
-                    style={{ width: 16, height: 16, cursor: 'pointer' }}
-                  />
-                  <label
-                    htmlFor={`folder-${item.id}`}
-                    style={{
-                      fontSize: 13,
-                      cursor: 'pointer',
-                      color: checked ? '#111827' : '#6b7280',
-                      flex: 1,
-                    }}
-                  >
-                    {item.name}
-                  </label>
-                </li>
-              )
-            })}
-        </ul>
+        <div className="tree">
+          {folderItems.map((item) => (
+            <div className="tree-row" key={item.id}>
+              <div>
+                <div className="row-title">{item.path ?? item.name}</div>
+                <div className="row-detail">
+                  {item.pinned
+                    ? 'Kept local recursively'
+                    : item.inheritedPinned
+                      ? 'Pinned by parent'
+                      : 'Online-only until opened'}
+                </div>
+              </div>
+              <button
+                className={`button ${item.pinned ? 'primary' : ''}`}
+                disabled={savingId === item.id}
+                onClick={() => void toggleFolder(item)}
+              >
+                {savingId === item.id ? 'Saving…' : item.pinned ? 'Pinned' : 'Make offline'}
+              </button>
+            </div>
+          ))}
+        </div>
       )}
-
-      <p
-        style={{
-          marginTop: 16,
-          fontSize: 11,
-          color: '#9ca3af',
-          lineHeight: 1.5,
-        }}
-      >
-        Files that have already downloaded stay on this device until you
-        remove them. Newly excluded folders just stop pulling fresh
-        changes.
-      </p>
-    </div>
+    </section>
   )
+}
+
+function flatten(items: VaultItem[], prefix = ''): VaultItem[] {
+  return items.flatMap((item) => {
+    const path = item.path ?? (prefix ? `${prefix}/${item.name}` : item.name)
+    return [{ ...item, path }, ...flatten(item.children ?? [], path)]
+  })
+}
+
+function updateItem(items: VaultItem[], id: string, patch: Partial<VaultItem>): VaultItem[] {
+  return items.map((item) => {
+    if (item.id === id) return { ...item, ...patch }
+    return { ...item, children: item.children ? updateItem(item.children, id, patch) : undefined }
+  })
 }

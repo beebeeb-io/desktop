@@ -1,95 +1,120 @@
-/**
- * Beebeeb desktop — settings window shell.
- *
- * Pure React, no router. The five tabs in the left rail map 1:1 to
- * the page components in `./pages/`. Each tab renders without a route
- * change so window state (size, focus, position) stays stable as the
- * user clicks around.
- *
- * The window itself is created by Tauri (see Task 8 / lib.rs) — once
- * the rust-engineer side lands, this component runs inside a 680×540
- * non-resizable native window opened from the tray "Open Settings"
- * action.
- *
- * See docs/superpowers/plans/2026-05-07-desktop-sync-client.md (Task 8).
- */
-
-import { useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useState } from 'react'
+import { command, loadSyncStatus, type SyncStatus } from './desktopApi'
 import Status from './pages/Status'
 import SyncFolder from './pages/SyncFolder'
 import SelectiveSync from './pages/SelectiveSync'
 import Bandwidth from './pages/Bandwidth'
 import Notifications from './pages/Notifications'
 import Account from './pages/Account'
-
-// `invoke` is imported per the plan signature even though the shell
-// itself doesn't call it directly — every page component imports it
-// independently. Re-exporting here keeps the import graph stable for
-// future shell-level IPC (e.g. an "Open log directory" footer link).
-void invoke
+import Shared from './pages/Shared'
+import VersionCenter from './pages/VersionCenter'
 
 type Page =
   | 'status'
-  | 'sync-folder'
+  | 'finder'
   | 'selective-sync'
+  | 'shared'
+  | 'versions'
+  | 'account'
   | 'bandwidth'
   | 'notifications'
-  | 'account'
+
+const NAV: Array<{ id: Page; label: string; icon: string }> = [
+  { id: 'status', label: 'Status', icon: '●' },
+  { id: 'finder', label: 'Finder location', icon: '⌂' },
+  { id: 'selective-sync', label: 'Selective sync', icon: '↓' },
+  { id: 'shared', label: 'Shared roots', icon: '↔' },
+  { id: 'versions', label: 'Versions & conflicts', icon: '⎇' },
+  { id: 'account', label: 'Account & security', icon: '⌘' },
+  { id: 'bandwidth', label: 'Network', icon: '⇅' },
+  { id: 'notifications', label: 'Notifications', icon: '!' },
+]
 
 export default function App() {
   const [page, setPage] = useState<Page>('status')
-  const nav = (p: Page, label: string) => (
-    <button
-      onClick={() => setPage(p)}
-      style={{
-        width: '100%',
-        textAlign: 'left',
-        padding: '8px 16px',
-        background: page === p ? 'rgba(251,191,36,0.15)' : 'transparent',
-        border: 'none',
-        cursor: 'pointer',
-        color: page === p ? '#b45309' : '#374151',
-        fontWeight: page === p ? 600 : 400,
-      }}
-    >
-      {label}
-    </button>
-  )
+  const [status, setStatus] = useState<SyncStatus | null>(null)
+  const [version, setVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const next = await loadSyncStatus()
+      if (!cancelled) setStatus(next)
+    }
+    void refresh()
+    const id = window.setInterval(refresh, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
+  useEffect(() => {
+    command<string>('app_version').then((result) => {
+      if (result.ok) setVersion(result.value)
+    })
+  }, [])
+
+  const renderPage = () => {
+    switch (page) {
+      case 'status':
+        return <Status onNavigate={setPage} />
+      case 'finder':
+        return <SyncFolder />
+      case 'selective-sync':
+        return <SelectiveSync />
+      case 'shared':
+        return <Shared />
+      case 'versions':
+        return <VersionCenter />
+      case 'account':
+        return <Account />
+      case 'bandwidth':
+        return <Bandwidth />
+      case 'notifications':
+        return <Notifications />
+    }
+  }
+
+  const locked = status?.logged_in && status.engine !== 'running'
+
   return (
-    <div
-      style={{
-        display: 'flex',
-        height: '100vh',
-        fontFamily: 'Inter, sans-serif',
-      }}
-    >
-      <aside
-        style={{
-          width: 160,
-          background: '#f9fafb',
-          borderRight: '1px solid #e5e7eb',
-          padding: '12px 0',
-        }}
-      >
-        <div style={{ padding: '0 16px 12px', fontWeight: 700, fontSize: 14 }}>
-          Beebeeb
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">b</div>
+          <div>
+            <div className="brand-name">Beebeeb</div>
+            <div className="brand-subtitle">macOS Drive</div>
+          </div>
         </div>
-        {nav('status', 'Status')}
-        {nav('sync-folder', 'Sync Folder')}
-        {nav('selective-sync', 'Sync Folders')}
-        {nav('bandwidth', 'Bandwidth')}
-        {nav('notifications', 'Notifications')}
-        {nav('account', 'Account')}
+
+        <div className="nav-group">
+          {NAV.map((item) => (
+            <button
+              key={item.id}
+              className={`nav-button ${page === item.id ? 'active' : ''}`}
+              onClick={() => setPage(item.id)}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="sidebar-footer">
+          <div className="status-pill" style={{ marginBottom: 10 }}>
+            <span
+              className={`dot ${status?.engine === 'running' ? 'ok' : locked ? 'warn' : ''}`}
+            />
+            {status?.logged_in ? (locked ? 'Needs unlock' : 'Signed in') : 'Signed out'}
+          </div>
+          <div>{status?.sync_root ?? 'Finder location not installed'}</div>
+          {version && <div style={{ marginTop: 8 }}>Version {version}</div>}
+        </div>
       </aside>
-      <main style={{ flex: 1, padding: 24, overflowY: 'auto' }}>
-        {page === 'status' && <Status />}
-        {page === 'sync-folder' && <SyncFolder />}
-        {page === 'selective-sync' && <SelectiveSync />}
-        {page === 'bandwidth' && <Bandwidth />}
-        {page === 'notifications' && <Notifications />}
-        {page === 'account' && <Account />}
-      </main>
+
+      <main className="content">{renderPage()}</main>
     </div>
   )
 }
