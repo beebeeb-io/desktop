@@ -2,11 +2,16 @@
 <!--
   Code-signing entitlements for the Beebeeb desktop app (parent target).
 
-  Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md Phase 2 Task 5.
+  Spec: docs/superpowers/specs/2026-05-16-macos-desktop-drive-design.md.
 
   Tauri picks this up via tauri.conf.json's macOS bundle settings
   (`"signingIdentity"` + the implicit entitlements path) — wire it in
   when finalising the .xcodeproj scaffold.
+
+  Production release rule: the containing app and File Provider extension must
+  be signed by the same Apple Team ID. Add app-group or keychain-access-group
+  entitlements only once the extension actually shares a container or Keychain
+  item with the daemon; do not predeclare guessed group names.
 
   Two entitlements requested:
 

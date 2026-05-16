@@ -106,8 +106,51 @@ security find-identity -v -p codesigning | grep "Developer ID"
 If you see no Developer ID Application identity:
 1. Sign in to <https://developer.apple.com/account/resources/certificates>.
 2. Create a *Developer ID Application* certificate (not "Apple Distribution").
-3. Download `.cer`, double-click to install; the matching private key
+3. Download `.cer`, double-click to install; the matching signing material
    should already be in your keychain from the CSR step.
+
+### Production macOS signing contract
+
+Release builds must use the Developer ID identity owned by Initlabs B.V.:
+
+```text
+Developer ID Application: Initlabs B.V. (<APPLE_TEAM_ID>)
+```
+
+The repo intentionally keeps `bundle.macOS.signingIdentity` as `null`; the
+identity is supplied by `APPLE_SIGNING_IDENTITY` locally or as a GitHub Actions
+secret. Never commit a certificate, `.p12`, app-specific password, or updater
+signing secret.
+
+Required app entitlements live in `src-tauri/entitlements.plist`:
+
+| Entitlement | Required for |
+|-------------|--------------|
+| `com.apple.security.files.user-selected.read-write` | User-approved sync/cache folder access. |
+| `com.apple.developer.fileprovider.extension` | Containing-app relationship to the File Provider extension. |
+
+The File Provider extension target, once embedded in an Xcode project, must be
+signed by the same Team ID as the containing app and use:
+
+- bundle id `io.beebeeb.desktop.FileProvider`;
+- extension point `com.apple.fileprovider-nonui`;
+- principal class `$(PRODUCT_MODULE_NAME).FileProviderExtension`;
+- matching app group/keychain-access-group values if the extension ever shares
+  a container or Keychain item with the Tauri app.
+
+Before public release, inspect the built app and extension:
+
+```sh
+APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Beebeeb.app"
+codesign --verify --deep --strict --verbose=2 "$APP"
+codesign -dvvv --entitlements :- "$APP"
+find "$APP/Contents/PlugIns" -maxdepth 2 -name "*.appex" -print -exec \
+  codesign --verify --strict --verbose=2 {} \; -exec \
+  codesign -dvvv --entitlements :- {} \;
+```
+
+If the File Provider extension is missing from `Contents/PlugIns`, the Finder
+drive is not part of the shipped artifact even if the Tauri shell launches.
 
 ### Notarisation (Guus runs this — also requires Apple Developer ID)
 
@@ -144,6 +187,25 @@ App-specific passwords are minted at <https://appleid.apple.com> →
 Sign-In and Security → App-Specific Passwords. Keep the value out of
 shell history (use `read -s NOTARY_PWD` and `--password "$NOTARY_PWD"`).
 
+### Local macOS release preflight
+
+Run this before handing an artifact to a tester:
+
+```sh
+cd repos/desktop
+scripts/macos-release-preflight.sh
+
+# After a local build, include the artifact path:
+scripts/macos-release-preflight.sh \
+  src-tauri/target/universal-apple-darwin/release/bundle/dmg/Beebeeb_<version>_universal.dmg
+```
+
+Without an artifact argument the script validates JSON/YAML/plist syntax,
+checks the updater signing config, checks whether a Developer ID identity is
+available locally, and runs the staged secret scan. With a `.dmg` or `.app`
+argument it also runs the local trust checks that do not require Apple
+credentials (`hdiutil`, `codesign`, and `spctl` as appropriate).
+
 ### CI signing (GitHub Actions)
 
 Set repository secrets:
@@ -153,10 +215,120 @@ Set repository secrets:
 - `APPLE_SIGNING_IDENTITY` — the human-readable identity string
 - `APPLE_ID` — Apple ID email
 - `APPLE_TEAM_ID` — 10-character team id
-- `APPLE_PASSWORD` — app-specific password
+- `APPLE_ID_PASSWORD` — app-specific password used by Tauri's macOS notarizer
+- `TAURI_SIGNING_PRIVATE_KEY` — updater signing secret contents
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — updater signing key password
+
+The workflow also exports `APPLE_PASSWORD` from `APPLE_ID_PASSWORD` for older
+Tauri-action compatibility. Keep both spellings out of local shell history.
 
 `tauri-action` reads these automatically; no extra wiring beyond
 declaring them in the workflow's `env`.
+
+### Login item and daemon startup expectations
+
+The app currently uses `tauri-plugin-autostart` with the macOS launcher wired in
+`src-tauri/src/lib.rs`. The release contract is:
+
+- The user opts into "Start at login" from the account page or tray menu.
+- macOS registers Beebeeb as a user login item. It should start quietly in the
+  menu bar/control center, not force the settings window open.
+- On startup after reboot, the daemon restores session/config state, rebinds
+  the local IPC socket, and leaves the vault locked until the user unlocks.
+- File Provider enumeration may show the Beebeeb domain while locked, but
+  hydration/upload operations must fail closed with an unlock-required error.
+
+Manual verification on a clean macOS user:
+
+```sh
+# After installing the signed/notarized DMG:
+open -a Beebeeb
+# Enable "Start at login" in Beebeeb.
+osascript -e 'tell application "System Events" to get the name of every login item'
+# Expected: Beebeeb appears, or System Settings > General > Login Items shows it.
+
+sudo shutdown -r now
+# After reboot and login:
+pgrep -fl Beebeeb
+log show --predicate 'process CONTAINS "Beebeeb"' --last 10m --style compact
+```
+
+Do not mark login-item verification complete until the app starts after an
+actual user-session login, not just after manually reopening it.
+
+### File Provider domain persistence
+
+The File Provider domain identifier is fixed in
+`BeebeebFileProvider/DomainRegistration.swift`:
+
+```text
+io.beebeeb.desktop.domain
+```
+
+Do not change this identifier after public release without a migration plan.
+macOS treats a new domain id as a different Finder location.
+
+Production verification matrix:
+
+1. Install signed/notarized DMG.
+2. Sign in and install the Beebeeb Finder location.
+3. Confirm Finder shows `Beebeeb` with `My files`, `Shared with me`, `Offline`,
+   and `Conflicts`.
+4. Reboot and confirm the domain remains visible.
+5. Install a newer signed build over the old one and confirm the same domain id
+   remains mounted and does not duplicate.
+6. Lock the vault and confirm Finder content operations require unlock.
+7. Unlock and confirm enumeration/hydration resume without re-adding the domain.
+
+Useful local checks:
+
+```sh
+pluginkit -m -v -p com.apple.fileprovider-nonui | grep -A3 -i Beebeeb
+brctl log --wait --shorten 2>/dev/null | grep -i Beebeeb
+```
+
+The exact Finder state must still be verified manually on a signed build; plist
+syntax checks only prove the extension metadata is parseable.
+
+### Safe uninstall and remount cleanup
+
+Uninstall must not delete remote data. It may remove local registration,
+login-item state, sockets, logs, and local cache after pending uploads are
+settled or explicitly discarded by the user.
+
+Required cleanup sequence for the product UI or a future uninstall helper:
+
+1. Pause sync and show any pending upload count.
+2. If the user chooses "remove local data", delete only local cache/state after
+   pending uploads are resolved or abandoned with confirmation.
+3. Disable the login item.
+4. Remove the File Provider domain with `NSFileProviderManager.remove`.
+5. Stop the daemon/control center.
+6. Remove the local IPC socket and stale lock file.
+7. Remove local state/cache/log directories owned by Beebeeb.
+8. Leave Keychain/session material only if the user chooses "keep me signed in";
+   sign-out must delete it.
+
+Manual cleanup checklist while the helper is not yet shipped:
+
+```sh
+# Run from the signed app/debug helper when available:
+# BeebeebFileProviderDomain.remove { ... }
+
+# Confirm the app is not running.
+pkill -x Beebeeb || true
+
+# Remove stale IPC/socket artifacts if present. Do not use sudo unless needed.
+rm -f "${TMPDIR%/}/beebeeb-fileprovider.sock"
+rm -f "$HOME/Library/Application Support/io.beebeeb.desktop/.beebeeb-sync.lock"
+
+# Inspect local app containers before deletion.
+ls -la "$HOME/Library/Application Support/io.beebeeb.desktop" 2>/dev/null || true
+ls -la "$HOME/Library/Logs/io.beebeeb.desktop" 2>/dev/null || true
+```
+
+Do not script `rm -rf` of the application-support directory in release docs
+until the daemon exposes pending-upload and cache ownership checks.
 
 ---
 
@@ -192,12 +364,13 @@ certificate from a trusted CA.
      (~$700/yr) gets you out of SmartScreen warnings on day one.
    - **Sectigo** — cheaper (~$200/yr), but standard certs build
      SmartScreen reputation slowly (weeks of installs).
-2. The CA delivers a `.pfx` (PKCS#12) that bundles cert + private key.
+2. The CA delivers a `.pfx` (PKCS#12) that bundles cert + signing material.
    Treat as a secret.
 3. For local builds, set:
    ```sh
    export TAURI_WINDOWS_CERTIFICATE="$(base64 < cert.pfx)"
-   export TAURI_WINDOWS_CERTIFICATE_PASSWORD="<password>"
+   read -r -s TAURI_WINDOWS_CERTIFICATE_PASSWORD
+   export TAURI_WINDOWS_CERTIFICATE_PASSWORD
    ```
 4. For GitHub Actions, set `WINDOWS_CERTIFICATE` and
    `WINDOWS_CERTIFICATE_PASSWORD` as repo secrets. `tauri-action`
@@ -216,7 +389,34 @@ bundles with **minisign**. The keypair is the one in
 "Auto-update signing" section). The public key in `tauri.conf.json`
 is what shipped clients trust; rotating it requires shipping an app
 update first that contains the new public key, then publishing the
-next update signed with the new private key.
+next update signed with the new updater signing secret.
+
+The current pre-launch key was generated without a password. Before the first
+public release, rotate it:
+
+```sh
+# Generate a protected replacement key outside the repo.
+mkdir -p ~/.tauri
+bunx tauri signer generate -w ~/.tauri/beebeeb-desktop-release.key
+chmod 600 ~/.tauri/beebeeb-desktop-release.key
+
+# Copy the printed public key into src-tauri/tauri.conf.json:
+# plugins.updater.pubkey = "<new public key>"
+
+# Store these as GitHub Actions secrets:
+# TAURI_SIGNING_PRIVATE_KEY = contents of ~/.tauri/beebeeb-desktop-release.key
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD = password entered during generation
+```
+
+Rotation after users already have Beebeeb installed is a two-release process:
+
+1. Release `N` is signed with the old updater signing secret and contains the new public
+   key in `tauri.conf.json`.
+2. Release `N+1` and later are signed with the new updater signing secret.
+
+Never publish an update signed by a signing secret that the installed app does not
+already trust, or the updater will reject it and users will need a manual DMG
+install.
 
 ---
 
@@ -339,6 +539,7 @@ Workers redirect — pick one when wiring up the production updater).
 | Secret                          | Where it goes               |
 |---------------------------------|-----------------------------|
 | Apple Developer ID `.p12`       | macOS Keychain or CI secret |
-| Apple app-specific password     | CI secret only              |
+| Apple app-specific password     | CI secret only (`APPLE_ID_PASSWORD`) |
 | Authenticode `.pfx`             | CI secret only              |
-| `~/.tauri/beebeeb-desktop.key`  | Build machine, mode 0600    |
+| Tauri updater signing secret    | CI secret only (`TAURI_SIGNING_PRIVATE_KEY`) |
+| Updater signing secret password | CI secret only (`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) |

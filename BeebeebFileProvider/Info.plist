@@ -14,7 +14,9 @@
 
   The CFBundleVersion / CFBundleShortVersionString are deliberately the
   same as the parent app's so the extension is signed and updated as a
-  unit.
+  unit. Keep the bundle id paired with the stable domain identifier in
+  DomainRegistration.swift; changing either after public release needs a
+  Finder-domain migration plan.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
