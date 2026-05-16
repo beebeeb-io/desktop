@@ -433,6 +433,38 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     }))
 }
 
+#[tauri::command]
+fn export_diagnostics() -> Result<serde_json::Value, String> {
+    let cfg = DesktopConfig::load()?;
+    let Some(sync_root) = cfg.sync_root else {
+        return Ok(serde_json::json!({
+            "sync_root_configured": false,
+            "queue": serde_json::Value::Null,
+        }));
+    };
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Ok(serde_json::json!({
+            "sync_root_configured": true,
+            "state_db_exists": false,
+            "queue": serde_json::Value::Null,
+        }));
+    }
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let queue = db
+        .queue_diagnostics(now)
+        .map_err(|e| format!("queue diagnostics: {e}"))?;
+    Ok(serde_json::json!({
+        "sync_root_configured": true,
+        "state_db_exists": true,
+        "queue": queue,
+    }))
+}
+
 // ── IPC commands: conflict/version center ───────────────────────────────────
 
 #[tauri::command]
@@ -1184,6 +1216,7 @@ pub fn run() {
             set_session,
             clear_session,
             sync_status,
+            export_diagnostics,
             list_version_conflict_center,
             list_file_versions,
             restore_file_version,

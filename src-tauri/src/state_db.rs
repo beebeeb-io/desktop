@@ -20,7 +20,8 @@
 //! daemon's writes.
 
 use rusqlite::{Connection, Result, params};
-use std::collections::HashSet;
+use serde::Serialize;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -282,6 +283,36 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum OperationPauseReason {
+    Auth,
+    Quota,
+    Permission,
+    Locked,
+}
+
+impl OperationPauseReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OperationPauseReason::Auth => "auth",
+            OperationPauseReason::Quota => "quota",
+            OperationPauseReason::Permission => "permission",
+            OperationPauseReason::Locked => "locked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QueueDiagnostics {
+    pub queued: i64,
+    pub due: i64,
+    pub paused: i64,
+    pub by_kind: BTreeMap<String, i64>,
+    pub paused_by_reason: BTreeMap<String, i64>,
+    pub last_error: Option<String>,
+    pub last_error_class: Option<String>,
+}
+
 /// Owned handle to the local SQLite state database.
 ///
 /// One instance per running daemon process. The inner `Connection` is
@@ -345,6 +376,8 @@ impl StateDb {
                 max_attempts INTEGER NOT NULL DEFAULT 5,
                 next_retry_at INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
+                last_error_class TEXT,
+                paused_reason TEXT,
                 created_at INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
             );
@@ -374,10 +407,13 @@ impl StateDb {
         )?;
         ensure_column(&conn, "files", "last_opened_at", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "operation_queue", "last_error_class", "TEXT")?;
+        ensure_column(&conn, "operation_queue", "paused_reason", "TEXT")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
             ",
         )?;
         Ok(Self(Mutex::new(conn)))
@@ -665,8 +701,8 @@ impl StateDb {
             "INSERT INTO operation_queue (
                 op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                 base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                last_error, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                last_error, last_error_class, paused_reason, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15)
              ON CONFLICT(op_id) DO UPDATE SET
                 kind = excluded.kind,
                 file_id = excluded.file_id,
@@ -680,6 +716,8 @@ impl StateDb {
                 max_attempts = excluded.max_attempts,
                 next_retry_at = excluded.next_retry_at,
                 last_error = excluded.last_error,
+                last_error_class = excluded.last_error_class,
+                paused_reason = excluded.paused_reason,
                 updated_at = excluded.updated_at",
             params![
                 op.op_id,
@@ -709,7 +747,7 @@ impl StateDb {
                     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
                     last_error, created_at, updated_at
              FROM operation_queue
-             WHERE next_retry_at <= ?1 AND attempts < max_attempts
+             WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL
              ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![now], |row| {
@@ -781,11 +819,75 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
             "UPDATE operation_queue
-             SET attempts = ?2, next_retry_at = ?3, last_error = ?4, updated_at = ?3
+             SET attempts = ?2,
+                 next_retry_at = ?3,
+                 last_error = ?4,
+                 last_error_class = NULL,
+                 paused_reason = NULL,
+                 updated_at = ?3
              WHERE op_id = ?1",
             params![op_id, attempts, next_retry_at, last_error],
         )?;
         Ok(())
+    }
+
+    pub fn record_operation_pause(
+        &self,
+        op_id: &str,
+        reason: OperationPauseReason,
+        last_error: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET paused_reason = ?2,
+                 last_error_class = ?2,
+                 last_error = ?3,
+                 updated_at = ?4
+             WHERE op_id = ?1",
+            params![op_id, reason.as_str(), last_error.map(redact_diagnostic_error), now],
+        )?;
+        Ok(())
+    }
+
+    pub fn queue_diagnostics(&self, now: i64) -> Result<QueueDiagnostics> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let queued = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))?;
+        let due = conn.query_row(
+            "SELECT COUNT(*) FROM operation_queue WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL",
+            params![now],
+            |row| row.get(0),
+        )?;
+        let paused = conn.query_row(
+            "SELECT COUNT(*) FROM operation_queue WHERE paused_reason IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let by_kind = count_queue_groups(&conn, "kind")?;
+        let paused_by_reason = count_queue_groups(&conn, "paused_reason")?;
+        let (last_error, last_error_class) = conn
+            .query_row(
+                "SELECT last_error, last_error_class
+                 FROM operation_queue
+                 WHERE last_error IS NOT NULL
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap_or((None, None));
+
+        Ok(QueueDiagnostics {
+            queued,
+            due,
+            paused,
+            by_kind,
+            paused_by_reason,
+            last_error: last_error.as_deref().map(redact_diagnostic_error),
+            last_error_class,
+        })
     }
 
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
@@ -968,6 +1070,43 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(names.iter().any(|n| n == column))
 }
 
+fn count_queue_groups(conn: &Connection, column: &str) -> Result<BTreeMap<String, i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {column}, COUNT(*) FROM operation_queue WHERE {column} IS NOT NULL GROUP BY {column}"
+    ))?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    rows.collect()
+}
+
+fn redact_diagnostic_error(error: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    for part in error.split_whitespace() {
+        if skip_next {
+            out.push("[redacted]".into());
+            skip_next = false;
+            continue;
+        }
+        let lower = part.to_ascii_lowercase();
+        if lower == "bearer" || lower == "token" || lower == "authorization:" || lower == "session" {
+            out.push(part.into());
+            skip_next = true;
+        } else if lower.starts_with("bearer=")
+            || lower.starts_with("token=")
+            || lower.starts_with("session_token=")
+            || lower.starts_with("authorization=")
+        {
+            let key = part.split_once('=').map(|(k, _)| k).unwrap_or(part);
+            out.push(format!("{key}=[redacted]"));
+        } else if part.len() > 96 {
+            out.push("[redacted]".into());
+        } else {
+            out.push(part.into());
+        }
+    }
+    out.join(" ")
+}
+
 #[cfg(test)]
 fn has_table(conn: &Connection, table: &str) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
@@ -1067,6 +1206,17 @@ mod tests {
             assert!(has_column(&conn, "files", column).unwrap(), "missing {column}");
         }
         assert!(has_table(&conn, "operation_queue").unwrap());
+        for column in [
+            "op_id",
+            "kind",
+            "attempts",
+            "next_retry_at",
+            "last_error",
+            "last_error_class",
+            "paused_reason",
+        ] {
+            assert!(has_column(&conn, "operation_queue", column).unwrap(), "missing {column}");
+        }
 
         let row: (String, i64, String) = conn
             .query_row(
@@ -1166,6 +1316,54 @@ mod tests {
 
         db.remove_operation("op-1").unwrap();
         assert!(db.list_due_operations(999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_operation_pause_survives_restart_and_diagnostics_redacts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-auth".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("file1".into()),
+            parent_id: None,
+            target_path: Some("/secret.txt".into()),
+            metadata_json: Some(r#"{"operation":"upload_version","token":"not-diagnostic"}"#.into()),
+            payload_path: Some("/tmp/payload".into()),
+            base_version: Some(3),
+            base_object_version_id: Some("object3".into()),
+            attempts: 1,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        db.record_operation_pause(
+            "op-auth",
+            OperationPauseReason::Auth,
+            Some("401 unauthorized Bearer abc.def.ghi session_token=super-secret"),
+            200,
+        )
+        .unwrap();
+
+        drop(db);
+        let reopened = StateDb::open(&path).unwrap();
+        assert!(reopened.list_due_operations(999).unwrap().is_empty());
+
+        let diagnostics = reopened.queue_diagnostics(999).unwrap();
+        assert_eq!(diagnostics.queued, 1);
+        assert_eq!(diagnostics.due, 0);
+        assert_eq!(diagnostics.paused, 1);
+        assert_eq!(diagnostics.paused_by_reason.get("auth"), Some(&1));
+        assert_eq!(diagnostics.last_error_class.as_deref(), Some("auth"));
+        let last_error = diagnostics.last_error.unwrap();
+        assert!(last_error.contains("Bearer [redacted]"));
+        assert!(last_error.contains("session_token=[redacted]"));
+        assert!(!last_error.contains("abc.def.ghi"));
+        assert!(!last_error.contains("super-secret"));
     }
 
     #[test]

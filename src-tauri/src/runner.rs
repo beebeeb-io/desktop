@@ -195,6 +195,11 @@ async fn run(
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
+                        emit_file_provider_invalidation(
+                            &app,
+                            "shared_roots_changed",
+                            outcome.removed_shared_file_ids,
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -218,6 +223,27 @@ async fn run(
                         // (timestamp ≈ now) doesn't get auto-resolved
                         // on the very same tick.
                         sweep_auto_resolutions(&app, &bridge, &sync_root).await;
+                        match bridge.process_due_operations(&sync_root, now_secs()).await {
+                            Ok(outcome) => {
+                                if !outcome.invalidated_item_ids.is_empty() {
+                                    emit_file_provider_invalidation(
+                                        &app,
+                                        "operations_applied",
+                                        outcome.invalidated_item_ids,
+                                    );
+                                }
+                                if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
+                                    tracing::info!(
+                                        paused = outcome.paused_op_ids.len(),
+                                        retried = outcome.retried_op_ids.len(),
+                                        "sync operation queue processed with deferred work"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "operation queue processing failed");
+                            }
+                        }
                         enforce_cache_budget(&bridge);
                         emit_status(&app, "idle", Some(&sync_root), None);
                     }
@@ -250,6 +276,27 @@ fn emit_status(app: &AppHandle, state: &str, sync_root: Option<&PathBuf>, error:
     if let Err(e) = app.emit("engine-status", payload) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
     }
+}
+
+pub(crate) fn file_provider_invalidation_payload(reason: &str, item_ids: Vec<String>) -> serde_json::Value {
+    serde_json::json!({
+        "reason": reason,
+        "item_ids": item_ids,
+    })
+}
+
+fn emit_file_provider_invalidation(app: &AppHandle, reason: &str, item_ids: Vec<String>) {
+    let payload = file_provider_invalidation_payload(reason, item_ids);
+    if let Err(e) = app.emit("file-provider-invalidate", payload) {
+        tracing::warn!(error = %e, "failed to emit file-provider-invalidate event");
+    }
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
@@ -373,3 +420,22 @@ async fn sweep_auto_resolutions(app: &AppHandle, bridge: &Arc<EngineBridge>, syn
 // per-file emit calls from engine_bridge.rs.
 #[allow(dead_code)]
 fn _unused_path(_p: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_provider_invalidation_payload_contains_only_reason_and_ids() {
+        let payload = file_provider_invalidation_payload(
+            "operations_applied",
+            vec!["file-a".to_string(), "shared-root".to_string()],
+        );
+
+        assert_eq!(payload["reason"], "operations_applied");
+        assert_eq!(payload["item_ids"][0], "file-a");
+        assert_eq!(payload["item_ids"][1], "shared-root");
+        assert!(payload.get("path").is_none());
+        assert!(payload.get("token").is_none());
+    }
+}

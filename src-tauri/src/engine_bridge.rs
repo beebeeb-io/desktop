@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 use crate::api_client::ApiClient;
 use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
-    FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PERMISSION_READ, PERMISSION_SHARE,
-    PERMISSION_WRITE, PendingOperation, StateDb,
+    FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, OperationPauseReason,
+    PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE, PendingOperation, QueueDiagnostics, StateDb,
 };
 
 // ── Per-file state machine ────────────────────────────────────────────────────
@@ -183,6 +183,35 @@ pub struct SharedRootRefreshOutcome {
     pub removed_cache_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TransferLoopOutcome {
+    pub completed_op_ids: Vec<String>,
+    pub retried_op_ids: Vec<String>,
+    pub paused_op_ids: Vec<String>,
+    pub invalidated_item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationFailureClass {
+    Retryable,
+    Auth,
+    Quota,
+    Permission,
+    Locked,
+}
+
+impl OperationFailureClass {
+    fn pause_reason(self) -> Option<OperationPauseReason> {
+        match self {
+            OperationFailureClass::Retryable => None,
+            OperationFailureClass::Auth => Some(OperationPauseReason::Auth),
+            OperationFailureClass::Quota => Some(OperationPauseReason::Quota),
+            OperationFailureClass::Permission => Some(OperationPauseReason::Permission),
+            OperationFailureClass::Locked => Some(OperationPauseReason::Locked),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SharedRootMapping {
     invite_id: String,
@@ -210,6 +239,125 @@ impl EngineBridge {
     /// Borrow the API client for the same reason.
     pub fn api(&self) -> &ApiClient {
         &self.api
+    }
+
+    pub fn queue_diagnostics(&self, now: i64) -> anyhow::Result<QueueDiagnostics> {
+        Ok(self.db.queue_diagnostics(now)?)
+    }
+
+    pub async fn process_due_operations(&self, sync_root: &Path, now: i64) -> anyhow::Result<TransferLoopOutcome> {
+        let mut outcome = TransferLoopOutcome {
+            completed_op_ids: Vec::new(),
+            retried_op_ids: Vec::new(),
+            paused_op_ids: Vec::new(),
+            invalidated_item_ids: Vec::new(),
+        };
+        let operations = self.db.list_due_operations(now)?;
+
+        for op in operations {
+            let result = self.execute_operation(&op, sync_root).await;
+            match result {
+                Ok(()) => {
+                    self.db.remove_operation(&op.op_id)?;
+                    if let Some(file_id) = &op.file_id {
+                        outcome.invalidated_item_ids.push(file_id.clone());
+                    }
+                    outcome.completed_op_ids.push(op.op_id);
+                }
+                Err(error) => {
+                    let class = classify_operation_error(&error.to_string());
+                    if let Some(reason) = class.pause_reason() {
+                        self.db
+                            .record_operation_pause(&op.op_id, reason, Some(&error.to_string()), now)?;
+                        outcome.paused_op_ids.push(op.op_id);
+                    } else {
+                        let attempts = op.attempts.saturating_add(1);
+                        let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
+                        self.db.record_operation_attempt(
+                            &op.op_id,
+                            attempts,
+                            next_retry_at,
+                            Some(&error.to_string()),
+                        )?;
+                        outcome.retried_op_ids.push(op.op_id);
+                    }
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    async fn execute_operation(&self, op: &PendingOperation, sync_root: &Path) -> anyhow::Result<()> {
+        match op.kind {
+            OperationKind::PinTree => Ok(()),
+            OperationKind::HydrateFile => {
+                let file_id = op
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("hydrate operation missing file_id"))?;
+                let dest = if let Some(target_path) = op.target_path.as_deref() {
+                    sync_root.join(target_path.trim_start_matches('/'))
+                } else if let Some(entry) = self.db.get_file(file_id)? {
+                    sync_root.join(entry.path.trim_start_matches('/'))
+                } else {
+                    return Err(anyhow::anyhow!("hydrate operation target missing from state"));
+                };
+                self.hydrate_file(file_id, &dest).await
+            }
+            OperationKind::CreateFolder => {
+                let metadata = operation_metadata(op)?;
+                let name = metadata["name_encrypted"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("create folder operation missing encrypted name"))?;
+                self.api
+                    .create_folder(name, op.parent_id.as_deref(), op.file_id.as_deref())
+                    .await?;
+                Ok(())
+            }
+            OperationKind::MoveFile | OperationKind::RenameFile => {
+                let file_id = op
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("metadata operation missing file_id"))?;
+                let metadata = operation_metadata(op)?;
+                let name = metadata["name_encrypted"].as_str();
+                self.api.update_metadata(file_id, name, op.parent_id.as_deref()).await?;
+                Ok(())
+            }
+            OperationKind::TrashFile => {
+                let file_id = op
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("trash operation missing file_id"))?;
+                self.api.trash_file(file_id).await?;
+                Ok(())
+            }
+            OperationKind::RestoreFile => {
+                let file_id = op
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("restore file operation missing file_id"))?;
+                self.api.restore_file(file_id).await?;
+                Ok(())
+            }
+            OperationKind::RestoreVersion => {
+                let file_id = op
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("restore operation missing file_id"))?;
+                let metadata = operation_metadata(op)?;
+                let version_id = metadata["version_id"]
+                    .as_str()
+                    .or(op.base_object_version_id.as_deref())
+                    .ok_or_else(|| anyhow::anyhow!("restore operation missing version id"))?;
+                self.api.restore_version(file_id, version_id).await?;
+                Ok(())
+            }
+            OperationKind::UploadVersion | OperationKind::UploadFile => Err(anyhow::anyhow!(
+                "versioned upload worker pending encryption/session handoff"
+            )),
+        }
     }
 
     pub async fn refresh_shared_roots(&self) -> anyhow::Result<SharedRootRefreshOutcome> {
@@ -1138,6 +1286,39 @@ fn operation_version_id(op: &PendingOperation) -> Option<String> {
     })
 }
 
+fn operation_metadata(op: &PendingOperation) -> anyhow::Result<serde_json::Value> {
+    Ok(op
+        .metadata_json
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+pub fn classify_operation_error(error: &str) -> OperationFailureClass {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid token") {
+        OperationFailureClass::Auth
+    } else if lower.contains("quota") || lower.contains("insufficient storage") || lower.contains("storage limit") {
+        OperationFailureClass::Quota
+    } else if lower.contains("403")
+        || lower.contains("forbidden")
+        || lower.contains("permission")
+        || lower.contains("read-only")
+    {
+        OperationFailureClass::Permission
+    } else if lower.contains("vault locked") || lower.contains("locked") || lower.contains("unlock") {
+        OperationFailureClass::Locked
+    } else {
+        OperationFailureClass::Retryable
+    }
+}
+
+pub fn retry_delay_seconds(attempts: i64) -> i64 {
+    let exponent = attempts.clamp(1, 6) as u32;
+    30_i64.saturating_mul(2_i64.saturating_pow(exponent - 1))
+}
+
 fn shared_roots_from_invite_response(body: &serde_json::Value) -> Vec<SharedRootMapping> {
     body.get("invites")
         .and_then(|value| value.as_array())
@@ -1242,6 +1423,102 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn apply_metadata_file_row(
+    db: &StateDb,
+    f: &serde_json::Value,
+    namespace: Namespace,
+    shared_root_id: Option<String>,
+    share_id: Option<String>,
+    permission_bits: i64,
+    now: i64,
+) -> anyhow::Result<Option<FileEntry>> {
+    let file_id = f["id"].as_str().unwrap_or_default();
+    if file_id.is_empty() {
+        return Ok(None);
+    }
+
+    let existing = db.get_file(file_id)?;
+    let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
+    let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+    let path = f["path"]
+        .as_str()
+        .or_else(|| f["display_path"].as_str())
+        .or_else(|| f["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let status = existing
+        .as_ref()
+        .map(|entry| entry.status.clone())
+        .unwrap_or(FileStatus::CloudOnly);
+
+    let entry = FileEntry {
+        file_id: file_id.to_string(),
+        path,
+        status,
+        size_bytes: size,
+        modified_at: remote_updated,
+        content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
+        remote_updated_at: remote_updated,
+    };
+    db.upsert_file(&entry)?;
+
+    let item_kind = if f["is_folder"].as_bool().unwrap_or(false)
+        || f["kind"].as_str() == Some("folder")
+        || f["type"].as_str() == Some("folder")
+    {
+        ItemKind::Folder
+    } else {
+        ItemKind::File
+    };
+    let mut contract = db
+        .get_file_contract_state(file_id)?
+        .unwrap_or_else(|| FileContractState {
+            file_id: file_id.to_string(),
+            namespace: namespace.clone(),
+            parent_id: None,
+            shared_root_id: shared_root_id.clone(),
+            share_id: share_id.clone(),
+            permission_bits,
+            item_kind: item_kind.clone(),
+            content_type: None,
+            current_version: 0,
+            current_object_version_id: None,
+            local_base_version: 0,
+            local_hash: None,
+            cache_path: None,
+            cache_bytes: 0,
+            pin_state: crate::state_db::PinState::Inherit,
+            inherited_pin_state: crate::state_db::PinState::Unpinned,
+            last_sync_at: now,
+        });
+    contract.namespace = namespace;
+    contract.parent_id = f["parent_id"].as_str().map(str::to_string);
+    contract.shared_root_id = shared_root_id;
+    contract.share_id = share_id;
+    contract.permission_bits = permission_bits;
+    contract.item_kind = item_kind;
+    contract.content_type = f["content_type"]
+        .as_str()
+        .or_else(|| f["mime_type"].as_str())
+        .map(str::to_string);
+    contract.current_version = f["current_version"]
+        .as_i64()
+        .or_else(|| f["version"].as_i64())
+        .or_else(|| f["version_number"].as_i64())
+        .unwrap_or(contract.current_version);
+    contract.current_object_version_id = f["current_object_version_id"]
+        .as_str()
+        .or_else(|| f["object_version_id"].as_str())
+        .map(str::to_string)
+        .or(contract.current_object_version_id);
+    if entry.status == FileStatus::Local && contract.local_base_version == 0 {
+        contract.local_base_version = contract.current_version;
+    }
+    contract.last_sync_at = now;
+    db.set_file_contract_state(&contract)?;
+    Ok(Some(entry))
+}
+
 // ── Periodic sync tick ────────────────────────────────────────────────────────
 
 /// One file the latest tick noticed has diverged on both sides.
@@ -1295,21 +1572,19 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
         }
         let size = f["size_bytes"].as_i64().unwrap_or(0);
         let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-        let path = f["path"].as_str().unwrap_or("").to_string();
-
         match bridge.db().get_file(file_id)? {
             None => {
                 // (1) New file — insert as cloud_only. base = remote
                 // (next-tick conflicts compare against this).
-                bridge.db().upsert_file(&FileEntry {
-                    file_id: file_id.to_string(),
-                    path,
-                    status: FileStatus::CloudOnly,
-                    size_bytes: size,
-                    modified_at: remote_updated,
-                    content_hash: None,
-                    remote_updated_at: remote_updated,
-                })?;
+                apply_metadata_file_row(
+                    bridge.db(),
+                    f,
+                    Namespace::MyFiles,
+                    None,
+                    None,
+                    PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                    now_secs,
+                )?;
             }
             Some(entry) if entry.status == FileStatus::Local => {
                 // (2) Local copy + remote moved? Nothing to check if
@@ -1346,6 +1621,15 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                     updated.size_bytes = size;
                     updated.modified_at = remote_updated;
                     bridge.db().upsert_file(&updated)?;
+                    apply_metadata_file_row(
+                        bridge.db(),
+                        f,
+                        Namespace::MyFiles,
+                        None,
+                        None,
+                        PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                        now_secs,
+                    )?;
                     continue;
                 }
 
@@ -1375,9 +1659,20 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                     is_text,
                 });
             }
-            Some(_) => {
+            Some(entry) => {
                 // (3) Pending download/upload/conflict/error — let
                 // the dedicated path own its transitions.
+                if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
+                    apply_metadata_file_row(
+                        bridge.db(),
+                        f,
+                        Namespace::MyFiles,
+                        None,
+                        None,
+                        PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                        now_secs,
+                    )?;
+                }
                 continue;
             }
         }
@@ -1640,6 +1935,146 @@ mod tests {
         assert_eq!(roots[0].display_name, "Client dropbox");
         assert_eq!(roots[0].permission_bits, PERMISSION_READ | PERMISSION_SHARE);
         assert_eq!(roots[1].permission_bits, PERMISSION_READ | PERMISSION_WRITE);
+    }
+
+    #[test]
+    fn test_operation_error_classification_and_backoff() {
+        assert_eq!(
+            classify_operation_error("401 unauthorized Bearer token"),
+            OperationFailureClass::Auth
+        );
+        assert_eq!(classify_operation_error("quota exceeded"), OperationFailureClass::Quota);
+        assert_eq!(
+            classify_operation_error("403 forbidden permission denied"),
+            OperationFailureClass::Permission
+        );
+        assert_eq!(
+            classify_operation_error("vault locked, unlock required"),
+            OperationFailureClass::Locked
+        );
+        assert_eq!(
+            classify_operation_error("connection reset by peer"),
+            OperationFailureClass::Retryable
+        );
+        assert_eq!(retry_delay_seconds(1), 30);
+        assert_eq!(retry_delay_seconds(2), 60);
+        assert_eq!(retry_delay_seconds(10), 960);
+    }
+
+    #[test]
+    fn test_metadata_file_row_persists_contract_for_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let metadata = serde_json::json!({
+            "id": "file-1",
+            "path": "Projects/spec.docx",
+            "parent_id": "folder-1",
+            "size_bytes": 4096,
+            "updated_at": 1234,
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "version_number": 7,
+            "object_version_id": "object-7"
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            2000,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(entry.status, FileStatus::CloudOnly);
+        assert_eq!(entry.remote_updated_at, 1234);
+        let contract = db.get_file_contract_state("file-1").unwrap().unwrap();
+        assert_eq!(contract.namespace, Namespace::MyFiles);
+        assert_eq!(contract.parent_id.as_deref(), Some("folder-1"));
+        assert_eq!(
+            contract.permission_bits,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER
+        );
+        assert_eq!(
+            contract.content_type.as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        );
+        assert_eq!(contract.current_version, 7);
+        assert_eq!(contract.current_object_version_id.as_deref(), Some("object-7"));
+        assert_eq!(contract.last_sync_at, 2000);
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_completes_pin_marker_and_invalidates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-pin".into(),
+                kind: OperationKind::PinTree,
+                file_id: Some("folder-1".into()),
+                parent_id: None,
+                target_path: None,
+                metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-pin".to_string()]);
+        assert_eq!(outcome.invalidated_item_ids, vec!["folder-1".to_string()]);
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("file-1".into()),
+                parent_id: None,
+                target_path: Some("Draft.txt".into()),
+                metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+                payload_path: Some(dir.path().join("payload").to_string_lossy().into_owned()),
+                base_version: Some(1),
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload".to_string()]);
+        assert!(outcome.paused_op_ids.is_empty());
+
+        let due_too_early = bridge.db.list_due_operations(229).unwrap();
+        assert!(due_too_early.is_empty());
+        let due = bridge.db.list_due_operations(230).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempts, 1);
+        assert_eq!(
+            due[0].last_error.as_deref(),
+            Some("versioned upload worker pending encryption/session handoff")
+        );
     }
 
     #[test]
