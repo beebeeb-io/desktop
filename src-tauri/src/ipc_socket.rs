@@ -7,20 +7,50 @@ pub enum IpcRequest {
     GetFileStatus { file_id: String },
     SetFileStatus { file_id: String, status: String },
     HydrateFile { file_id: String, dest_path: String },
+    ListFileProviderItems { container_id: String },
     GetSyncSummary,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcResponse {
-    FileStatus { file_id: String, status: String },
+    FileStatus(FileProviderItemPayload),
+    FileProviderItems {
+        items: Vec<FileProviderItemPayload>,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     SyncSummary {
         syncing: u32,
         cloud_only: u32,
         conflicts: u32,
     },
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileProviderItemPayload {
+    pub identifier: String,
+    pub parent_identifier: String,
+    pub filename: String,
+    pub kind: String,
+    pub size_bytes: i64,
+    pub content_type: Option<String>,
+    pub status: String,
+    pub capabilities: u32,
+    pub version_identifier: Option<String>,
+}
+
+const FP_ROOT: &str = "__fp_root__";
+const FP_ROOT_APPLE: &str = "NSFileProviderRootContainerItemIdentifier";
+const NAMESPACE_MY_FILES: &str = "namespace:my_files";
+const NAMESPACE_SHARED_WITH_ME: &str = "namespace:shared_with_me";
+const NAMESPACE_OFFLINE: &str = "namespace:offline";
+const NAMESPACE_CONFLICTS: &str = "namespace:conflicts";
+const CAP_READ: u32 = 1 << 0;
+const CAP_WRITE: u32 = 1 << 1;
+const CAP_RENAME: u32 = 1 << 2;
+const CAP_DELETE: u32 = 1 << 3;
 
 pub fn ipc_socket_path() -> std::path::PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
@@ -62,33 +92,25 @@ async fn handle_connection(
         let req: IpcRequest = match serde_json::from_slice(&buf[..n]) {
             Ok(r) => r,
             Err(e) => {
-                let err = serde_json::to_vec(&IpcResponse::Error {
-                    message: e.to_string(),
-                })
-                .unwrap();
+                let err = serde_json::to_vec(&IpcResponse::Error { message: e.to_string() }).unwrap();
                 let _ = stream.write_all(&err).await;
                 continue;
             }
         };
         let resp = match req {
             IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
-                Ok(Some(e)) => IpcResponse::FileStatus {
-                    file_id: e.file_id,
-                    status: format!("{:?}", e.status).to_lowercase(),
-                },
+                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload(&e, NAMESPACE_MY_FILES)),
                 _ => IpcResponse::Error {
                     message: "not found".into(),
                 },
             },
+            IpcRequest::ListFileProviderItems { container_id } => IpcResponse::FileProviderItems {
+                items: list_file_provider_items(&db, &container_id),
+            },
             IpcRequest::HydrateFile { file_id, dest_path } => {
-                match bridge
-                    .hydrate_file(&file_id, std::path::Path::new(&dest_path))
-                    .await
-                {
+                match bridge.hydrate_file(&file_id, std::path::Path::new(&dest_path)).await {
                     Ok(_) => IpcResponse::Ok,
-                    Err(e) => IpcResponse::Error {
-                        message: e.to_string(),
-                    },
+                    Err(e) => IpcResponse::Error { message: e.to_string() },
                 }
             }
             IpcRequest::GetSyncSummary => {
@@ -114,4 +136,115 @@ async fn handle_connection(
         };
         let _ = stream.write_all(&serde_json::to_vec(&resp).unwrap()).await;
     }
+}
+
+fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -> Vec<FileProviderItemPayload> {
+    if is_file_provider_root(container_id) {
+        return vec![
+            namespace_payload(NAMESPACE_MY_FILES, "My files"),
+            namespace_payload(NAMESPACE_SHARED_WITH_ME, "Shared with me"),
+            namespace_payload(NAMESPACE_OFFLINE, "Offline"),
+            namespace_payload(NAMESPACE_CONFLICTS, "Conflicts"),
+        ];
+    }
+
+    match container_id {
+        NAMESPACE_MY_FILES => db
+            .list_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| is_top_level_path(&entry.path))
+            .map(|entry| file_entry_payload(&entry, NAMESPACE_MY_FILES))
+            .collect(),
+        NAMESPACE_OFFLINE => db
+            .list_by_status(crate::state_db::FileStatus::Local)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| file_entry_payload(&entry, NAMESPACE_OFFLINE))
+            .collect(),
+        NAMESPACE_CONFLICTS => db
+            .list_by_status(crate::state_db::FileStatus::Conflict)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| file_entry_payload(&entry, NAMESPACE_CONFLICTS))
+            .collect(),
+        NAMESPACE_SHARED_WITH_ME => Vec::new(),
+        _ => Vec::new(),
+    }
+}
+
+fn namespace_payload(identifier: &str, filename: &str) -> FileProviderItemPayload {
+    FileProviderItemPayload {
+        identifier: identifier.to_string(),
+        parent_identifier: FP_ROOT_APPLE.to_string(),
+        filename: filename.to_string(),
+        kind: "namespace".to_string(),
+        size_bytes: 0,
+        content_type: Some("public.folder".to_string()),
+        status: "local".to_string(),
+        capabilities: CAP_READ,
+        version_identifier: None,
+    }
+}
+
+fn is_file_provider_root(container_id: &str) -> bool {
+    container_id == FP_ROOT
+        || container_id == FP_ROOT_APPLE
+        || container_id == "rootContainer"
+        || container_id.is_empty()
+        || container_id.to_ascii_lowercase().contains("root")
+}
+
+fn file_entry_payload(entry: &crate::state_db::FileEntry, parent_identifier: &str) -> FileProviderItemPayload {
+    let status = file_status_string(&entry.status);
+    let capabilities = match entry.status {
+        crate::state_db::FileStatus::CloudOnly
+        | crate::state_db::FileStatus::Downloading
+        | crate::state_db::FileStatus::Error => CAP_READ,
+        crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
+        crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
+            CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
+        }
+    };
+
+    FileProviderItemPayload {
+        identifier: entry.file_id.clone(),
+        parent_identifier: parent_identifier.to_string(),
+        filename: filename_from_path(&entry.path),
+        kind: "file".to_string(),
+        size_bytes: entry.size_bytes,
+        content_type: None,
+        status: status.to_string(),
+        capabilities,
+        version_identifier: Some(format!(
+            "{}:{}:{}",
+            entry.remote_updated_at, entry.modified_at, entry.size_bytes
+        )),
+    }
+}
+
+fn file_status_string(status: &crate::state_db::FileStatus) -> &'static str {
+    match status {
+        crate::state_db::FileStatus::CloudOnly => "cloud_only",
+        crate::state_db::FileStatus::Downloading => "downloading",
+        crate::state_db::FileStatus::Local => "local",
+        crate::state_db::FileStatus::Uploading => "uploading",
+        crate::state_db::FileStatus::Conflict => "conflict",
+        crate::state_db::FileStatus::Error => "error",
+    }
+}
+
+fn filename_from_path(path: &str) -> String {
+    let trimmed = path.trim_matches('/');
+    trimmed
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn is_top_level_path(path: &str) -> bool {
+    let trimmed = path.trim_matches('/');
+    !trimmed.is_empty() && !trimmed.contains('/')
 }

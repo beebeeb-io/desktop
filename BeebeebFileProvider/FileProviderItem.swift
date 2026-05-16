@@ -1,81 +1,131 @@
-// FileProviderItem.swift
-//
-// SCAFFOLD STATUS: this file is the plan's exact code (per spec
-// 2026-05-07-desktop-sync-client.md Phase 2 Task 5). Outside an Xcode
-// extension target it is NOT expected to compile — the legacy
-// `NSFileProviderItem` protocol's `typeIdentifier` and `isTrashed`
-// properties were removed/renamed (`contentType: UTType`,
-// `isTrashed -> presence in trash domain`) in newer macOS SDKs (12+).
-// Whoever finalises the Xcode target setup should pick one of:
-//
-//   1. Set the extension's deployment target to macOS 11 (Big Sur) or
-//      lower, where the legacy properties still exist.
-//   2. Migrate to the modern `NSFileProviderReplicatedExtension` API +
-//      `contentType: UTType` — preferred long-term, ~30 LOC of changes.
-//
-// For Phase 2 Task 5 ("scaffold"), this captures the design intent:
-// per-file metadata wrapper, capabilities split by isLocal status,
-// shared/uploaded flags reserved for future sharing UX. Refactor to the
-// real SDK once the .xcodeproj is wired up and the deployment target is
-// chosen.
-//
-// Per-file metadata wrapper for the macOS File Provider extension.
-// Each `NSFileProviderItem` describes one entry the system might
-// surface in Finder — the filename Finder displays, the size shown
-// in Get-Info, the capabilities (can the user write? rename? delete?),
-// and the badge state (uploading / downloaded / shared).
-//
-// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md
-// Phase 2 Task 5.
-//
-// ## Capabilities policy
-//
-// - **Cloud-only files** (`isLocal == false`): read-only. Finder shows
-//   the placeholder; double-clicking triggers `fetchContents` on the
-//   extension which calls into the Rust daemon to hydrate.
-// - **Local files** (`isLocal == true`): full read+write+rename+delete.
-//   The Rust daemon owns the upload-on-change logic; the extension
-//   just hands modified content back.
-//
-// Forward-compat fields (`isShared`, etc.) are pinned to constants for
-// the v1 scaffold. They become dynamic when sharing UX lands.
-
 import FileProvider
+import Foundation
+import UniformTypeIdentifiers
 
-class FileProviderItem: NSObject, NSFileProviderItem {
-    let itemIdentifier: NSFileProviderItemIdentifier
+enum BeebeebItemKind: String, Codable {
+    case namespace
+    case folder
+    case file
+}
+
+enum BeebeebNamespace: String, CaseIterable {
+    case myFiles = "my_files"
+    case sharedWithMe = "shared_with_me"
+    case offline
+    case conflicts
+
+    var identifier: NSFileProviderItemIdentifier {
+        NSFileProviderItemIdentifier("namespace:\(rawValue)")
+    }
+
+    var displayName: String {
+        switch self {
+        case .myFiles: return "My files"
+        case .sharedWithMe: return "Shared with me"
+        case .offline: return "Offline"
+        case .conflicts: return "Conflicts"
+        }
+    }
+}
+
+struct BeebeebProviderItem: Codable {
+    let identifier: String
+    let parentIdentifier: String
     let filename: String
-    let typeIdentifier: String
-    let capabilities: NSFileProviderItemCapabilities
-    let documentSize: NSNumber?
-    let isTrashed: Bool = false
-    let isUploaded: Bool
-    let isDownloaded: Bool
-    let isShared: Bool = false
+    let kind: BeebeebItemKind
+    let sizeBytes: Int64
+    let contentType: String?
+    let status: String
+    let capabilities: Int
+    let versionIdentifier: String?
 
-    /// `fileId`  — server-side UUID. Maps 1:1 to `files.file_id` in the
-    ///             Rust state DB.
-    /// `name`    — decrypted filename. Already decoded by the daemon
-    ///             before being handed to the extension; the extension
-    ///             never sees ciphertext.
-    /// `size`    — plaintext byte count. Finder uses this for the size
-    ///             column even before hydration.
-    /// `isLocal` — `true` once `state == "local"` in the state DB; the
-    ///             daemon flips it after a successful download or
-    ///             upload completion.
-    /// `mimeType`— used to derive a UTI for Finder. Pass `nil` to fall
-    ///             back to `public.data` (a generic binary blob); the
-    ///             daemon should pass `application/pdf` etc. when known.
-    init(fileId: String, name: String, size: Int64, isLocal: Bool, mimeType: String?) {
-        self.itemIdentifier = NSFileProviderItemIdentifier(fileId)
-        self.filename = name
-        self.typeIdentifier = mimeType ?? "public.data"
-        self.documentSize = NSNumber(value: size)
-        self.isUploaded = true       // file exists on the server
-        self.isDownloaded = isLocal  // file exists locally
-        self.capabilities = isLocal
-            ? [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming]
-            : [.allowsReading]
+    static let read = 1 << 0
+    static let write = 1 << 1
+    static let rename = 1 << 2
+    static let delete = 1 << 3
+
+    static func namespace(_ namespace: BeebeebNamespace) -> BeebeebProviderItem {
+        BeebeebProviderItem(
+            identifier: namespace.identifier.rawValue,
+            parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue,
+            filename: namespace.displayName,
+            kind: .namespace,
+            sizeBytes: 0,
+            contentType: UTType.folder.identifier,
+            status: "local",
+            capabilities: read,
+            versionIdentifier: nil
+        )
+    }
+}
+
+final class FileProviderItem: NSObject, NSFileProviderItem {
+    let model: BeebeebProviderItem
+
+    init(model: BeebeebProviderItem) {
+        self.model = model
         super.init()
+    }
+
+    var itemIdentifier: NSFileProviderItemIdentifier {
+        NSFileProviderItemIdentifier(model.identifier)
+    }
+
+    var parentItemIdentifier: NSFileProviderItemIdentifier {
+        NSFileProviderItemIdentifier(model.parentIdentifier)
+    }
+
+    var filename: String {
+        model.filename
+    }
+
+    var contentType: UTType {
+        if model.kind == .namespace || model.kind == .folder {
+            return .folder
+        }
+        if let raw = model.contentType, let type = UTType(raw) {
+            return type
+        }
+        return .data
+    }
+
+    var documentSize: NSNumber? {
+        model.kind == .file ? NSNumber(value: model.sizeBytes) : nil
+    }
+
+    var childItemCount: NSNumber? {
+        model.kind == .file ? nil : NSNumber(value: 0)
+    }
+
+    var itemVersion: NSFileProviderItemVersion {
+        let version = model.versionIdentifier ?? "\(model.status):\(model.sizeBytes)"
+        let data = Data(version.utf8)
+        return NSFileProviderItemVersion(contentVersion: data, metadataVersion: data)
+    }
+
+    var isUploaded: Bool {
+        true
+    }
+
+    var isDownloaded: Bool {
+        model.kind != .file || model.status == "local"
+    }
+
+    var isMostRecentVersionDownloaded: Bool {
+        isDownloaded
+    }
+
+    var capabilities: NSFileProviderItemCapabilities {
+        var result: NSFileProviderItemCapabilities = [.allowsReading]
+        if model.capabilities & BeebeebProviderItem.write != 0 {
+            result.insert(.allowsWriting)
+        }
+        if model.capabilities & BeebeebProviderItem.rename != 0 {
+            result.insert(.allowsRenaming)
+        }
+        if model.capabilities & BeebeebProviderItem.delete != 0 {
+            result.insert(.allowsDeleting)
+        }
+        return result
     }
 }

@@ -1,92 +1,159 @@
-// FileProviderExtension.swift
-//
-// SCAFFOLD STATUS: see FileProviderItem.swift. Same caveat applies —
-// `NSFileProviderExtension` is deprecated in macOS 11+; modern code
-// should subclass `NSFileProviderReplicatedExtension`. Plan code kept
-// verbatim so the design intent is on disk; Xcode-target setup will
-// either pin the deployment target to macOS 10.15 (where this compiles
-// as-is) or migrate to the replicated extension API.
-//
-// Apple-side entry point of the BeebeebFileProvider extension. Registered
-// via Info.plist's `NSExtensionPrincipalClass = $(PRODUCT_MODULE_NAME).FileProviderExtension`.
-//
-// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md
-// Phase 2 Task 5.
-//
-// ## Lifecycle
-//
-// macOS spawns this process when Finder needs metadata or content for a
-// file in the Beebeeb domain. We don't own a long-running connection —
-// `XPCBridge.sendRequest` opens a new Unix socket connection to the Rust
-// daemon for each call. The daemon owns the durable state (state.db,
-// the actual encrypted blobs); the extension is a thin shim that
-// translates Apple File Provider callbacks into JSON requests.
-//
-// ## Threading
-//
-// The completion handlers must be called on whatever queue Apple
-// delivered the request on. We rely on `XPCBridge` doing its socket
-// I/O synchronously — that's fine for a v1 scaffold; if hydration takes
-// minutes, Apple will simply mark the file as "still loading" without
-// blocking Finder's UI thread.
-
 import FileProvider
+import Foundation
 
-class FileProviderExtension: NSFileProviderExtension {
+final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private let ipc = XPCBridge()
+    private let domain: NSFileProviderDomain
 
-    /// Apple asks "tell me about this item" — usually before showing it
-    /// in Finder, populating Get-Info, or deciding whether the user can
-    /// drag it.
-    override func item(
+    required init(domain: NSFileProviderDomain) {
+        self.domain = domain
+        super.init()
+    }
+
+    func item(
         for identifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        do {
+            let model: BeebeebProviderItem
+            if let namespace = BeebeebNamespace.allCases.first(where: { $0.identifier == identifier }) {
+                model = .namespace(namespace)
+            } else {
+                model = try ipc.item(identifier: identifier)
+            }
+            completionHandler(FileProviderItem(model: model), nil)
+        } catch {
+            completionHandler(nil, error)
+        }
+        progress.completedUnitCount = 1
+        return progress
+    }
+
+    func enumerator(
+        for containerItemIdentifier: NSFileProviderItemIdentifier,
+        request: NSFileProviderRequest
+    ) throws -> NSFileProviderEnumerator {
+        FileProviderEnumerator(containerIdentifier: containerItemIdentifier, ipc: ipc)
+    }
+
+    func fetchContents(
+        for itemIdentifier: NSFileProviderItemIdentifier,
+        version requestedVersion: NSFileProviderItemVersion?,
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        let destinationURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(itemIdentifier.rawValue)
+
+        do {
+            try ipc.hydrateFile(itemIdentifier: itemIdentifier, destinationURL: destinationURL)
+            let model = try ipc.item(identifier: itemIdentifier)
+            completionHandler(destinationURL, FileProviderItem(model: model), nil)
+        } catch {
+            completionHandler(nil, nil, error)
+        }
+
+        progress.completedUnitCount = 1
+        return progress
+    }
+
+    func createItem(
+        basedOn itemTemplate: NSFileProviderItem,
+        fields: NSFileProviderItemFields,
+        contents url: URL?,
+        options: NSFileProviderCreateItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> Progress {
+        unsupportedWrite(completionHandler: completionHandler)
+    }
+
+    func modifyItem(
+        _ item: NSFileProviderItem,
+        baseVersion version: NSFileProviderItemVersion,
+        changedFields: NSFileProviderItemFields,
+        contents newContents: URL?,
+        options: NSFileProviderModifyItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> Progress {
+        unsupportedWrite(completionHandler: completionHandler)
+    }
+
+    func deleteItem(
+        identifier: NSFileProviderItemIdentifier,
+        baseVersion version: NSFileProviderItemVersion,
+        options: NSFileProviderDeleteItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        completionHandler(BeebeebIPCError.invalidResponse("Finder writes are not wired yet."))
+        progress.completedUnitCount = 1
+        return progress
+    }
+
+    func invalidate() {
+        _ = domain
+    }
+
+    private func unsupportedWrite(
+        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        completionHandler(nil, [], false, BeebeebIPCError.invalidResponse("Finder writes are not wired yet."))
+        progress.completedUnitCount = 1
+        return progress
+    }
+}
+
+final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
+    private let containerIdentifier: NSFileProviderItemIdentifier
+    private let ipc: XPCBridge
+
+    init(containerIdentifier: NSFileProviderItemIdentifier, ipc: XPCBridge) {
+        self.containerIdentifier = containerIdentifier
+        self.ipc = ipc
+        super.init()
+    }
+
+    func invalidate() {}
+
+    func enumerateItems(
+        for observer: NSFileProviderEnumerationObserver,
+        startingAt page: NSFileProviderPage
     ) {
-        ipc.getFileStatus(fileId: identifier.rawValue) { status, name, size in
-            let isLocal = status == "local"
-            let item = FileProviderItem(
-                fileId: identifier.rawValue,
-                name: name ?? identifier.rawValue,
-                size: size,
-                isLocal: isLocal,
-                mimeType: nil
-            )
-            completionHandler(item, nil)
+        do {
+            let models: [BeebeebProviderItem]
+            if containerIdentifier == .rootContainer {
+                models = try ipc.enumerate(containerIdentifier: containerIdentifier)
+            } else if BeebeebNamespace.allCases.contains(where: { $0.identifier == containerIdentifier }) {
+                models = try ipc.enumerate(containerIdentifier: containerIdentifier)
+            } else {
+                models = try ipc.enumerate(containerIdentifier: containerIdentifier)
+            }
+
+            observer.didEnumerate(models.map(FileProviderItem.init(model:)))
+            observer.finishEnumerating(upTo: nil)
+        } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
+            observer.didEnumerate(BeebeebNamespace.allCases.map { FileProviderItem(model: .namespace($0)) })
+            observer.finishEnumerating(upTo: nil)
+        } catch {
+            observer.finishEnumeratingWithError(error)
         }
     }
 
-    /// Apple asks "deliver the file's contents now" — triggered when a
-    /// user double-clicks a cloud-only placeholder, or when Spotlight
-    /// indexes a file. We forward to the daemon's hydrate path; the
-    /// daemon writes plaintext to the temporary URL we picked, then we
-    /// hand that URL back to Apple along with refreshed metadata
-    /// reflecting the new `local` status.
-    override func fetchContents(
-        for itemVersion: NSFileProviderItemVersion,
-        request: NSFileProviderRequest,
-        completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
+    func enumerateChanges(
+        for observer: NSFileProviderChangeObserver,
+        from syncAnchor: NSFileProviderSyncAnchor
     ) {
-        let fileId = itemVersion.itemIdentifier.rawValue
-        let destURL = NSFileProviderManager.default.temporaryDirectoryURL()
-            .appendingPathComponent(fileId)
+        observer.finishEnumeratingChanges(upTo: NSFileProviderSyncAnchor(Data()), moreComing: false)
+    }
 
-        ipc.hydrateFile(fileId: fileId, destPath: destURL.path) { error in
-            if let error = error {
-                completionHandler(nil, nil, error)
-                return
-            }
-            self.ipc.getFileStatus(fileId: fileId) { status, name, size in
-                _ = status // suppress unused — we know it's "local" or the hydrate failed
-                let item = FileProviderItem(
-                    fileId: fileId,
-                    name: name ?? fileId,
-                    size: size,
-                    isLocal: true,
-                    mimeType: nil
-                )
-                completionHandler(destURL, item, nil)
-            }
-        }
+    func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
+        completionHandler(NSFileProviderSyncAnchor(Data()))
     }
 }
