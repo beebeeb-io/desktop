@@ -58,6 +58,110 @@ impl FileStatus {
     }
 }
 
+pub const PERMISSION_READ: i64 = 1 << 0;
+pub const PERMISSION_WRITE: i64 = 1 << 1;
+pub const PERMISSION_SHARE: i64 = 1 << 2;
+pub const PERMISSION_OWNER: i64 = 1 << 3;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Namespace {
+    MyFiles,
+    SharedWithMe,
+    Offline,
+    Conflicts,
+}
+
+impl Namespace {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Namespace::MyFiles => "my_files",
+            Namespace::SharedWithMe => "shared_with_me",
+            Namespace::Offline => "offline",
+            Namespace::Conflicts => "conflicts",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "shared_with_me" => Namespace::SharedWithMe,
+            "offline" => Namespace::Offline,
+            "conflicts" => Namespace::Conflicts,
+            _ => Namespace::MyFiles,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PinState {
+    Inherit,
+    Pinned,
+    Unpinned,
+}
+
+impl PinState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            PinState::Inherit => "inherit",
+            PinState::Pinned => "pinned",
+            PinState::Unpinned => "unpinned",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "pinned" => PinState::Pinned,
+            "unpinned" => PinState::Unpinned,
+            _ => PinState::Inherit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OperationKind {
+    HydrateFile,
+    PinTree,
+    UploadVersion,
+    UploadFile,
+    CreateFolder,
+    RenameFile,
+    MoveFile,
+    TrashFile,
+    RestoreFile,
+    RestoreVersion,
+}
+
+impl OperationKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            OperationKind::HydrateFile => "hydrate_file",
+            OperationKind::PinTree => "pin_tree",
+            OperationKind::UploadVersion => "upload_version",
+            OperationKind::UploadFile => "upload_file",
+            OperationKind::CreateFolder => "create_folder",
+            OperationKind::RenameFile => "rename_file",
+            OperationKind::MoveFile => "move_file",
+            OperationKind::TrashFile => "trash_file",
+            OperationKind::RestoreFile => "restore_file",
+            OperationKind::RestoreVersion => "restore_version",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "hydrate_file" => OperationKind::HydrateFile,
+            "pin_tree" => OperationKind::PinTree,
+            "upload_version" => OperationKind::UploadVersion,
+            "create_folder" => OperationKind::CreateFolder,
+            "rename_file" => OperationKind::RenameFile,
+            "move_file" => OperationKind::MoveFile,
+            "trash_file" => OperationKind::TrashFile,
+            "restore_file" => OperationKind::RestoreFile,
+            "restore_version" => OperationKind::RestoreVersion,
+            _ => OperationKind::UploadFile,
+        }
+    }
+}
+
 /// One row in the `files` table.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -86,6 +190,53 @@ pub struct FileEntry {
     /// successful sync re-anchors them, which is the safe direction
     /// (over-detect rather than miss a real conflict).
     pub remote_updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileContractState {
+    pub file_id: String,
+    pub namespace: Namespace,
+    pub parent_id: Option<String>,
+    pub shared_root_id: Option<String>,
+    pub share_id: Option<String>,
+    pub permission_bits: i64,
+    pub current_version: i64,
+    pub current_object_version_id: Option<String>,
+    pub local_base_version: i64,
+    pub local_hash: Option<String>,
+    pub cache_path: Option<String>,
+    pub cache_bytes: i64,
+    pub pin_state: PinState,
+    pub inherited_pin_state: PinState,
+    pub last_sync_at: i64,
+}
+
+impl FileContractState {
+    pub fn effective_pin_state(&self) -> PinState {
+        match self.pin_state {
+            PinState::Inherit => self.inherited_pin_state.clone(),
+            _ => self.pin_state.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingOperation {
+    pub op_id: String,
+    pub kind: OperationKind,
+    pub file_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub target_path: Option<String>,
+    pub metadata_json: Option<String>,
+    pub payload_path: Option<String>,
+    pub base_version: Option<i64>,
+    pub base_object_version_id: Option<String>,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub next_retry_at: i64,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// Owned handle to the local SQLite state database.
@@ -117,30 +268,69 @@ impl StateDb {
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 modified_at INTEGER NOT NULL DEFAULT 0,
                 content_hash TEXT,
-                remote_updated_at INTEGER NOT NULL DEFAULT 0
+                remote_updated_at INTEGER NOT NULL DEFAULT 0,
+                namespace TEXT NOT NULL DEFAULT 'my_files',
+                parent_id TEXT,
+                shared_root_id TEXT,
+                share_id TEXT,
+                permission_bits INTEGER NOT NULL DEFAULT 0,
+                current_version INTEGER NOT NULL DEFAULT 0,
+                current_object_version_id TEXT,
+                local_base_version INTEGER NOT NULL DEFAULT 0,
+                local_hash TEXT,
+                cache_path TEXT,
+                cache_bytes INTEGER NOT NULL DEFAULT 0,
+                pin_state TEXT NOT NULL DEFAULT 'inherit',
+                inherited_pin_state TEXT NOT NULL DEFAULT 'unpinned',
+                last_sync_at INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_status ON files(status);
+            CREATE TABLE IF NOT EXISTS operation_queue (
+                op_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                file_id TEXT,
+                parent_id TEXT,
+                target_path TEXT,
+                metadata_json TEXT,
+                payload_path TEXT,
+                base_version INTEGER,
+                base_object_version_id TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                next_retry_at INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_due ON operation_queue(next_retry_at, created_at);
         ",
         )?;
-        // Forward-migration for DBs created before `remote_updated_at`
-        // existed (Task 10). SQLite's `ALTER TABLE ... ADD COLUMN` has
-        // no `IF NOT EXISTS` clause, so we read pragma + only attempt
-        // the alter when the column is absent. Failures here are
-        // surfaced; the daemon is useless against a half-migrated DB.
-        let has_col = {
-            let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
-            let names: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(1))?
-                .filter_map(|r| r.ok())
-                .collect();
-            names.iter().any(|n| n == "remote_updated_at")
-        };
-        if !has_col {
-            conn.execute(
-                "ALTER TABLE files ADD COLUMN remote_updated_at INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
+        ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "namespace", "TEXT NOT NULL DEFAULT 'my_files'")?;
+        ensure_column(&conn, "files", "parent_id", "TEXT")?;
+        ensure_column(&conn, "files", "shared_root_id", "TEXT")?;
+        ensure_column(&conn, "files", "share_id", "TEXT")?;
+        ensure_column(&conn, "files", "permission_bits", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "current_version", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "current_object_version_id", "TEXT")?;
+        ensure_column(&conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "local_hash", "TEXT")?;
+        ensure_column(&conn, "files", "cache_path", "TEXT")?;
+        ensure_column(&conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
+        ensure_column(
+            &conn,
+            "files",
+            "inherited_pin_state",
+            "TEXT NOT NULL DEFAULT 'unpinned'",
+        )?;
+        ensure_column(&conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
+            CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
+            ",
+        )?;
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -273,6 +463,199 @@ impl StateDb {
         })?;
         rows.collect()
     }
+
+    pub fn set_file_contract_state(&self, state: &FileContractState) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET
+               namespace = ?2,
+               parent_id = ?3,
+               shared_root_id = ?4,
+               share_id = ?5,
+               permission_bits = ?6,
+               current_version = ?7,
+               current_object_version_id = ?8,
+               local_base_version = ?9,
+               local_hash = ?10,
+               cache_path = ?11,
+               cache_bytes = ?12,
+               pin_state = ?13,
+               inherited_pin_state = ?14,
+               last_sync_at = ?15
+             WHERE file_id = ?1",
+            params![
+                state.file_id,
+                state.namespace.as_str(),
+                state.parent_id,
+                state.shared_root_id,
+                state.share_id,
+                state.permission_bits,
+                state.current_version,
+                state.current_object_version_id,
+                state.local_base_version,
+                state.local_hash,
+                state.cache_path,
+                state.cache_bytes,
+                state.pin_state.as_str(),
+                state.inherited_pin_state.as_str(),
+                state.last_sync_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_file_contract_state(&self, file_id: &str) -> Result<Option<FileContractState>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
+                    current_version, current_object_version_id, local_base_version, local_hash,
+                    cache_path, cache_bytes, pin_state, inherited_pin_state, last_sync_at
+             FROM files WHERE file_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![file_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(FileContractState {
+                file_id: row.get(0)?,
+                namespace: Namespace::from_str(&row.get::<_, String>(1)?),
+                parent_id: row.get(2)?,
+                shared_root_id: row.get(3)?,
+                share_id: row.get(4)?,
+                permission_bits: row.get(5)?,
+                current_version: row.get(6)?,
+                current_object_version_id: row.get(7)?,
+                local_base_version: row.get(8)?,
+                local_hash: row.get(9)?,
+                cache_path: row.get(10)?,
+                cache_bytes: row.get(11)?,
+                pin_state: PinState::from_str(&row.get::<_, String>(12)?),
+                inherited_pin_state: PinState::from_str(&row.get::<_, String>(13)?),
+                last_sync_at: row.get(14)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO operation_queue (
+                op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+                base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+                last_error, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(op_id) DO UPDATE SET
+                kind = excluded.kind,
+                file_id = excluded.file_id,
+                parent_id = excluded.parent_id,
+                target_path = excluded.target_path,
+                metadata_json = excluded.metadata_json,
+                payload_path = excluded.payload_path,
+                base_version = excluded.base_version,
+                base_object_version_id = excluded.base_object_version_id,
+                attempts = excluded.attempts,
+                max_attempts = excluded.max_attempts,
+                next_retry_at = excluded.next_retry_at,
+                last_error = excluded.last_error,
+                updated_at = excluded.updated_at",
+            params![
+                op.op_id,
+                op.kind.as_str(),
+                op.file_id,
+                op.parent_id,
+                op.target_path,
+                op.metadata_json,
+                op.payload_path,
+                op.base_version,
+                op.base_object_version_id,
+                op.attempts,
+                op.max_attempts,
+                op.next_retry_at,
+                op.last_error,
+                op.created_at,
+                op.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_due_operations(&self, now: i64) -> Result<Vec<PendingOperation>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+                    base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+                    last_error, created_at, updated_at
+             FROM operation_queue
+             WHERE next_retry_at <= ?1 AND attempts < max_attempts
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            Ok(PendingOperation {
+                op_id: row.get(0)?,
+                kind: OperationKind::from_str(&row.get::<_, String>(1)?),
+                file_id: row.get(2)?,
+                parent_id: row.get(3)?,
+                target_path: row.get(4)?,
+                metadata_json: row.get(5)?,
+                payload_path: row.get(6)?,
+                base_version: row.get(7)?,
+                base_object_version_id: row.get(8)?,
+                attempts: row.get(9)?,
+                max_attempts: row.get(10)?,
+                next_retry_at: row.get(11)?,
+                last_error: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn record_operation_attempt(
+        &self,
+        op_id: &str,
+        attempts: i64,
+        next_retry_at: i64,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET attempts = ?2, next_retry_at = ?3, last_error = ?4, updated_at = ?3
+             WHERE op_id = ?1",
+            params![op_id, attempts, next_retry_at, last_error],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_operation(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        Ok(())
+    }
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    if !has_column(conn, table, column)? {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(names.iter().any(|n| n == column))
+}
+
+#[cfg(test)]
+fn has_table(conn: &Connection, table: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
+    let mut rows = stmt.query(params![table])?;
+    Ok(rows.next()?.is_some())
 }
 
 #[cfg(test)]
@@ -317,5 +700,144 @@ mod tests {
         let conflicts = db.list_by_status(FileStatus::Conflict).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].file_id, "x1");
+    }
+
+    #[test]
+    fn test_migrates_drive_contract_columns_and_operation_queue() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE files (
+                    file_id TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'cloud_only',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    modified_at INTEGER NOT NULL DEFAULT 0,
+                    content_hash TEXT
+                );
+                INSERT INTO files (file_id, path, status)
+                VALUES ('legacy', '/legacy.txt', 'local');
+                ",
+            )
+            .unwrap();
+        }
+
+        let db = StateDb::open(&path).unwrap();
+        let conn = db.0.lock().expect("state_db mutex poisoned");
+        for column in [
+            "remote_updated_at",
+            "namespace",
+            "parent_id",
+            "shared_root_id",
+            "share_id",
+            "permission_bits",
+            "current_version",
+            "current_object_version_id",
+            "local_base_version",
+            "local_hash",
+            "cache_path",
+            "cache_bytes",
+            "pin_state",
+            "inherited_pin_state",
+            "last_sync_at",
+        ] {
+            assert!(has_column(&conn, "files", column).unwrap(), "missing {column}");
+        }
+        assert!(has_table(&conn, "operation_queue").unwrap());
+
+        let row: (String, i64, String) = conn
+            .query_row(
+                "SELECT namespace, permission_bits, pin_state FROM files WHERE file_id = 'legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("my_files".into(), 0, "inherit".into()));
+    }
+
+    #[test]
+    fn test_persists_drive_contract_state() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "file1".into(),
+            path: "/Shared/report.pdf".into(),
+            status: FileStatus::Local,
+            size_bytes: 2048,
+            modified_at: 10,
+            content_hash: Some("remote-hash".into()),
+            remote_updated_at: 11,
+        })
+        .unwrap();
+
+        let contract = FileContractState {
+            file_id: "file1".into(),
+            namespace: Namespace::SharedWithMe,
+            parent_id: Some("parent1".into()),
+            shared_root_id: Some("root1".into()),
+            share_id: Some("share1".into()),
+            permission_bits: PERMISSION_READ | PERMISSION_WRITE,
+            current_version: 7,
+            current_object_version_id: Some("object7".into()),
+            local_base_version: 6,
+            local_hash: Some("local-hash".into()),
+            cache_path: Some("/tmp/beebeeb-cache/file1".into()),
+            cache_bytes: 2048,
+            pin_state: PinState::Inherit,
+            inherited_pin_state: PinState::Pinned,
+            last_sync_at: 1234,
+        };
+        db.set_file_contract_state(&contract).unwrap();
+
+        let got = db.get_file_contract_state("file1").unwrap().unwrap();
+        assert_eq!(got.namespace, Namespace::SharedWithMe);
+        assert_eq!(got.shared_root_id.as_deref(), Some("root1"));
+        assert_eq!(got.share_id.as_deref(), Some("share1"));
+        assert_eq!(got.permission_bits, PERMISSION_READ | PERMISSION_WRITE);
+        assert_eq!(got.current_version, 7);
+        assert_eq!(got.current_object_version_id.as_deref(), Some("object7"));
+        assert_eq!(got.local_base_version, 6);
+        assert_eq!(got.local_hash.as_deref(), Some("local-hash"));
+        assert_eq!(got.cache_path.as_deref(), Some("/tmp/beebeeb-cache/file1"));
+        assert_eq!(got.cache_bytes, 2048);
+        assert_eq!(got.effective_pin_state(), PinState::Pinned);
+    }
+
+    #[test]
+    fn test_operation_queue_persists_retry_state() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let op = PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("file1".into()),
+            parent_id: Some("parent1".into()),
+            target_path: Some("/report.pdf".into()),
+            metadata_json: Some(r#"{"name":"encrypted"}"#.into()),
+            payload_path: Some("/tmp/payload".into()),
+            base_version: Some(3),
+            base_object_version_id: Some("object3".into()),
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            created_at: 100,
+            updated_at: 100,
+        };
+        db.enqueue_operation(&op).unwrap();
+
+        db.record_operation_attempt("op-1", 2, 300, Some("timeout")).unwrap();
+        let queued = db.list_due_operations(301).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, OperationKind::UploadVersion);
+        assert_eq!(queued[0].attempts, 2);
+        assert_eq!(queued[0].next_retry_at, 300);
+        assert_eq!(queued[0].last_error.as_deref(), Some("timeout"));
+
+        db.remove_operation("op-1").unwrap();
+        assert!(db.list_due_operations(999).unwrap().is_empty());
     }
 }
