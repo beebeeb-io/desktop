@@ -38,7 +38,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::api_client::ApiClient;
 use crate::conflict::{VersionInfo, is_conflict, is_text_file};
-use crate::state_db::{FileEntry, FileStatus, OperationKind, PendingOperation, StateDb};
+use crate::state_db::{
+    FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PERMISSION_READ, PERMISSION_SHARE,
+    PERMISSION_WRITE, PendingOperation, StateDb,
+};
 
 // ── Per-file state machine ────────────────────────────────────────────────────
 
@@ -157,6 +160,25 @@ pub struct CacheCleanupOutcome {
     pub evicted_file_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedRootRefreshOutcome {
+    pub active_shared_root_ids: Vec<String>,
+    pub removed_shared_file_ids: Vec<String>,
+    pub removed_cache_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SharedRootMapping {
+    invite_id: String,
+    file_id: String,
+    display_name: String,
+    is_folder: bool,
+    size_bytes: i64,
+    content_type: Option<String>,
+    permission_bits: i64,
+    approved_at: Option<i64>,
+}
+
 impl EngineBridge {
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
         Self { db, api }
@@ -174,6 +196,64 @@ impl EngineBridge {
         &self.api
     }
 
+    pub async fn refresh_shared_roots(&self) -> anyhow::Result<SharedRootRefreshOutcome> {
+        let body = self.api.list_shared_roots().await?;
+        let roots = shared_roots_from_invite_response(&body);
+        let active_shared_root_ids: Vec<String> = roots.iter().map(|root| root.file_id.clone()).collect();
+        let now = now_secs();
+
+        for root in &roots {
+            self.db.upsert_file(&FileEntry {
+                file_id: root.file_id.clone(),
+                path: format!("Shared with me/{}", root.display_name),
+                status: FileStatus::CloudOnly,
+                size_bytes: root.size_bytes,
+                modified_at: root.approved_at.unwrap_or(now),
+                content_hash: None,
+                remote_updated_at: root.approved_at.unwrap_or(0),
+            })?;
+
+            let mut contract = self
+                .db
+                .get_file_contract_state(&root.file_id)?
+                .ok_or_else(|| anyhow::anyhow!("missing state row for shared root {}", root.file_id))?;
+            contract.namespace = Namespace::SharedWithMe;
+            contract.parent_id = None;
+            contract.shared_root_id = Some(root.file_id.clone());
+            contract.share_id = Some(root.invite_id.clone());
+            contract.permission_bits = root.permission_bits;
+            contract.item_kind = if root.is_folder {
+                ItemKind::Folder
+            } else {
+                ItemKind::File
+            };
+            contract.content_type = root.content_type.clone();
+            contract.last_sync_at = now;
+            self.db.set_file_contract_state(&contract)?;
+        }
+
+        let removed = self.db.purge_revoked_shared_content(&active_shared_root_ids)?;
+        let mut removed_shared_file_ids = Vec::new();
+        let mut removed_cache_paths = Vec::new();
+        for cache in removed {
+            removed_shared_file_ids.push(cache.file_id);
+            if let Some(path) = cache.cache_path {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(path = %path, error = %e, "failed to remove revoked shared cache file");
+                    }
+                }
+                removed_cache_paths.push(path);
+            }
+        }
+
+        Ok(SharedRootRefreshOutcome {
+            active_shared_root_ids,
+            removed_shared_file_ids,
+            removed_cache_paths,
+        })
+    }
+
     pub fn queue_finder_create(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
         if is_ignored_finder_name(&target.filename) {
             return Ok(FinderWriteOutcome::Ignored {
@@ -181,19 +261,22 @@ impl EngineBridge {
             });
         }
 
+        let parent_contract = self.ensure_shared_parent_allows_write(target.parent_id.as_deref())?;
         let file_id = uuid::Uuid::new_v4().to_string();
         match target.kind {
             FinderWriteItemKind::Folder => {
                 let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                let mut payload = serde_json::json!({
+                    "operation": "create_folder",
+                    "name_encrypted": metadata,
+                });
+                apply_shared_context(&mut payload, parent_contract.as_ref());
                 self.enqueue_finder_operation(
                     OperationKind::CreateFolder,
                     Some(file_id),
                     target.parent_id,
                     Some(target.filename),
-                    serde_json::json!({
-                        "operation": "create_folder",
-                        "name_encrypted": metadata,
-                    }),
+                    payload,
                     None,
                     None,
                     None,
@@ -221,16 +304,19 @@ impl EngineBridge {
                     content_hash: None,
                     remote_updated_at: 0,
                 })?;
+                let mut payload = serde_json::json!({
+                    "operation": "create_file",
+                    "name_encrypted": name_encrypted,
+                    "content_type": target.content_type,
+                    "uploaded_by": "authenticated_desktop_user",
+                });
+                apply_shared_context(&mut payload, parent_contract.as_ref());
                 self.enqueue_finder_operation(
                     OperationKind::UploadVersion,
                     Some(file_id),
                     target.parent_id,
                     Some(target.filename),
-                    serde_json::json!({
-                        "operation": "create_file",
-                        "name_encrypted": name_encrypted,
-                        "content_type": target.content_type,
-                    }),
+                    payload,
                     Some(staged_path),
                     None,
                     None,
@@ -250,6 +336,7 @@ impl EngineBridge {
             .file_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Finder modify callback did not include a file id"))?;
+        let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
 
         if let Some(contents_path) = target.contents_path.as_deref() {
             let staged_path = stage_finder_payload(contents_path)?;
@@ -260,21 +347,26 @@ impl EngineBridge {
                 .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
             let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
             self.db.set_status(&file_id, FileStatus::Uploading)?;
+            let mut payload = serde_json::json!({
+                "operation": "upload_version",
+                "name_encrypted": name_encrypted,
+                "content_type": target.content_type,
+                "size_bytes": size_bytes,
+                "base_version_identifier": target.base_version_identifier,
+                "uploaded_by": "authenticated_desktop_user",
+            });
+            apply_shared_context(&mut payload, item_contract.as_ref());
             self.enqueue_finder_operation(
                 OperationKind::UploadVersion,
                 Some(file_id),
                 target.parent_id,
                 Some(target.filename),
-                serde_json::json!({
-                    "operation": "upload_version",
-                    "name_encrypted": name_encrypted,
-                    "content_type": target.content_type,
-                    "size_bytes": size_bytes,
-                    "base_version_identifier": target.base_version_identifier,
-                }),
+                payload,
                 Some(staged_path),
                 parse_base_version_number(target.base_version_identifier.as_deref()),
-                None,
+                item_contract
+                    .as_ref()
+                    .and_then(|contract| contract.current_object_version_id.clone()),
             )
         } else {
             let name_encrypted = encrypted_metadata_for_name(
@@ -288,19 +380,23 @@ impl EngineBridge {
             } else {
                 OperationKind::RenameFile
             };
+            let mut payload = serde_json::json!({
+                "operation": "metadata_update",
+                "name_encrypted": name_encrypted,
+                "base_version_identifier": target.base_version_identifier,
+            });
+            apply_shared_context(&mut payload, item_contract.as_ref());
             self.enqueue_finder_operation(
                 kind,
                 Some(file_id),
                 target.parent_id,
                 Some(target.filename),
-                serde_json::json!({
-                    "operation": "metadata_update",
-                    "name_encrypted": name_encrypted,
-                    "base_version_identifier": target.base_version_identifier,
-                }),
+                payload,
                 None,
                 None,
-                None,
+                item_contract
+                    .as_ref()
+                    .and_then(|contract| contract.current_object_version_id.clone()),
             )
         }
     }
@@ -310,18 +406,23 @@ impl EngineBridge {
         file_id: &str,
         base_version_identifier: Option<String>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        let item_contract = self.ensure_item_allows_shared_write(file_id, "delete")?;
+        let mut payload = serde_json::json!({
+            "operation": "trash",
+            "base_version_identifier": base_version_identifier,
+        });
+        apply_shared_context(&mut payload, item_contract.as_ref());
         self.enqueue_finder_operation(
             OperationKind::TrashFile,
             Some(file_id.to_string()),
             None,
             None,
-            serde_json::json!({
-                "operation": "trash",
-                "base_version_identifier": base_version_identifier,
-            }),
+            payload,
             None,
             parse_base_version_number(base_version_identifier.as_deref()),
-            None,
+            item_contract
+                .as_ref()
+                .and_then(|contract| contract.current_object_version_id.clone()),
         )
     }
 
@@ -469,6 +570,42 @@ impl EngineBridge {
         };
         self.db.enqueue_operation(&op)?;
         Ok(())
+    }
+
+    fn ensure_shared_parent_allows_write(&self, parent_id: Option<&str>) -> anyhow::Result<Option<FileContractState>> {
+        let Some(parent_id) = parent_id else {
+            return Ok(None);
+        };
+        if parent_id == "namespace:shared_with_me" {
+            return Err(anyhow::anyhow!(
+                "Shared with me is read-only at the namespace root; open an editable shared folder first"
+            ));
+        }
+        let Some(contract) = self.db.get_file_contract_state(parent_id)? else {
+            return Ok(None);
+        };
+        if contract.is_shared() && !contract.can_write() {
+            return Err(anyhow::anyhow!(
+                "read-only shared folder cannot accept new Finder items"
+            ));
+        }
+        Ok(Some(contract).filter(|contract| contract.is_shared()))
+    }
+
+    fn ensure_item_allows_shared_write(
+        &self,
+        file_id: &str,
+        operation: &str,
+    ) -> anyhow::Result<Option<FileContractState>> {
+        let Some(contract) = self.db.get_file_contract_state(file_id)? else {
+            return Ok(None);
+        };
+        if contract.is_shared() && !contract.can_write() {
+            return Err(anyhow::anyhow!(
+                "read-only shared item cannot be changed from Finder during {operation}"
+            ));
+        }
+        Ok(Some(contract).filter(|contract| contract.is_shared()))
     }
 
     /// Download `file_id` from the vault, decrypt, write to `dest_path`.
@@ -777,6 +914,103 @@ fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
             .and_then(|part| part.parse::<i64>().ok())
             .filter(|version| *version > 0)
     })
+}
+
+fn shared_roots_from_invite_response(body: &serde_json::Value) -> Vec<SharedRootMapping> {
+    body.get("invites")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(shared_root_from_invite)
+        .collect()
+}
+
+fn shared_root_from_invite(invite: &serde_json::Value) -> Option<SharedRootMapping> {
+    if invite.get("status").and_then(|value| value.as_str()) != Some("approved") {
+        return None;
+    }
+
+    let invite_id = string_field(invite, &["id", "invite_id"])?;
+    let file_id = string_field(invite, &["file_id"])?;
+    let display_name = string_field(
+        invite,
+        &["display_name", "decrypted_name", "filename", "file_name", "name"],
+    )
+    .unwrap_or_else(|| format!("Shared item {}", file_id.chars().take(8).collect::<String>()));
+    let is_folder = invite
+        .get("is_folder_share")
+        .and_then(|value| value.as_bool())
+        .or_else(|| invite.get("is_folder").and_then(|value| value.as_bool()))
+        .unwrap_or(false);
+    let content_type = string_field(invite, &["mime_type", "content_type"]);
+    let size_bytes = invite.get("size_bytes").and_then(|value| value.as_i64()).unwrap_or(0);
+    let mut permission_bits = PERMISSION_READ;
+    if invite
+        .get("can_reshare")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        permission_bits |= PERMISSION_SHARE;
+    }
+    if shared_invite_allows_write(invite) {
+        permission_bits |= PERMISSION_WRITE;
+    }
+
+    Some(SharedRootMapping {
+        invite_id,
+        file_id,
+        display_name,
+        is_folder,
+        size_bytes,
+        content_type,
+        permission_bits,
+        approved_at: invite
+            .get("approved_at")
+            .and_then(|value| value.as_str())
+            .and_then(parse_rfc3339_secs),
+    })
+}
+
+fn shared_invite_allows_write(invite: &serde_json::Value) -> bool {
+    if ["can_write", "can_edit", "editable"]
+        .iter()
+        .any(|key| invite.get(*key).and_then(|value| value.as_bool()).unwrap_or(false))
+    {
+        return true;
+    }
+    ["permission", "permissions", "role", "access"]
+        .iter()
+        .filter_map(|key| invite.get(*key).and_then(|value| value.as_str()))
+        .any(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "write" | "edit" | "editable" | "editor" | "admin" | "owner"
+            )
+        })
+}
+
+fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(*key).and_then(|field| field.as_str()))
+        .map(str::trim)
+        .find(|field| !field.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_rfc3339_secs(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+fn apply_shared_context(metadata: &mut serde_json::Value, contract: Option<&FileContractState>) {
+    let Some(contract) = contract else {
+        return;
+    };
+    metadata["shared_root_id"] = serde_json::json!(contract.shared_root_id);
+    metadata["share_id"] = serde_json::json!(contract.share_id);
+    metadata["permission_bits"] = serde_json::json!(contract.permission_bits);
+    metadata["uploaded_by"] = serde_json::json!("authenticated_desktop_user");
 }
 
 fn now_secs() -> i64 {
@@ -1149,6 +1383,113 @@ mod tests {
 
         assert_eq!(evicted.evicted_file_ids, vec!["unpinned".to_string()]);
         assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
+    }
+
+    #[test]
+    fn test_shared_invite_mapping_filters_approved_and_permissions() {
+        let body = serde_json::json!({
+            "invites": [
+                {
+                    "id": "invite-read",
+                    "file_id": "root-read",
+                    "status": "approved",
+                    "display_name": "Client dropbox",
+                    "is_folder_share": true,
+                    "can_reshare": true
+                },
+                {
+                    "id": "invite-write",
+                    "file_id": "root-write",
+                    "status": "approved",
+                    "decrypted_name": "Editorial",
+                    "is_folder": true,
+                    "permission": "write"
+                },
+                {
+                    "id": "invite-pending",
+                    "file_id": "root-pending",
+                    "status": "claimed"
+                }
+            ]
+        });
+
+        let roots = shared_roots_from_invite_response(&body);
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].display_name, "Client dropbox");
+        assert_eq!(roots[0].permission_bits, PERMISSION_READ | PERMISSION_SHARE);
+        assert_eq!(roots[1].permission_bits, PERMISSION_READ | PERMISSION_WRITE);
+    }
+
+    #[test]
+    fn test_read_only_shared_item_rejects_finder_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(
+            &bridge,
+            "shared-readonly",
+            "/Shared with me/Readonly.txt",
+            None,
+            FileStatus::Local,
+            100,
+        );
+        let mut contract = bridge.db.get_file_contract_state("shared-readonly").unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("shared-readonly".into());
+        contract.share_id = Some("invite-1".into());
+        contract.permission_bits = PERMISSION_READ;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+
+        let err = bridge
+            .queue_finder_delete("shared-readonly", Some("1:1:100".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("read-only shared item"));
+        assert!(bridge.db.list_due_operations(now_secs()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_editable_shared_write_queues_actor_and_share_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("shared.txt");
+        std::fs::write(&source, b"shared payload").unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(
+            &bridge,
+            "shared-editable",
+            "/Shared with me/Editable.txt",
+            None,
+            FileStatus::Local,
+            100,
+        );
+        let mut contract = bridge.db.get_file_contract_state("shared-editable").unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("shared-root".into());
+        contract.share_id = Some("invite-2".into());
+        contract.permission_bits = PERMISSION_READ | PERMISSION_WRITE;
+        contract.current_object_version_id = Some("object-1".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+
+        bridge
+            .queue_finder_modify(FinderWriteTarget {
+                file_id: Some("shared-editable".into()),
+                parent_id: None,
+                filename: "Editable.txt".into(),
+                kind: FinderWriteItemKind::File,
+                contents_path: Some(source.to_string_lossy().into_owned()),
+                content_type: Some("text/plain".into()),
+                base_version_identifier: Some("3:2:100".into()),
+            })
+            .unwrap();
+
+        let queued = bridge.db.list_due_operations(now_secs()).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, OperationKind::UploadVersion);
+        assert_eq!(queued[0].base_version, Some(3));
+        assert_eq!(queued[0].base_object_version_id.as_deref(), Some("object-1"));
+        let metadata: serde_json::Value = serde_json::from_str(queued[0].metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["shared_root_id"], "shared-root");
+        assert_eq!(metadata["share_id"], "invite-2");
+        assert_eq!(metadata["uploaded_by"], "authenticated_desktop_user");
     }
 
     fn seed_bridge_row(

@@ -154,7 +154,7 @@ async fn handle_connection(
         };
         let resp = match req {
             IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
-                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload(&e, NAMESPACE_MY_FILES)),
+                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, NAMESPACE_MY_FILES)),
                 _ => IpcResponse::Error {
                     message: "not found".into(),
                 },
@@ -175,6 +175,15 @@ async fn handle_connection(
                 contents_path,
                 content_type,
             } => {
+                if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
+                    return write_ipc_response(
+                        &mut stream,
+                        IpcResponse::Error {
+                            message: "Shared with me is read-only at the namespace root".into(),
+                        },
+                    )
+                    .await;
+                }
                 let target = crate::engine_bridge::FinderWriteTarget {
                     file_id: None,
                     parent_id: normalize_parent_id(parent_id),
@@ -269,6 +278,10 @@ async fn handle_connection(
     }
 }
 
+async fn write_ipc_response(stream: &mut UnixStream, response: IpcResponse) {
+    let _ = stream.write_all(&serde_json::to_vec(&response).unwrap()).await;
+}
+
 fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
     if kind.eq_ignore_ascii_case("folder") || kind.eq_ignore_ascii_case("namespace") {
         crate::engine_bridge::FinderWriteItemKind::Folder
@@ -307,7 +320,7 @@ fn write_outcome_response(
             item: file_id
                 .as_deref()
                 .and_then(|id| db.get_file(id).ok().flatten())
-                .map(|entry| file_entry_payload(&entry, NAMESPACE_MY_FILES)),
+                .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES)),
             ignored,
             message,
         },
@@ -330,23 +343,55 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
             .list_files()
             .unwrap_or_default()
             .into_iter()
-            .filter(|entry| is_top_level_path(&entry.path))
-            .map(|entry| file_entry_payload(&entry, NAMESPACE_MY_FILES))
+            .filter(|entry| {
+                is_top_level_path(&entry.path)
+                    && db
+                        .get_file_contract_state(&entry.file_id)
+                        .ok()
+                        .flatten()
+                        .map(|contract| contract.namespace == crate::state_db::Namespace::MyFiles)
+                        .unwrap_or(true)
+            })
+            .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES))
             .collect(),
         NAMESPACE_OFFLINE => db
             .list_by_status(crate::state_db::FileStatus::Local)
             .unwrap_or_default()
             .into_iter()
-            .map(|entry| file_entry_payload(&entry, NAMESPACE_OFFLINE))
+            .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_OFFLINE))
             .collect(),
         NAMESPACE_CONFLICTS => db
             .list_by_status(crate::state_db::FileStatus::Conflict)
             .unwrap_or_default()
             .into_iter()
-            .map(|entry| file_entry_payload(&entry, NAMESPACE_CONFLICTS))
+            .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_CONFLICTS))
             .collect(),
-        NAMESPACE_SHARED_WITH_ME => Vec::new(),
-        _ => Vec::new(),
+        NAMESPACE_SHARED_WITH_ME => db
+            .list_contract_states_by_namespace(crate::state_db::Namespace::SharedWithMe)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|contract| contract.parent_id.is_none())
+            .filter_map(|contract| {
+                db.get_file(&contract.file_id)
+                    .ok()
+                    .flatten()
+                    .map(|entry| file_entry_payload(&entry, &contract, NAMESPACE_SHARED_WITH_ME))
+            })
+            .collect(),
+        _ => db
+            .list_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| {
+                db.get_file_contract_state(&entry.file_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|contract| contract.parent_id)
+                    .as_deref()
+                    == Some(container_id)
+            })
+            .map(|entry| file_entry_payload_for_db(db, &entry, container_id))
+            .collect(),
     }
 }
 
@@ -372,17 +417,70 @@ fn is_file_provider_root(container_id: &str) -> bool {
         || container_id.to_ascii_lowercase().contains("root")
 }
 
-fn file_entry_payload(entry: &crate::state_db::FileEntry, parent_identifier: &str) -> FileProviderItemPayload {
-    let status = file_status_string(&entry.status);
-    let capabilities = match entry.status {
-        crate::state_db::FileStatus::CloudOnly
-        | crate::state_db::FileStatus::Downloading
-        | crate::state_db::FileStatus::Error => CAP_READ,
-        crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
-        crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
-            CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
-        }
+fn file_entry_payload_for_db(
+    db: &crate::state_db::StateDb,
+    entry: &crate::state_db::FileEntry,
+    parent_identifier: &str,
+) -> FileProviderItemPayload {
+    match db.get_file_contract_state(&entry.file_id).ok().flatten() {
+        Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
+        None => file_entry_payload_without_contract(entry, parent_identifier),
+    }
+}
+
+fn file_entry_payload(
+    entry: &crate::state_db::FileEntry,
+    contract: &crate::state_db::FileContractState,
+    fallback_parent_identifier: &str,
+) -> FileProviderItemPayload {
+    let parent_identifier = contract.parent_id.as_deref().unwrap_or(fallback_parent_identifier);
+    let kind = match contract.item_kind {
+        crate::state_db::ItemKind::Folder => "folder",
+        crate::state_db::ItemKind::File => "file",
     };
+    let mut capabilities = capabilities_for_status(&entry.status);
+    if contract.permission_bits != 0 {
+        capabilities = 0;
+        if contract.permission_bits & crate::state_db::PERMISSION_READ != 0 {
+            capabilities |= CAP_READ;
+        }
+        if contract.permission_bits & crate::state_db::PERMISSION_WRITE != 0
+            && matches!(
+                entry.status,
+                crate::state_db::FileStatus::Local
+                    | crate::state_db::FileStatus::Uploading
+                    | crate::state_db::FileStatus::Conflict
+                    | crate::state_db::FileStatus::CloudOnly
+            )
+        {
+            capabilities |= CAP_WRITE | CAP_RENAME | CAP_DELETE;
+        }
+    }
+
+    FileProviderItemPayload {
+        identifier: entry.file_id.clone(),
+        parent_identifier: parent_identifier.to_string(),
+        filename: filename_from_path(&entry.path),
+        kind: kind.to_string(),
+        size_bytes: entry.size_bytes,
+        content_type: contract.content_type.clone(),
+        status: file_status_string(&entry.status).to_string(),
+        capabilities,
+        version_identifier: Some(format!(
+            "{}:{}:{}",
+            contract.current_version.max(entry.remote_updated_at),
+            entry.modified_at,
+            entry.size_bytes
+        )),
+    }
+}
+
+fn file_entry_payload_without_contract(
+    entry: &crate::state_db::FileEntry,
+    parent_identifier: &str,
+) -> FileProviderItemPayload {
+    let status = file_status_string(&entry.status);
+    let capabilities = capabilities_for_status(&entry.status);
 
     FileProviderItemPayload {
         identifier: entry.file_id.clone(),
@@ -397,6 +495,18 @@ fn file_entry_payload(entry: &crate::state_db::FileEntry, parent_identifier: &st
             "{}:{}:{}",
             entry.remote_updated_at, entry.modified_at, entry.size_bytes
         )),
+    }
+}
+
+fn capabilities_for_status(status: &crate::state_db::FileStatus) -> u32 {
+    match status {
+        crate::state_db::FileStatus::CloudOnly
+        | crate::state_db::FileStatus::Downloading
+        | crate::state_db::FileStatus::Error => CAP_READ,
+        crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
+        crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
+            CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
+        }
     }
 }
 
@@ -424,4 +534,57 @@ fn filename_from_path(path: &str) -> String {
 fn is_top_level_path(path: &str) -> bool {
     let trimmed = path.trim_matches('/');
     !trimmed.is_empty() && !trimmed.contains('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, PERMISSION_READ, PERMISSION_WRITE, StateDb};
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_shared_namespace_lists_roots_with_permission_capabilities() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_shared_root(&db, "read-root", "Shared with me/Read only", PERMISSION_READ);
+        seed_shared_root(
+            &db,
+            "write-root",
+            "Shared with me/Editable",
+            PERMISSION_READ | PERMISSION_WRITE,
+        );
+
+        let items = list_file_provider_items(&db, NAMESPACE_SHARED_WITH_ME);
+        assert_eq!(items.len(), 2);
+        let read_only = items.iter().find(|item| item.identifier == "read-root").unwrap();
+        assert_eq!(read_only.kind, "folder");
+        assert_eq!(read_only.capabilities, CAP_READ);
+
+        let editable = items.iter().find(|item| item.identifier == "write-root").unwrap();
+        assert_eq!(
+            editable.capabilities & (CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE),
+            CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
+        );
+    }
+
+    fn seed_shared_root(db: &StateDb, file_id: &str, path: &str, permissions: i64) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some(file_id.into());
+        contract.share_id = Some(format!("invite-{file_id}"));
+        contract.permission_bits = permissions;
+        contract.item_kind = ItemKind::Folder;
+        contract.content_type = Some("public.folder".into());
+        db.set_file_contract_state(&contract).unwrap();
+    }
 }

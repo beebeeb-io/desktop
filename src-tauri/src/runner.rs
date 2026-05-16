@@ -40,7 +40,7 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::ApiClient;
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_bridge::{sync_tick, CachePolicy, ConflictDetected, EngineBridge};
+use crate::engine_bridge::{CachePolicy, ConflictDetected, EngineBridge, sync_tick};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 
@@ -61,8 +61,7 @@ const STATE_DIR: &str = ".beebeeb";
 /// `resolve_conflict` IPC in `lib.rs` can build a fresh ApiClient
 /// without duplicating the env-var read.
 pub(crate) fn api_base_url() -> String {
-    std::env::var("BEEBEEB_API_URL")
-        .unwrap_or_else(|_| "https://api.beebeeb.io".to_string())
+    std::env::var("BEEBEEB_API_URL").unwrap_or_else(|_| "https://api.beebeeb.io".to_string())
 }
 
 /// Owned handle to a running engine task. Drop it (or call
@@ -76,12 +75,7 @@ impl EngineRunner {
     /// Spawn the runner on a background tokio task. Returns the handle
     /// synchronously — actual startup (lock acquire, DB open, first
     /// tick) happens inside the task.
-    pub fn spawn(
-        app: AppHandle,
-        sync_root: PathBuf,
-        session_token: String,
-        master_key: [u8; 32],
-    ) -> Self {
+    pub fn spawn(app: AppHandle, sync_root: PathBuf, session_token: String, master_key: [u8; 32]) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(async move {
@@ -195,6 +189,18 @@ async fn run(
             biased;
             _ = &mut cancel => break,
             _ = tick.tick() => {
+                match bridge.refresh_shared_roots().await {
+                    Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
+                        tracing::info!(
+                            removed = outcome.removed_shared_file_ids.len(),
+                            "revoked shared content removed from local Finder state"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "shared root refresh failed");
+                    }
+                }
                 match sync_tick(&*bridge).await {
                     Ok(conflicts) => {
                         // Task 10 — surface freshly detected conflicts.
@@ -234,12 +240,7 @@ async fn run(
 /// Emit an `engine-status` event the WebView + tray listen to.
 /// Best-effort: a missing main window or serialisation issue is
 /// logged but doesn't break the runner.
-fn emit_status(
-    app: &AppHandle,
-    state: &str,
-    sync_root: Option<&PathBuf>,
-    error: Option<&str>,
-) {
+fn emit_status(app: &AppHandle, state: &str, sync_root: Option<&PathBuf>, error: Option<&str>) {
     let payload = serde_json::json!({
         "state": state,
         "sync_root": sync_root.map(|p| p.to_string_lossy().into_owned()),

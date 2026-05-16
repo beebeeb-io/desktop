@@ -150,8 +150,8 @@ impl ApiClient {
         self.url(&format!("/api/v1/shares/invites/folder-members/{}", encode(folder_id)))
     }
 
-    pub fn shares_mine_url(&self) -> String {
-        self.url("/api/v1/shares/mine")
+    pub fn shares_incoming_url(&self) -> String {
+        self.url("/api/v1/shares/invites/incoming")
     }
 
     pub fn list_files_url(&self, scope: ListFilesScope<'_>) -> String {
@@ -423,7 +423,7 @@ impl ApiClient {
     pub async fn list_shared_roots(&self) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client
-            .get(self.shares_mine_url())
+            .get(self.shares_incoming_url())
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
@@ -488,6 +488,9 @@ mod tests {
             client.folder_members_url("folder/one"),
             "https://api.beebeeb.io/api/v1/shares/invites/folder-members/folder%2Fone"
         );
-        assert_eq!(client.shares_mine_url(), "https://api.beebeeb.io/api/v1/shares/mine");
+        assert_eq!(
+            client.shares_incoming_url(),
+            "https://api.beebeeb.io/api/v1/shares/invites/incoming"
+        );
     }
 }

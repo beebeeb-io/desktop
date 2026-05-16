@@ -20,6 +20,7 @@
 //! daemon's writes.
 
 use rusqlite::{Connection, Result, params};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -87,6 +88,28 @@ impl Namespace {
             "offline" => Namespace::Offline,
             "conflicts" => Namespace::Conflicts,
             _ => Namespace::MyFiles,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ItemKind {
+    File,
+    Folder,
+}
+
+impl ItemKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ItemKind::File => "file",
+            ItemKind::Folder => "folder",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "folder" => ItemKind::Folder,
+            _ => ItemKind::File,
         }
     }
 }
@@ -200,6 +223,8 @@ pub struct FileContractState {
     pub shared_root_id: Option<String>,
     pub share_id: Option<String>,
     pub permission_bits: i64,
+    pub item_kind: ItemKind,
+    pub content_type: Option<String>,
     pub current_version: i64,
     pub current_object_version_id: Option<String>,
     pub local_base_version: i64,
@@ -218,6 +243,24 @@ impl FileContractState {
             _ => self.pin_state.clone(),
         }
     }
+
+    pub fn can_read(&self) -> bool {
+        self.permission_bits & PERMISSION_READ != 0
+    }
+
+    pub fn can_write(&self) -> bool {
+        self.permission_bits & PERMISSION_WRITE != 0
+    }
+
+    pub fn is_shared(&self) -> bool {
+        self.namespace == Namespace::SharedWithMe
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevokedSharedCache {
+    pub file_id: String,
+    pub cache_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,6 +317,8 @@ impl StateDb {
                 shared_root_id TEXT,
                 share_id TEXT,
                 permission_bits INTEGER NOT NULL DEFAULT 0,
+                item_kind TEXT NOT NULL DEFAULT 'file',
+                content_type TEXT,
                 current_version INTEGER NOT NULL DEFAULT 0,
                 current_object_version_id TEXT,
                 local_base_version INTEGER NOT NULL DEFAULT 0,
@@ -312,6 +357,8 @@ impl StateDb {
         ensure_column(&conn, "files", "shared_root_id", "TEXT")?;
         ensure_column(&conn, "files", "share_id", "TEXT")?;
         ensure_column(&conn, "files", "permission_bits", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "item_kind", "TEXT NOT NULL DEFAULT 'file'")?;
+        ensure_column(&conn, "files", "content_type", "TEXT")?;
         ensure_column(&conn, "files", "current_version", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "current_object_version_id", "TEXT")?;
         ensure_column(&conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
@@ -475,15 +522,17 @@ impl StateDb {
                shared_root_id = ?4,
                share_id = ?5,
                permission_bits = ?6,
-               current_version = ?7,
-               current_object_version_id = ?8,
-               local_base_version = ?9,
-               local_hash = ?10,
-               cache_path = ?11,
-               cache_bytes = ?12,
-               pin_state = ?13,
-               inherited_pin_state = ?14,
-               last_sync_at = ?15
+               item_kind = ?7,
+               content_type = ?8,
+               current_version = ?9,
+               current_object_version_id = ?10,
+               local_base_version = ?11,
+               local_hash = ?12,
+               cache_path = ?13,
+               cache_bytes = ?14,
+               pin_state = ?15,
+               inherited_pin_state = ?16,
+               last_sync_at = ?17
              WHERE file_id = ?1",
             params![
                 state.file_id,
@@ -492,6 +541,8 @@ impl StateDb {
                 state.shared_root_id,
                 state.share_id,
                 state.permission_bits,
+                state.item_kind.as_str(),
+                state.content_type,
                 state.current_version,
                 state.current_object_version_id,
                 state.local_base_version,
@@ -510,8 +561,9 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
-                    current_version, current_object_version_id, local_base_version, local_hash,
-                    cache_path, cache_bytes, pin_state, inherited_pin_state, last_sync_at
+                    item_kind, content_type, current_version, current_object_version_id,
+                    local_base_version, local_hash, cache_path, cache_bytes, pin_state,
+                    inherited_pin_state, last_sync_at
              FROM files WHERE file_id = ?1",
         )?;
         let mut rows = stmt.query(params![file_id])?;
@@ -523,19 +575,88 @@ impl StateDb {
                 shared_root_id: row.get(3)?,
                 share_id: row.get(4)?,
                 permission_bits: row.get(5)?,
-                current_version: row.get(6)?,
-                current_object_version_id: row.get(7)?,
-                local_base_version: row.get(8)?,
-                local_hash: row.get(9)?,
-                cache_path: row.get(10)?,
-                cache_bytes: row.get(11)?,
-                pin_state: PinState::from_str(&row.get::<_, String>(12)?),
-                inherited_pin_state: PinState::from_str(&row.get::<_, String>(13)?),
-                last_sync_at: row.get(14)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(6)?),
+                content_type: row.get(7)?,
+                current_version: row.get(8)?,
+                current_object_version_id: row.get(9)?,
+                local_base_version: row.get(10)?,
+                local_hash: row.get(11)?,
+                cache_path: row.get(12)?,
+                cache_bytes: row.get(13)?,
+                pin_state: PinState::from_str(&row.get::<_, String>(14)?),
+                inherited_pin_state: PinState::from_str(&row.get::<_, String>(15)?),
+                last_sync_at: row.get(16)?,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn list_contract_states_by_namespace(&self, namespace: Namespace) -> Result<Vec<FileContractState>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
+                    item_kind, content_type, current_version, current_object_version_id,
+                    local_base_version, local_hash, cache_path, cache_bytes, pin_state,
+                    inherited_pin_state, last_sync_at
+             FROM files WHERE namespace = ?1 ORDER BY path ASC",
+        )?;
+        let rows = stmt.query_map(params![namespace.as_str()], |row| {
+            Ok(FileContractState {
+                file_id: row.get(0)?,
+                namespace: Namespace::from_str(&row.get::<_, String>(1)?),
+                parent_id: row.get(2)?,
+                shared_root_id: row.get(3)?,
+                share_id: row.get(4)?,
+                permission_bits: row.get(5)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(6)?),
+                content_type: row.get(7)?,
+                current_version: row.get(8)?,
+                current_object_version_id: row.get(9)?,
+                local_base_version: row.get(10)?,
+                local_hash: row.get(11)?,
+                cache_path: row.get(12)?,
+                cache_bytes: row.get(13)?,
+                pin_state: PinState::from_str(&row.get::<_, String>(14)?),
+                inherited_pin_state: PinState::from_str(&row.get::<_, String>(15)?),
+                last_sync_at: row.get(16)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn purge_revoked_shared_content(&self, active_shared_root_ids: &[String]) -> Result<Vec<RevokedSharedCache>> {
+        let active: HashSet<&str> = active_shared_root_ids.iter().map(String::as_str).collect();
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let candidates = {
+            let mut stmt = tx.prepare(
+                "SELECT file_id, shared_root_id, cache_path
+                 FROM files
+                 WHERE namespace = 'shared_with_me'",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        let mut revoked = Vec::new();
+        for (file_id, shared_root_id, cache_path) in candidates {
+            let root_id = shared_root_id.as_deref().unwrap_or(file_id.as_str());
+            if active.contains(root_id) {
+                continue;
+            }
+            tx.execute("DELETE FROM operation_queue WHERE file_id = ?1", params![file_id])?;
+            tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+            revoked.push(RevokedSharedCache { file_id, cache_path });
+        }
+        tx.commit()?;
+        Ok(revoked)
     }
 
     pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
@@ -893,6 +1014,8 @@ mod tests {
             "shared_root_id",
             "share_id",
             "permission_bits",
+            "item_kind",
+            "content_type",
             "current_version",
             "current_object_version_id",
             "local_base_version",
@@ -940,6 +1063,8 @@ mod tests {
             shared_root_id: Some("root1".into()),
             share_id: Some("share1".into()),
             permission_bits: PERMISSION_READ | PERMISSION_WRITE,
+            item_kind: ItemKind::Folder,
+            content_type: Some("public.folder".into()),
             current_version: 7,
             current_object_version_id: Some("object7".into()),
             local_base_version: 6,
@@ -957,6 +1082,11 @@ mod tests {
         assert_eq!(got.shared_root_id.as_deref(), Some("root1"));
         assert_eq!(got.share_id.as_deref(), Some("share1"));
         assert_eq!(got.permission_bits, PERMISSION_READ | PERMISSION_WRITE);
+        assert_eq!(got.item_kind, ItemKind::Folder);
+        assert_eq!(got.content_type.as_deref(), Some("public.folder"));
+        assert!(got.can_read());
+        assert!(got.can_write());
+        assert!(got.is_shared());
         assert_eq!(got.current_version, 7);
         assert_eq!(got.current_object_version_id.as_deref(), Some("object7"));
         assert_eq!(got.local_base_version, 6);
@@ -999,6 +1129,42 @@ mod tests {
 
         db.remove_operation("op-1").unwrap();
         assert!(db.list_due_operations(999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_revoked_shared_content_is_removed_and_cache_paths_returned() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "active", "/Shared with me/Active", None, FileStatus::Local, 10);
+        seed_contract_row(&db, "revoked", "/Shared with me/Revoked", None, FileStatus::Local, 20);
+
+        let mut active = db.get_file_contract_state("active").unwrap().unwrap();
+        active.namespace = Namespace::SharedWithMe;
+        active.shared_root_id = Some("active".into());
+        active.share_id = Some("invite-active".into());
+        active.permission_bits = PERMISSION_READ;
+        active.cache_path = Some("/cache/active".into());
+        db.set_file_contract_state(&active).unwrap();
+
+        let mut revoked = db.get_file_contract_state("revoked").unwrap().unwrap();
+        revoked.namespace = Namespace::SharedWithMe;
+        revoked.shared_root_id = Some("revoked".into());
+        revoked.share_id = Some("invite-revoked".into());
+        revoked.permission_bits = PERMISSION_READ;
+        revoked.cache_path = Some("/cache/revoked".into());
+        db.set_file_contract_state(&revoked).unwrap();
+
+        let removed = db.purge_revoked_shared_content(&["active".to_string()]).unwrap();
+
+        assert_eq!(
+            removed,
+            vec![RevokedSharedCache {
+                file_id: "revoked".into(),
+                cache_path: Some("/cache/revoked".into()),
+            }]
+        );
+        assert!(db.get_file("active").unwrap().is_some());
+        assert!(db.get_file("revoked").unwrap().is_none());
     }
 
     #[test]

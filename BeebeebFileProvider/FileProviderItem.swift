@@ -116,7 +116,10 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     }
 
     var capabilities: NSFileProviderItemCapabilities {
-        var result: NSFileProviderItemCapabilities = [.allowsReading]
+        var result: NSFileProviderItemCapabilities = []
+        if model.capabilities & BeebeebProviderItem.read != 0 {
+            result.insert(.allowsReading)
+        }
         if model.capabilities & BeebeebProviderItem.write != 0 {
             result.insert(.allowsWriting)
         }
