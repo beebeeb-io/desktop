@@ -259,7 +259,7 @@ async fn desktop_login(
         return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
     }
 
-    if let Err(e) = verify_recovery_phrase_for_account(&client, &base_url, &email, &recovery_check).await {
+    if let Err(e) = verify_recovery_phrase_for_account(&client, &base_url, &session_token, &recovery_check).await {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err(e);
     }
@@ -334,13 +334,13 @@ async fn desktop_session_has_totp(
 async fn verify_recovery_phrase_for_account(
     client: &reqwest::Client,
     base_url: &str,
-    email: &str,
+    session_token: &str,
     recovery_check: &[u8; 32],
 ) -> Result<(), String> {
     let resp = client
-        .post(format!("{base_url}/api/v1/auth/recover-with-phrase-start"))
+        .post(format!("{base_url}/api/v1/auth/verify-recovery-check"))
+        .bearer_auth(session_token)
         .json(&serde_json::json!({
-            "email": email,
             "recovery_check": encode_base64(recovery_check),
         }))
         .send()
