@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcRequest {
@@ -115,22 +117,35 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
 pub async fn serve_ipc(
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+    mut cancel: oneshot::Receiver<()>,
 ) {
     let path = ipc_socket_path();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).expect("bind IPC socket");
     tracing::info!("IPC socket listening at {:?}", path);
+    let mut connections: Vec<JoinHandle<()>> = Vec::new();
 
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let db = db.clone();
-                let bridge = bridge.clone();
-                tokio::spawn(handle_connection(stream, db, bridge));
+        connections.retain(|handle| !handle.is_finished());
+        tokio::select! {
+            biased;
+            _ = &mut cancel => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    let db = db.clone();
+                    let bridge = bridge.clone();
+                    connections.push(tokio::spawn(handle_connection(stream, db, bridge)));
+                }
+                Err(e) => tracing::warn!("IPC accept error: {e}"),
             }
-            Err(e) => tracing::warn!("IPC accept error: {e}"),
         }
     }
+    for handle in connections {
+        handle.abort();
+    }
+    drop(listener);
+    let _ = std::fs::remove_file(&path);
+    tracing::info!("IPC socket stopped at {:?}", path);
 }
 
 async fn handle_connection(

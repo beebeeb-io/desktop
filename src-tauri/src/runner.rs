@@ -165,20 +165,16 @@ async fn run(
     // (macOS File Provider, Windows Cloud Files, Linux FUSE) can query
     // status and trigger hydrations without waiting for the next tick.
     //
-    // We don't keep an explicit cancel handle on this task: serve_ipc
-    // owns the listener, on the next runner spawn the listener bind
-    // calls remove_file() first to clear stale sockets. When the
-    // process exits, the OS reaps the task. Logout-time cleanup is
-    // best-effort — the in-flight hydrates would only succeed if they
-    // already had the master key from the previous session, and the
-    // socket re-binds on the next login.
-    {
+    // Keep an explicit cancel handle so lock/logout tears down the listener
+    // that holds a cloned EngineBridge with the active master key.
+    let (ipc_cancel_tx, ipc_cancel_rx) = oneshot::channel::<()>();
+    let mut ipc_task = {
         let db_for_ipc = db.clone();
         let bridge_for_ipc = bridge.clone();
         tokio::spawn(async move {
-            crate::ipc_socket::serve_ipc(db_for_ipc, bridge_for_ipc).await;
-        });
-    }
+            crate::ipc_socket::serve_ipc(db_for_ipc, bridge_for_ipc, ipc_cancel_rx).await;
+        })
+    };
 
     emit_status(&app, "running", Some(&sync_root), None);
 
@@ -260,6 +256,15 @@ async fn run(
     }
 
     emit_status(&app, "stopped", Some(&sync_root), None);
+    let _ = ipc_cancel_tx.send(());
+    if tokio::time::timeout(Duration::from_secs(2), &mut ipc_task)
+        .await
+        .is_err()
+    {
+        ipc_task.abort();
+        let _ = ipc_task.await;
+        let _ = std::fs::remove_file(crate::ipc_socket::ipc_socket_path());
+    }
     // _lock + bridge drop here; SQLite closes, lock file deleted.
 }
 

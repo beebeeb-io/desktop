@@ -1,9 +1,8 @@
 //! Desktop auth, unlock, and secret-storage primitives.
 //!
-//! This module is deliberately not wired into the Tauri runner yet. It
-//! establishes the fail-closed state model and Keychain-backed storage surface
-//! that the control center and File Provider IPC can use once their workers
-//! are ready to integrate without conflicts.
+//! This module backs the Tauri runner's login, lock, unlock, and logout flow.
+//! It establishes the fail-closed state model and Keychain-backed storage
+//! surface used before the sync engine receives any file-content key material.
 
 use std::fmt;
 

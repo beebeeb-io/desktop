@@ -9,6 +9,7 @@ export interface SyncStatus {
   engine: string
   sync_root: string | null
   engine_running?: boolean
+  vault_unlocked?: boolean
   syncing: number
   cloud_only: number
   conflicts: number
@@ -103,10 +104,10 @@ function reasonFrom(error: unknown): string {
 function isUnsupported(reason: string): boolean {
   const lower = reason.toLowerCase()
   return (
-    lower.includes('not found') ||
     lower.includes('unknown command') ||
     lower.includes('is not a registered') ||
     lower.includes('invoke') ||
+    lower.includes('command not found') ||
     lower.includes('__tauri') ||
     lower.includes('not implemented')
   )

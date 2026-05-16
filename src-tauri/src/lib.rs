@@ -1,10 +1,11 @@
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::{
+    Emitter, Manager, State,
     menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, State,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -16,6 +17,7 @@ mod config;
 mod conflict;
 mod engine_bridge;
 mod ipc_socket;
+mod keychain;
 #[cfg(target_os = "linux")]
 mod linux_fuse;
 #[cfg(all(test, not(target_os = "linux")))]
@@ -32,6 +34,7 @@ mod state_db;
 #[cfg(target_os = "windows")]
 mod windows_cf;
 use config::DesktopConfig;
+use keychain::{AuthVault, MacOsKeychainStore, SecretBytes, SessionToken};
 use runner::EngineRunner;
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
@@ -47,11 +50,20 @@ use runner::EngineRunner;
 /// authoritative copy of the master key in this process at any moment.
 /// `take()` removes it from the registry on logout; everything else
 /// reads it through a borrow under the `Mutex`.
-#[derive(Debug)]
 pub struct Session {
     pub token: String,
     pub master_key: [u8; 32],
     pub email: Option<String>,
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("token", &"<redacted>")
+            .field("master_key", &"<redacted>")
+            .field("email", &self.email)
+            .finish()
+    }
 }
 
 /// Tauri-managed shared state. Held behind a `Mutex` because the web
@@ -59,6 +71,7 @@ pub struct Session {
 /// access. Cheap to lock — sessions change rarely.
 pub struct AppState {
     pub session: Mutex<Option<Session>>,
+    pub auth_present: Mutex<bool>,
     /// Active engine runner, if any. `set_session` spawns one when a
     /// sync_root is also configured; `clear_session` aborts it.
     pub engine: tokio::sync::Mutex<Option<EngineRunner>>,
@@ -80,11 +93,82 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             session: Mutex::new(None),
+            auth_present: Mutex::new(false),
             engine: tokio::sync::Mutex::new(None),
             // Default to "stopped" — once the runner spawns and emits
             // its first event, the listener overwrites this.
             engine_state: Mutex::new("stopped".to_string()),
         }
+    }
+}
+
+fn keychain_error(context: &str, error: impl fmt::Display) -> String {
+    format!("{context}: {error}")
+}
+
+fn persist_session_to_keychain(token: &str, master_key: [u8; 32]) -> Result<(), String> {
+    let vault = AuthVault::new(MacOsKeychainStore::new());
+    let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
+    vault
+        .install_session(token)
+        .map_err(|e| keychain_error("store session in Keychain", e))?;
+    vault
+        .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
+        .map_err(|e| keychain_error("store vault key in Keychain", e))
+}
+
+fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, String> {
+    let mut vault = AuthVault::new(MacOsKeychainStore::new());
+    let Some(token) = vault
+        .session_token()
+        .map_err(|e| keychain_error("load session from Keychain", e))?
+    else {
+        return Ok(None);
+    };
+    vault
+        .unlock()
+        .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;
+    let mut master_key = [0u8; 32];
+    master_key.copy_from_slice(vault.master_key().map_err(|e| keychain_error("read vault key", e))?);
+    Ok(Some(Session {
+        token: token.expose_for_request().to_string(),
+        master_key,
+        email,
+    }))
+}
+
+fn keychain_session_present() -> bool {
+    AuthVault::new(MacOsKeychainStore::new())
+        .session_token()
+        .map(|token| token.is_some())
+        .unwrap_or(false)
+}
+
+fn clear_keychain_session() -> Result<(), String> {
+    let mut vault = AuthVault::new(MacOsKeychainStore::new());
+    vault
+        .clear_session()
+        .map_err(|e| keychain_error("clear Keychain session", e))
+}
+
+fn set_auth_present(state: &State<'_, AppState>, present: bool) {
+    if let Ok(mut guard) = state.auth_present.lock() {
+        *guard = present;
+    }
+}
+
+async fn start_engine_if_possible(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    token: String,
+    master_key: [u8; 32],
+) {
+    if let Some(root) = DesktopConfig::load().ok().and_then(|c| c.sync_root) {
+        let mut engine_slot = state.engine.lock().await;
+        if let Some(prev) = engine_slot.take() {
+            prev.abort().await;
+        }
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key));
     }
 }
 
@@ -187,8 +271,7 @@ async fn desktop_login(
         .send()
         .await
         .map_err(|e| format!("network error: {e}"))?;
-    if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED
-        || start_resp.status() == reqwest::StatusCode::NOT_FOUND
+    if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED || start_resp.status() == reqwest::StatusCode::NOT_FOUND
     {
         return Err("Invalid email or password".to_string());
     }
@@ -210,8 +293,8 @@ async fn desktop_login(
         .get("server_state")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "No server_state in login start response".to_string())?;
-    let server_message_bytes = decode_base64(server_message)
-        .map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
+    let server_message_bytes =
+        decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
     let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
         &login_start.state,
         password.as_bytes(),
@@ -259,35 +342,32 @@ async fn desktop_login(
         return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
     }
 
-    if let Err(e) = verify_recovery_phrase_for_account(&client, &base_url, &session_token, &recovery_check).await {
+    if let Err(e) =
+        verify_recovery_phrase_for_account(&client, &base_url, &session_token, &email, &recovery_check).await
+    {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err(e);
     }
 
-    // Store session — same path as `set_session` IPC.
+    if let Err(e) = persist_session_to_keychain(&session_token, master_key) {
+        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+        return Err(e);
+    }
+
+    // Store the unlocked session in memory for this process. The Keychain copy
+    // above is used for later lock/unlock and app-restart restore.
     {
-        let mut guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
+        let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
             token: session_token.clone(),
             master_key,
             email: Some(email.clone()),
         });
     }
+    set_auth_present(&state, true);
     tracing::info!(email = %email, "session installed via desktop_login");
 
-    // Start the engine if sync_root is already configured (uncommon on
-    // first launch — onboarding's folder-picker step does it normally).
-    let sync_root = DesktopConfig::load().ok().and_then(|c| c.sync_root);
-    if let Some(root) = sync_root {
-        let mut engine_slot = state.engine.lock().await;
-        if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
-        }
-        *engine_slot = Some(EngineRunner::spawn(app, root, session_token, master_key));
-    }
+    start_engine_if_possible(app, &state, session_token, master_key).await;
 
     Ok(())
 }
@@ -325,16 +405,14 @@ async fn desktop_session_has_totp(
         .json()
         .await
         .map_err(|e| format!("parse session verification response: {e}"))?;
-    Ok(body
-        .get("totp_enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+    Ok(body.get("totp_enabled").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
 async fn verify_recovery_phrase_for_account(
     client: &reqwest::Client,
     base_url: &str,
     session_token: &str,
+    email: &str,
     recovery_check: &[u8; 32],
 ) -> Result<(), String> {
     let resp = client
@@ -349,6 +427,9 @@ async fn verify_recovery_phrase_for_account(
     if resp.status().is_success() {
         return Ok(());
     }
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return verify_recovery_phrase_for_account_legacy(client, base_url, email, recovery_check).await;
+    }
     if resp.status() == reqwest::StatusCode::BAD_REQUEST {
         return Err("Recovery phrase does not match this Beebeeb account.".to_string());
     }
@@ -357,11 +438,34 @@ async fn verify_recovery_phrase_for_account(
     Err(format!("Recovery phrase check failed ({status}): {body}"))
 }
 
-async fn revoke_desktop_session(
+async fn verify_recovery_phrase_for_account_legacy(
     client: &reqwest::Client,
     base_url: &str,
-    session_token: &str,
+    email: &str,
+    recovery_check: &[u8; 32],
 ) -> Result<(), String> {
+    let resp = client
+        .post(format!("{base_url}/api/v1/auth/recover-with-phrase-start"))
+        .json(&serde_json::json!({
+            "email": email,
+            "recovery_check": encode_base64(recovery_check),
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("recovery phrase check failed: {e}"))?;
+    if resp.status().is_success() {
+        tracing::warn!("used legacy recovery phrase verification fallback; deploy /verify-recovery-check to remove this path");
+        return Ok(());
+    }
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        return Err("Recovery phrase does not match this Beebeeb account.".to_string());
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("Recovery phrase check failed ({status}): {body}"))
+}
+
+async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, session_token: &str) -> Result<(), String> {
     client
         .post(format!("{base_url}/api/v1/auth/logout"))
         .bearer_auth(session_token)
@@ -393,37 +497,28 @@ async fn set_session(
     email: Option<String>,
 ) -> Result<(), String> {
     if master_key.len() != 32 {
-        return Err(format!(
-            "master_key must be 32 bytes, got {}",
-            master_key.len()
-        ));
+        return Err(format!("master_key must be 32 bytes, got {}", master_key.len()));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&master_key);
+    persist_session_to_keychain(&token, arr)?;
     let token_clone = token.clone();
     let key_clone = arr;
 
     {
-        let mut guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(Session { token, master_key: arr, email });
+        let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        *guard = Some(Session {
+            token,
+            master_key: arr,
+            email,
+        });
     }
+    set_auth_present(&state, true);
     tracing::info!("session installed via IPC");
 
     // If we already know the sync_root, kick off the engine. Otherwise
     // it'll start when the first-launch picker resolves.
-    let sync_root = DesktopConfig::load().ok().and_then(|c| c.sync_root);
-    if let Some(root) = sync_root {
-        let mut engine_slot = state.engine.lock().await;
-        if let Some(prev) = engine_slot.take() {
-            // Tear down the prior engine before installing a new one
-            // (handles re-login and session rotation cleanly).
-            prev.abort().await;
-        }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token_clone, key_clone));
-    }
+    start_engine_if_possible(app, &state, token_clone, key_clone).await;
     Ok(())
 }
 
@@ -434,6 +529,15 @@ async fn set_session(
 /// the macro's async-with-state contract.
 #[tauri::command]
 async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
+    // Stop the engine before dropping memory so the IPC listener cannot accept
+    // new File Provider operations with a cloned master key.
+    let mut engine_slot = state.engine.lock().await;
+    if let Some(prev) = engine_slot.take() {
+        prev.abort().await;
+        tracing::info!("engine aborted on logout");
+    }
+    drop(engine_slot);
+
     match state.session.lock() {
         Ok(mut guard) => {
             guard.take();
@@ -443,37 +547,70 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
             tracing::warn!("session mutex poisoned during clear_session");
         }
     }
-    // Stop the engine if one is running.
-    let mut engine_slot = state.engine.lock().await;
-    if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
-        tracing::info!("engine aborted on logout");
+    if let Ok(mut guard) = state.engine_state.lock() {
+        *guard = "stopped".to_string();
     }
+    clear_keychain_session()?;
+    set_auth_present(&state, false);
     Ok(())
 }
 
-/// The current desktop login path leaves the master key in memory immediately
-/// after sign-in. Until wrapped-key keychain persistence lands, "unlock" is a
-/// readiness check instead of a second biometric/keychain unwrap.
+/// Restore a Keychain-backed session into memory and start the engine for the
+/// configured sync root. Keychain may show the OS unlock prompt depending on
+/// the user's security settings. Until the user calls this command, hydration
+/// and upload commands stay unavailable because there is no in-memory key.
 #[tauri::command]
-fn unlock_vault(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state
+async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let existing = state
         .session
         .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?;
-    if guard.is_some() {
-        Ok(())
-    } else {
-        Err("Sign in before unlocking the vault.".to_string())
+        .map_err(|_| "session mutex poisoned".to_string())?
+        .as_ref()
+        .map(|session| (session.token.clone(), session.master_key));
+    if let Some((token, master_key)) = existing {
+        start_engine_if_possible(app, &state, token, master_key).await;
+        return Ok(());
     }
+
+    let session = load_session_from_keychain(None)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let token = session.token.clone();
+    let master_key = session.master_key;
+    {
+        let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        *guard = Some(session);
+    }
+    set_auth_present(&state, true);
+    tracing::info!("vault unlocked from Keychain");
+    start_engine_if_possible(app, &state, token, master_key).await;
+    Ok(())
 }
 
-/// Full lock/unlock needs persisted wrapped-key material. Returning a clear
-/// runtime error is better than exposing this as an unknown command or silently
-/// dropping the only in-memory key.
+/// Lock clears all runtime key material and stops the sync daemon, but keeps
+/// the Keychain session so the user can unlock again without re-entering their
+/// recovery phrase.
 #[tauri::command]
-fn lock_vault() -> Result<(), String> {
-    Err("Vault locking requires keychain-backed session persistence, which is not packaged in this build yet.".to_string())
+async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
+    let mut engine_slot = state.engine.lock().await;
+    if let Some(prev) = engine_slot.take() {
+        prev.abort().await;
+        tracing::info!("engine aborted on vault lock");
+    }
+    drop(engine_slot);
+
+    match state.session.lock() {
+        Ok(mut guard) => {
+            guard.take();
+            tracing::info!("vault locked; runtime session cleared");
+        }
+        Err(_) => {
+            tracing::warn!("session mutex poisoned during lock_vault");
+        }
+    }
+    if let Ok(mut guard) = state.engine_state.lock() {
+        *guard = "stopped".to_string();
+    }
+    set_auth_present(&state, keychain_session_present());
+    Ok(())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -483,7 +620,8 @@ struct FinderInstallState {
 }
 
 fn file_provider_packaging_error() -> String {
-    "The Beebeeb File Provider extension is not packaged in this build, so Finder drive registration is unavailable.".to_string()
+    "The Beebeeb File Provider extension is not packaged in this build, so Finder drive registration is unavailable."
+        .to_string()
 }
 
 #[tauri::command]
@@ -492,10 +630,7 @@ fn finder_location_state() -> Result<FinderInstallState, String> {
         .ok()
         .and_then(|c| c.sync_root)
         .map(|p| p.to_string_lossy().into_owned());
-    Ok(FinderInstallState {
-        installed: false,
-        path,
-    })
+    Ok(FinderInstallState { installed: false, path })
 }
 
 /// Persist the chosen sync root and start the daemon when possible, but do not
@@ -591,15 +726,11 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
 async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     use state_db::FileStatus;
 
-    let logged_in = state
-        .session
-        .lock()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
+    let vault_unlocked = state.session.lock().map(|g| g.is_some()).unwrap_or(false);
+    let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
+    let logged_in = vault_unlocked || auth_present;
     let sync_root_path = DesktopConfig::load().ok().and_then(|c| c.sync_root);
-    let sync_root = sync_root_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+    let sync_root = sync_root_path.as_ref().map(|p| p.to_string_lossy().into_owned());
     let engine_running = state.engine.lock().await.is_some();
 
     // Collapse the runner's five-state stream into the tri-state
@@ -613,12 +744,16 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
             .lock()
             .map(|g| g.clone())
             .unwrap_or_else(|_| "stopped".to_string());
-        match raw.as_str() {
+        let engine = match raw.as_str() {
             "running" | "idle" | "syncing" => "running",
             "error" => "error",
             _ => "stopped",
+        };
+        if logged_in && !vault_unlocked && engine == "stopped" {
+            "locked".to_string()
+        } else {
+            engine.to_string()
         }
-        .to_string()
     };
 
     // Count files by status, opening a short-lived connection at the
@@ -664,11 +799,79 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         "logged_in": logged_in,
         "sync_root": sync_root,
         "engine_running": engine_running,
+        "vault_unlocked": vault_unlocked,
         "engine": engine,
         "syncing": counts.0,
         "cloud_only": counts.1,
         "conflicts": counts.2,
     }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BillingUsageResponse {
+    used_bytes: i64,
+    quota_bytes: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DesktopStorageSummary {
+    used_bytes: i64,
+    quota_bytes: i64,
+    cache_bytes: i64,
+    pinned_bytes: i64,
+}
+
+/// Storage summary for the control center.
+///
+/// Remote usage/quota comes from the API's billing usage endpoint. Local
+/// cache/pinned bytes are read from the desktop SQLite state DB so the UI can
+/// distinguish account storage from bytes actually present on this Mac.
+#[tauri::command]
+async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopStorageSummary, String> {
+    let token = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        guard
+            .as_ref()
+            .map(|session| session.token.clone())
+            .ok_or_else(|| "vault is locked".to_string())?
+    };
+
+    let usage: BillingUsageResponse = reqwest::Client::new()
+        .get(format!("{}/api/v1/billing/usage", runner::api_base_url()))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("load storage usage: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("load storage usage: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("parse storage usage: {e}"))?;
+
+    let (cache_bytes, pinned_bytes) = DesktopConfig::load()
+        .ok()
+        .and_then(|cfg| cfg.sync_root)
+        .and_then(|root| {
+            let db_path = root.join(".beebeeb").join("state.db");
+            if !db_path.exists() {
+                return None;
+            }
+            let db = state_db::StateDb::open(&db_path).ok()?;
+            let pinned = db.cache_bytes_by_effective_pin(true).ok()?.max(0);
+            let unpinned = db.cache_bytes_by_effective_pin(false).ok()?.max(0);
+            Some((pinned.saturating_add(unpinned), pinned))
+        })
+        .unwrap_or((0, 0));
+
+    Ok(DesktopStorageSummary {
+        used_bytes: usage.used_bytes.max(0),
+        quota_bytes: usage.quota_bytes.max(0),
+        cache_bytes,
+        pinned_bytes,
+    })
 }
 
 #[tauri::command]
@@ -720,15 +923,9 @@ fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEn
 }
 
 #[tauri::command]
-async fn list_file_versions(
-    state: State<'_, AppState>,
-    file_id: String,
-) -> Result<serde_json::Value, String> {
+async fn list_file_versions(state: State<'_, AppState>, file_id: String) -> Result<serde_json::Value, String> {
     let (token, master_key) = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(s) => (s.token.clone(), s.master_key),
             None => return Err("not signed in".into()),
@@ -747,10 +944,7 @@ async fn restore_file_version(
     version_id: String,
 ) -> Result<serde_json::Value, String> {
     let (token, master_key) = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(s) => (s.token.clone(), s.master_key),
             None => return Err("not signed in".into()),
@@ -758,18 +952,10 @@ async fn restore_file_version(
     };
 
     let cfg = DesktopConfig::load()?;
-    let sync_root = cfg
-        .sync_root
-        .ok_or_else(|| "no sync root configured".to_string())?;
+    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
     let db_path = sync_root.join(".beebeeb").join("state.db");
-    let db = std::sync::Arc::new(
-        state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?,
-    );
-    let api = std::sync::Arc::new(api_client::ApiClient::new(
-        runner::api_base_url(),
-        token,
-        master_key,
-    ));
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
     let bridge = engine_bridge::EngineBridge::new(db, api.clone());
 
     match api.restore_version(&file_id, &version_id).await {
@@ -785,11 +971,9 @@ async fn restore_file_version(
         }
         Err(e) => {
             let msg = e.to_string();
-            if let Err(queue_err) = bridge.queue_restore_version(
-                &file_id,
-                &version_id,
-                Some(format!("direct restore failed: {msg}")),
-            ) {
+            if let Err(queue_err) =
+                bridge.queue_restore_version(&file_id, &version_id, Some(format!("direct restore failed: {msg}")))
+            {
                 tracing::warn!(
                     error = %queue_err,
                     file_id = %file_id,
@@ -834,10 +1018,7 @@ fn get_sync_root() -> Result<Option<String>, String> {
 ///
 /// Spec 030 §2 + §3 (lock acquired by the spawned engine).
 #[tauri::command]
-async fn pick_sync_root(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
     let suggestion = config::default_sync_root_suggestion();
     // Best-effort create — the dialog still opens even if this fails,
     // pointed at the parent dir.
@@ -897,9 +1078,7 @@ async fn pick_sync_root(
 /// native picker.
 #[tauri::command]
 fn default_sync_root() -> String {
-    config::default_sync_root_suggestion()
-        .to_string_lossy()
-        .into_owned()
+    config::default_sync_root_suggestion().to_string_lossy().into_owned()
 }
 
 // ── IPC commands: Task 9 — settings page ──────────────────────────────────────
@@ -970,11 +1149,7 @@ fn get_selective_sync() -> Result<Vec<String>, String> {
 #[tauri::command]
 fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
     let mut cfg = DesktopConfig::load()?;
-    cfg.excluded_folder_ids = if excluded.is_empty() {
-        None
-    } else {
-        Some(excluded)
-    };
+    cfg.excluded_folder_ids = if excluded.is_empty() { None } else { Some(excluded) };
     cfg.save()
 }
 
@@ -1006,11 +1181,7 @@ struct VaultItem {
 ///   - parse `id` as a UUID for the HKDF info
 ///   - parse `name_encrypted` (a JSON-encoded `EncryptedBlob` string)
 ///   - derive per-file key, decrypt to UTF-8
-fn try_decrypt_name(
-    file_meta: &serde_json::Value,
-    id: &str,
-    master_key: &[u8; 32],
-) -> Option<String> {
+fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
     let file_uuid = uuid::Uuid::parse_str(id).ok()?;
 
     let name_enc_str = file_meta.get("name_encrypted").and_then(|v| v.as_str())?;
@@ -1042,10 +1213,7 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
     // Lift the session pieces we need without holding the mutex over
     // the async API call.
     let creds = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         guard.as_ref().map(|s| (s.token.clone(), s.master_key))
     };
     let Some((token, master_key)) = creds else {
@@ -1116,9 +1284,7 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
         return Err("The local sync database has not been created yet. Start the daemon once before changing offline availability.".to_string());
     }
 
-    let db = std::sync::Arc::new(
-        state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?,
-    );
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
     let api = std::sync::Arc::new(api_client::ApiClient::new(
         runner::api_base_url(),
         String::new(),
@@ -1226,18 +1392,13 @@ async fn open_conflict_window(
 /// without raising the OS notification.
 ///
 /// Spec: Phase 4 Task 11.
-pub(crate) fn notify_conflict_impl(
-    app: &tauri::AppHandle,
-    file_name: &str,
-) -> Result<(), String> {
+pub(crate) fn notify_conflict_impl(app: &tauri::AppHandle, file_name: &str) -> Result<(), String> {
     use tauri_plugin_notification::NotificationExt;
 
     // Honour the user's preference. Best-effort load — if the config
     // file is unreadable we fall back to "show", matching the
     // documented Default of `notify_conflicts: true`.
-    let want = DesktopConfig::load()
-        .map(|c| c.notify_conflicts)
-        .unwrap_or(true);
+    let want = DesktopConfig::load().map(|c| c.notify_conflicts).unwrap_or(true);
     if !want {
         return Ok(());
     }
@@ -1255,11 +1416,7 @@ pub(crate) fn notify_conflict_impl(
 /// "remind me later" UI we may add); the engine's auto-detection
 /// path calls the impl directly.
 #[tauri::command]
-async fn notify_conflict(
-    app: tauri::AppHandle,
-    file_name: String,
-    file_id: String,
-) -> Result<(), String> {
+async fn notify_conflict(app: tauri::AppHandle, file_name: String, file_id: String) -> Result<(), String> {
     let _ = file_id; // reserved for future click-to-open wiring
     notify_conflict_impl(&app, &file_name)
 }
@@ -1298,10 +1455,7 @@ async fn resolve_conflict(
     // intentionally do NOT clone the entire Session struct — only
     // what the ApiClient needs.
     let (token, master_key) = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(s) => (s.token.clone(), s.master_key),
             None => return Err("not signed in".into()),
@@ -1311,28 +1465,17 @@ async fn resolve_conflict(
     // Sync root from desktop.toml — without it the daemon has no
     // place to write the resolved file, so this is a hard error.
     let cfg = DesktopConfig::load()?;
-    let sync_root = cfg
-        .sync_root
-        .ok_or_else(|| "no sync root configured".to_string())?;
+    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
 
     // Build a fresh bridge. The state DB is at a deterministic path
     // under the sync root (same convention as `runner::run`).
     let db_path = sync_root.join(".beebeeb").join("state.db");
-    let db = std::sync::Arc::new(
-        state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?,
-    );
-    let api = std::sync::Arc::new(api_client::ApiClient::new(
-        runner::api_base_url(),
-        token,
-        master_key,
-    ));
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
     let bridge = engine_bridge::EngineBridge::new(db, api);
 
     let outcome: Result<(), String> = match choice.as_str() {
-        "local" => bridge
-            .resolve_keep_mine(&file_id)
-            .await
-            .map_err(|e| e.to_string()),
+        "local" => bridge.resolve_keep_mine(&file_id).await.map_err(|e| e.to_string()),
         "remote" => bridge
             .resolve_keep_theirs(&file_id, &sync_root)
             .await
@@ -1443,9 +1586,7 @@ fn toggle_autostart(app: tauri::AppHandle) -> Result<bool, String> {
 /// Return the current autostart state (for the frontend settings page).
 #[tauri::command]
 fn autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
-    app.autolaunch()
-        .is_enabled()
-        .map_err(|e| e.to_string())
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -1472,10 +1613,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Autostart — LaunchAgent on macOS (no elevated privileges required),
         // registry key on Windows, .desktop file on Linux
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            Some(vec![]),
-        ))
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
         .invoke_handler(tauri::generate_handler![
             app_version,
             install_update,
@@ -1486,6 +1624,7 @@ pub fn run() {
             unlock_vault,
             lock_vault,
             sync_status,
+            desktop_storage_summary,
             export_diagnostics,
             list_version_conflict_center,
             list_file_versions,
@@ -1520,6 +1659,12 @@ pub fn run() {
             setup_native_menu(app)?;
             setup_tray(app)?;
             attach_tray_status_listener(&app.handle().clone());
+            {
+                let app_state = app.state::<AppState>();
+                if let Ok(mut guard) = app_state.auth_present.lock() {
+                    *guard = keychain_session_present();
+                }
+            }
 
             // Spawn background update checker
             let handle = app.handle().clone();
@@ -1531,9 +1676,7 @@ pub fn run() {
             // session is present, open the onboarding window automatically.
             // The settings window stays hidden (visible:false in tauri.conf.json)
             // until the user completes onboarding.
-            let no_sync_root = DesktopConfig::load()
-                .map(|c| c.sync_root.is_none())
-                .unwrap_or(true);
+            let no_sync_root = DesktopConfig::load().map(|c| c.sync_root.is_none()).unwrap_or(true);
             if no_sync_root {
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -1544,12 +1687,14 @@ pub fn run() {
                     }
                 });
             } else {
-                // Already configured — show the settings window immediately
-                // (same as left-click on the tray).
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Already configured — show the settings window after startup
+                // settles (same as left-click on the tray). The short delay
+                // mirrors onboarding and avoids racing Tauri's window setup.
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    show_settings_window(&h);
+                });
             }
 
             Ok(())
@@ -1582,10 +1727,7 @@ async fn run_update_loop(app: tauri::AppHandle) {
 
     loop {
         check_for_update(&app).await;
-        tokio::time::sleep(std::time::Duration::from_secs(
-            UPDATE_CHECK_INTERVAL_HOURS * 3600,
-        ))
-        .await;
+        tokio::time::sleep(std::time::Duration::from_secs(UPDATE_CHECK_INTERVAL_HOURS * 3600)).await;
     }
 }
 
@@ -1637,11 +1779,7 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
         "Beebeeb",
         true,
         &[
-            &PredefinedMenuItem::about(
-                app,
-                Some("About Beebeeb"),
-                Some(AboutMetadata::default()),
-            )?,
+            &PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(AboutMetadata::default()))?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::hide_others(app, None)?,
@@ -1704,9 +1842,7 @@ fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
     let show_item = MenuItemBuilder::new("Open Settings")
         .id("open_settings")
         .build(manager)?;
-    let hide_item = MenuItemBuilder::new("Hide")
-        .id("tray_hide")
-        .build(manager)?;
+    let hide_item = MenuItemBuilder::new("Hide").id("tray_hide").build(manager)?;
     let autostart_item = CheckMenuItemBuilder::new("Start at login")
         .id("tray_autostart")
         .checked(autostart_enabled)
@@ -1739,9 +1875,7 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
             }
         };
         let state = payload.get("state").and_then(|v| v.as_str()).unwrap_or("");
-        let files_remaining = payload
-            .get("files_remaining")
-            .and_then(|v| v.as_u64());
+        let files_remaining = payload.get("files_remaining").and_then(|v| v.as_u64());
         let error = payload.get("error").and_then(|v| v.as_str());
 
         // Mirror the latest state into AppState so the `sync_status`
@@ -1783,10 +1917,7 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // Read current autostart state so the check mark is correct on launch.
-    let autostart_enabled = app
-        .autolaunch()
-        .is_enabled()
-        .unwrap_or(false);
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let tray_menu = build_tray_menu(app, autostart_enabled)?;
 
     let icon = app
@@ -1861,5 +1992,22 @@ fn show_settings_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
+        return;
+    }
+
+    match tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("index.html".into()))
+        .title("Beebeeb")
+        .inner_size(680.0, 540.0)
+        .resizable(false)
+        .center()
+        .build()
+    {
+        Ok(win) => {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to create settings window");
+        }
     }
 }

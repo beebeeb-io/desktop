@@ -80,7 +80,7 @@ export default function Account() {
   }
 
   const loggedIn = status?.logged_in ?? false
-  const unlocked = loggedIn && status?.engine === 'running'
+  const unlocked = loggedIn && (status?.vault_unlocked ?? status?.engine === 'running')
 
   return (
     <section className="page">
