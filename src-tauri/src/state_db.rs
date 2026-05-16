@@ -492,6 +492,12 @@ impl StateDb {
         }
     }
 
+    pub fn delete_file(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+        Ok(())
+    }
+
     /// Update just the `status` column for a known file. No-op if
     /// `file_id` doesn't exist; callers should pair with `upsert_file`
     /// when they want create-or-update semantics.

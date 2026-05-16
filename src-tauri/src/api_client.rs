@@ -34,12 +34,20 @@ pub struct ListFilesScope<'a> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DesktopUploadInitRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
     pub file_name: String,
-    pub file_size_bytes: i64,
+    pub file_size_bytes: u64,
     pub mime_type: Option<String>,
     pub parent_id: Option<String>,
     pub profile: String,
     pub is_media: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_version_number: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

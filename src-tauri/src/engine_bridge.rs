@@ -29,6 +29,7 @@
 //! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
 //! was a stub returning `anyhow::Err`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,7 +37,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use beebeeb_types::EncryptedBlob;
 use serde::{Deserialize, Serialize};
 
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, DesktopUploadInitRequest};
 use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
     FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, OperationPauseReason,
@@ -354,10 +355,183 @@ impl EngineBridge {
                 self.api.restore_version(file_id, version_id).await?;
                 Ok(())
             }
-            OperationKind::UploadVersion | OperationKind::UploadFile => Err(anyhow::anyhow!(
-                "versioned upload worker pending encryption/session handoff"
-            )),
+            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op).await,
         }
+    }
+
+    async fn upload_version(&self, op: &PendingOperation) -> anyhow::Result<()> {
+        let local_file_id = op
+            .file_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("upload operation missing file_id"))?;
+        let payload_path = op
+            .payload_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("upload operation missing staged payload"))?;
+        let payload_path = Path::new(payload_path);
+        if !payload_path.is_file() {
+            return Err(anyhow::anyhow!(
+                "staged upload payload is missing: {}",
+                payload_path.display()
+            ));
+        }
+
+        let metadata = operation_metadata(op)?;
+        let name_encrypted = metadata["name_encrypted"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("upload operation missing encrypted name"))?;
+        let content_type = metadata["content_type"].as_str().map(str::to_string);
+        let plaintext_size = std::fs::metadata(payload_path)?.len();
+        if plaintext_size == 0 {
+            return Err(anyhow::anyhow!(
+                "empty Finder uploads are not supported by the v2 upload endpoint yet"
+            ));
+        }
+
+        let init_request = upload_init_request_for_operation(
+            local_file_id,
+            name_encrypted,
+            content_type.clone(),
+            op.parent_id.clone(),
+            plaintext_size,
+            op.base_version,
+            is_create_file_operation(&metadata),
+        );
+        let upload = self.api.init_upload(&init_request).await?;
+
+        let server_file_id = upload.file_id.clone();
+        let effective_name_encrypted = if server_file_id != local_file_id {
+            encrypted_metadata_for_name(
+                self.api.master_key(),
+                &server_file_id,
+                metadata_display_name(&metadata, op).as_deref().unwrap_or(&server_file_id),
+                content_type.as_deref(),
+            )?
+        } else {
+            name_encrypted.to_string()
+        };
+        self.api
+            .update_metadata(&server_file_id, Some(&effective_name_encrypted), op.parent_id.as_deref())
+            .await?;
+
+        let mk_bytes: [u8; 32] = *self.api.master_key();
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, server_file_id.as_bytes());
+
+        let mut file = std::fs::File::open(payload_path)?;
+        let chunk_size = upload.chunk_size_bytes as usize;
+        let chunk_count = upload.chunk_count as u64;
+        if chunk_size == 0 || chunk_count == 0 {
+            return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+        }
+        let mut buffer = vec![0u8; chunk_size];
+        for chunk_index in 0..chunk_count {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                return Err(anyhow::anyhow!(
+                    "staged upload ended before expected chunk {} of {}",
+                    chunk_index + 1,
+                    chunk_count
+                ));
+            }
+            let encrypted = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &buffer[..read])
+                .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
+            self.api
+                .upload_session_chunk(&upload.upload_session_id, chunk_index as u32, &encrypted)
+                .await?;
+        }
+
+        let completed = self.api.complete_upload_session(&upload.upload_session_id).await?;
+        self.apply_completed_upload(
+            local_file_id,
+            &server_file_id,
+            op,
+            &completed,
+            plaintext_size,
+            content_type,
+            Some(upload.object_version_id),
+        )?;
+        if let Err(e) = std::fs::remove_file(payload_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %payload_path.display(), error = %e, "failed to remove staged upload payload");
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_completed_upload(
+        &self,
+        local_file_id: &str,
+        server_file_id: &str,
+        op: &PendingOperation,
+        completed: &serde_json::Value,
+        plaintext_size: u64,
+        content_type: Option<String>,
+        object_version_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        let now = now_secs();
+        let mut entry = self.db.get_file(local_file_id)?.unwrap_or_else(|| FileEntry {
+            file_id: server_file_id.to_string(),
+            path: op
+                .target_path
+                .clone()
+                .unwrap_or_else(|| server_file_id.to_string()),
+            status: FileStatus::Local,
+            size_bytes: plaintext_size as i64,
+            modified_at: now,
+            content_hash: None,
+            remote_updated_at: now,
+        });
+        entry.file_id = server_file_id.to_string();
+        if let Some(target_path) = op.target_path.as_ref() {
+            entry.path = target_path.clone();
+        }
+        entry.status = FileStatus::Local;
+        entry.size_bytes = completed["size_bytes"].as_i64().unwrap_or(plaintext_size as i64);
+        entry.modified_at = now;
+        entry.remote_updated_at = now;
+        self.db.upsert_file(&entry)?;
+
+        let mut contract = self
+            .db
+            .get_file_contract_state(local_file_id)?
+            .unwrap_or_else(|| FileContractState {
+                file_id: server_file_id.to_string(),
+                namespace: Namespace::MyFiles,
+                parent_id: None,
+                shared_root_id: None,
+                share_id: None,
+                permission_bits: PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                item_kind: ItemKind::File,
+                content_type: None,
+                current_version: 0,
+                current_object_version_id: None,
+                local_base_version: 0,
+                local_hash: None,
+                cache_path: None,
+                cache_bytes: 0,
+                pin_state: crate::state_db::PinState::Inherit,
+                inherited_pin_state: crate::state_db::PinState::Inherit,
+                last_sync_at: 0,
+            });
+        contract.file_id = server_file_id.to_string();
+        contract.item_kind = ItemKind::File;
+        contract.content_type = content_type.or_else(|| completed["mime_type"].as_str().map(str::to_string));
+        contract.parent_id = op.parent_id.clone();
+        contract.current_version = completed["version_number"]
+            .as_i64()
+            .unwrap_or(contract.current_version.saturating_add(1));
+        contract.local_base_version = contract.current_version;
+        contract.current_object_version_id = completed["current_object_version_id"]
+            .as_str()
+            .map(str::to_string)
+            .or(object_version_id);
+        contract.last_sync_at = now;
+        self.db.set_file_contract_state(&contract)?;
+        if local_file_id != server_file_id {
+            self.db.delete_file(local_file_id)?;
+        }
+        Ok(())
     }
 
     pub async fn refresh_shared_roots(&self) -> anyhow::Result<SharedRootRefreshOutcome> {
@@ -857,7 +1031,7 @@ impl EngineBridge {
     }
 
     async fn do_hydrate(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
-        let file_uuid: uuid::Uuid = file_id
+        let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
 
@@ -875,7 +1049,7 @@ impl EngineBridge {
         // array (it zeroizes on drop), so we copy from the borrow.
         let mk_bytes: [u8; 32] = *self.api.master_key();
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_uuid.as_bytes());
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
 
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
@@ -885,11 +1059,7 @@ impl EngineBridge {
 
         for i in 0..chunk_count {
             let chunk_bytes = self.api.download_chunk(file_id, i).await?;
-            // Stored format: serde_json::to_vec(&EncryptedBlob) — see
-            // repos/cli/src/commands/push.rs:257.
-            let blob: EncryptedBlob = serde_json::from_slice(&chunk_bytes)
-                .map_err(|e| anyhow::anyhow!("parse chunk {i} as EncryptedBlob: {e}"))?;
-            let decrypted = beebeeb_core::encrypt::decrypt_chunk(&file_key, &blob)
+            let decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
             plaintext.extend_from_slice(&decrypted);
         }
@@ -1096,6 +1266,55 @@ fn encrypted_metadata_for_name(
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key_bytes);
     beebeeb_core::encrypt::encrypt_name(&master_key, file_id, filename, mime_type)
         .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
+}
+
+fn upload_init_request_for_operation(
+    file_id: &str,
+    name_encrypted: &str,
+    content_type: Option<String>,
+    parent_id: Option<String>,
+    plaintext_size: u64,
+    base_version: Option<i64>,
+    is_new_file: bool,
+) -> DesktopUploadInitRequest {
+    let plan = beebeeb_types::plan_chunks(plaintext_size, beebeeb_types::ChunkProfile::Desktop);
+    DesktopUploadInitRequest {
+        file_id: if is_new_file { None } else { Some(file_id.to_string()) },
+        file_name: name_encrypted.to_string(),
+        file_size_bytes: plaintext_size,
+        mime_type: None,
+        parent_id,
+        profile: "desktop".to_string(),
+        is_media: beebeeb_core::media::is_media(content_type.as_deref()),
+        chunk_size_bytes: Some(plan.chunk_size_bytes),
+        chunk_count: Some(plan.chunk_count),
+        base_version_number: base_version.and_then(|version| i32::try_from(version).ok()),
+    }
+}
+
+fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
+    metadata["operation"].as_str() == Some("create_file")
+}
+
+fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOperation) -> Option<String> {
+    metadata["display_name"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| op.target_path.as_deref().map(display_name_for_path))
+}
+
+fn decrypt_downloaded_chunk(
+    file_key: &beebeeb_core::kdf::FileKey,
+    chunk_bytes: &[u8],
+) -> Result<Vec<u8>, beebeeb_core::CoreError> {
+    match beebeeb_core::encrypt::decrypt_chunk_raw(file_key, chunk_bytes) {
+        Ok(bytes) => Ok(bytes),
+        Err(raw_error) => {
+            let blob: EncryptedBlob = serde_json::from_slice(chunk_bytes)
+                .map_err(|_| raw_error)?;
+            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
+        }
+    }
 }
 
 fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
@@ -1726,6 +1945,51 @@ mod tests {
     }
 
     #[test]
+    fn test_upload_init_request_omits_new_file_id_and_preserves_existing_base() {
+        let req = upload_init_request_for_operation(
+            "file-new",
+            "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+            Some("image/png".into()),
+            Some("folder-1".into()),
+            11,
+            None,
+            true,
+        );
+        assert_eq!(req.file_id, None);
+        assert_eq!(req.file_size_bytes, 11);
+        assert_eq!(req.profile, "desktop");
+        assert!(req.is_media);
+        assert_eq!(req.chunk_count, Some(1));
+
+        let replace = upload_init_request_for_operation(
+            "file-existing",
+            "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+            Some("text/plain".into()),
+            None,
+            42,
+            Some(7),
+            false,
+        );
+        assert_eq!(replace.file_id.as_deref(), Some("file-existing"));
+        assert_eq!(replace.base_version_number, Some(7));
+        assert!(!replace.is_media);
+    }
+
+    #[test]
+    fn test_download_chunk_decrypts_raw_and_json_formats() {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes([9u8; 32]);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+
+        let raw = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, b"raw bytes").unwrap();
+        assert_eq!(decrypt_downloaded_chunk(&file_key, &raw).unwrap(), b"raw bytes");
+
+        let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, b"json bytes").unwrap();
+        let json = serde_json::to_vec(&blob).unwrap();
+        assert_eq!(decrypt_downloaded_chunk(&file_key, &json).unwrap(), b"json bytes");
+    }
+
+    #[test]
     fn test_staging_payload_copies_to_durable_location() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("report.txt");
@@ -2071,10 +2335,11 @@ mod tests {
         let due = bridge.db.list_due_operations(230).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].attempts, 1);
-        assert_eq!(
-            due[0].last_error.as_deref(),
-            Some("versioned upload worker pending encryption/session handoff")
-        );
+        assert!(due[0]
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("staged upload payload is missing"));
     }
 
     #[test]
