@@ -433,6 +433,115 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     }))
 }
 
+// ── IPC commands: conflict/version center ───────────────────────────────────
+
+#[tauri::command]
+fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
+    let cfg = DesktopConfig::load()?;
+    let Some(sync_root) = cfg.sync_root else {
+        return Ok(Vec::new());
+    };
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    engine_bridge::version_conflict_feed_from_db(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_file_versions(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<serde_json::Value, String> {
+    let (token, master_key) = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+
+    let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
+    api.list_versions(&file_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restore_file_version(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+    version_id: String,
+) -> Result<serde_json::Value, String> {
+    let (token, master_key) = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg
+        .sync_root
+        .ok_or_else(|| "no sync root configured".to_string())?;
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db = std::sync::Arc::new(
+        state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?,
+    );
+    let api = std::sync::Arc::new(api_client::ApiClient::new(
+        runner::api_base_url(),
+        token,
+        master_key,
+    ));
+    let bridge = engine_bridge::EngineBridge::new(db, api.clone());
+
+    match api.restore_version(&file_id, &version_id).await {
+        Ok(body) => {
+            let _ = app.emit(
+                "version-restored",
+                serde_json::json!({
+                    "file_id": file_id,
+                    "version_id": version_id,
+                }),
+            );
+            Ok(body)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if let Err(queue_err) = bridge.queue_restore_version(
+                &file_id,
+                &version_id,
+                Some(format!("direct restore failed: {msg}")),
+            ) {
+                tracing::warn!(
+                    error = %queue_err,
+                    file_id = %file_id,
+                    version_id = %version_id,
+                    "failed to queue restore review operation"
+                );
+            }
+            let _ = app.emit(
+                "version-center-review",
+                serde_json::json!({
+                    "file_id": file_id,
+                    "version_id": version_id,
+                    "kind": "restore",
+                }),
+            );
+            Err(format!(
+                "restore failed; queued for review if state DB was available: {msg}"
+            ))
+        }
+    }
+}
+
 // ── IPC commands: sync-root config ────────────────────────────────────────────
 
 /// Read the persisted sync root from `~/.config/beebeeb/desktop.toml`.
@@ -1075,6 +1184,9 @@ pub fn run() {
             set_session,
             clear_session,
             sync_status,
+            list_version_conflict_center,
+            list_file_versions,
+            restore_file_version,
             get_sync_root,
             pick_sync_root,
             default_sync_root,

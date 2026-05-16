@@ -160,6 +160,22 @@ pub struct CacheCleanupOutcome {
     pub evicted_file_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionConflictEntry {
+    pub id: String,
+    pub file_id: String,
+    pub file_name: String,
+    pub kind: String,
+    pub status: String,
+    pub updated_at: Option<i64>,
+    pub detail: String,
+    pub action: String,
+    pub op_id: Option<String>,
+    pub version_id: Option<String>,
+    pub base_version: Option<i64>,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedRootRefreshOutcome {
     pub active_shared_root_ids: Vec<String>,
@@ -474,6 +490,44 @@ impl EngineBridge {
         Ok(CacheCleanupOutcome {
             evicted_file_ids: evicted,
         })
+    }
+
+    pub fn version_conflict_feed(&self) -> anyhow::Result<Vec<VersionConflictEntry>> {
+        version_conflict_feed_from_db(self.db.as_ref())
+    }
+
+    pub fn queue_restore_version(
+        &self,
+        file_id: &str,
+        version_id: &str,
+        last_error: Option<String>,
+    ) -> anyhow::Result<PendingOperation> {
+        let now = now_secs();
+        let op = PendingOperation {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            kind: OperationKind::RestoreVersion,
+            file_id: Some(file_id.to_string()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "restore_version",
+                    "version_id": version_id,
+                })
+                .to_string(),
+            ),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: Some(version_id.to_string()),
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: now,
+            last_error,
+            created_at: now,
+            updated_at: now,
+        };
+        self.db.enqueue_operation(&op)?;
+        Ok(op)
     }
 
     fn enqueue_finder_operation(
@@ -852,6 +906,39 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
         || lower.ends_with(".crdownload")
 }
 
+pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
+    let mut entries = Vec::new();
+
+    for file in db.list_by_status(FileStatus::Conflict)? {
+        entries.push(VersionConflictEntry {
+            id: format!("conflict:{}", file.file_id),
+            file_id: file.file_id.clone(),
+            file_name: display_name_for_path(&file.path),
+            kind: "conflict".to_string(),
+            status: "needs review".to_string(),
+            updated_at: Some(file.modified_at),
+            detail: "Local and remote both changed from the last synced base.".to_string(),
+            action: "open_conflict".to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
+    }
+
+    for op in db.list_review_operations()? {
+        entries.push(review_entry_for_operation(&op, db)?);
+    }
+
+    entries.sort_by(|a, b| {
+        b.updated_at
+            .unwrap_or_default()
+            .cmp(&a.updated_at.unwrap_or_default())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(entries)
+}
+
 fn encrypted_metadata_for_name(
     master_key_bytes: &[u8; 32],
     file_id: &str,
@@ -913,6 +1000,141 @@ fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
             .next()
             .and_then(|part| part.parse::<i64>().ok())
             .filter(|version| *version > 0)
+    })
+}
+
+fn display_name_for_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
+    let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
+    let file_name = op
+        .target_path
+        .as_deref()
+        .map(display_name_for_path)
+        .or_else(|| {
+            op.file_id
+                .as_deref()
+                .and_then(|id| db.get_file(id).ok().flatten())
+                .map(|entry| display_name_for_path(&entry.path))
+        })
+        .unwrap_or_else(|| file_id.clone());
+    let (kind, status, detail, action) = classify_review_operation(op);
+
+    Ok(VersionConflictEntry {
+        id: format!("op:{}", op.op_id),
+        file_id,
+        file_name,
+        kind: kind.to_string(),
+        status: status.to_string(),
+        updated_at: Some(op.updated_at),
+        detail,
+        action: action.to_string(),
+        op_id: Some(op.op_id.clone()),
+        version_id: operation_version_id(op),
+        base_version: op.base_version,
+        last_error: op.last_error.clone(),
+    })
+}
+
+fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static str, String, &'static str) {
+    let error = op.last_error.as_deref().unwrap_or("").to_ascii_lowercase();
+    let metadata = op.metadata_json.as_deref().unwrap_or("").to_ascii_lowercase();
+    let stale_base = error.contains("stale")
+        || error.contains("base version")
+        || metadata.contains("base_version_identifier")
+        || op.base_version.is_some();
+
+    if matches!(op.kind, OperationKind::RestoreVersion) {
+        return (
+            "restore",
+            "restore review",
+            "Restore is queued or failed; the server restore endpoint creates a new current version when it succeeds."
+                .to_string(),
+            "restore_review",
+        );
+    }
+    if error.contains("quota") || error.contains("insufficient storage") {
+        return (
+            "quota_failure",
+            "quota blocked",
+            op.last_error
+                .clone()
+                .unwrap_or_else(|| "Upload is blocked by account storage quota.".to_string()),
+            "review_upload",
+        );
+    }
+    if error.contains("permission")
+        || error.contains("forbidden")
+        || error.contains("read-only")
+        || error.contains("403")
+    {
+        return (
+            "permission_failure",
+            "permission blocked",
+            op.last_error
+                .clone()
+                .unwrap_or_else(|| "Write is blocked by folder permissions.".to_string()),
+            "review_upload",
+        );
+    }
+    if stale_base && matches!(op.kind, OperationKind::UploadVersion) {
+        return (
+            "stale_base",
+            "stale base kept local",
+            "Local bytes are preserved in the durable queue and need version review before retry.".to_string(),
+            "review_upload",
+        );
+    }
+
+    match op.kind {
+        OperationKind::UploadVersion | OperationKind::UploadFile => (
+            "failed_upload",
+            "upload review",
+            op.last_error
+                .clone()
+                .unwrap_or_else(|| "Upload is queued for the encrypted transfer worker.".to_string()),
+            "review_upload",
+        ),
+        OperationKind::RenameFile | OperationKind::MoveFile => (
+            "metadata",
+            "metadata review",
+            op.last_error
+                .clone()
+                .unwrap_or_else(|| "Rename or move is queued for metadata sync.".to_string()),
+            "review_upload",
+        ),
+        OperationKind::TrashFile => (
+            "delete",
+            "delete review",
+            op.last_error
+                .clone()
+                .unwrap_or_else(|| "Delete is queued as a trash/soft-delete operation.".to_string()),
+            "review_upload",
+        ),
+        _ => (
+            "failed_upload",
+            "queued review",
+            op.last_error
+                .clone()
+                .unwrap_or_else(|| "Operation is queued for a worker that is not attached yet.".to_string()),
+            "review_upload",
+        ),
+    }
+}
+
+fn operation_version_id(op: &PendingOperation) -> Option<String> {
+    op.base_object_version_id.clone().or_else(|| {
+        op.metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.get("version_id").and_then(|v| v.as_str()).map(str::to_string))
     })
 }
 
@@ -1490,6 +1712,135 @@ mod tests {
         assert_eq!(metadata["shared_root_id"], "shared-root");
         assert_eq!(metadata["share_id"], "invite-2");
         assert_eq!(metadata["uploaded_by"], "authenticated_desktop_user");
+    }
+
+    #[test]
+    fn test_version_center_feed_maps_conflicts_and_review_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "conflict-file".into(),
+                path: "/Work/conflict.md".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 64,
+                modified_at: 100,
+                content_hash: Some("local".into()),
+                remote_updated_at: 90,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-quota".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("quota-file".into()),
+                parent_id: None,
+                target_path: Some("/Work/quota.png".into()),
+                metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+                payload_path: Some("/tmp/quota".into()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 3,
+                max_attempts: 3,
+                next_retry_at: 100,
+                last_error: Some("quota exceeded".into()),
+                created_at: 101,
+                updated_at: 101,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-permission".into(),
+                kind: OperationKind::MoveFile,
+                file_id: Some("shared-file".into()),
+                parent_id: Some("shared-folder".into()),
+                target_path: Some("/Shared/blocked.txt".into()),
+                metadata_json: Some(r#"{"operation":"metadata_update"}"#.into()),
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 1,
+                max_attempts: 5,
+                next_retry_at: 100,
+                last_error: Some("403 forbidden: permission denied".into()),
+                created_at: 102,
+                updated_at: 102,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-stale".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("stale-file".into()),
+                parent_id: None,
+                target_path: Some("/Work/stale.txt".into()),
+                metadata_json: Some(r#"{"operation":"upload_version","base_version_identifier":"7:1700:12"}"#.into()),
+                payload_path: Some("/tmp/stale".into()),
+                base_version: Some(7),
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 100,
+                last_error: Some("stale base version rejected".into()),
+                created_at: 103,
+                updated_at: 103,
+            })
+            .unwrap();
+
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert!(feed.iter().any(|entry| {
+            entry.kind == "conflict"
+                && entry.file_id == "conflict-file"
+                && entry.file_name == "conflict.md"
+                && entry.action == "open_conflict"
+        }));
+        assert!(
+            feed.iter()
+                .any(|entry| entry.kind == "quota_failure" && entry.file_name == "quota.png")
+        );
+        assert!(
+            feed.iter()
+                .any(|entry| entry.kind == "permission_failure" && entry.file_name == "blocked.txt")
+        );
+        assert!(feed.iter().any(|entry| {
+            entry.kind == "stale_base"
+                && entry.file_name == "stale.txt"
+                && entry.base_version == Some(7)
+                && entry.detail.contains("preserved")
+        }));
+    }
+
+    #[test]
+    fn test_restore_version_routes_to_durable_operation_for_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+
+        let queued = bridge
+            .queue_restore_version(
+                "file-restore",
+                "version-2",
+                Some("direct restore failed: network offline".into()),
+            )
+            .unwrap();
+
+        assert_eq!(queued.kind, OperationKind::RestoreVersion);
+        assert_eq!(queued.file_id.as_deref(), Some("file-restore"));
+        assert_eq!(queued.base_object_version_id.as_deref(), Some("version-2"));
+        let metadata: serde_json::Value = serde_json::from_str(queued.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["operation"], "restore_version");
+        assert_eq!(metadata["version_id"], "version-2");
+
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert!(feed.iter().any(|entry| {
+            entry.kind == "restore"
+                && entry.file_id == "file-restore"
+                && entry.version_id.as_deref() == Some("version-2")
+                && entry.last_error.as_deref() == Some("direct restore failed: network offline")
+        }));
     }
 
     fn seed_bridge_row(

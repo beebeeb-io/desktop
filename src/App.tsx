@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { command, loadSyncStatus, type SyncStatus } from './desktopApi'
 import Status from './pages/Status'
 import SyncFolder from './pages/SyncFolder'
@@ -34,6 +35,7 @@ export default function App() {
   const [page, setPage] = useState<Page>('status')
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [version, setVersion] = useState<string | null>(null)
+  const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -55,6 +57,31 @@ export default function App() {
     })
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    const unlisten = Promise.all([
+      listen('engine-conflict', () => {
+        if (cancelled) return
+        setPage('versions')
+        setVersionCenterRefresh((value) => value + 1)
+      }),
+      listen('version-center-review', () => {
+        if (cancelled) return
+        setPage('versions')
+        setVersionCenterRefresh((value) => value + 1)
+      }),
+      listen('version-restored', () => {
+        if (cancelled) return
+        setPage('versions')
+        setVersionCenterRefresh((value) => value + 1)
+      }),
+    ])
+    return () => {
+      cancelled = true
+      void unlisten.then((callbacks) => callbacks.forEach((callback) => callback()))
+    }
+  }, [])
+
   const renderPage = () => {
     switch (page) {
       case 'status':
@@ -66,7 +93,7 @@ export default function App() {
       case 'shared':
         return <Shared />
       case 'versions':
-        return <VersionCenter />
+        return <VersionCenter refreshSignal={versionCenterRefresh} />
       case 'account':
         return <Account />
       case 'bandwidth':

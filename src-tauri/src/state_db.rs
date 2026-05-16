@@ -734,6 +734,43 @@ impl StateDb {
         rows.collect()
     }
 
+    /// Return operations that need user-visible review. This is broader
+    /// than the retry worker's "due now" view: terminal failures whose
+    /// attempts hit max_attempts must still appear in the conflict/version
+    /// center instead of disappearing from the UI.
+    pub fn list_review_operations(&self) -> Result<Vec<PendingOperation>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+                    base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+                    last_error, created_at, updated_at
+             FROM operation_queue
+             WHERE last_error IS NOT NULL
+                OR kind IN ('upload_version', 'restore_version')
+             ORDER BY updated_at DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PendingOperation {
+                op_id: row.get(0)?,
+                kind: OperationKind::from_str(&row.get::<_, String>(1)?),
+                file_id: row.get(2)?,
+                parent_id: row.get(3)?,
+                target_path: row.get(4)?,
+                metadata_json: row.get(5)?,
+                payload_path: row.get(6)?,
+                base_version: row.get(7)?,
+                base_object_version_id: row.get(8)?,
+                attempts: row.get(9)?,
+                max_attempts: row.get(10)?,
+                next_retry_at: row.get(11)?,
+                last_error: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn record_operation_attempt(
         &self,
         op_id: &str,

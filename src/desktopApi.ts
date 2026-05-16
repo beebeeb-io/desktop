@@ -52,9 +52,33 @@ export interface VersionConflictEntry {
   id: string
   file_id: string
   file_name: string
-  kind: 'conflict' | 'failed_upload' | 'version'
+  kind:
+    | 'conflict'
+    | 'failed_upload'
+    | 'quota_failure'
+    | 'permission_failure'
+    | 'stale_base'
+    | 'restore'
+    | 'metadata'
+    | 'delete'
   status: string
-  updated_at?: string
+  updated_at?: number
+  detail: string
+  action: 'open_conflict' | 'review_upload' | 'restore_review' | string
+  op_id?: string | null
+  version_id?: string | null
+  base_version?: number | null
+  last_error?: string | null
+}
+
+export interface FileVersionEntry {
+  id: string
+  version?: number | null
+  object_version_id?: string | null
+  created_at?: string | number | null
+  size_bytes?: number | null
+  is_current?: boolean
+  created_by?: string | null
 }
 
 export interface FinderInstallState {
