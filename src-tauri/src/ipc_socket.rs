@@ -38,6 +38,19 @@ pub enum IpcRequest {
         file_id: String,
         base_version_identifier: Option<String>,
     },
+    SetRecursivePin {
+        file_id: String,
+        pinned: bool,
+    },
+    RecordOpenedFile {
+        file_id: String,
+        cache_path: String,
+        cache_bytes: i64,
+    },
+    EnforceSmartCache {
+        max_unpinned_cache_bytes: Option<i64>,
+        disk_pressure_min_free_bytes: Option<u64>,
+    },
     GetSyncSummary,
 }
 
@@ -60,6 +73,13 @@ pub enum IpcResponse {
         syncing: u32,
         cloud_only: u32,
         conflicts: u32,
+    },
+    PinUpdated {
+        changed_item_ids: Vec<String>,
+        hydrate_operations: usize,
+    },
+    CacheCleanup {
+        evicted_file_ids: Vec<String>,
     },
 }
 
@@ -190,6 +210,40 @@ async fn handle_connection(
                 file_id,
                 base_version_identifier,
             } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
+            IpcRequest::SetRecursivePin { file_id, pinned } => match bridge.set_recursive_pin(&file_id, pinned) {
+                Ok(outcome) => IpcResponse::PinUpdated {
+                    changed_item_ids: outcome.changed_item_ids,
+                    hydrate_operations: outcome.hydrate_operations,
+                },
+                Err(e) => IpcResponse::Error { message: e.to_string() },
+            },
+            IpcRequest::RecordOpenedFile {
+                file_id,
+                cache_path,
+                cache_bytes,
+            } => match bridge.record_smart_cache_open(&file_id, std::path::Path::new(&cache_path), cache_bytes) {
+                Ok(outcome) => IpcResponse::CacheCleanup {
+                    evicted_file_ids: outcome.evicted_file_ids,
+                },
+                Err(e) => IpcResponse::Error { message: e.to_string() },
+            },
+            IpcRequest::EnforceSmartCache {
+                max_unpinned_cache_bytes,
+                disk_pressure_min_free_bytes,
+            } => {
+                let policy = crate::engine_bridge::CachePolicy {
+                    max_unpinned_cache_bytes: max_unpinned_cache_bytes
+                        .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().max_unpinned_cache_bytes),
+                    disk_pressure_min_free_bytes: disk_pressure_min_free_bytes
+                        .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().disk_pressure_min_free_bytes),
+                };
+                match bridge.enforce_smart_cache(policy) {
+                    Ok(outcome) => IpcResponse::CacheCleanup {
+                        evicted_file_ids: outcome.evicted_file_ids,
+                    },
+                    Err(e) => IpcResponse::Error { message: e.to_string() },
+                }
+            }
             IpcRequest::GetSyncSummary => {
                 let syncing = db
                     .list_by_status(crate::state_db::FileStatus::Downloading)

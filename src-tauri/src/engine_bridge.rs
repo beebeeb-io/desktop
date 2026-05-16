@@ -131,6 +131,32 @@ pub enum FinderWriteOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachePolicy {
+    pub max_unpinned_cache_bytes: i64,
+    pub disk_pressure_min_free_bytes: u64,
+}
+
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            max_unpinned_cache_bytes: 2 * 1024 * 1024 * 1024,
+            disk_pressure_min_free_bytes: 5 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinUpdateOutcome {
+    pub changed_item_ids: Vec<String>,
+    pub hydrate_operations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCleanupOutcome {
+    pub evicted_file_ids: Vec<String>,
+}
+
 impl EngineBridge {
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
         Self { db, api }
@@ -299,6 +325,56 @@ impl EngineBridge {
         )
     }
 
+    pub fn set_recursive_pin(&self, file_id: &str, pinned: bool) -> anyhow::Result<PinUpdateOutcome> {
+        let now = now_secs();
+        let changed_item_ids = self.db.set_recursive_pin(file_id, pinned, now)?;
+        let mut hydrate_operations = 0usize;
+
+        self.enqueue_pin_tree_operation(file_id, pinned, now)?;
+        if pinned {
+            for changed_id in &changed_item_ids {
+                let Some(entry) = self.db.get_file(changed_id)? else {
+                    continue;
+                };
+                let Some(contract) = self.db.get_file_contract_state(changed_id)? else {
+                    continue;
+                };
+                if contract.effective_pin_state() == crate::state_db::PinState::Pinned
+                    && entry.status == FileStatus::CloudOnly
+                    && entry.size_bytes > 0
+                {
+                    self.enqueue_hydrate_operation(&entry, now)?;
+                    hydrate_operations += 1;
+                }
+            }
+        }
+
+        Ok(PinUpdateOutcome {
+            changed_item_ids,
+            hydrate_operations,
+        })
+    }
+
+    pub fn record_smart_cache_open(
+        &self,
+        file_id: &str,
+        cache_path: &Path,
+        cache_bytes: i64,
+    ) -> anyhow::Result<CacheCleanupOutcome> {
+        self.db
+            .mark_cached(file_id, &cache_path.to_string_lossy(), cache_bytes, now_secs())?;
+        self.enforce_smart_cache(CachePolicy::default())
+    }
+
+    pub fn enforce_smart_cache(&self, policy: CachePolicy) -> anyhow::Result<CacheCleanupOutcome> {
+        let evicted = self
+            .db
+            .evict_unpinned_cache_until_under(policy.max_unpinned_cache_bytes, now_secs())?;
+        Ok(CacheCleanupOutcome {
+            evicted_file_ids: evicted,
+        })
+    }
+
     fn enqueue_finder_operation(
         &self,
         kind: OperationKind,
@@ -339,6 +415,62 @@ impl EngineBridge {
         })
     }
 
+    fn enqueue_pin_tree_operation(&self, file_id: &str, pinned: bool, now: i64) -> anyhow::Result<()> {
+        let op = PendingOperation {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            kind: OperationKind::PinTree,
+            file_id: Some(file_id.to_string()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "pin_tree",
+                    "pinned": pinned,
+                })
+                .to_string(),
+            ),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: now,
+            last_error: Some("queued recursive pin state; hydration worker not yet attached".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        self.db.enqueue_operation(&op)?;
+        Ok(())
+    }
+
+    fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> anyhow::Result<()> {
+        let op = PendingOperation {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            kind: OperationKind::HydrateFile,
+            file_id: Some(entry.file_id.clone()),
+            parent_id: None,
+            target_path: Some(entry.path.clone()),
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "hydrate_file",
+                    "reason": "recursive_pin",
+                })
+                .to_string(),
+            ),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: now,
+            last_error: Some("queued pinned content hydration; transfer worker not yet attached".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        self.db.enqueue_operation(&op)?;
+        Ok(())
+    }
+
     /// Download `file_id` from the vault, decrypt, write to `dest_path`.
     /// Called by an OS extension when a cloud-only placeholder is first
     /// opened (Tasks 5-7) and by `bb pull`-style flows we may add later.
@@ -370,6 +502,10 @@ impl EngineBridge {
         match self.do_hydrate(file_id, dest_path).await {
             Ok(()) => {
                 self.db.set_status(file_id, FileStatus::Local)?;
+                let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+                self.db
+                    .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+                let _ = self.enforce_smart_cache(CachePolicy::default());
                 Ok(())
             }
             Err(e) => {
@@ -950,5 +1086,94 @@ mod tests {
         assert_eq!(queued[0].kind, OperationKind::TrashFile);
         assert_eq!(queued[0].base_version, Some(9));
         assert!(queued[0].payload_path.is_none());
+    }
+
+    #[test]
+    fn test_recursive_pin_queues_hydration_for_cloud_only_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "folder-a", "/Projects", None, FileStatus::CloudOnly, 0);
+        seed_bridge_row(
+            &bridge,
+            "file-a",
+            "/Projects/report.txt",
+            Some("folder-a"),
+            FileStatus::CloudOnly,
+            128,
+        );
+        seed_bridge_row(
+            &bridge,
+            "file-local",
+            "/Projects/local.txt",
+            Some("folder-a"),
+            FileStatus::Local,
+            256,
+        );
+
+        let queued = bridge.set_recursive_pin("folder-a", true).unwrap();
+        assert_eq!(queued.changed_item_ids.len(), 3);
+        assert_eq!(queued.hydrate_operations, 1);
+
+        let due = bridge.db.list_due_operations(now_secs()).unwrap();
+        assert!(due.iter().any(|op| {
+            op.kind == OperationKind::PinTree
+                && op.file_id.as_deref() == Some("folder-a")
+                && op.metadata_json.as_deref().unwrap_or("").contains("\"pinned\":true")
+        }));
+        assert!(
+            due.iter()
+                .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-a") })
+        );
+        assert!(
+            !due.iter()
+                .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-local") })
+        );
+    }
+
+    #[test]
+    fn test_smart_cache_cleanup_never_evicts_effectively_pinned_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "pinned", "/Pinned.txt", None, FileStatus::Local, 700);
+        seed_bridge_row(&bridge, "unpinned", "/Unpinned.txt", None, FileStatus::Local, 600);
+        bridge.db.set_recursive_pin("pinned", true, 1).unwrap();
+        bridge.db.mark_cached("pinned", "/cache/pinned", 700, 10).unwrap();
+        bridge.db.mark_cached("unpinned", "/cache/unpinned", 600, 20).unwrap();
+
+        let evicted = bridge
+            .enforce_smart_cache(CachePolicy {
+                max_unpinned_cache_bytes: 500,
+                disk_pressure_min_free_bytes: 0,
+            })
+            .unwrap();
+
+        assert_eq!(evicted.evicted_file_ids, vec!["unpinned".to_string()]);
+        assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
+    }
+
+    fn seed_bridge_row(
+        bridge: &EngineBridge,
+        file_id: &str,
+        path: &str,
+        parent_id: Option<&str>,
+        status: FileStatus,
+        cache_bytes: i64,
+    ) {
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: path.into(),
+                status,
+                size_bytes: cache_bytes,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.parent_id = parent_id.map(str::to_string);
+        contract.cache_bytes = cache_bytes;
+        bridge.db.set_file_contract_state(&contract).unwrap();
     }
 }

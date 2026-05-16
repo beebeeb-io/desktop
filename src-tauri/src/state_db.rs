@@ -282,6 +282,7 @@ impl StateDb {
                 cache_bytes INTEGER NOT NULL DEFAULT 0,
                 pin_state TEXT NOT NULL DEFAULT 'inherit',
                 inherited_pin_state TEXT NOT NULL DEFAULT 'unpinned',
+                last_opened_at INTEGER NOT NULL DEFAULT 0,
                 last_sync_at INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_status ON files(status);
@@ -324,6 +325,7 @@ impl StateDb {
             "inherited_pin_state",
             "TEXT NOT NULL DEFAULT 'unpinned'",
         )?;
+        ensure_column(&conn, "files", "last_opened_at", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
         conn.execute_batch(
             "
@@ -633,6 +635,163 @@ impl StateDb {
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
         Ok(())
     }
+
+    pub fn set_recursive_pin(&self, root_file_id: &str, pinned: bool, now: i64) -> Result<Vec<String>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "
+                WITH RECURSIVE tree(file_id) AS (
+                    SELECT file_id FROM files WHERE file_id = ?1
+                    UNION ALL
+                    SELECT f.file_id
+                    FROM files f
+                    JOIN tree t ON f.parent_id = t.file_id
+                )
+                SELECT file_id FROM tree ORDER BY file_id ASC
+                ",
+            )?;
+            let rows = stmt.query_map(params![root_file_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        let state = if pinned { PinState::Pinned } else { PinState::Unpinned };
+        let state_str = state.as_str();
+        tx.execute(
+            "UPDATE files
+             SET pin_state = ?2, inherited_pin_state = ?2, last_sync_at = ?3
+             WHERE file_id = ?1",
+            params![root_file_id, state_str, now],
+        )?;
+        tx.execute(
+            "
+            WITH RECURSIVE tree(file_id) AS (
+                SELECT file_id FROM files WHERE file_id = ?1
+                UNION ALL
+                SELECT f.file_id
+                FROM files f
+                JOIN tree t ON f.parent_id = t.file_id
+            )
+            UPDATE files
+            SET inherited_pin_state = ?2, last_sync_at = ?3
+            WHERE file_id IN (SELECT file_id FROM tree WHERE file_id != ?1)
+            ",
+            params![root_file_id, state_str, now],
+        )?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    pub fn mark_cached(&self, file_id: &str, cache_path: &str, cache_bytes: i64, opened_at: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files
+             SET cache_path = ?2,
+                 cache_bytes = ?3,
+                 last_opened_at = ?4,
+                 status = CASE
+                    WHEN status IN ('uploading', 'conflict', 'error') THEN status
+                    ELSE 'local'
+                 END
+             WHERE file_id = ?1",
+            params![file_id, cache_path, cache_bytes.max(0), opened_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn unpinned_cache_bytes(&self) -> Result<i64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(cache_bytes), 0)
+            FROM files
+            WHERE cache_bytes > 0
+              AND cache_path IS NOT NULL
+              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
+            ",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn cache_bytes_by_effective_pin(&self, pinned: bool) -> Result<i64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let predicate = if pinned {
+            "pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned')"
+        } else {
+            "NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))"
+        };
+        conn.query_row(
+            &format!(
+                "
+                SELECT COALESCE(SUM(cache_bytes), 0)
+                FROM files
+                WHERE cache_bytes > 0
+                  AND cache_path IS NOT NULL
+                  AND ({predicate})
+                "
+            ),
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn evict_unpinned_cache_until_under(&self, max_unpinned_cache_bytes: i64, now: i64) -> Result<Vec<String>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut total: i64 = tx.query_row(
+            "
+            SELECT COALESCE(SUM(cache_bytes), 0)
+            FROM files
+            WHERE cache_bytes > 0
+              AND cache_path IS NOT NULL
+              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
+            ",
+            [],
+            |row| row.get(0),
+        )?;
+        if total <= max_unpinned_cache_bytes.max(0) {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+
+        let candidates = {
+            let mut stmt = tx.prepare(
+                "
+                SELECT file_id, cache_bytes
+                FROM files
+                WHERE cache_bytes > 0
+                  AND cache_path IS NOT NULL
+                  AND status = 'local'
+                  AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
+                ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
+                ",
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        let mut evicted = Vec::new();
+        for (file_id, bytes) in candidates {
+            if total <= max_unpinned_cache_bytes.max(0) {
+                break;
+            }
+            tx.execute(
+                "UPDATE files
+                 SET cache_path = NULL,
+                     cache_bytes = 0,
+                     status = 'cloud_only',
+                     modified_at = ?2
+                 WHERE file_id = ?1",
+                params![file_id, now],
+            )?;
+            total = total.saturating_sub(bytes);
+            evicted.push(file_id);
+        }
+        tx.commit()?;
+        Ok(evicted)
+    }
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
@@ -743,6 +902,7 @@ mod tests {
             "pin_state",
             "inherited_pin_state",
             "last_sync_at",
+            "last_opened_at",
         ] {
             assert!(has_column(&conn, "files", column).unwrap(), "missing {column}");
         }
@@ -839,5 +999,106 @@ mod tests {
 
         db.remove_operation("op-1").unwrap();
         assert!(db.list_due_operations(999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_recursive_pin_inheritance_persists_for_folder_tree() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "folder-a", "/Projects", None, FileStatus::CloudOnly, 0);
+        seed_contract_row(
+            &db,
+            "file-a",
+            "/Projects/report.txt",
+            Some("folder-a"),
+            FileStatus::CloudOnly,
+            100,
+        );
+        seed_contract_row(
+            &db,
+            "nested-folder",
+            "/Projects/Nested",
+            Some("folder-a"),
+            FileStatus::CloudOnly,
+            0,
+        );
+        seed_contract_row(
+            &db,
+            "file-b",
+            "/Projects/Nested/spec.md",
+            Some("nested-folder"),
+            FileStatus::CloudOnly,
+            200,
+        );
+
+        let changed = db.set_recursive_pin("folder-a", true, 1000).unwrap();
+        assert_eq!(changed.len(), 4);
+        assert_eq!(
+            db.get_file_contract_state("folder-a").unwrap().unwrap().pin_state,
+            PinState::Pinned
+        );
+        assert_eq!(
+            db.get_file_contract_state("file-b")
+                .unwrap()
+                .unwrap()
+                .effective_pin_state(),
+            PinState::Pinned
+        );
+
+        db.set_recursive_pin("folder-a", false, 2000).unwrap();
+        assert_eq!(
+            db.get_file_contract_state("file-b")
+                .unwrap()
+                .unwrap()
+                .effective_pin_state(),
+            PinState::Unpinned
+        );
+    }
+
+    #[test]
+    fn test_cache_eviction_preserves_pinned_and_uploading_files() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "pinned", "/Pinned.txt", None, FileStatus::Local, 800);
+        seed_contract_row(&db, "uploading", "/Uploading.txt", None, FileStatus::Uploading, 900);
+        seed_contract_row(&db, "old", "/Old.txt", None, FileStatus::Local, 700);
+        seed_contract_row(&db, "new", "/New.txt", None, FileStatus::Local, 600);
+
+        db.set_recursive_pin("pinned", true, 10).unwrap();
+        db.mark_cached("pinned", "/cache/pinned", 800, 10).unwrap();
+        db.mark_cached("uploading", "/cache/uploading", 900, 20).unwrap();
+        db.mark_cached("old", "/cache/old", 700, 30).unwrap();
+        db.mark_cached("new", "/cache/new", 600, 40).unwrap();
+
+        let evicted = db.evict_unpinned_cache_until_under(1_000, 50).unwrap();
+        assert_eq!(evicted, vec!["old".to_string(), "new".to_string()]);
+        assert_eq!(db.get_file("old").unwrap().unwrap().status, FileStatus::CloudOnly);
+        assert_eq!(db.get_file("new").unwrap().unwrap().status, FileStatus::CloudOnly);
+        assert_eq!(db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(db.get_file("uploading").unwrap().unwrap().status, FileStatus::Uploading);
+    }
+
+    fn seed_contract_row(
+        db: &StateDb,
+        file_id: &str,
+        path: &str,
+        parent_id: Option<&str>,
+        status: FileStatus,
+        cache_bytes: i64,
+    ) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status,
+            size_bytes: cache_bytes,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.parent_id = parent_id.map(str::to_string);
+        contract.cache_bytes = cache_bytes;
+        db.set_file_contract_state(&contract).unwrap();
     }
 }

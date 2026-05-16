@@ -40,7 +40,7 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::ApiClient;
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_bridge::{sync_tick, ConflictDetected, EngineBridge};
+use crate::engine_bridge::{sync_tick, CachePolicy, ConflictDetected, EngineBridge};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 
@@ -212,6 +212,7 @@ async fn run(
                         // (timestamp ≈ now) doesn't get auto-resolved
                         // on the very same tick.
                         sweep_auto_resolutions(&app, &bridge, &sync_root).await;
+                        enforce_cache_budget(&bridge);
                         emit_status(&app, "idle", Some(&sync_root), None);
                     }
                     Err(e) => {
@@ -247,6 +248,19 @@ fn emit_status(
     });
     if let Err(e) = app.emit("engine-status", payload) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
+    }
+}
+
+fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
+    match bridge.enforce_smart_cache(CachePolicy::default()) {
+        Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
+            tracing::info!(
+                evicted = outcome.evicted_file_ids.len(),
+                "smart cache cleanup evicted unpinned files"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "smart cache cleanup failed"),
     }
 }
 
