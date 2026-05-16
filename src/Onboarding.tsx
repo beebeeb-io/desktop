@@ -12,8 +12,8 @@ import {
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
 
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
-  { id: 'signin', title: 'Sign in', detail: 'Store the session in the desktop keychain.' },
-  { id: 'unlock', title: 'Unlock vault', detail: 'Release the master key only into memory.' },
+  { id: 'signin', title: 'Sign in', detail: 'Establish the desktop session.' },
+  { id: 'unlock', title: 'Unlock vault', detail: 'Confirm the master key is available in memory.' },
   { id: 'finder', title: 'Install Finder location', detail: 'Register Beebeeb in the Finder sidebar.' },
   { id: 'pinning', title: 'Choose offline folders', detail: 'Default is online-only; pin only what you need.' },
   { id: 'ready', title: 'Review status', detail: 'Open the control center.' },
@@ -114,6 +114,7 @@ function Field({
 function SignInStep({ onDone }: { onDone: () => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [recoveryPhrase, setRecoveryPhrase] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -121,7 +122,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
     event.preventDefault()
     setBusy(true)
     setError(null)
-    const result = await command<void>('desktop_login', { email, password })
+    const result = await command<void>('desktop_login', { email, password, recoveryPhrase })
     setBusy(false)
     if (result.ok) {
       onDone()
@@ -133,13 +134,24 @@ function SignInStep({ onDone }: { onDone: () => void }) {
   return (
     <Card
       title="Sign in to your Beebeeb account"
-      copy="The desktop app keeps the session token in native storage and uses it to talk to the local daemon."
+      copy="Sign in with your password and recovery phrase so the desktop daemon can decrypt your vault locally."
     >
       {error && <div className="notice error">{error}</div>}
       <form onSubmit={submit} style={{ marginTop: 16 }}>
         <Field label="Email" type="email" value={email} onChange={setEmail} disabled={busy} />
         <Field label="Password" type="password" value={password} onChange={setPassword} disabled={busy} />
-        <button className="button primary" type="submit" disabled={!email || !password || busy}>
+        <Field
+          label="Recovery phrase"
+          type="password"
+          value={recoveryPhrase}
+          onChange={setRecoveryPhrase}
+          disabled={busy}
+        />
+        <button
+          className="button primary"
+          type="submit"
+          disabled={!email || !password || !recoveryPhrase || busy}
+        >
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
@@ -162,7 +174,7 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   return (
     <Card
       title="Unlock the vault"
-      copy="This step should unwrap the master key with macOS keychain access control. If the command is not registered, setup stops here instead of faking an unlocked vault."
+      copy="This step confirms that file operations can access the in-memory master key from the desktop session."
     >
       {result && !result.ok && (
         <div className="notice">
@@ -303,8 +315,7 @@ function PinningStep({ onDone }: { onDone: () => void }) {
         </div>
       ) : items.length === 0 ? (
         <div className="empty-state" style={{ marginTop: 16 }}>
-          No remote folder tree is available from this build yet. Onboarding will continue with
-          everything online-only.
+          No remote folders are available yet. Onboarding will continue with everything online-only.
         </div>
       ) : (
         <div className="tree" style={{ marginTop: 16 }}>

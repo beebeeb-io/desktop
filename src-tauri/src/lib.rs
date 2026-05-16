@@ -92,7 +92,7 @@ impl Default for AppState {
 
 /// Open the first-launch onboarding window.
 ///
-/// The window is 480×580, non-resizable, and centred. It mounts
+/// The window is wide enough for the two-column onboarding shell and centred. It mounts
 /// `Onboarding.tsx` (via `?window=onboarding`) which walks the user
 /// through three steps: sign-in, sync-folder selection, and a first-sync
 /// progress view. Called from `setup` if no sync_root is configured and
@@ -112,8 +112,9 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
         tauri::WebviewUrl::App("index.html?window=onboarding".into()),
     )
     .title("Welcome to Beebeeb")
-    .inner_size(480.0, 600.0)
-    .resizable(false)
+    .inner_size(860.0, 640.0)
+    .min_inner_size(780.0, 560.0)
+    .resizable(true)
     .center()
     .build()
     .map_err(|e| e.to_string())?;
@@ -136,23 +137,17 @@ fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Authenticate with the Beebeeb API using email + password, derive the
-/// master key from the returned Argon2id salt, and install the session
-/// in `AppState` (same as `set_session` but in one round-trip from the UI).
-///
-/// Uses the legacy `/api/v1/auth/login` endpoint (email + password → salt
-/// + session_token). OPAQUE login is handled by the web client — the desktop
-/// onboarding uses legacy login because it doesn't have WASM crypto available.
-///
-/// The master key is derived on the Rust side using `beebeeb_core::kdf::derive_master_key`
-/// (Argon2id, 4 MiB / 1 iter / 1 thread — same params as the WASM path).
+/// Authenticate with the current OPAQUE login endpoints and derive the vault
+/// master key from the user's recovery phrase. Web/mobile use the same split:
+/// OPAQUE proves the password to the server, while the recovery phrase is the
+/// actual zero-knowledge vault secret on a fresh device.
 ///
 /// On success the session is stored in `AppState`. If a sync_root is already
 /// configured (unusual on first launch but possible on re-login), the engine
 /// runner is also started.
 ///
-/// Returns `Err` on HTTP errors (wrong password → 401), network failures,
-/// or missing `salt` field in the response (account may be OPAQUE-only).
+/// Returns `Err` on HTTP errors, network failures, OPAQUE failures, or invalid
+/// recovery phrases.
 ///
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
@@ -161,61 +156,113 @@ async fn desktop_login(
     state: State<'_, AppState>,
     email: String,
     password: String,
+    recovery_phrase: String,
 ) -> Result<(), String> {
-    // POST /api/v1/auth/login
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("reqwest build: {e}"))?;
 
-    let resp = client
-        .post(format!("{base_url}/api/v1/auth/login"))
-        .json(&serde_json::json!({ "email": email, "password": password }))
+    let email = email.trim().to_lowercase();
+    if email.is_empty() || password.is_empty() {
+        return Err("Email and password are required.".to_string());
+    }
+    let recovery_phrase = recovery_phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+    if recovery_phrase.is_empty() {
+        return Err("Recovery phrase is required to unlock this device.".to_string());
+    }
+    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
+        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
+    let recovery_check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
+    let master_key: [u8; 32] = master_key_struct.to_bytes();
+
+    let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
+        .map_err(|e| format!("opaque login start: {e}"))?;
+    let client_message = encode_base64(&login_start.message);
+
+    let start_resp = client
+        .post(format!("{base_url}/api/v1/opaque/login-start"))
+        .json(&serde_json::json!({ "email": email, "client_message": client_message }))
         .send()
         .await
         .map_err(|e| format!("network error: {e}"))?;
-
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+    if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        || start_resp.status() == reqwest::StatusCode::NOT_FOUND
+    {
         return Err("Invalid email or password".to_string());
     }
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Login failed ({status}): {body}"));
+    if !start_resp.status().is_success() {
+        let status = start_resp.status();
+        let body = start_resp.text().await.unwrap_or_default();
+        return Err(format!("Login start failed ({status}): {body}"));
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| format!("parse response: {e}"))?;
+    let start_body: serde_json::Value = start_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse login start response: {e}"))?;
+    let server_message = start_body
+        .get("server_message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No server_message in login start response".to_string())?;
+    let server_state = start_body
+        .get("server_state")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No server_state in login start response".to_string())?;
+    let server_message_bytes = decode_base64(server_message)
+        .map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
+    let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
+        &login_start.state,
+        password.as_bytes(),
+        &server_message_bytes,
+    )
+    .map_err(|e| format!("Invalid email or password ({e})"))?;
 
-    // Require 2FA? Surface a clear message rather than silently failing.
-    if body.get("requires_2fa").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io and use the sync client feature there.".to_string());
+    let finish_resp = client
+        .post(format!("{base_url}/api/v1/opaque/login-finish"))
+        .json(&serde_json::json!({
+            "email": email,
+            "client_message": encode_base64(&login_finish.message),
+            "server_state": server_state,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Invalid email or password".to_string());
     }
-
-    let session_token = body
+    if !finish_resp.status().is_success() {
+        let status = finish_resp.status();
+        let body = finish_resp.text().await.unwrap_or_default();
+        return Err(format!("Login finish failed ({status}): {body}"));
+    }
+    let finish_body: serde_json::Value = finish_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse login finish response: {e}"))?;
+    if finish_body
+        .get("requires_2fa")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
+    }
+    let session_token = finish_body
         .get("session_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "No session_token in login response".to_string())?
+        .ok_or_else(|| "No session_token in login finish response".to_string())?
         .to_string();
 
-    // Derive master key from salt (legacy Argon2id path).
-    // OPAQUE accounts don't have a `salt` field — those users must use
-    // the web client for now.
-    let salt_b64 = body
-        .get("salt")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            "This account uses a newer sign-in method. Please sign in at app.beebeeb.io instead.".to_string()
-        })?
-        .to_string();
+    if desktop_session_has_totp(&client, &base_url, &session_token).await? {
+        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+        return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
+    }
 
-    // Decode base64 salt (the web client passes it as standard base64)
-    let salt_bytes = decode_base64(&salt_b64)
-        .map_err(|e| format!("invalid salt encoding: {e}"))?;
-
-    let master_key_struct = beebeeb_core::kdf::derive_master_key(&password, &salt_bytes)
-        .map_err(|e| format!("key derivation failed: {e}"))?;
-    let master_key: [u8; 32] = master_key_struct.to_bytes();
+    if let Err(e) = verify_recovery_phrase_for_account(&client, &base_url, &email, &recovery_check).await {
+        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+        return Err(e);
+    }
 
     // Store session — same path as `set_session` IPC.
     {
@@ -251,6 +298,79 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(s.trim())
         .map_err(|e| e.to_string())
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+async fn desktop_session_has_totp(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<bool, String> {
+    let resp = client
+        .get(format!("{base_url}/api/v1/auth/me"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| format!("session verification failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Session verification failed ({status}): {body}"));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse session verification response: {e}"))?;
+    Ok(body
+        .get("totp_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+async fn verify_recovery_phrase_for_account(
+    client: &reqwest::Client,
+    base_url: &str,
+    email: &str,
+    recovery_check: &[u8; 32],
+) -> Result<(), String> {
+    let resp = client
+        .post(format!("{base_url}/api/v1/auth/recover-with-phrase-start"))
+        .json(&serde_json::json!({
+            "email": email,
+            "recovery_check": encode_base64(recovery_check),
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("recovery phrase check failed: {e}"))?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        return Err("Recovery phrase does not match this Beebeeb account.".to_string());
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("Recovery phrase check failed ({status}): {body}"))
+}
+
+async fn revoke_desktop_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<(), String> {
+    client
+        .post(format!("{base_url}/api/v1/auth/logout"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| format!("logout failed: {e}"))?
+        .error_for_status()
+        .map(|_| ())
+        .map_err(|e| format!("logout failed: {e}"))
 }
 
 // ── IPC commands: session ─────────────────────────────────────────────────────
@@ -330,6 +450,124 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
         tracing::info!("engine aborted on logout");
     }
     Ok(())
+}
+
+/// The current desktop login path leaves the master key in memory immediately
+/// after sign-in. Until wrapped-key keychain persistence lands, "unlock" is a
+/// readiness check instead of a second biometric/keychain unwrap.
+#[tauri::command]
+fn unlock_vault(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "session mutex poisoned".to_string())?;
+    if guard.is_some() {
+        Ok(())
+    } else {
+        Err("Sign in before unlocking the vault.".to_string())
+    }
+}
+
+/// Full lock/unlock needs persisted wrapped-key material. Returning a clear
+/// runtime error is better than exposing this as an unknown command or silently
+/// dropping the only in-memory key.
+#[tauri::command]
+fn lock_vault() -> Result<(), String> {
+    Err("Vault locking requires keychain-backed session persistence, which is not packaged in this build yet.".to_string())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct FinderInstallState {
+    installed: bool,
+    path: Option<String>,
+}
+
+fn file_provider_packaging_error() -> String {
+    "The Beebeeb File Provider extension is not packaged in this build, so Finder drive registration is unavailable.".to_string()
+}
+
+#[tauri::command]
+fn finder_location_state() -> Result<FinderInstallState, String> {
+    let path = DesktopConfig::load()
+        .ok()
+        .and_then(|c| c.sync_root)
+        .map(|p| p.to_string_lossy().into_owned());
+    Ok(FinderInstallState {
+        installed: false,
+        path,
+    })
+}
+
+/// Persist the chosen sync root and start the daemon when possible, but do not
+/// claim Finder integration succeeded while the `.appex` is absent.
+#[tauri::command]
+async fn install_finder_location(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<FinderInstallState, String> {
+    let root = path
+        .map(PathBuf::from)
+        .unwrap_or_else(config::default_sync_root_suggestion);
+    if !root.is_absolute() {
+        return Err(format!("Finder location must be absolute: {}", root.display()));
+    }
+    config::ensure_directory(&root)?;
+
+    let mut cfg = DesktopConfig::load()?;
+    cfg.sync_root = Some(root.clone());
+    cfg.save()?;
+
+    let session = state
+        .session
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
+    if let Some((token, key)) = session {
+        let mut engine_slot = state.engine.lock().await;
+        if let Some(prev) = engine_slot.take() {
+            prev.abort().await;
+        }
+        *engine_slot = Some(EngineRunner::spawn(app, root.clone(), token, key));
+    }
+
+    Err(file_provider_packaging_error())
+}
+
+#[tauri::command]
+fn open_finder_location(path: Option<String>) -> Result<(), String> {
+    let root = path
+        .map(PathBuf::from)
+        .or_else(|| DesktopConfig::load().ok().and_then(|c| c.sync_root))
+        .unwrap_or_else(config::default_sync_root_suggestion);
+    config::ensure_directory(&root)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&root)
+            .spawn()
+            .map_err(|e| format!("open Finder: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&root)
+            .spawn()
+            .map_err(|e| format!("open Explorer: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&root)
+            .spawn()
+            .map_err(|e| format!("open file manager: {e}"))?;
+        Ok(())
+    }
 }
 
 /// Lightweight status endpoint for the WebView's settings page.
@@ -862,6 +1100,36 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
     Ok(out)
 }
 
+#[tauri::command]
+async fn list_remote_tree(state: State<'_, AppState>) -> Result<Vec<VaultItem>, String> {
+    list_vault_folders(state).await
+}
+
+#[tauri::command]
+fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::PinUpdateOutcome, String> {
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg
+        .sync_root
+        .ok_or_else(|| "Choose a sync folder before changing offline availability.".to_string())?;
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Err("The local sync database has not been created yet. Start the daemon once before changing offline availability.".to_string());
+    }
+
+    let db = std::sync::Arc::new(
+        state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?,
+    );
+    let api = std::sync::Arc::new(api_client::ApiClient::new(
+        runner::api_base_url(),
+        String::new(),
+        [0u8; 32],
+    ));
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+    bridge
+        .set_recursive_pin(&item_id, pinned)
+        .map_err(|e| format!("set recursive pin: {e}"))
+}
+
 /// Best-effort lookup of the signed-in user's email, used by
 /// `repos/desktop/src/pages/Account.tsx`.
 ///
@@ -1215,6 +1483,8 @@ pub fn run() {
             autostart_enabled,
             set_session,
             clear_session,
+            unlock_vault,
+            lock_vault,
             sync_status,
             export_diagnostics,
             list_version_conflict_center,
@@ -1223,6 +1493,9 @@ pub fn run() {
             get_sync_root,
             pick_sync_root,
             default_sync_root,
+            finder_location_state,
+            install_finder_location,
+            open_finder_location,
             // Task 9 — settings page IPC
             get_desktop_config,
             set_desktop_config,
@@ -1231,6 +1504,8 @@ pub fn run() {
             get_selective_sync,
             set_selective_sync,
             list_vault_folders,
+            list_remote_tree,
+            set_recursive_pin,
             // Task 12 — conflict window IPC
             open_conflict_window,
             resolve_conflict,
