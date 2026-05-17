@@ -72,6 +72,7 @@ impl fmt::Debug for Session {
 pub struct AppState {
     pub session: Mutex<Option<Session>>,
     pub auth_present: Mutex<bool>,
+    pub auth_email: Mutex<Option<String>>,
     /// Active engine runner, if any. `set_session` spawns one when a
     /// sync_root is also configured; `clear_session` aborts it.
     pub engine: tokio::sync::Mutex<Option<EngineRunner>>,
@@ -94,6 +95,7 @@ impl Default for AppState {
         Self {
             session: Mutex::new(None),
             auth_present: Mutex::new(false),
+            auth_email: Mutex::new(None),
             engine: tokio::sync::Mutex::new(None),
             // Default to "stopped" — once the runner spawns and emits
             // its first event, the listener overwrites this.
@@ -115,6 +117,27 @@ fn persist_session_to_keychain(token: &str, master_key: [u8; 32]) -> Result<(), 
     vault
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))
+}
+
+fn persist_session_token_to_keychain(token: &str) -> Result<(), String> {
+    let vault = AuthVault::new(MacOsKeychainStore::new());
+    let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
+    vault
+        .install_session(token)
+        .map_err(|e| keychain_error("store session in Keychain", e))
+}
+
+fn persist_vault_key_to_keychain(master_key: [u8; 32]) -> Result<(), String> {
+    AuthVault::new(MacOsKeychainStore::new())
+        .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
+        .map_err(|e| keychain_error("store vault key in Keychain", e))
+}
+
+fn load_session_token_from_keychain() -> Result<Option<String>, String> {
+    AuthVault::new(MacOsKeychainStore::new())
+        .session_token()
+        .map_err(|e| keychain_error("load session from Keychain", e))
+        .map(|token| token.map(|t| t.expose_for_request().to_string()))
 }
 
 fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, String> {
@@ -154,6 +177,12 @@ fn clear_keychain_session() -> Result<(), String> {
 fn set_auth_present(state: &State<'_, AppState>, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
         *guard = present;
+    }
+}
+
+fn set_auth_email(state: &State<'_, AppState>, email: Option<String>) {
+    if let Ok(mut guard) = state.auth_email.lock() {
+        *guard = email;
     }
 }
 
@@ -221,26 +250,21 @@ fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Authenticate with the current OPAQUE login endpoints and derive the vault
-/// master key from the user's recovery phrase. Web/mobile use the same split:
-/// OPAQUE proves the password to the server, while the recovery phrase is the
-/// actual zero-knowledge vault secret on a fresh device.
+/// Authenticate with the current OPAQUE login endpoints.
 ///
-/// On success the session is stored in `AppState`. If a sync_root is already
-/// configured (unusual on first launch but possible on re-login), the engine
-/// runner is also started.
+/// This intentionally mirrors web and iOS: sign-in proves account access with
+/// email/password only. If this Mac does not already have the vault key in
+/// Keychain, onboarding moves to the separate recovery-phrase unlock step.
 ///
-/// Returns `Err` on HTTP errors, network failures, OPAQUE failures, or invalid
-/// recovery phrases.
+/// Returns `Err` on HTTP errors, network failures, OPAQUE failures, or 2FA
+/// requirements.
 ///
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
 async fn desktop_login(
-    app: tauri::AppHandle,
     state: State<'_, AppState>,
     email: String,
     password: String,
-    recovery_phrase: String,
 ) -> Result<(), String> {
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
@@ -252,14 +276,6 @@ async fn desktop_login(
     if email.is_empty() || password.is_empty() {
         return Err("Email and password are required.".to_string());
     }
-    let recovery_phrase = recovery_phrase.split_whitespace().collect::<Vec<_>>().join(" ");
-    if recovery_phrase.is_empty() {
-        return Err("Recovery phrase is required to unlock this device.".to_string());
-    }
-    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
-        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
-    let recovery_check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
-    let master_key: [u8; 32] = master_key_struct.to_bytes();
 
     let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
         .map_err(|e| format!("opaque login start: {e}"))?;
@@ -342,33 +358,78 @@ async fn desktop_login(
         return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
     }
 
-    if let Err(e) =
-        verify_recovery_phrase_for_account(&client, &base_url, &session_token, &email, &recovery_check).await
-    {
+    if let Err(e) = persist_session_token_to_keychain(&session_token) {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err(e);
     }
 
-    if let Err(e) = persist_session_to_keychain(&session_token, master_key) {
-        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-        return Err(e);
+    set_auth_present(&state, true);
+    set_auth_email(&state, Some(email.clone()));
+    tracing::info!(email = %email, "desktop account session installed");
+
+    Ok(())
+}
+
+/// Provision this Mac with the user's vault key after account sign-in.
+///
+/// A recovery phrase is only needed when the Mac does not already have a
+/// Keychain-stored vault key. The account session was established by
+/// `desktop_login`; this command proves the phrase belongs to that account,
+/// stores the vault key in Keychain, and starts the sync runner.
+#[tauri::command]
+async fn desktop_unlock_with_recovery_phrase(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    recovery_phrase: String,
+) -> Result<(), String> {
+    let existing = state
+        .session
+        .lock()
+        .map_err(|_| "session mutex poisoned".to_string())?
+        .as_ref()
+        .map(|session| (session.token.clone(), session.master_key));
+    if let Some((token, master_key)) = existing {
+        start_engine_if_possible(app, &state, token, master_key).await;
+        return Ok(());
     }
 
-    // Store the unlocked session in memory for this process. The Keychain copy
-    // above is used for later lock/unlock and app-restart restore.
+    let token = load_session_token_from_keychain()?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
+    let recovery_phrase = recovery_phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+    if recovery_phrase.is_empty() {
+        return Err("Recovery phrase is required to unlock this device.".to_string());
+    }
+    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
+        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
+    let recovery_check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
+    let master_key: [u8; 32] = master_key_struct.to_bytes();
+
+    let base_url = runner::api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+    verify_recovery_phrase_for_account(
+        &client,
+        &base_url,
+        &token,
+        email.as_deref().unwrap_or(""),
+        &recovery_check,
+    )
+    .await?;
+    persist_vault_key_to_keychain(master_key)?;
+
     {
         let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
-            token: session_token.clone(),
+            token: token.clone(),
             master_key,
-            email: Some(email.clone()),
+            email,
         });
     }
     set_auth_present(&state, true);
-    tracing::info!(email = %email, "session installed via desktop_login");
-
-    start_engine_if_possible(app, &state, session_token, master_key).await;
-
+    tracing::info!("vault provisioned from recovery phrase");
+    start_engine_if_possible(app, &state, token, master_key).await;
     Ok(())
 }
 
@@ -428,6 +489,9 @@ async fn verify_recovery_phrase_for_account(
         return Ok(());
     }
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        if email.trim().is_empty() {
+            return Err("Recovery phrase verification endpoint is unavailable. Sign in again before unlocking this Mac.".to_string());
+        }
         return verify_recovery_phrase_for_account_legacy(client, base_url, email, recovery_check).await;
     }
     if resp.status() == reqwest::StatusCode::BAD_REQUEST {
@@ -510,10 +574,11 @@ async fn set_session(
         *guard = Some(Session {
             token,
             master_key: arr,
-            email,
+            email: email.clone(),
         });
     }
     set_auth_present(&state, true);
+    set_auth_email(&state, email);
     tracing::info!("session installed via IPC");
 
     // If we already know the sync_root, kick off the engine. Otherwise
@@ -552,6 +617,7 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     }
     clear_keychain_session()?;
     set_auth_present(&state, false);
+    set_auth_email(&state, None);
     Ok(())
 }
 
@@ -572,7 +638,8 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         return Ok(());
     }
 
-    let session = load_session_from_keychain(None)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
+    let session = load_session_from_keychain(email)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let token = session.token.clone();
     let master_key = session.master_key;
     {
@@ -1314,7 +1381,11 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
 #[tauri::command]
 fn account_email(state: State<'_, AppState>) -> Result<Option<String>, String> {
     let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-    Ok(guard.as_ref().and_then(|s| s.email.clone()))
+    if let Some(email) = guard.as_ref().and_then(|s| s.email.clone()) {
+        return Ok(Some(email));
+    }
+    drop(guard);
+    Ok(state.auth_email.lock().ok().and_then(|guard| guard.clone()))
 }
 
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
@@ -1622,6 +1693,7 @@ pub fn run() {
             set_session,
             clear_session,
             unlock_vault,
+            desktop_unlock_with_recovery_phrase,
             lock_vault,
             sync_status,
             desktop_storage_summary,

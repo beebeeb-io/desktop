@@ -8,12 +8,13 @@ import {
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
+import logoFull from './assets/logo-full.svg'
 
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
 
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
-  { id: 'signin', title: 'Sign in', detail: 'Establish the desktop session.' },
-  { id: 'unlock', title: 'Unlock vault', detail: 'Confirm the master key is available in memory.' },
+  { id: 'signin', title: 'Sign in', detail: 'Authenticate your account.' },
+  { id: 'unlock', title: 'Set up this Mac', detail: 'Restore the vault key on this device.' },
   { id: 'finder', title: 'Install Finder location', detail: 'Register Beebeeb in the Finder sidebar.' },
   { id: 'pinning', title: 'Choose offline folders', detail: 'Default is online-only; pin only what you need.' },
   { id: 'ready', title: 'Review status', detail: 'Open the control center.' },
@@ -26,12 +27,9 @@ export default function Onboarding() {
     <div className="onboarding-shell">
       <aside className="onboarding-rail">
         <div>
-          <div className="brand">
-            <div className="brand-mark">b</div>
-            <div>
-              <div className="brand-name">Beebeeb Drive</div>
-              <div className="brand-subtitle">Private macOS file access</div>
-            </div>
+          <div className="onboarding-brand">
+            <img src={logoFull} alt="beebeeb.io" className="onboarding-logo" />
+            <div className="brand-subtitle">Private macOS file access</div>
           </div>
           <div className="steps">
             {STEPS.map((item, index) => (
@@ -46,8 +44,7 @@ export default function Onboarding() {
           </div>
         </div>
         <div className="sidebar-footer">
-          Finder can show the drive while locked. File contents stay unavailable until the vault is
-          unlocked.
+          End-to-end encrypted | EU servers | Zero-knowledge
         </div>
       </aside>
 
@@ -72,7 +69,10 @@ function Card({
   children: ReactNode
 }) {
   return (
-    <section className="panel">
+    <section className="auth-card">
+      <div className="auth-card-header">
+        <img src={logoFull} alt="beebeeb.io" className="auth-logo" />
+      </div>
       <h1 className="page-title">{title}</h1>
       <p className="page-copy" style={{ marginBottom: 22 }}>
         {copy}
@@ -88,12 +88,14 @@ function Field({
   value,
   onChange,
   disabled,
+  placeholder,
 }: {
   label: string
   type: string
   value: string
   onChange: (value: string) => void
   disabled?: boolean
+  placeholder?: string
 }) {
   return (
     <label style={{ display: 'block', marginBottom: 14 }}>
@@ -105,6 +107,7 @@ function Field({
         type={type}
         value={value}
         disabled={disabled}
+        placeholder={placeholder}
         onChange={(event) => onChange(event.currentTarget.value)}
       />
     </label>
@@ -114,7 +117,6 @@ function Field({
 function SignInStep({ onDone }: { onDone: () => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [recoveryPhrase, setRecoveryPhrase] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -122,7 +124,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
     event.preventDefault()
     setBusy(true)
     setError(null)
-    const result = await command<void>('desktop_login', { email, password, recoveryPhrase })
+    const result = await command<void>('desktop_login', { email, password })
     setBusy(false)
     if (result.ok) {
       onDone()
@@ -133,25 +135,14 @@ function SignInStep({ onDone }: { onDone: () => void }) {
 
   return (
     <Card
-      title="Sign in to your Beebeeb account"
-      copy="Sign in with your password and recovery phrase so the desktop daemon can decrypt your vault locally."
+      title="Welcome back"
+      copy="Sign in to unlock your encrypted vault."
     >
       {error && <div className="notice error">{error}</div>}
       <form onSubmit={submit} style={{ marginTop: 16 }}>
-        <Field label="Email" type="email" value={email} onChange={setEmail} disabled={busy} />
-        <Field label="Password" type="password" value={password} onChange={setPassword} disabled={busy} />
-        <Field
-          label="Recovery phrase"
-          type="password"
-          value={recoveryPhrase}
-          onChange={setRecoveryPhrase}
-          disabled={busy}
-        />
-        <button
-          className="button primary"
-          type="submit"
-          disabled={!email || !password || !recoveryPhrase || busy}
-        >
+        <Field label="Email" type="email" value={email} onChange={setEmail} disabled={busy} placeholder="you@example.com" />
+        <Field label="Password" type="password" value={password} onChange={setPassword} disabled={busy} placeholder="Your password" />
+        <button className="button primary" type="submit" disabled={!email || !password || busy}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
@@ -160,12 +151,14 @@ function SignInStep({ onDone }: { onDone: () => void }) {
 }
 
 function UnlockStep({ onDone }: { onDone: () => void }) {
+  const [recoveryPhrase, setRecoveryPhrase] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<CommandResult<void> | null>(null)
 
-  const unlock = async () => {
+  const unlock = async (event: FormEvent) => {
+    event.preventDefault()
     setBusy(true)
-    const next = await command<void>('unlock_vault')
+    const next = await command<void>('desktop_unlock_with_recovery_phrase', { recoveryPhrase })
     setResult(next)
     setBusy(false)
     if (next.ok) onDone()
@@ -173,18 +166,32 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
 
   return (
     <Card
-      title="Unlock the vault"
-      copy="This step confirms that file operations can access the in-memory master key from the desktop session."
+      title="Set up this Mac"
+      copy="This Mac does not have your encryption keys yet. Restore them to continue."
     >
       {result && !result.ok && (
         <div className="notice">
-          {result.unsupported ? commandUnavailableLabel('unlock_vault') : result.reason}
+          {result.unsupported ? commandUnavailableLabel('desktop_unlock_with_recovery_phrase') : result.reason}
         </div>
       )}
-      <div className="button-row" style={{ marginTop: 18 }}>
-        <button className="button primary" onClick={unlock} disabled={busy}>
+      <form onSubmit={unlock} style={{ marginTop: 16 }}>
+        <Field
+          label="Recovery phrase"
+          type="password"
+          value={recoveryPhrase}
+          onChange={setRecoveryPhrase}
+          disabled={busy}
+          placeholder="word word word..."
+        />
+        <div className="row-detail" style={{ marginTop: -6, marginBottom: 14 }}>
+          Paste or type all 12 words, separated by spaces. Beebeeb stores the unlocked vault key in
+          macOS Keychain for future unlocks.
+        </div>
+        <button className="button primary" type="submit" disabled={busy || !recoveryPhrase.trim()}>
           {busy ? 'Unlocking…' : 'Unlock vault'}
         </button>
+      </form>
+      <div className="button-row" style={{ marginTop: 12 }}>
         {result && !result.ok && result.unsupported && (
           <button className="button" onClick={onDone}>
             Continue to Finder setup

@@ -1,5 +1,5 @@
 :root {
-  color: #1c1a17;
+  color: #1a1714;
   background: #faf8f5;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -59,8 +59,8 @@ button {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: #fbbf24;
-  color: #92400e;
+  background: #f5b800;
+  color: #1a1714;
   display: grid;
   place-items: center;
   font-weight: 800;
@@ -238,9 +238,9 @@ button {
 }
 
 .button.primary {
-  border-color: #fbbf24;
-  background: #fbbf24;
-  color: #92400e;
+  border-color: #f5b800;
+  background: #f5b800;
+  color: #1a1714;
 }
 
 .button.danger {
@@ -370,7 +370,7 @@ button {
 .progress-fill {
   height: 100%;
   border-radius: inherit;
-  background: #fbbf24;
+  background: #f5b800;
 }
 
 .tree {
@@ -402,21 +402,32 @@ button {
 
 .form-input {
   width: 100%;
-  min-height: 38px;
-  padding: 9px 11px;
+  min-height: 44px;
+  padding: 10px 12px;
   border: 1px solid #d9d3c8;
   border-radius: 8px;
-  color: #1c1a17;
+  color: #1a1714;
   background: #ffffff;
+  font-size: 14px;
+  outline: none;
+}
+
+.form-input::placeholder {
+  color: #9b968d;
+}
+
+.form-input:focus {
+  border-color: #c69100;
+  box-shadow: 0 0 0 3px rgba(245, 184, 0, 0.22);
 }
 
 .onboarding-shell {
   min-height: 100vh;
-  padding: 30px;
+  padding: 28px;
   background: #faf8f5;
   display: grid;
-  grid-template-columns: minmax(280px, 410px) minmax(0, 1fr);
-  gap: 26px;
+  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
+  gap: 32px;
 }
 
 .onboarding-rail {
@@ -424,12 +435,27 @@ button {
   flex-direction: column;
   justify-content: space-between;
   border-right: 1px solid #e8e4dc;
-  padding-right: 24px;
+  padding: 18px 28px 18px 4px;
+}
+
+.onboarding-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 8px;
+}
+
+.onboarding-logo {
+  width: 172px;
+  height: auto;
+  display: block;
 }
 
 .onboarding-main {
   align-self: center;
-  max-width: 760px;
+  width: 100%;
+  max-width: 28rem;
+  justify-self: center;
 }
 
 .steps {
@@ -448,8 +474,8 @@ button {
 }
 
 .step-row.active {
-  background: rgba(251, 191, 36, 0.16);
-  color: #1c1a17;
+  background: rgba(245, 184, 0, 0.12);
+  color: #1a1714;
 }
 
 .step-number {
@@ -466,8 +492,49 @@ button {
 }
 
 .step-row.active .step-number {
-  background: #fbbf24;
-  color: #92400e;
+  background: #f5b800;
+  color: #1a1714;
+}
+
+.auth-card {
+  width: 100%;
+  background: #faf8f5;
+  border: 1px solid #e8e4dc;
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(26, 23, 20, 0.08);
+  overflow: hidden;
+  padding: 24px;
+}
+
+.auth-card-header {
+  margin: -24px -24px 22px;
+  padding: 18px 24px;
+  border-bottom: 1px solid #eee9df;
+}
+
+.auth-logo {
+  width: 116px;
+  height: auto;
+  display: block;
+}
+
+.auth-card .page-title {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.auth-card .page-copy {
+  color: #6b6860;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.auth-card .button.primary {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 4px;
+  justify-content: center;
+  font-size: 14px;
 }
 
 @media (max-width: 820px) {
