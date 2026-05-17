@@ -30,16 +30,30 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
   }, [])
 
   useEffect(() => {
+    if (!status) return
+    if (!status.logged_in || status.engine !== 'running') {
+      setStorage(null)
+      setStorageNotice(status.logged_in ? 'Unlock the vault to load storage.' : 'Sign in to load storage.')
+      return
+    }
+
+    let cancelled = false
+    setStorageNotice(null)
     command<StorageSummary>('desktop_storage_summary').then((result) => {
+      if (cancelled) return
       if (result.ok) {
         setStorage(result.value)
         return
       }
+      setStorage(null)
       setStorageNotice(
         result.unsupported ? commandUnavailableLabel('desktop_storage_summary') : result.reason,
       )
     })
-  }, [])
+    return () => {
+      cancelled = true
+    }
+  }, [status?.logged_in, status?.engine])
 
   const health = useMemo(() => {
     if (!status) return { label: 'Loading', className: '', detail: 'Waiting for daemon status.' }
@@ -62,6 +76,17 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     storage && storage.quota_bytes > 0
       ? Math.min(100, Math.round((storage.used_bytes / storage.quota_bytes) * 100))
       : 0
+
+  const openSetup = async () => {
+    if (!status?.logged_in) {
+      const opened = await command<void>('open_onboarding_window')
+      if (!opened.ok) {
+        setStorageNotice(opened.unsupported ? commandUnavailableLabel('open_onboarding_window') : opened.reason)
+      }
+      return
+    }
+    onNavigate?.('finder')
+  }
 
   if (!status) {
     return (
@@ -121,8 +146,8 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
               <div className="row-title">Finder location</div>
               <div className="row-detail mono">{status.sync_root ?? 'Not installed'}</div>
             </div>
-            <button className="button" onClick={() => onNavigate?.('finder')}>
-              Open setup
+            <button className="button" onClick={() => void openSetup()}>
+              {status.logged_in ? 'Open setup' : 'Sign in'}
             </button>
           </div>
           <div className="row">

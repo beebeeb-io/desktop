@@ -374,8 +374,8 @@ async fn desktop_login(
 ///
 /// A recovery phrase is only needed when the Mac does not already have a
 /// Keychain-stored vault key. The account session was established by
-/// `desktop_login`; this command proves the phrase belongs to that account,
-/// stores the vault key in Keychain, and starts the sync runner.
+/// `desktop_login`; this command derives the local vault key with
+/// `beebeeb-core`, stores it in Keychain, and starts the sync runner.
 #[tauri::command]
 async fn desktop_unlock_with_recovery_phrase(
     app: tauri::AppHandle,
@@ -395,28 +395,11 @@ async fn desktop_unlock_with_recovery_phrase(
 
     let token = load_session_token_from_keychain()?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let recovery_phrase = recovery_phrase.split_whitespace().collect::<Vec<_>>().join(" ");
-    if recovery_phrase.is_empty() {
-        return Err("Recovery phrase is required to unlock this device.".to_string());
-    }
+    let recovery_phrase = normalize_recovery_phrase_input(&recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
         .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
-    let recovery_check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
     let master_key: [u8; 32] = master_key_struct.to_bytes();
 
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-    verify_recovery_phrase_for_account(
-        &client,
-        &base_url,
-        &token,
-        email.as_deref().unwrap_or(""),
-        &recovery_check,
-    )
-    .await?;
     persist_vault_key_to_keychain(master_key)?;
 
     {
@@ -431,6 +414,26 @@ async fn desktop_unlock_with_recovery_phrase(
     tracing::info!("vault provisioned from recovery phrase");
     start_engine_if_possible(app, &state, token, master_key).await;
     Ok(())
+}
+
+fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
+    let words = input
+        .split_whitespace()
+        .map(|word| {
+            word.trim()
+                .to_ascii_lowercase()
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+
+    if words.len() != 12 {
+        return Err("Recovery phrase must contain exactly 12 words.".to_string());
+    }
+
+    Ok(words.join(" "))
 }
 
 /// Decode a base64 string (standard alphabet, with or without padding).
@@ -467,66 +470,6 @@ async fn desktop_session_has_totp(
         .await
         .map_err(|e| format!("parse session verification response: {e}"))?;
     Ok(body.get("totp_enabled").and_then(|v| v.as_bool()).unwrap_or(false))
-}
-
-async fn verify_recovery_phrase_for_account(
-    client: &reqwest::Client,
-    base_url: &str,
-    session_token: &str,
-    email: &str,
-    recovery_check: &[u8; 32],
-) -> Result<(), String> {
-    let resp = client
-        .post(format!("{base_url}/api/v1/auth/verify-recovery-check"))
-        .bearer_auth(session_token)
-        .json(&serde_json::json!({
-            "recovery_check": encode_base64(recovery_check),
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("recovery phrase check failed: {e}"))?;
-    if resp.status().is_success() {
-        return Ok(());
-    }
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        if email.trim().is_empty() {
-            return Err("Recovery phrase verification endpoint is unavailable. Sign in again before unlocking this Mac.".to_string());
-        }
-        return verify_recovery_phrase_for_account_legacy(client, base_url, email, recovery_check).await;
-    }
-    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
-        return Err("Recovery phrase does not match this Beebeeb account.".to_string());
-    }
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    Err(format!("Recovery phrase check failed ({status}): {body}"))
-}
-
-async fn verify_recovery_phrase_for_account_legacy(
-    client: &reqwest::Client,
-    base_url: &str,
-    email: &str,
-    recovery_check: &[u8; 32],
-) -> Result<(), String> {
-    let resp = client
-        .post(format!("{base_url}/api/v1/auth/recover-with-phrase-start"))
-        .json(&serde_json::json!({
-            "email": email,
-            "recovery_check": encode_base64(recovery_check),
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("recovery phrase check failed: {e}"))?;
-    if resp.status().is_success() {
-        tracing::warn!("used legacy recovery phrase verification fallback; deploy /verify-recovery-check to remove this path");
-        return Ok(());
-    }
-    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
-        return Err("Recovery phrase does not match this Beebeeb account.".to_string());
-    }
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    Err(format!("Recovery phrase check failed ({status}): {body}"))
 }
 
 async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, session_token: &str) -> Result<(), String> {
@@ -2081,5 +2024,28 @@ fn show_settings_window(app: &tauri::AppHandle) {
         Err(error) => {
             tracing::warn!(%error, "failed to create settings window");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_recovery_phrase_input;
+
+    #[test]
+    fn normalizes_recovery_phrase_in_rust() {
+        let input = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima";
+        let normalized = normalize_recovery_phrase_input(input).expect("phrase should normalize");
+
+        assert_eq!(
+            normalized,
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+        );
+    }
+
+    #[test]
+    fn rejects_non_twelve_word_recovery_phrase() {
+        let error = normalize_recovery_phrase_input("alpha bravo charlie").expect_err("phrase should be incomplete");
+
+        assert_eq!(error, "Recovery phrase must contain exactly 12 words.");
     }
 }

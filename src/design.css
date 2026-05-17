@@ -421,6 +421,54 @@ button {
   box-shadow: 0 0 0 3px rgba(245, 184, 0, 0.22);
 }
 
+.recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.recovery-word {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid #d9d3c8;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.word-index {
+  color: #8a857a;
+  font-size: 11px;
+  font-weight: 750;
+  text-align: center;
+}
+
+.recovery-input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  border: 0;
+  border-left: 1px solid #eee9df;
+  border-radius: 0;
+  color: #1a1714;
+  background: transparent;
+  font-size: 13px;
+  outline: none;
+  padding: 8px 9px;
+}
+
+.recovery-word:focus-within {
+  border-color: #c69100;
+  box-shadow: 0 0 0 3px rgba(245, 184, 0, 0.22);
+}
+
+.recovery-input:disabled {
+  cursor: not-allowed;
+}
+
 .onboarding-shell {
   min-height: 100vh;
   padding: 28px;
@@ -565,5 +613,9 @@ button {
     border-bottom: 1px solid #e8e4dc;
     padding-right: 0;
     padding-bottom: 20px;
+  }
+
+  .recovery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

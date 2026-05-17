@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   command,
@@ -11,6 +11,7 @@ import {
 import logoFull from './assets/logo-full.svg'
 
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
+const RECOVERY_WORD_COUNT = 12
 
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
   { id: 'signin', title: 'Sign in', detail: 'Authenticate your account.' },
@@ -151,17 +152,63 @@ function SignInStep({ onDone }: { onDone: () => void }) {
 }
 
 function UnlockStep({ onDone }: { onDone: () => void }) {
-  const [recoveryPhrase, setRecoveryPhrase] = useState('')
+  const [recoveryWords, setRecoveryWords] = useState<string[]>(() =>
+    Array.from({ length: RECOVERY_WORD_COUNT }, () => ''),
+  )
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<CommandResult<void> | null>(null)
+  const wordRefs = useRef<Array<HTMLInputElement | null>>([])
+
+  const recoveryPhrase = recoveryWords.map((word) => word.trim()).join(' ').trim()
+  const filledWords = recoveryWords.filter((word) => word.trim()).length
+  const canUnlock = filledWords === RECOVERY_WORD_COUNT
 
   const unlock = async (event: FormEvent) => {
     event.preventDefault()
+    if (!canUnlock) return
     setBusy(true)
     const next = await command<void>('desktop_unlock_with_recovery_phrase', { recoveryPhrase })
     setResult(next)
     setBusy(false)
     if (next.ok) onDone()
+  }
+
+  const applyWords = (startIndex: number, rawWords: string[]) => {
+    const cleanWords = rawWords.map((word) => word.trim()).filter(Boolean)
+    if (cleanWords.length === 0) return
+
+    setResult(null)
+    setRecoveryWords((current) => {
+      const next = [...current]
+      cleanWords.slice(0, RECOVERY_WORD_COUNT - startIndex).forEach((word, offset) => {
+        next[startIndex + offset] = word
+      })
+      return next
+    })
+
+    const nextIndex = Math.min(startIndex + cleanWords.length, RECOVERY_WORD_COUNT - 1)
+    requestAnimationFrame(() => wordRefs.current[nextIndex]?.focus())
+  }
+
+  const updateWord = (index: number, value: string) => {
+    if (/\s/.test(value)) {
+      applyWords(index, value.split(/\s+/))
+      return
+    }
+
+    setResult(null)
+    setRecoveryWords((current) => current.map((word, wordIndex) => (wordIndex === index ? value : word)))
+  }
+
+  const onWordKeyDown = (event: KeyboardEvent<HTMLInputElement>, index: number) => {
+    if (event.key === ' ' || event.key === 'Enter') {
+      event.preventDefault()
+      wordRefs.current[Math.min(index + 1, RECOVERY_WORD_COUNT - 1)]?.focus()
+      return
+    }
+    if (event.key === 'Backspace' && !recoveryWords[index] && index > 0) {
+      wordRefs.current[index - 1]?.focus()
+    }
   }
 
   return (
@@ -175,19 +222,41 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
         </div>
       )}
       <form onSubmit={unlock} style={{ marginTop: 16 }}>
-        <Field
-          label="Recovery phrase"
-          type="password"
-          value={recoveryPhrase}
-          onChange={setRecoveryPhrase}
-          disabled={busy}
-          placeholder="word word word..."
-        />
-        <div className="row-detail" style={{ marginTop: -6, marginBottom: 14 }}>
-          Paste or type all 12 words, separated by spaces. Beebeeb stores the unlocked vault key in
-          macOS Keychain for future unlocks.
+        <div className="field-label" style={{ marginBottom: 8 }}>
+          Recovery phrase
         </div>
-        <button className="button primary" type="submit" disabled={busy || !recoveryPhrase.trim()}>
+        <div className="recovery-grid">
+          {recoveryWords.map((word, index) => (
+            <label className="recovery-word" key={index}>
+              <span className="word-index">{index + 1}</span>
+              <input
+                ref={(node) => {
+                  wordRefs.current[index] = node
+                }}
+                aria-label={`Recovery word ${index + 1}`}
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                className="recovery-input"
+                disabled={busy}
+                spellCheck={false}
+                type="text"
+                value={word}
+                onChange={(event) => updateWord(index, event.currentTarget.value)}
+                onKeyDown={(event) => onWordKeyDown(event, index)}
+                onPaste={(event) => {
+                  event.preventDefault()
+                  applyWords(index, event.clipboardData.getData('text').split(/\s+/))
+                }}
+              />
+            </label>
+          ))}
+        </div>
+        <div className="row-detail" style={{ marginTop: 10, marginBottom: 14 }}>
+          Paste all 12 words into any box or type them one by one. Beebeeb stores the unlocked vault
+          key in macOS Keychain for future unlocks.
+        </div>
+        <button className="button primary" type="submit" disabled={busy || !canUnlock}>
           {busy ? 'Unlocking…' : 'Unlock vault'}
         </button>
       </form>
