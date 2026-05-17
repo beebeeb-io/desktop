@@ -55,13 +55,11 @@ const TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// user's view of "files in their vault".
 const STATE_DIR: &str = ".beebeeb";
 
-/// API base URL the engine talks to. Overridden by `BEEBEEB_API_URL`
-/// for local dev (so a developer can point at `http://localhost:3001`
-/// without rebuilding the binary). Public to the crate so the
-/// `resolve_conflict` IPC in `lib.rs` can build a fresh ApiClient
-/// without duplicating the env-var read.
+/// API base URL the engine talks to. Desktop always targets the production
+/// API so packaged builds cannot accidentally authenticate against a local
+/// development server.
 pub(crate) fn api_base_url() -> String {
-    std::env::var("BEEBEEB_API_URL").unwrap_or_else(|_| "https://api.beebeeb.io".to_string())
+    "https://api.beebeeb.io".to_string()
 }
 
 /// Owned handle to a running engine task. Drop it (or call
