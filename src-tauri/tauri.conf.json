@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.beebeeb.desktop",
   "build": {
+    "beforeBuildCommand": "bun run build",
     "beforeBundleCommand": "scripts/build-fileprovider-extension.sh",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"

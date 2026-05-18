@@ -85,6 +85,10 @@ export interface FileVersionEntry {
 export interface FinderInstallState {
   installed: boolean
   path?: string | null
+  status?: string
+  last_error?: string | null
+  last_attempt_at?: number | null
+  reason_category?: string | null
 }
 
 export const DEFAULT_CONFIG: DesktopConfig = {

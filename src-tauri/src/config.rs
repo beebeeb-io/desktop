@@ -84,6 +84,17 @@ pub struct DesktopConfig {
     /// field existed.
     #[serde(default)]
     pub excluded_folder_ids: Option<Vec<String>>,
+
+    /// Last known Finder/File Provider setup status. This is persisted so
+    /// a failed deferred setup remains visible after navigation or restart.
+    #[serde(default)]
+    pub finder_install_status: Option<String>,
+    #[serde(default)]
+    pub finder_install_last_error: Option<String>,
+    #[serde(default)]
+    pub finder_install_last_attempt_at: Option<i64>,
+    #[serde(default)]
+    pub finder_install_reason_category: Option<String>,
     // NOTE: persisted session deferred to a later step. For now the
     // session is in-memory only (set_session IPC). Adding it here
     // requires the OS-keychain wrapping called out in spec 030 §1.
@@ -112,6 +123,10 @@ impl Default for DesktopConfig {
             notify_sync_complete: false,
             notify_quota_warnings: true,
             excluded_folder_ids: None,
+            finder_install_status: None,
+            finder_install_last_error: None,
+            finder_install_last_attempt_at: None,
+            finder_install_reason_category: None,
         }
     }
 }

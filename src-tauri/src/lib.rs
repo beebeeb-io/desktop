@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
     Emitter, Manager, State,
@@ -629,6 +630,91 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
 struct FinderInstallState {
     installed: bool,
     path: Option<String>,
+    status: String,
+    last_error: Option<String>,
+    last_attempt_at: Option<i64>,
+    reason_category: Option<String>,
+}
+
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn classify_finder_install_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("provision") || lower.contains("entitlement") || lower.contains("app-group") {
+        "provisioning".to_string()
+    } else if lower.contains("disabled") || lower.contains("-2011") || lower.contains("sync is not enabled") {
+        "disabled".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout".to_string()
+    } else if lower.contains("not available") || lower.contains("only available") || lower.contains("unsupported") {
+        "unsupported".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn finder_install_state_from_config(
+    cfg: &DesktopConfig,
+    installed: bool,
+    runtime_error: Option<String>,
+) -> FinderInstallState {
+    let status = if installed {
+        "installed".to_string()
+    } else if runtime_error.is_some() || cfg.finder_install_status.as_deref() == Some("error") {
+        "error".to_string()
+    } else {
+        cfg.finder_install_status
+            .clone()
+            .unwrap_or_else(|| "missing".to_string())
+    };
+    let last_error = if installed {
+        None
+    } else {
+        runtime_error.or_else(|| cfg.finder_install_last_error.clone())
+    };
+    let reason_category = if installed {
+        None
+    } else if let Some(error) = &last_error {
+        Some(classify_finder_install_error(error))
+    } else {
+        cfg.finder_install_reason_category.clone()
+    };
+
+    FinderInstallState {
+        installed,
+        path: cfg.sync_root.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        status,
+        last_error,
+        last_attempt_at: cfg.finder_install_last_attempt_at,
+        reason_category,
+    }
+}
+
+fn persist_finder_install_result(
+    cfg: &mut DesktopConfig,
+    installed: bool,
+    error: Option<String>,
+) -> Result<(), String> {
+    cfg.finder_install_last_attempt_at = Some(now_unix_seconds());
+    if installed {
+        cfg.finder_install_status = Some("installed".to_string());
+        cfg.finder_install_last_error = None;
+        cfg.finder_install_reason_category = None;
+    } else if let Some(error) = error {
+        cfg.finder_install_status = Some("error".to_string());
+        cfg.finder_install_reason_category = Some(classify_finder_install_error(&error));
+        cfg.finder_install_last_error = Some(error);
+    } else {
+        cfg.finder_install_status = Some("missing".to_string());
+        cfg.finder_install_last_error = None;
+        cfg.finder_install_reason_category = None;
+    }
+    cfg.save()
 }
 
 #[cfg(target_os = "macos")]
@@ -653,12 +739,19 @@ fn install_file_provider_domain() -> Result<(), String> {
 
 #[tauri::command]
 fn finder_location_state() -> Result<FinderInstallState, String> {
-    let path = DesktopConfig::load()
-        .ok()
-        .and_then(|c| c.sync_root)
-        .map(|p| p.to_string_lossy().into_owned());
-    let installed = file_provider_installed()?;
-    Ok(FinderInstallState { installed, path })
+    let mut cfg = DesktopConfig::load()?;
+    match file_provider_installed() {
+        Ok(installed) => {
+            if installed && cfg.finder_install_status.as_deref() != Some("installed") {
+                persist_finder_install_result(&mut cfg, true, None)?;
+            }
+            Ok(finder_install_state_from_config(&cfg, installed, None))
+        }
+        Err(error) => {
+            persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
+            Ok(finder_install_state_from_config(&cfg, false, Some(error)))
+        }
+    }
 }
 
 /// Persist the chosen sync root and start the daemon when possible, but do not
@@ -694,10 +787,18 @@ async fn install_finder_location(
         *engine_slot = Some(EngineRunner::spawn(app, root.clone(), token, key));
     }
 
-    install_file_provider_domain()?;
+    if let Err(error) = install_file_provider_domain() {
+        persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
+        return Err(error);
+    }
+    persist_finder_install_result(&mut cfg, true, None)?;
     Ok(FinderInstallState {
         installed: true,
         path: Some(root.to_string_lossy().into_owned()),
+        status: "installed".to_string(),
+        last_error: None,
+        last_attempt_at: cfg.finder_install_last_attempt_at,
+        reason_category: None,
     })
 }
 
@@ -2051,7 +2152,10 @@ fn show_settings_window(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_recovery_phrase_input;
+    use super::{
+        classify_finder_install_error, finder_install_state_from_config, normalize_recovery_phrase_input,
+    };
+    use crate::config::DesktopConfig;
 
     #[test]
     fn normalizes_recovery_phrase_in_rust() {
@@ -2069,5 +2173,40 @@ mod tests {
         let error = normalize_recovery_phrase_input("alpha bravo charlie").expect_err("phrase should be incomplete");
 
         assert_eq!(error, "Recovery phrase must contain exactly 12 words.");
+    }
+
+    #[test]
+    fn classifies_file_provider_setup_errors() {
+        assert_eq!(
+            classify_finder_install_error("Entitlement com.apple.security.application-groups is ignored"),
+            "provisioning"
+        );
+        assert_eq!(
+            classify_finder_install_error("NSFileProviderErrorDomain Code=-2011"),
+            "disabled"
+        );
+        assert_eq!(
+            classify_finder_install_error("Timed out waiting for the Beebeeb File Provider domain"),
+            "timeout"
+        );
+    }
+
+    #[test]
+    fn maps_persisted_file_provider_error_into_state() {
+        let cfg = DesktopConfig {
+            finder_install_status: Some("error".to_string()),
+            finder_install_last_error: Some("Timed out waiting for setup".to_string()),
+            finder_install_last_attempt_at: Some(42),
+            finder_install_reason_category: Some("timeout".to_string()),
+            ..DesktopConfig::default()
+        };
+
+        let state = finder_install_state_from_config(&cfg, false, None);
+
+        assert!(!state.installed);
+        assert_eq!(state.status, "error");
+        assert_eq!(state.last_error.as_deref(), Some("Timed out waiting for setup"));
+        assert_eq!(state.last_attempt_at, Some(42));
+        assert_eq!(state.reason_category.as_deref(), Some("timeout"));
     }
 }

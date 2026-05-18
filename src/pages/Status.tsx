@@ -4,22 +4,74 @@ import {
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
+  type FinderInstallState,
   type StorageSummary,
   type SyncStatus,
 } from '../desktopApi'
 
 type PageLink = 'versions' | 'selective-sync' | 'finder' | 'account'
 
+function finderSetupState(installState: FinderInstallState | null) {
+  if (!installState) {
+    return { label: 'Loading', className: '', detail: 'Checking Finder setup.' }
+  }
+
+  const status = installState.status?.toLowerCase()
+  const setupBlocked =
+    Boolean(installState.last_error?.trim()) ||
+    status === 'setup_blocked' ||
+    status === 'blocked' ||
+    status === 'failed' ||
+    status === 'error'
+
+  if (setupBlocked) {
+    return {
+      label: 'Setup blocked',
+      className: 'error',
+      detail: installState.last_error?.trim() ?? 'Finder setup needs attention.',
+    }
+  }
+
+  if (installState.installed || status === 'installed' || status === 'ready') {
+    return {
+      label: 'Installed',
+      className: 'ok',
+      detail: installState.path ?? 'Finder location is installed.',
+    }
+  }
+
+  return {
+    label: 'Needs install',
+    className: 'warn',
+    detail: installState.path ?? 'Install the Finder location to browse Beebeeb files.',
+  }
+}
+
 export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) => void }) {
   const [status, setStatus] = useState<SyncStatus | null>(null)
+  const [finderInstallState, setFinderInstallState] = useState<FinderInstallState | null>(null)
+  const [finderNotice, setFinderNotice] = useState<string | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [storageNotice, setStorageNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const next = await loadSyncStatus()
-      if (!cancelled) setStatus(next)
+      const [next, finderState] = await Promise.all([
+        loadSyncStatus(),
+        command<FinderInstallState>('finder_location_state'),
+      ])
+      if (cancelled) return
+      setStatus(next)
+      if (finderState.ok) {
+        setFinderInstallState(finderState.value)
+        setFinderNotice(null)
+      } else {
+        setFinderInstallState(null)
+        setFinderNotice(
+          finderState.unsupported ? commandUnavailableLabel('finder_location_state') : finderState.reason,
+        )
+      }
     }
     void refresh()
     const id = window.setInterval(refresh, 3000)
@@ -76,6 +128,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     storage && storage.quota_bytes > 0
       ? Math.min(100, Math.round((storage.used_bytes / storage.quota_bytes) * 100))
       : 0
+  const finderSetup = finderSetupState(finderInstallState)
 
   const openSetup = async () => {
     if (!status?.logged_in) {
@@ -144,7 +197,15 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
           <div className="row">
             <div>
               <div className="row-title">Finder location</div>
-              <div className="row-detail mono">{status.sync_root ?? 'Not installed'}</div>
+              <div className="row-detail">
+                <span className="status-pill" style={{ marginRight: 8 }}>
+                  <span className={`dot ${finderSetup.className}`} />
+                  {finderSetup.label}
+                </span>
+                <span className={finderSetup.label === 'Setup blocked' ? undefined : 'mono'}>
+                  {finderNotice ?? finderSetup.detail}
+                </span>
+              </div>
             </div>
             <button className="button" onClick={() => void openSetup()}>
               {status.logged_in ? 'Open setup' : 'Sign in'}

@@ -50,6 +50,7 @@ export default function SyncFolder() {
   }
 
   const installed = installState?.installed ?? false
+  const finderLastError = installState?.last_error?.trim()
 
   return (
     <section className="page">
@@ -68,6 +69,11 @@ export default function SyncFolder() {
       </div>
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
+      {finderLastError && (
+        <div className="notice error" style={{ marginBottom: 14 }}>
+          {finderLastError}
+        </div>
+      )}
 
       <div className="grid two">
         <div className="panel">
