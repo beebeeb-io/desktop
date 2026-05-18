@@ -345,10 +345,12 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "base64 0.22.1",
  "beebeeb-types",
  "bip39",
  "blake3",
  "chrono",
+ "flate2",
  "hkdf",
  "opaque-ke",
  "rand 0.8.6",

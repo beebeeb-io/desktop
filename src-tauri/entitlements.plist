@@ -13,25 +13,39 @@
   entitlements only once the extension actually shares a container or Keychain
   item with the daemon; do not predeclare guessed group names.
 
-  Two entitlements requested:
+	  Main-app entitlements:
 
-  - `com.apple.security.files.user-selected.read-write` — needed for
-    the first-launch folder picker (`pick_sync_root` IPC) so the user
-    can choose any directory as the sync root, not just the app's
-    sandbox.
+	  - `com.apple.security.app-sandbox` — required for the containing app
+	    shape that hosts a File Provider extension.
 
-  - `com.apple.developer.fileprovider.extension` — required for any
-    target that hosts a File Provider extension. Apple's notarisation
-    pipeline rejects the build without it. The actual extension target
-    needs the same entitlement plus `application-identifier` /
-    `keychain-access-groups` if we ever push to the keychain (post-MVP).
+	  - `com.apple.security.application-groups` — shares the File Provider
+	    document group with the extension. macOS supports TeamID-prefixed
+	    group names without separate developer-portal registration.
+
+	  - `com.apple.security.files.user-selected.read-write` — needed for
+	    the first-launch folder picker (`pick_sync_root` IPC) so the user
+	    can choose any directory as the sync root, not just the app's
+	    sandbox.
+
+	  The File Provider entitlement belongs to the `.appex` target. Keeping
+	  that restricted entitlement on this containing app breaks local
+	  Apple Development launches unless a matching provisioning profile is
+	  installed.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>R8352WDJJR.io.beebeeb.desktop.fileprovider</string>
+    </array>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
-    <key>com.apple.developer.fileprovider.extension</key>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
     <true/>
 </dict>
 </plist>

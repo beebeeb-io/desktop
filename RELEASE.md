@@ -75,13 +75,13 @@ bun run tauri build --target x86_64-apple-darwin      # Intel only
 | `frameworks`         | `[]`                   | We embed nothing — only system frameworks |
 | `exceptionDomain`    | `""`                   | No NSAppTransportSecurity exception needed |
 | `signingIdentity`    | `null`                 | Set via env var at sign time, not in repo |
-| `entitlements`       | `entitlements.plist`   | File-Provider extension + folder picker   |
+| `entitlements`       | `entitlements.plist`   | App sandbox, app group, network, folder picker |
 | `providerShortName`  | `null`                 | Filled in once Apple provider id is final |
 
-`entitlements.plist` requests `com.apple.security.files.user-selected.read-write`
-(folder picker on first launch) and `com.apple.developer.fileprovider.extension`
-(File Provider host — Apple notarisation rejects extension-hosting bundles
-without it).
+`entitlements.plist` requests the containing-app sandbox, the Beebeeb File
+Provider app group, network access for API sync, and
+`com.apple.security.files.user-selected.read-write` for the first-launch folder
+picker.
 
 ### Code signing (Guus runs this — Apple Developer ID required)
 
@@ -126,8 +126,11 @@ Required app entitlements live in `src-tauri/entitlements.plist`:
 
 | Entitlement | Required for |
 |-------------|--------------|
+| `com.apple.security.app-sandbox` | Required containing-app shape for macOS File Provider. |
+| `com.apple.security.application-groups` | Shared File Provider document group with the extension. |
 | `com.apple.security.files.user-selected.read-write` | User-approved sync/cache folder access. |
-| `com.apple.developer.fileprovider.extension` | Containing-app relationship to the File Provider extension. |
+| `com.apple.security.network.client` | API sync and update checks. |
+| `com.apple.security.network.server` | Local daemon/socket integration where macOS applies network policy. |
 
 The File Provider extension target, once embedded in an Xcode project, must be
 signed by the same Team ID as the containing app and use:
@@ -135,8 +138,9 @@ signed by the same Team ID as the containing app and use:
 - bundle id `io.beebeeb.desktop.FileProvider`;
 - extension point `com.apple.fileprovider-nonui`;
 - principal class `$(PRODUCT_MODULE_NAME).FileProviderExtension`;
-- matching app group/keychain-access-group values if the extension ever shares
-  a container or Keychain item with the Tauri app.
+- `NSExtensionFileProviderDocumentGroup` matching the app-group entitlement;
+- matching keychain-access-group values only if the extension ever shares a
+  Keychain item with the Tauri app.
 
 Before public release, inspect the built app and extension:
 

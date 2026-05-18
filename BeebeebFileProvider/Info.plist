@@ -46,13 +46,21 @@
       class is the Swift class that gets instantiated when Finder
       asks for an item.
     -->
-    <key>NSExtension</key>
-    <dict>
-        <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.fileprovider-nonui</string>
-        <key>NSExtensionPrincipalClass</key>
-        <string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
-    </dict>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionFileProviderDocumentGroup</key>
+		<string>R8352WDJJR.io.beebeeb.desktop.fileprovider</string>
+		<key>NSExtensionFileProviderDownloadPipelineDepth</key>
+		<integer>8</integer>
+		<key>NSExtensionFileProviderSupportsEnumeration</key>
+		<true/>
+		<key>NSExtensionFileProviderUploadPipelineDepth</key>
+		<integer>8</integer>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.fileprovider-nonui</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
+	</dict>
 
     <!--
       Shown to the user when macOS first asks them to grant the

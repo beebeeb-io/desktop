@@ -26,6 +26,7 @@ It creates:
 
 ```text
 src-tauri/target/fileprovider/BeebeebFileProvider.appex
+src-tauri/target/fileprovider/BeebeebFileProviderCtl
 ```
 
 Tauri embeds that generated bundle into
@@ -52,11 +53,16 @@ If this later moves to a full Xcode target, keep the same contract:
 - extension point: `com.apple.fileprovider-nonui`;
 - principal class: `$(PRODUCT_MODULE_NAME).FileProviderExtension`;
 - bundle id: `io.beebeeb.desktop.FileProvider`;
-- the same Apple Team ID as the containing Beebeeb app;
-- app-group entitlement shared with the containing Beebeeb app if the socket
-  path moves out of `/tmp` or the extension shares a container;
+- document group: `R8352WDJJR.io.beebeeb.desktop.fileprovider`;
+- app-group entitlement shared with the containing Beebeeb app;
+- the same Apple Team ID and provisioning profile entitlement values as the
+  containing Beebeeb app;
 - matching keychain-access-group entitlement only if the extension ever reads
   shared Keychain items. The current design keeps secrets in the daemon.
+
+The extension binary must be a Mach-O executable, not a shared library. The
+`main.swift` entrypoint calls `NSExtensionMain`; without that, macOS cannot
+attach sandbox/app-group entitlements to the launched provider process.
 
 ## Install / Remount Flow
 

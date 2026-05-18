@@ -5,7 +5,9 @@
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <true/>
-    <key>com.apple.developer.fileprovider.extension</key>
-    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>R8352WDJJR.io.beebeeb.desktop.fileprovider</string>
+    </array>
 </dict>
 </plist>

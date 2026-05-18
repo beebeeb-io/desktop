@@ -81,8 +81,6 @@ mkdir -p "$MACOS_DIR"
 
 xcrun swiftc \
   -target "$TARGET_TRIPLE" \
-  -emit-library \
-  -parse-as-library \
   -module-name "$MODULE_NAME" \
   -framework FileProvider \
   -framework Foundation \
