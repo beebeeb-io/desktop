@@ -104,7 +104,12 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     }
 
     var isUploaded: Bool {
-        true
+        switch model.status {
+        case "uploading", "conflict", "error":
+            return false
+        default:
+            return true
+        }
     }
 
     var isDownloaded: Bool {
