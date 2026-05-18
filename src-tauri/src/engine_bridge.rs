@@ -404,14 +404,20 @@ impl EngineBridge {
             encrypted_metadata_for_name(
                 self.api.master_key(),
                 &server_file_id,
-                metadata_display_name(&metadata, op).as_deref().unwrap_or(&server_file_id),
+                metadata_display_name(&metadata, op)
+                    .as_deref()
+                    .unwrap_or(&server_file_id),
                 content_type.as_deref(),
             )?
         } else {
             name_encrypted.to_string()
         };
         self.api
-            .update_metadata(&server_file_id, Some(&effective_name_encrypted), op.parent_id.as_deref())
+            .update_metadata(
+                &server_file_id,
+                Some(&effective_name_encrypted),
+                op.parent_id.as_deref(),
+            )
             .await?;
 
         let mk_bytes: [u8; 32] = *self.api.master_key();
@@ -472,10 +478,7 @@ impl EngineBridge {
         let now = now_secs();
         let mut entry = self.db.get_file(local_file_id)?.unwrap_or_else(|| FileEntry {
             file_id: server_file_id.to_string(),
-            path: op
-                .target_path
-                .clone()
-                .unwrap_or_else(|| server_file_id.to_string()),
+            path: op.target_path.clone().unwrap_or_else(|| server_file_id.to_string()),
             status: FileStatus::Local,
             size_bytes: plaintext_size as i64,
             modified_at: now,
@@ -1310,8 +1313,7 @@ fn decrypt_downloaded_chunk(
     match beebeeb_core::encrypt::decrypt_chunk_raw(file_key, chunk_bytes) {
         Ok(bytes) => Ok(bytes),
         Err(raw_error) => {
-            let blob: EncryptedBlob = serde_json::from_slice(chunk_bytes)
-                .map_err(|_| raw_error)?;
+            let blob: EncryptedBlob = serde_json::from_slice(chunk_bytes).map_err(|_| raw_error)?;
             beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
         }
     }
@@ -1902,6 +1904,10 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+    use std::thread;
 
     #[test]
     fn test_file_state_machine_transitions() {
@@ -2006,6 +2012,145 @@ mod tests {
             [7u8; 32],
         ));
         EngineBridge::new(db, api)
+    }
+
+    fn test_bridge_with_api(db_path: &Path, base_url: String, master_key: [u8; 32]) -> EngineBridge {
+        let db = Arc::new(StateDb::open(db_path).unwrap());
+        let api = Arc::new(ApiClient::new(base_url, "token".into(), master_key));
+        EngineBridge::new(db, api)
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        body: Vec<u8>,
+    }
+
+    struct UploadMockServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl UploadMockServer {
+        fn start(fail_chunk: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                let expected_requests = if fail_chunk { 3 } else { 4 };
+                for _ in 0..expected_requests {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    let response = upload_mock_response(&request, fail_chunk);
+                    server_requests.lock().unwrap().push(request);
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.handle.join().unwrap();
+            Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> RecordedRequest {
+        let mut buffer = Vec::new();
+        let mut temp = [0u8; 4096];
+        let header_end;
+        loop {
+            let read = std::io::Read::read(stream, &mut temp).unwrap();
+            assert!(read > 0, "mock server connection closed before headers");
+            buffer.extend_from_slice(&temp[..read]);
+            if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                header_end = pos + 4;
+                break;
+            }
+        }
+
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let mut lines = headers.lines();
+        let request_line = lines.next().unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap().to_string();
+        let path = request_parts.next().unwrap().to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = std::io::Read::read(stream, &mut temp).unwrap();
+            assert!(read > 0, "mock server connection closed before body");
+            body.extend_from_slice(&temp[..read]);
+        }
+        body.truncate(content_length);
+
+        RecordedRequest { method, path, body }
+    }
+
+    fn http_json(status: &str, body: serde_json::Value) -> String {
+        let body = body.to_string();
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool) -> String {
+        match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/api/v1/uploads/init") => http_json(
+                "200 OK",
+                serde_json::json!({
+                    "file_id": "server-file-1",
+                    "tenant_id": "tenant-1",
+                    "object_version_id": "object-init-1",
+                    "upload_session_id": "upload-session-1",
+                    "chunk_size_bytes": 4 * 1024 * 1024,
+                    "chunk_count": 1,
+                    "storage_format_version": 1,
+                    "storage_pool_id": "pool-1",
+                    "region": "local"
+                }),
+            ),
+            ("PATCH", "/api/v1/files/server-file-1") => {
+                http_json("200 OK", serde_json::json!({ "id": "server-file-1" }))
+            }
+            ("PUT", "/api/v1/uploads/upload-session-1/chunks/0") if fail_chunk => {
+                http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }))
+            }
+            ("PUT", "/api/v1/uploads/upload-session-1/chunks/0") => http_json(
+                "200 OK",
+                serde_json::json!({ "index": 0, "size": request.body.len() as i64, "skipped": false }),
+            ),
+            ("POST", "/api/v1/uploads/upload-session-1/complete") => http_json(
+                "200 OK",
+                serde_json::json!({
+                    "file_id": "server-file-1",
+                    "version_number": 1,
+                    "current_object_version_id": "object-complete-1",
+                    "size_bytes": 19,
+                    "mime_type": "text/plain"
+                }),
+            ),
+            _ => http_json(
+                "404 Not Found",
+                serde_json::json!({ "error": format!("unexpected {} {}", request.method, request.path) }),
+            ),
+        }
     }
 
     #[test]
@@ -2335,11 +2480,159 @@ mod tests {
         let due = bridge.db.list_due_operations(230).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].attempts, 1);
-        assert!(due[0]
-            .last_error
-            .as_deref()
-            .unwrap_or("")
-            .contains("staged upload payload is missing"));
+        assert!(
+            due[0]
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("staged upload payload is missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_uploads_encrypted_payload_and_commits_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"live upload payload").unwrap();
+        let server = UploadMockServer::start(false);
+        let master_key = [11u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-live".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-file-1".into()),
+                parent_id: Some("folder-1".into()),
+                target_path: Some("Reports/report.txt".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "report.txt",
+                        "content_type": "text/plain"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-live".to_string()]);
+        assert!(outcome.retried_op_ids.is_empty());
+        assert!(
+            !payload.exists(),
+            "staged payload should be removed only after complete succeeds"
+        );
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+        assert!(bridge.db.get_file("local-file-1").unwrap().is_none());
+
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert_eq!(entry.path, "Reports/report.txt");
+        assert_eq!(entry.size_bytes, 19);
+
+        let contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        assert_eq!(contract.current_version, 1);
+        assert_eq!(contract.local_base_version, 1);
+        assert_eq!(contract.current_object_version_id.as_deref(), Some("object-complete-1"));
+        assert_eq!(contract.content_type.as_deref(), Some("text/plain"));
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            init_body.get("file_id").is_none(),
+            "new-file uploads must let the server mint the id"
+        );
+        assert_eq!(init_body["file_size_bytes"], 19);
+        assert_eq!(init_body["parent_id"], "folder-1");
+        assert_eq!(init_body["chunk_count"], 1);
+        assert_eq!(requests[1].method, "PATCH");
+        assert_eq!(requests[2].method, "PUT");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_ne!(requests[2].body, b"live upload payload");
+
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
+            b"live upload payload"
+        );
+        assert_eq!(requests[3].method, "POST");
+        assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_preserves_payload_when_upload_chunk_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"retry me").unwrap();
+        let server = UploadMockServer::start(true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [12u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-retry".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-file-2".into()),
+                parent_id: None,
+                target_path: Some("retry.txt".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "retry.txt",
+                        "content_type": "text/plain"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload-retry".to_string()]);
+        assert!(outcome.completed_op_ids.is_empty());
+        assert!(payload.exists(), "failed uploads must preserve the staged payload");
+
+        let due_too_early = bridge.db.list_due_operations(229).unwrap();
+        assert!(due_too_early.is_empty());
+        let due = bridge.db.list_due_operations(230).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempts, 1);
+        assert!(
+            due[0]
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("500 Internal Server Error")
+        );
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
     }
 
     #[test]

@@ -9,7 +9,7 @@
       "source_file": "vite.config.ts",
       "source_location": "L1",
       "id": "vite_config_ts",
-      "community": 61,
+      "community": 62,
       "norm_label": "vite.config.ts"
     },
     {
@@ -108,7 +108,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_mobile_extra_jsx",
-      "community": 40,
+      "community": 41,
       "norm_label": "hifi-mobile-extra.jsx"
     },
     {
@@ -117,7 +117,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_mobile_extra_mobileshell",
-      "community": 40,
+      "community": 41,
       "norm_label": "mobileshell()"
     },
     {
@@ -126,7 +126,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L33",
       "id": "hifi_hifi_mobile_extra_moboffline",
-      "community": 40,
+      "community": 41,
       "norm_label": "moboffline()"
     },
     {
@@ -135,7 +135,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L80",
       "id": "hifi_hifi_mobile_extra_mobupgrade",
-      "community": 40,
+      "community": 41,
       "norm_label": "mobupgrade()"
     },
     {
@@ -144,7 +144,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L119",
       "id": "hifi_hifi_mobile_extra_mobshareext",
-      "community": 40,
+      "community": 41,
       "norm_label": "mobshareext()"
     },
     {
@@ -153,7 +153,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L160",
       "id": "hifi_hifi_mobile_extra_mobpush",
-      "community": 40,
+      "community": 41,
       "norm_label": "mobpush()"
     },
     {
@@ -162,7 +162,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L1",
       "id": "design_hifi_browser_window_jsx",
-      "community": 41,
+      "community": 42,
       "norm_label": "browser-window.jsx"
     },
     {
@@ -171,7 +171,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L13",
       "id": "hifi_browser_window_chrometrafficlights",
-      "community": 41,
+      "community": 42,
       "norm_label": "chrometrafficlights()"
     },
     {
@@ -180,7 +180,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L24",
       "id": "hifi_browser_window_chrometab",
-      "community": 41,
+      "community": 42,
       "norm_label": "chrometab()"
     },
     {
@@ -189,7 +189,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L48",
       "id": "hifi_browser_window_chrometabbar",
-      "community": 41,
+      "community": 42,
       "norm_label": "chrometabbar()"
     },
     {
@@ -198,7 +198,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L62",
       "id": "hifi_browser_window_chrometoolbar",
-      "community": 41,
+      "community": 42,
       "norm_label": "chrometoolbar()"
     },
     {
@@ -207,7 +207,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L93",
       "id": "hifi_browser_window_chromewindow",
-      "community": 41,
+      "community": 42,
       "norm_label": "chromewindow()"
     },
     {
@@ -216,7 +216,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_brand_system_jsx",
-      "community": 46,
+      "community": 47,
       "norm_label": "hifi-brand-system.jsx"
     },
     {
@@ -225,7 +225,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_brand_system_swatchrow",
-      "community": 46,
+      "community": 47,
       "norm_label": "swatchrow()"
     },
     {
@@ -234,7 +234,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L25",
       "id": "hifi_hifi_brand_system_dssection",
-      "community": 46,
+      "community": 47,
       "norm_label": "dssection()"
     },
     {
@@ -243,7 +243,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L37",
       "id": "hifi_hifi_brand_system_hibrandsystem",
-      "community": 46,
+      "community": 47,
       "norm_label": "hibrandsystem()"
     },
     {
@@ -252,7 +252,7 @@
       "source_file": "design/hifi/hifi-team-photos.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_team_photos_jsx",
-      "community": 53,
+      "community": 54,
       "norm_label": "hifi-team-photos.jsx"
     },
     {
@@ -261,7 +261,7 @@
       "source_file": "design/hifi/hifi-team-photos.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_team_photos_hiteam",
-      "community": 53,
+      "community": 54,
       "norm_label": "hiteam()"
     },
     {
@@ -270,7 +270,7 @@
       "source_file": "design/hifi/hifi-team-photos.jsx",
       "source_location": "L90",
       "id": "hifi_hifi_team_photos_hiphotos",
-      "community": 53,
+      "community": 54,
       "norm_label": "hiphotos()"
     },
     {
@@ -342,7 +342,7 @@
       "source_file": "design/hifi/hifi-compliance.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_compliance_jsx",
-      "community": 54,
+      "community": 55,
       "norm_label": "hifi-compliance.jsx"
     },
     {
@@ -351,7 +351,7 @@
       "source_file": "design/hifi/hifi-compliance.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_compliance_compliancetile",
-      "community": 54,
+      "community": 55,
       "norm_label": "compliancetile()"
     },
     {
@@ -360,7 +360,7 @@
       "source_file": "design/hifi/hifi-compliance.jsx",
       "source_location": "L38",
       "id": "hifi_hifi_compliance_hicompliance",
-      "community": 54,
+      "community": 55,
       "norm_label": "hicompliance()"
     },
     {
@@ -792,7 +792,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_drive_jsx",
-      "community": 47,
+      "community": 48,
       "norm_label": "hifi-drive.jsx"
     },
     {
@@ -801,7 +801,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L14",
       "id": "hifi_hifi_drive_fileiconhi",
-      "community": 47,
+      "community": 48,
       "norm_label": "fileiconhi()"
     },
     {
@@ -810,7 +810,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L37",
       "id": "hifi_hifi_drive_avatarstack",
-      "community": 47,
+      "community": 48,
       "norm_label": "avatarstack()"
     },
     {
@@ -819,7 +819,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L53",
       "id": "hifi_hifi_drive_hidrive",
-      "community": 47,
+      "community": 48,
       "norm_label": "hidrive()"
     },
     {
@@ -999,7 +999,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_drive_jsx",
-      "community": 43,
+      "community": 44,
       "norm_label": "flows-drive.jsx"
     },
     {
@@ -1008,7 +1008,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L14",
       "id": "hifi_flows_drive_fileicon",
-      "community": 43,
+      "community": 44,
       "norm_label": "fileicon()"
     },
     {
@@ -1017,7 +1017,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L22",
       "id": "hifi_flows_drive_drivea",
-      "community": 43,
+      "community": 44,
       "norm_label": "drivea()"
     },
     {
@@ -1026,7 +1026,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L83",
       "id": "hifi_flows_drive_driveb",
-      "community": 43,
+      "community": 44,
       "norm_label": "driveb()"
     },
     {
@@ -1035,7 +1035,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L125",
       "id": "hifi_flows_drive_drivec",
-      "community": 43,
+      "community": 44,
       "norm_label": "drivec()"
     },
     {
@@ -1044,7 +1044,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_extra_jsx",
-      "community": 48,
+      "community": 49,
       "norm_label": "hifi-web-extra.jsx"
     },
     {
@@ -1053,7 +1053,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_web_extra_webframe",
-      "community": 48,
+      "community": 49,
       "norm_label": "webframe()"
     },
     {
@@ -1062,7 +1062,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L36",
       "id": "hifi_hifi_web_extra_hirecipientshare",
-      "community": 48,
+      "community": 49,
       "norm_label": "hirecipientshare()"
     },
     {
@@ -1071,7 +1071,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L171",
       "id": "hifi_hifi_web_extra_hirecipientpassword",
-      "community": 48,
+      "community": 49,
       "norm_label": "hirecipientpassword()"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "design/hifi/hifi-web-details.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_details_jsx",
-      "community": 55,
+      "community": 56,
       "norm_label": "hifi-web-details.jsx"
     },
     {
@@ -1458,7 +1458,7 @@
       "source_file": "design/hifi/hifi-web-details.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_web_details_hifiledetails",
-      "community": 55,
+      "community": 56,
       "norm_label": "hifiledetails()"
     },
     {
@@ -1467,7 +1467,7 @@
       "source_file": "design/hifi/hifi-web-details.jsx",
       "source_location": "L164",
       "id": "hifi_hifi_web_details_hicontextmenu",
-      "community": 55,
+      "community": 56,
       "norm_label": "hicontextmenu()"
     },
     {
@@ -1476,7 +1476,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_onboarding_jsx",
-      "community": 49,
+      "community": 50,
       "norm_label": "flows-onboarding.jsx"
     },
     {
@@ -1485,7 +1485,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L11",
       "id": "hifi_flows_onboarding_onboardinga",
-      "community": 49,
+      "community": 50,
       "norm_label": "onboardinga()"
     },
     {
@@ -1494,7 +1494,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L66",
       "id": "hifi_flows_onboarding_onboardingb",
-      "community": 49,
+      "community": 50,
       "norm_label": "onboardingb()"
     },
     {
@@ -1503,7 +1503,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L123",
       "id": "hifi_flows_onboarding_onboardingc",
-      "community": 49,
+      "community": 50,
       "norm_label": "onboardingc()"
     },
     {
@@ -1584,7 +1584,7 @@
       "source_file": "design/hifi/hifi-upload-share.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_upload_share_jsx",
-      "community": 56,
+      "community": 57,
       "norm_label": "hifi-upload-share.jsx"
     },
     {
@@ -1593,7 +1593,7 @@
       "source_file": "design/hifi/hifi-upload-share.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_upload_share_hiupload",
-      "community": 56,
+      "community": 57,
       "norm_label": "hiupload()"
     },
     {
@@ -1602,7 +1602,7 @@
       "source_file": "design/hifi/hifi-upload-share.jsx",
       "source_location": "L101",
       "id": "hifi_hifi_upload_share_hishare",
-      "community": 56,
+      "community": 57,
       "norm_label": "hishare()"
     },
     {
@@ -1611,7 +1611,7 @@
       "source_file": "design/hifi/hifi-onboarding.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_onboarding_jsx",
-      "community": 58,
+      "community": 59,
       "norm_label": "hifi-onboarding.jsx"
     },
     {
@@ -1620,7 +1620,7 @@
       "source_file": "design/hifi/hifi-onboarding.jsx",
       "source_location": "L9",
       "id": "hifi_hifi_onboarding_hionboarding",
-      "community": 58,
+      "community": 59,
       "norm_label": "hionboarding()"
     },
     {
@@ -1989,7 +1989,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_security_jsx",
-      "community": 50,
+      "community": 51,
       "norm_label": "hifi-security.jsx"
     },
     {
@@ -1998,7 +1998,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_security_securitynavitem",
-      "community": 50,
+      "community": 51,
       "norm_label": "securitynavitem()"
     },
     {
@@ -2007,7 +2007,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L13",
       "id": "hifi_hifi_security_securityscorering",
-      "community": 50,
+      "community": 51,
       "norm_label": "securityscorering()"
     },
     {
@@ -2016,7 +2016,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L37",
       "id": "hifi_hifi_security_hisecurity",
-      "community": 50,
+      "community": 51,
       "norm_label": "hisecurity()"
     },
     {
@@ -2241,7 +2241,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_admin_jsx",
-      "community": 51,
+      "community": 52,
       "norm_label": "hifi-web-admin.jsx"
     },
     {
@@ -2250,7 +2250,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_web_admin_hinotifications",
-      "community": 51,
+      "community": 52,
       "norm_label": "hinotifications()"
     },
     {
@@ -2259,7 +2259,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L108",
       "id": "hifi_hifi_web_admin_hiteamadmin",
-      "community": 51,
+      "community": 52,
       "norm_label": "hiteamadmin()"
     },
     {
@@ -2268,7 +2268,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L259",
       "id": "hifi_hifi_web_admin_himigrationwizard",
-      "community": 51,
+      "community": 52,
       "norm_label": "himigrationwizard()"
     },
     {
@@ -2277,7 +2277,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_actions_jsx",
-      "community": 44,
+      "community": 45,
       "norm_label": "hifi-actions.jsx"
     },
     {
@@ -2286,7 +2286,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_actions_himovemodal",
-      "community": 44,
+      "community": 45,
       "norm_label": "himovemodal()"
     },
     {
@@ -2295,7 +2295,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L91",
       "id": "hifi_hifi_actions_hitrash",
-      "community": 44,
+      "community": 45,
       "norm_label": "hitrash()"
     },
     {
@@ -2304,7 +2304,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L158",
       "id": "hifi_hifi_actions_hiversionhistory",
-      "community": 44,
+      "community": 45,
       "norm_label": "hiversionhistory()"
     },
     {
@@ -2313,7 +2313,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L255",
       "id": "hifi_hifi_actions_hisearchresults",
-      "community": 44,
+      "community": 45,
       "norm_label": "hisearchresults()"
     },
     {
@@ -2538,7 +2538,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_mobile_desktop_jsx",
-      "community": 52,
+      "community": 53,
       "norm_label": "flows-mobile-desktop.jsx"
     },
     {
@@ -2547,7 +2547,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L4",
       "id": "hifi_flows_mobile_desktop_iosdrive",
-      "community": 52,
+      "community": 53,
       "norm_label": "iosdrive()"
     },
     {
@@ -2556,7 +2556,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L89",
       "id": "hifi_flows_mobile_desktop_androiddrive",
-      "community": 52,
+      "community": 53,
       "norm_label": "androiddrive()"
     },
     {
@@ -2565,7 +2565,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L164",
       "id": "hifi_flows_mobile_desktop_synctray",
-      "community": 52,
+      "community": 53,
       "norm_label": "synctray()"
     },
     {
@@ -2574,7 +2574,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L1",
       "id": "beebeebfileprovider_fileproviderextension_swift",
-      "community": 8,
+      "community": 9,
       "norm_label": "fileproviderextension.swift"
     },
     {
@@ -2583,7 +2583,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L5",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension",
-      "community": 8,
+      "community": 9,
       "norm_label": "fileproviderextension"
     },
     {
@@ -2592,7 +2592,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsobject",
-      "community": 8,
+      "community": 9,
       "norm_label": "nsobject"
     },
     {
@@ -2601,7 +2601,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsfileproviderreplicatedextension",
-      "community": 8,
+      "community": 9,
       "norm_label": "nsfileproviderreplicatedextension"
     },
     {
@@ -2610,7 +2610,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L9",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_init",
-      "community": 8,
+      "community": 9,
       "norm_label": ".init()"
     },
     {
@@ -2619,7 +2619,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L14",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_item",
-      "community": 8,
+      "community": 9,
       "norm_label": ".item()"
     },
     {
@@ -2628,7 +2628,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L35",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_enumerator",
-      "community": 8,
+      "community": 9,
       "norm_label": ".enumerator()"
     },
     {
@@ -2637,7 +2637,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L42",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_fetchcontents",
-      "community": 8,
+      "community": 9,
       "norm_label": ".fetchcontents()"
     },
     {
@@ -2646,7 +2646,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L64",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_createitem",
-      "community": 8,
+      "community": 9,
       "norm_label": ".createitem()"
     },
     {
@@ -2655,7 +2655,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L97",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_modifyitem",
-      "community": 8,
+      "community": 9,
       "norm_label": ".modifyitem()"
     },
     {
@@ -2664,7 +2664,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L133",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_deleteitem",
-      "community": 8,
+      "community": 9,
       "norm_label": ".deleteitem()"
     },
     {
@@ -2673,7 +2673,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L154",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_invalidate",
-      "community": 8,
+      "community": 9,
       "norm_label": ".invalidate()"
     },
     {
@@ -2682,7 +2682,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L158",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_versionidentifier",
-      "community": 8,
+      "community": 9,
       "norm_label": ".versionidentifier()"
     },
     {
@@ -2691,7 +2691,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L163",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator",
-      "community": 8,
+      "community": 9,
       "norm_label": "fileproviderenumerator"
     },
     {
@@ -2700,7 +2700,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsfileproviderenumerator",
-      "community": 8,
+      "community": 9,
       "norm_label": "nsfileproviderenumerator"
     },
     {
@@ -2709,7 +2709,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L167",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_init",
-      "community": 8,
+      "community": 9,
       "norm_label": ".init()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L173",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_invalidate",
-      "community": 8,
+      "community": 9,
       "norm_label": ".invalidate()"
     },
     {
@@ -2727,7 +2727,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L175",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_enumerateitems",
-      "community": 8,
+      "community": 9,
       "norm_label": ".enumerateitems()"
     },
     {
@@ -2736,7 +2736,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L199",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_enumeratechanges",
-      "community": 8,
+      "community": 9,
       "norm_label": ".enumeratechanges()"
     },
     {
@@ -2745,7 +2745,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L206",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_currentsyncanchor",
-      "community": 8,
+      "community": 9,
       "norm_label": ".currentsyncanchor()"
     },
     {
@@ -3042,7 +3042,7 @@
       "source_file": "BeebeebFileProvider/FileProviderItem.swift",
       "source_location": "L62",
       "id": "beebeebfileprovider_fileprovideritem_fileprovideritem",
-      "community": 8,
+      "community": 9,
       "norm_label": "fileprovideritem"
     },
     {
@@ -3051,7 +3051,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsfileprovideritem",
-      "community": 8,
+      "community": 9,
       "norm_label": "nsfileprovideritem"
     },
     {
@@ -3060,7 +3060,7 @@
       "source_file": "BeebeebFileProvider/FileProviderItem.swift",
       "source_location": "L65",
       "id": "beebeebfileprovider_fileprovideritem_fileprovideritem_init",
-      "community": 8,
+      "community": 9,
       "norm_label": ".init()"
     },
     {
@@ -3069,7 +3069,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L1",
       "id": "beebeebfileprovider_domainregistration_swift",
-      "community": 45,
+      "community": 46,
       "norm_label": "domainregistration.swift"
     },
     {
@@ -3078,7 +3078,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L4",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain",
-      "community": 45,
+      "community": 46,
       "norm_label": "beebeebfileproviderdomain"
     },
     {
@@ -3087,7 +3087,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L12",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain_install",
-      "community": 45,
+      "community": 46,
       "norm_label": ".install()"
     },
     {
@@ -3096,7 +3096,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L16",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain_remove",
-      "community": 45,
+      "community": 46,
       "norm_label": ".remove()"
     },
     {
@@ -3105,7 +3105,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L20",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain_signalrootenumerator",
-      "community": 45,
+      "community": 46,
       "norm_label": ".signalrootenumerator()"
     },
     {
@@ -3114,7 +3114,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L1",
       "id": "src_tauri_build_rs",
-      "community": 59,
+      "community": 60,
       "norm_label": "build.rs"
     },
     {
@@ -3123,7 +3123,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L1",
       "id": "src_tauri_build_main",
-      "community": 59,
+      "community": 60,
       "norm_label": "main()"
     },
     {
@@ -3132,7 +3132,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L1",
       "id": "src_tauri_tests_keychain_rs",
-      "community": 10,
+      "community": 1,
       "norm_label": "keychain.rs"
     },
     {
@@ -3141,7 +3141,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L8",
       "id": "tests_keychain_memorystore",
-      "community": 10,
+      "community": 38,
       "norm_label": "memorystore"
     },
     {
@@ -3150,7 +3150,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L14",
       "id": "tests_keychain_memorystore_save_session_token",
-      "community": 10,
+      "community": 38,
       "norm_label": ".save_session_token()"
     },
     {
@@ -3159,7 +3159,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L19",
       "id": "tests_keychain_memorystore_load_session_token",
-      "community": 10,
+      "community": 38,
       "norm_label": ".load_session_token()"
     },
     {
@@ -3168,7 +3168,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L23",
       "id": "tests_keychain_memorystore_delete_session_token",
-      "community": 10,
+      "community": 38,
       "norm_label": ".delete_session_token()"
     },
     {
@@ -3177,7 +3177,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L28",
       "id": "tests_keychain_memorystore_save_wrapped_master_key",
-      "community": 10,
+      "community": 38,
       "norm_label": ".save_wrapped_master_key()"
     },
     {
@@ -3186,7 +3186,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L33",
       "id": "tests_keychain_memorystore_load_wrapped_master_key",
-      "community": 10,
+      "community": 38,
       "norm_label": ".load_wrapped_master_key()"
     },
     {
@@ -3195,7 +3195,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L42",
       "id": "tests_keychain_memorystore_delete_wrapped_master_key",
-      "community": 10,
+      "community": 38,
       "norm_label": ".delete_wrapped_master_key()"
     },
     {
@@ -3204,7 +3204,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L49",
       "id": "tests_keychain_vault_starts_locked_and_fails_closed",
-      "community": 10,
+      "community": 1,
       "norm_label": "vault_starts_locked_and_fails_closed()"
     },
     {
@@ -3213,7 +3213,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L61",
       "id": "tests_keychain_install_and_clear_session_round_trips_through_store",
-      "community": 10,
+      "community": 1,
       "norm_label": "install_and_clear_session_round_trips_through_store()"
     },
     {
@@ -3222,7 +3222,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L89",
       "id": "tests_keychain_unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked",
-      "community": 10,
+      "community": 1,
       "norm_label": "unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked()"
     },
     {
@@ -3231,7 +3231,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L109",
       "id": "tests_keychain_unlock_rejects_wrong_sized_master_key_and_remains_locked",
-      "community": 10,
+      "community": 1,
       "norm_label": "unlock_rejects_wrong_sized_master_key_and_remains_locked()"
     },
     {
@@ -3240,7 +3240,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L125",
       "id": "tests_keychain_debug_output_redacts_session_token_and_key_material",
-      "community": 10,
+      "community": 1,
       "norm_label": "debug_output_redacts_session_token_and_key_material()"
     },
     {
@@ -3249,7 +3249,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L1",
       "id": "src_tauri_src_conflict_rs",
-      "community": 11,
+      "community": 8,
       "norm_label": "conflict.rs"
     },
     {
@@ -3258,7 +3258,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L45",
       "id": "src_conflict_versioninfo",
-      "community": 11,
+      "community": 8,
       "norm_label": "versioninfo"
     },
     {
@@ -3267,7 +3267,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L53",
       "id": "src_conflict_is_conflict",
-      "community": 11,
+      "community": 0,
       "norm_label": "is_conflict()"
     },
     {
@@ -3276,7 +3276,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L63",
       "id": "src_conflict_conflictrecord",
-      "community": 11,
+      "community": 8,
       "norm_label": "conflictrecord"
     },
     {
@@ -3285,7 +3285,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L77",
       "id": "src_conflict_resolution",
-      "community": 11,
+      "community": 8,
       "norm_label": "resolution"
     },
     {
@@ -3294,7 +3294,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L91",
       "id": "src_conflict_auto_resolution_deadline",
-      "community": 11,
+      "community": 8,
       "norm_label": "auto_resolution_deadline()"
     },
     {
@@ -3303,7 +3303,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L100",
       "id": "src_conflict_is_text_file",
-      "community": 11,
+      "community": 0,
       "norm_label": "is_text_file()"
     },
     {
@@ -3312,7 +3312,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L120",
       "id": "src_conflict_v",
-      "community": 11,
+      "community": 8,
       "norm_label": "v()"
     },
     {
@@ -3321,7 +3321,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L128",
       "id": "src_conflict_test_conflict_detected_when_both_sides_changed",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_conflict_detected_when_both_sides_changed()"
     },
     {
@@ -3330,7 +3330,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L137",
       "id": "src_conflict_test_no_conflict_when_only_remote_changed",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_no_conflict_when_only_remote_changed()"
     },
     {
@@ -3339,7 +3339,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L147",
       "id": "src_conflict_test_no_conflict_when_only_local_changed",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_no_conflict_when_only_local_changed()"
     },
     {
@@ -3348,7 +3348,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L157",
       "id": "src_conflict_test_no_conflict_when_both_sides_landed_on_same_hash",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_no_conflict_when_both_sides_landed_on_same_hash()"
     },
     {
@@ -3357,7 +3357,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L168",
       "id": "src_conflict_test_auto_resolution_deadline_is_24h",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_auto_resolution_deadline_is_24h()"
     },
     {
@@ -3366,7 +3366,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L175",
       "id": "src_conflict_test_auto_resolve_fires_after_24h",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_auto_resolve_fires_after_24h()"
     },
     {
@@ -3375,7 +3375,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L183",
       "id": "src_conflict_test_auto_resolve_does_not_fire_early",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_auto_resolve_does_not_fire_early()"
     },
     {
@@ -3384,7 +3384,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L191",
       "id": "src_conflict_test_text_classification",
-      "community": 11,
+      "community": 8,
       "norm_label": "test_text_classification()"
     },
     {
@@ -3402,7 +3402,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L31",
       "id": "src_state_db_filestatus",
-      "community": 9,
+      "community": 10,
       "norm_label": "filestatus"
     },
     {
@@ -3411,7 +3411,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L41",
       "id": "src_state_db_filestatus_as_str",
-      "community": 9,
+      "community": 10,
       "norm_label": ".as_str()"
     },
     {
@@ -3420,7 +3420,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L51",
       "id": "src_state_db_filestatus_from_str",
-      "community": 0,
+      "community": 1,
       "norm_label": ".from_str()"
     },
     {
@@ -3645,7 +3645,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L330",
       "id": "src_state_db_statedb_open",
-      "community": 0,
+      "community": 1,
       "norm_label": ".open()"
     },
     {
@@ -3996,7 +3996,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L1",
       "id": "src_tauri_src_config_rs",
-      "community": 0,
+      "community": 7,
       "norm_label": "config.rs"
     },
     {
@@ -4005,7 +4005,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L34",
       "id": "src_config_desktopconfig",
-      "community": 0,
+      "community": 7,
       "norm_label": "desktopconfig"
     },
     {
@@ -4014,7 +4014,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L93",
       "id": "src_config_default_true",
-      "community": 0,
+      "community": 7,
       "norm_label": "default_true()"
     },
     {
@@ -4023,7 +4023,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L105",
       "id": "src_config_desktopconfig_default",
-      "community": 0,
+      "community": 7,
       "norm_label": ".default()"
     },
     {
@@ -4032,7 +4032,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L130",
       "id": "src_config_desktopsettings",
-      "community": 0,
+      "community": 7,
       "norm_label": "desktopsettings"
     },
     {
@@ -4041,7 +4041,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L140",
       "id": "src_config_desktopsettings_from",
-      "community": 0,
+      "community": 7,
       "norm_label": ".from()"
     },
     {
@@ -4050,7 +4050,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L156",
       "id": "src_config_desktopconfig_apply_settings",
-      "community": 0,
+      "community": 7,
       "norm_label": ".apply_settings()"
     },
     {
@@ -4059,7 +4059,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L170",
       "id": "src_config_desktopconfig_path",
-      "community": 0,
+      "community": 7,
       "norm_label": ".path()"
     },
     {
@@ -4068,7 +4068,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L182",
       "id": "src_config_desktopconfig_load",
-      "community": 0,
+      "community": 1,
       "norm_label": ".load()"
     },
     {
@@ -4077,7 +4077,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L212",
       "id": "src_config_desktopconfig_save",
-      "community": 0,
+      "community": 7,
       "norm_label": ".save()"
     },
     {
@@ -4086,7 +4086,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L242",
       "id": "src_config_default_sync_root_suggestion",
-      "community": 0,
+      "community": 7,
       "norm_label": "default_sync_root_suggestion()"
     },
     {
@@ -4095,7 +4095,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L251",
       "id": "src_config_ensure_directory",
-      "community": 0,
+      "community": 1,
       "norm_label": "ensure_directory()"
     },
     {
@@ -4104,7 +4104,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L1",
       "id": "src_tauri_src_lockfile_rs",
-      "community": 38,
+      "community": 39,
       "norm_label": "lockfile.rs"
     },
     {
@@ -4113,7 +4113,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L50",
       "id": "src_lockfile_lockcontents",
-      "community": 38,
+      "community": 39,
       "norm_label": "lockcontents"
     },
     {
@@ -4122,7 +4122,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L59",
       "id": "src_lockfile_lockfile",
-      "community": 38,
+      "community": 39,
       "norm_label": "lockfile"
     },
     {
@@ -4131,7 +4131,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L72",
       "id": "src_lockfile_lockfile_acquire",
-      "community": 38,
+      "community": 39,
       "norm_label": ".acquire()"
     },
     {
@@ -4140,7 +4140,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L127",
       "id": "src_lockfile_lockfile_drop",
-      "community": 38,
+      "community": 39,
       "norm_label": ".drop()"
     },
     {
@@ -4149,7 +4149,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L141",
       "id": "src_lockfile_pid_alive",
-      "community": 38,
+      "community": 39,
       "norm_label": "pid_alive()"
     },
     {
@@ -4158,7 +4158,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L165",
       "id": "src_lockfile_hostname_or_unknown",
-      "community": 38,
+      "community": 39,
       "norm_label": "hostname_or_unknown()"
     },
     {
@@ -4167,7 +4167,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1",
       "id": "src_tauri_src_lib_rs",
-      "community": 0,
+      "community": 1,
       "norm_label": "lib.rs"
     },
     {
@@ -4176,7 +4176,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L53",
       "id": "src_lib_session",
-      "community": 0,
+      "community": 1,
       "norm_label": "session"
     },
     {
@@ -4185,7 +4185,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L60",
       "id": "src_lib_session_fmt",
-      "community": 0,
+      "community": 1,
       "norm_label": ".fmt()"
     },
     {
@@ -4194,7 +4194,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L72",
       "id": "src_lib_appstate",
-      "community": 0,
+      "community": 1,
       "norm_label": "appstate"
     },
     {
@@ -4203,7 +4203,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L94",
       "id": "src_lib_appstate_default",
-      "community": 0,
+      "community": 1,
       "norm_label": ".default()"
     },
     {
@@ -4212,7 +4212,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L107",
       "id": "src_lib_keychain_error",
-      "community": 0,
+      "community": 1,
       "norm_label": "keychain_error()"
     },
     {
@@ -4221,7 +4221,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L111",
       "id": "src_lib_persist_session_to_keychain",
-      "community": 0,
+      "community": 1,
       "norm_label": "persist_session_to_keychain()"
     },
     {
@@ -4230,7 +4230,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L122",
       "id": "src_lib_persist_session_token_to_keychain",
-      "community": 0,
+      "community": 1,
       "norm_label": "persist_session_token_to_keychain()"
     },
     {
@@ -4239,7 +4239,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L130",
       "id": "src_lib_persist_vault_key_to_keychain",
-      "community": 0,
+      "community": 1,
       "norm_label": "persist_vault_key_to_keychain()"
     },
     {
@@ -4248,7 +4248,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L136",
       "id": "src_lib_load_session_token_from_keychain",
-      "community": 0,
+      "community": 1,
       "norm_label": "load_session_token_from_keychain()"
     },
     {
@@ -4257,7 +4257,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L143",
       "id": "src_lib_load_session_from_keychain",
-      "community": 0,
+      "community": 1,
       "norm_label": "load_session_from_keychain()"
     },
     {
@@ -4266,7 +4266,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L163",
       "id": "src_lib_keychain_session_present",
-      "community": 0,
+      "community": 1,
       "norm_label": "keychain_session_present()"
     },
     {
@@ -4275,7 +4275,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L170",
       "id": "src_lib_clear_keychain_session",
-      "community": 0,
+      "community": 1,
       "norm_label": "clear_keychain_session()"
     },
     {
@@ -4284,7 +4284,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L177",
       "id": "src_lib_set_auth_present",
-      "community": 0,
+      "community": 1,
       "norm_label": "set_auth_present()"
     },
     {
@@ -4293,7 +4293,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L183",
       "id": "src_lib_set_auth_email",
-      "community": 0,
+      "community": 1,
       "norm_label": "set_auth_email()"
     },
     {
@@ -4302,7 +4302,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L189",
       "id": "src_lib_start_engine_if_possible",
-      "community": 0,
+      "community": 1,
       "norm_label": "start_engine_if_possible()"
     },
     {
@@ -4311,7 +4311,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L215",
       "id": "src_lib_open_onboarding_window_impl",
-      "community": 0,
+      "community": 1,
       "norm_label": "open_onboarding_window_impl()"
     },
     {
@@ -4320,7 +4320,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L241",
       "id": "src_lib_open_onboarding_window",
-      "community": 0,
+      "community": 1,
       "norm_label": "open_onboarding_window()"
     },
     {
@@ -4329,7 +4329,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L248",
       "id": "src_lib_show_settings",
-      "community": 0,
+      "community": 1,
       "norm_label": "show_settings()"
     },
     {
@@ -4338,7 +4338,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L264",
       "id": "src_lib_desktop_login",
-      "community": 0,
+      "community": 1,
       "norm_label": "desktop_login()"
     },
     {
@@ -4347,7 +4347,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L380",
       "id": "src_lib_desktop_unlock_with_recovery_phrase",
-      "community": 0,
+      "community": 1,
       "norm_label": "desktop_unlock_with_recovery_phrase()"
     },
     {
@@ -4356,7 +4356,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L419",
       "id": "src_lib_normalize_recovery_phrase_input",
-      "community": 0,
+      "community": 1,
       "norm_label": "normalize_recovery_phrase_input()"
     },
     {
@@ -4365,7 +4365,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L440",
       "id": "src_lib_decode_base64",
-      "community": 0,
+      "community": 1,
       "norm_label": "decode_base64()"
     },
     {
@@ -4374,7 +4374,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L447",
       "id": "src_lib_encode_base64",
-      "community": 0,
+      "community": 1,
       "norm_label": "encode_base64()"
     },
     {
@@ -4383,7 +4383,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L452",
       "id": "src_lib_desktop_session_has_totp",
-      "community": 0,
+      "community": 1,
       "norm_label": "desktop_session_has_totp()"
     },
     {
@@ -4392,7 +4392,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L475",
       "id": "src_lib_revoke_desktop_session",
-      "community": 0,
+      "community": 1,
       "norm_label": "revoke_desktop_session()"
     },
     {
@@ -4401,7 +4401,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L499",
       "id": "src_lib_set_session",
-      "community": 0,
+      "community": 1,
       "norm_label": "set_session()"
     },
     {
@@ -4410,7 +4410,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L539",
       "id": "src_lib_clear_session",
-      "community": 0,
+      "community": 1,
       "norm_label": "clear_session()"
     },
     {
@@ -4419,7 +4419,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L572",
       "id": "src_lib_unlock_vault",
-      "community": 0,
+      "community": 1,
       "norm_label": "unlock_vault()"
     },
     {
@@ -4428,7 +4428,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L602",
       "id": "src_lib_lock_vault",
-      "community": 0,
+      "community": 1,
       "norm_label": "lock_vault()"
     },
     {
@@ -4437,7 +4437,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L627",
       "id": "src_lib_finderinstallstate",
-      "community": 0,
+      "community": 1,
       "norm_label": "finderinstallstate"
     },
     {
@@ -4446,7 +4446,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L632",
       "id": "src_lib_file_provider_packaging_error",
-      "community": 0,
+      "community": 1,
       "norm_label": "file_provider_packaging_error()"
     },
     {
@@ -4455,7 +4455,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L638",
       "id": "src_lib_finder_location_state",
-      "community": 0,
+      "community": 1,
       "norm_label": "finder_location_state()"
     },
     {
@@ -4464,7 +4464,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L649",
       "id": "src_lib_install_finder_location",
-      "community": 0,
+      "community": 1,
       "norm_label": "install_finder_location()"
     },
     {
@@ -4473,7 +4473,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L683",
       "id": "src_lib_open_finder_location",
-      "community": 0,
+      "community": 1,
       "norm_label": "open_finder_location()"
     },
     {
@@ -4482,7 +4482,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L736",
       "id": "src_lib_sync_status",
-      "community": 0,
+      "community": 1,
       "norm_label": "sync_status()"
     },
     {
@@ -4491,7 +4491,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L821",
       "id": "src_lib_billingusageresponse",
-      "community": 0,
+      "community": 1,
       "norm_label": "billingusageresponse"
     },
     {
@@ -4500,7 +4500,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L827",
       "id": "src_lib_desktopstoragesummary",
-      "community": 0,
+      "community": 1,
       "norm_label": "desktopstoragesummary"
     },
     {
@@ -4509,7 +4509,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L840",
       "id": "src_lib_desktop_storage_summary",
-      "community": 0,
+      "community": 1,
       "norm_label": "desktop_storage_summary()"
     },
     {
@@ -4518,7 +4518,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L888",
       "id": "src_lib_export_diagnostics",
-      "community": 0,
+      "community": 1,
       "norm_label": "export_diagnostics()"
     },
     {
@@ -4527,7 +4527,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L922",
       "id": "src_lib_list_version_conflict_center",
-      "community": 0,
+      "community": 1,
       "norm_label": "list_version_conflict_center()"
     },
     {
@@ -4536,7 +4536,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L936",
       "id": "src_lib_list_file_versions",
-      "community": 0,
+      "community": 1,
       "norm_label": "list_file_versions()"
     },
     {
@@ -4545,7 +4545,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L950",
       "id": "src_lib_restore_file_version",
-      "community": 0,
+      "community": 1,
       "norm_label": "restore_file_version()"
     },
     {
@@ -4554,7 +4554,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1014",
       "id": "src_lib_get_sync_root",
-      "community": 0,
+      "community": 1,
       "norm_label": "get_sync_root()"
     },
     {
@@ -4563,7 +4563,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1031",
       "id": "src_lib_pick_sync_root",
-      "community": 0,
+      "community": 1,
       "norm_label": "pick_sync_root()"
     },
     {
@@ -4572,7 +4572,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1090",
       "id": "src_lib_default_sync_root",
-      "community": 0,
+      "community": 7,
       "norm_label": "default_sync_root()"
     },
     {
@@ -4581,7 +4581,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1106",
       "id": "src_lib_get_desktop_config",
-      "community": 0,
+      "community": 1,
       "norm_label": "get_desktop_config()"
     },
     {
@@ -4590,7 +4590,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1119",
       "id": "src_lib_set_desktop_config",
-      "community": 0,
+      "community": 1,
       "norm_label": "set_desktop_config()"
     },
     {
@@ -4599,7 +4599,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1138",
       "id": "src_lib_get_selective_sync",
-      "community": 0,
+      "community": 1,
       "norm_label": "get_selective_sync()"
     },
     {
@@ -4608,7 +4608,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1160",
       "id": "src_lib_set_selective_sync",
-      "community": 0,
+      "community": 1,
       "norm_label": "set_selective_sync()"
     },
     {
@@ -4617,7 +4617,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1176",
       "id": "src_lib_vaultitem",
-      "community": 0,
+      "community": 1,
       "norm_label": "vaultitem"
     },
     {
@@ -4626,7 +4626,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1194",
       "id": "src_lib_try_decrypt_name",
-      "community": 0,
+      "community": 1,
       "norm_label": "try_decrypt_name()"
     },
     {
@@ -4635,7 +4635,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1222",
       "id": "src_lib_list_vault_folders",
-      "community": 0,
+      "community": 1,
       "norm_label": "list_vault_folders()"
     },
     {
@@ -4644,7 +4644,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1282",
       "id": "src_lib_list_remote_tree",
-      "community": 0,
+      "community": 1,
       "norm_label": "list_remote_tree()"
     },
     {
@@ -4653,7 +4653,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1287",
       "id": "src_lib_set_recursive_pin",
-      "community": 0,
+      "community": 1,
       "norm_label": "set_recursive_pin()"
     },
     {
@@ -4662,7 +4662,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1325",
       "id": "src_lib_account_email",
-      "community": 0,
+      "community": 1,
       "norm_label": "account_email()"
     },
     {
@@ -4671,7 +4671,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1342",
       "id": "src_lib_open_conflict_window_impl",
-      "community": 0,
+      "community": 1,
       "norm_label": "open_conflict_window_impl()"
     },
     {
@@ -4680,7 +4680,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1389",
       "id": "src_lib_open_conflict_window",
-      "community": 0,
+      "community": 1,
       "norm_label": "open_conflict_window()"
     },
     {
@@ -4689,7 +4689,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1409",
       "id": "src_lib_notify_conflict_impl",
-      "community": 0,
+      "community": 1,
       "norm_label": "notify_conflict_impl()"
     },
     {
@@ -4698,7 +4698,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1433",
       "id": "src_lib_notify_conflict",
-      "community": 0,
+      "community": 1,
       "norm_label": "notify_conflict()"
     },
     {
@@ -4707,7 +4707,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1455",
       "id": "src_lib_resolve_conflict",
-      "community": 0,
+      "community": 1,
       "norm_label": "resolve_conflict()"
     },
     {
@@ -4716,7 +4716,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1540",
       "id": "src_lib_app_version",
-      "community": 0,
+      "community": 1,
       "norm_label": "app_version()"
     },
     {
@@ -4725,7 +4725,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1549",
       "id": "src_lib_install_update",
-      "community": 0,
+      "community": 1,
       "norm_label": "install_update()"
     },
     {
@@ -4734,7 +4734,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1587",
       "id": "src_lib_toggle_autostart",
-      "community": 0,
+      "community": 1,
       "norm_label": "toggle_autostart()"
     },
     {
@@ -4743,7 +4743,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1602",
       "id": "src_lib_autostart_enabled",
-      "community": 0,
+      "community": 1,
       "norm_label": "autostart_enabled()"
     },
     {
@@ -4752,7 +4752,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1609",
       "id": "src_lib_run",
-      "community": 0,
+      "community": 1,
       "norm_label": "run()"
     },
     {
@@ -4761,7 +4761,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1739",
       "id": "src_lib_run_update_loop",
-      "community": 0,
+      "community": 1,
       "norm_label": "run_update_loop()"
     },
     {
@@ -4770,7 +4770,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1749",
       "id": "src_lib_check_for_update",
-      "community": 0,
+      "community": 1,
       "norm_label": "check_for_update()"
     },
     {
@@ -4779,7 +4779,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1790",
       "id": "src_lib_setup_native_menu",
-      "community": 0,
+      "community": 1,
       "norm_label": "setup_native_menu()"
     },
     {
@@ -4788,7 +4788,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1853",
       "id": "src_lib_build_tray_menu",
-      "community": 0,
+      "community": 1,
       "norm_label": "build_tray_menu()"
     },
     {
@@ -4797,7 +4797,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1881",
       "id": "src_lib_attach_tray_status_listener",
-      "community": 0,
+      "community": 1,
       "norm_label": "attach_tray_status_listener()"
     },
     {
@@ -4806,7 +4806,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1933",
       "id": "src_lib_setup_tray",
-      "community": 0,
+      "community": 1,
       "norm_label": "setup_tray()"
     },
     {
@@ -4815,7 +4815,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L2006",
       "id": "src_lib_show_settings_window",
-      "community": 0,
+      "community": 1,
       "norm_label": "show_settings_window()"
     },
     {
@@ -4824,7 +4824,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L2035",
       "id": "src_lib_normalizes_recovery_phrase_in_rust",
-      "community": 0,
+      "community": 1,
       "norm_label": "normalizes_recovery_phrase_in_rust()"
     },
     {
@@ -4833,7 +4833,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L2046",
       "id": "src_lib_rejects_non_twelve_word_recovery_phrase",
-      "community": 0,
+      "community": 1,
       "norm_label": "rejects_non_twelve_word_recovery_phrase()"
     },
     {
@@ -4842,7 +4842,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L1",
       "id": "src_tauri_src_engine_bridge_rs",
-      "community": 1,
+      "community": 0,
       "norm_label": "engine_bridge.rs"
     },
     {
@@ -4851,7 +4851,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L50",
       "id": "src_engine_bridge_fileevent",
-      "community": 1,
+      "community": 0,
       "norm_label": "fileevent"
     },
     {
@@ -4860,7 +4860,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L65",
       "id": "src_engine_bridge_filesm",
-      "community": 1,
+      "community": 0,
       "norm_label": "filesm"
     },
     {
@@ -4869,7 +4869,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L70",
       "id": "src_engine_bridge_filesm_new",
-      "community": 1,
+      "community": 0,
       "norm_label": ".new()"
     },
     {
@@ -4878,7 +4878,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L73",
       "id": "src_engine_bridge_filesm_state",
-      "community": 1,
+      "community": 0,
       "norm_label": ".state()"
     },
     {
@@ -4887,7 +4887,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L81",
       "id": "src_engine_bridge_filesm_transition",
-      "community": 1,
+      "community": 0,
       "norm_label": ".transition()"
     },
     {
@@ -4896,7 +4896,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L102",
       "id": "src_engine_bridge_enginebridge",
-      "community": 1,
+      "community": 0,
       "norm_label": "enginebridge"
     },
     {
@@ -4905,7 +4905,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L108",
       "id": "src_engine_bridge_finderwriteitemkind",
-      "community": 1,
+      "community": 0,
       "norm_label": "finderwriteitemkind"
     },
     {
@@ -4914,7 +4914,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L114",
       "id": "src_engine_bridge_finderwritetarget",
-      "community": 1,
+      "community": 0,
       "norm_label": "finderwritetarget"
     },
     {
@@ -4923,7 +4923,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L125",
       "id": "src_engine_bridge_finderwriteoutcome",
-      "community": 1,
+      "community": 0,
       "norm_label": "finderwriteoutcome"
     },
     {
@@ -4932,7 +4932,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L139",
       "id": "src_engine_bridge_cachepolicy",
-      "community": 1,
+      "community": 0,
       "norm_label": "cachepolicy"
     },
     {
@@ -4941,7 +4941,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L145",
       "id": "src_engine_bridge_cachepolicy_default",
-      "community": 1,
+      "community": 0,
       "norm_label": ".default()"
     },
     {
@@ -4950,7 +4950,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L154",
       "id": "src_engine_bridge_pinupdateoutcome",
-      "community": 1,
+      "community": 0,
       "norm_label": "pinupdateoutcome"
     },
     {
@@ -4959,7 +4959,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L160",
       "id": "src_engine_bridge_cachecleanupoutcome",
-      "community": 1,
+      "community": 0,
       "norm_label": "cachecleanupoutcome"
     },
     {
@@ -4968,7 +4968,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L165",
       "id": "src_engine_bridge_versionconflictentry",
-      "community": 1,
+      "community": 0,
       "norm_label": "versionconflictentry"
     },
     {
@@ -4977,7 +4977,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L181",
       "id": "src_engine_bridge_sharedrootrefreshoutcome",
-      "community": 1,
+      "community": 0,
       "norm_label": "sharedrootrefreshoutcome"
     },
     {
@@ -4986,7 +4986,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L188",
       "id": "src_engine_bridge_transferloopoutcome",
-      "community": 1,
+      "community": 0,
       "norm_label": "transferloopoutcome"
     },
     {
@@ -4995,7 +4995,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L196",
       "id": "src_engine_bridge_operationfailureclass",
-      "community": 1,
+      "community": 0,
       "norm_label": "operationfailureclass"
     },
     {
@@ -5004,7 +5004,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L205",
       "id": "src_engine_bridge_operationfailureclass_pause_reason",
-      "community": 1,
+      "community": 0,
       "norm_label": ".pause_reason()"
     },
     {
@@ -5013,7 +5013,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L217",
       "id": "src_engine_bridge_sharedrootmapping",
-      "community": 1,
+      "community": 0,
       "norm_label": "sharedrootmapping"
     },
     {
@@ -5022,7 +5022,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L229",
       "id": "src_engine_bridge_enginebridge_new",
-      "community": 1,
+      "community": 0,
       "norm_label": ".new()"
     },
     {
@@ -5031,7 +5031,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L236",
       "id": "src_engine_bridge_enginebridge_db",
-      "community": 11,
+      "community": 0,
       "norm_label": ".db()"
     },
     {
@@ -5040,7 +5040,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L241",
       "id": "src_engine_bridge_enginebridge_api",
-      "community": 11,
+      "community": 0,
       "norm_label": ".api()"
     },
     {
@@ -5049,7 +5049,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L245",
       "id": "src_engine_bridge_enginebridge_queue_diagnostics",
-      "community": 1,
+      "community": 0,
       "norm_label": ".queue_diagnostics()"
     },
     {
@@ -5058,7 +5058,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L249",
       "id": "src_engine_bridge_enginebridge_process_due_operations",
-      "community": 1,
+      "community": 0,
       "norm_label": ".process_due_operations()"
     },
     {
@@ -5067,7 +5067,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L292",
       "id": "src_engine_bridge_enginebridge_execute_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": ".execute_operation()"
     },
     {
@@ -5076,655 +5076,745 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L362",
       "id": "src_engine_bridge_enginebridge_upload_version",
-      "community": 1,
+      "community": 0,
       "norm_label": ".upload_version()"
     },
     {
       "label": ".apply_completed_upload()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L462",
+      "source_location": "L468",
       "id": "src_engine_bridge_enginebridge_apply_completed_upload",
-      "community": 1,
+      "community": 0,
       "norm_label": ".apply_completed_upload()"
     },
     {
       "label": ".refresh_shared_roots()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L537",
+      "source_location": "L540",
       "id": "src_engine_bridge_enginebridge_refresh_shared_roots",
-      "community": 1,
+      "community": 0,
       "norm_label": ".refresh_shared_roots()"
     },
     {
       "label": ".queue_finder_create()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L595",
+      "source_location": "L598",
       "id": "src_engine_bridge_enginebridge_queue_finder_create",
-      "community": 1,
+      "community": 0,
       "norm_label": ".queue_finder_create()"
     },
     {
       "label": ".queue_finder_modify()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L666",
+      "source_location": "L669",
       "id": "src_engine_bridge_enginebridge_queue_finder_modify",
-      "community": 1,
+      "community": 0,
       "norm_label": ".queue_finder_modify()"
     },
     {
       "label": ".queue_finder_delete()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L742",
+      "source_location": "L745",
       "id": "src_engine_bridge_enginebridge_queue_finder_delete",
-      "community": 1,
+      "community": 0,
       "norm_label": ".queue_finder_delete()"
     },
     {
       "label": ".set_recursive_pin()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L767",
+      "source_location": "L770",
       "id": "src_engine_bridge_enginebridge_set_recursive_pin",
-      "community": 1,
+      "community": 0,
       "norm_label": ".set_recursive_pin()"
     },
     {
       "label": ".record_smart_cache_open()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L797",
+      "source_location": "L800",
       "id": "src_engine_bridge_enginebridge_record_smart_cache_open",
-      "community": 1,
+      "community": 0,
       "norm_label": ".record_smart_cache_open()"
     },
     {
       "label": ".enforce_smart_cache()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L808",
+      "source_location": "L811",
       "id": "src_engine_bridge_enginebridge_enforce_smart_cache",
-      "community": 1,
+      "community": 0,
       "norm_label": ".enforce_smart_cache()"
     },
     {
       "label": ".version_conflict_feed()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L817",
+      "source_location": "L820",
       "id": "src_engine_bridge_enginebridge_version_conflict_feed",
-      "community": 1,
+      "community": 0,
       "norm_label": ".version_conflict_feed()"
     },
     {
       "label": ".queue_restore_version()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L821",
+      "source_location": "L824",
       "id": "src_engine_bridge_enginebridge_queue_restore_version",
-      "community": 1,
+      "community": 0,
       "norm_label": ".queue_restore_version()"
     },
     {
       "label": ".enqueue_finder_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L855",
+      "source_location": "L858",
       "id": "src_engine_bridge_enginebridge_enqueue_finder_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": ".enqueue_finder_operation()"
     },
     {
       "label": ".enqueue_pin_tree_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L895",
+      "source_location": "L898",
       "id": "src_engine_bridge_enginebridge_enqueue_pin_tree_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": ".enqueue_pin_tree_operation()"
     },
     {
       "label": ".enqueue_hydrate_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L923",
+      "source_location": "L926",
       "id": "src_engine_bridge_enginebridge_enqueue_hydrate_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": ".enqueue_hydrate_operation()"
     },
     {
       "label": ".ensure_shared_parent_allows_write()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L951",
+      "source_location": "L954",
       "id": "src_engine_bridge_enginebridge_ensure_shared_parent_allows_write",
-      "community": 1,
+      "community": 0,
       "norm_label": ".ensure_shared_parent_allows_write()"
     },
     {
       "label": ".ensure_item_allows_shared_write()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L971",
+      "source_location": "L974",
       "id": "src_engine_bridge_enginebridge_ensure_item_allows_shared_write",
-      "community": 1,
+      "community": 0,
       "norm_label": ".ensure_item_allows_shared_write()"
     },
     {
       "label": ".hydrate_file()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1009",
+      "source_location": "L1012",
       "id": "src_engine_bridge_enginebridge_hydrate_file",
-      "community": 1,
+      "community": 0,
       "norm_label": ".hydrate_file()"
     },
     {
       "label": ".do_hydrate()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1033",
+      "source_location": "L1036",
       "id": "src_engine_bridge_enginebridge_do_hydrate",
-      "community": 1,
+      "community": 0,
       "norm_label": ".do_hydrate()"
     },
     {
       "label": ".resolve_keep_mine()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1093",
+      "source_location": "L1096",
       "id": "src_engine_bridge_enginebridge_resolve_keep_mine",
-      "community": 1,
+      "community": 0,
       "norm_label": ".resolve_keep_mine()"
     },
     {
       "label": ".resolve_keep_theirs()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1128",
+      "source_location": "L1131",
       "id": "src_engine_bridge_enginebridge_resolve_keep_theirs",
-      "community": 1,
+      "community": 0,
       "norm_label": ".resolve_keep_theirs()"
     },
     {
       "label": ".auto_resolve_keep_both()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1168",
+      "source_location": "L1171",
       "id": "src_engine_bridge_enginebridge_auto_resolve_keep_both",
-      "community": 1,
+      "community": 0,
       "norm_label": ".auto_resolve_keep_both()"
     },
     {
       "label": "is_ignored_finder_name()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1207",
+      "source_location": "L1210",
       "id": "src_engine_bridge_is_ignored_finder_name",
-      "community": 1,
+      "community": 0,
       "norm_label": "is_ignored_finder_name()"
     },
     {
       "label": "version_conflict_feed_from_db()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1227",
+      "source_location": "L1230",
       "id": "src_engine_bridge_version_conflict_feed_from_db",
-      "community": 1,
+      "community": 0,
       "norm_label": "version_conflict_feed_from_db()"
     },
     {
       "label": "encrypted_metadata_for_name()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1260",
+      "source_location": "L1263",
       "id": "src_engine_bridge_encrypted_metadata_for_name",
-      "community": 1,
+      "community": 0,
       "norm_label": "encrypted_metadata_for_name()"
     },
     {
       "label": "upload_init_request_for_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1271",
+      "source_location": "L1274",
       "id": "src_engine_bridge_upload_init_request_for_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": "upload_init_request_for_operation()"
     },
     {
       "label": "is_create_file_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1295",
+      "source_location": "L1298",
       "id": "src_engine_bridge_is_create_file_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": "is_create_file_operation()"
     },
     {
       "label": "metadata_display_name()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1299",
+      "source_location": "L1302",
       "id": "src_engine_bridge_metadata_display_name",
-      "community": 1,
+      "community": 0,
       "norm_label": "metadata_display_name()"
     },
     {
       "label": "decrypt_downloaded_chunk()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1306",
+      "source_location": "L1309",
       "id": "src_engine_bridge_decrypt_downloaded_chunk",
-      "community": 1,
+      "community": 0,
       "norm_label": "decrypt_downloaded_chunk()"
     },
     {
       "label": "stage_finder_payload()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1320",
+      "source_location": "L1322",
       "id": "src_engine_bridge_stage_finder_payload",
-      "community": 1,
+      "community": 0,
       "norm_label": "stage_finder_payload()"
     },
     {
       "label": "stage_finder_payload_with_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1324",
+      "source_location": "L1326",
       "id": "src_engine_bridge_stage_finder_payload_with_root",
-      "community": 1,
+      "community": 0,
       "norm_label": "stage_finder_payload_with_root()"
     },
     {
       "label": "default_finder_staging_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1346",
+      "source_location": "L1348",
       "id": "src_engine_bridge_default_finder_staging_root",
-      "community": 1,
+      "community": 0,
       "norm_label": "default_finder_staging_root()"
     },
     {
       "label": "sanitize_staging_name()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1353",
+      "source_location": "L1355",
       "id": "src_engine_bridge_sanitize_staging_name",
-      "community": 1,
+      "community": 0,
       "norm_label": "sanitize_staging_name()"
     },
     {
       "label": "parse_base_version_number()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1363",
+      "source_location": "L1365",
       "id": "src_engine_bridge_parse_base_version_number",
-      "community": 1,
+      "community": 0,
       "norm_label": "parse_base_version_number()"
     },
     {
       "label": "display_name_for_path()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1373",
+      "source_location": "L1375",
       "id": "src_engine_bridge_display_name_for_path",
-      "community": 1,
+      "community": 0,
       "norm_label": "display_name_for_path()"
     },
     {
       "label": "review_entry_for_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1382",
+      "source_location": "L1384",
       "id": "src_engine_bridge_review_entry_for_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": "review_entry_for_operation()"
     },
     {
       "label": "classify_review_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1413",
+      "source_location": "L1415",
       "id": "src_engine_bridge_classify_review_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": "classify_review_operation()"
     },
     {
       "label": "operation_version_id()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1499",
+      "source_location": "L1501",
       "id": "src_engine_bridge_operation_version_id",
-      "community": 1,
+      "community": 0,
       "norm_label": "operation_version_id()"
     },
     {
       "label": "operation_metadata()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1508",
+      "source_location": "L1510",
       "id": "src_engine_bridge_operation_metadata",
-      "community": 1,
+      "community": 0,
       "norm_label": "operation_metadata()"
     },
     {
       "label": "classify_operation_error()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1517",
+      "source_location": "L1519",
       "id": "src_engine_bridge_classify_operation_error",
-      "community": 1,
+      "community": 0,
       "norm_label": "classify_operation_error()"
     },
     {
       "label": "retry_delay_seconds()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1536",
+      "source_location": "L1538",
       "id": "src_engine_bridge_retry_delay_seconds",
-      "community": 1,
+      "community": 0,
       "norm_label": "retry_delay_seconds()"
     },
     {
       "label": "shared_roots_from_invite_response()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1541",
+      "source_location": "L1543",
       "id": "src_engine_bridge_shared_roots_from_invite_response",
-      "community": 1,
+      "community": 0,
       "norm_label": "shared_roots_from_invite_response()"
     },
     {
       "label": "shared_root_from_invite()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1550",
+      "source_location": "L1552",
       "id": "src_engine_bridge_shared_root_from_invite",
-      "community": 1,
+      "community": 0,
       "norm_label": "shared_root_from_invite()"
     },
     {
       "label": "shared_invite_allows_write()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1596",
+      "source_location": "L1598",
       "id": "src_engine_bridge_shared_invite_allows_write",
-      "community": 1,
+      "community": 0,
       "norm_label": "shared_invite_allows_write()"
     },
     {
       "label": "string_field()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1614",
+      "source_location": "L1616",
       "id": "src_engine_bridge_string_field",
-      "community": 1,
+      "community": 0,
       "norm_label": "string_field()"
     },
     {
       "label": "parse_rfc3339_secs()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1622",
+      "source_location": "L1624",
       "id": "src_engine_bridge_parse_rfc3339_secs",
-      "community": 1,
+      "community": 0,
       "norm_label": "parse_rfc3339_secs()"
     },
     {
       "label": "apply_shared_context()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1628",
+      "source_location": "L1630",
       "id": "src_engine_bridge_apply_shared_context",
-      "community": 1,
+      "community": 0,
       "norm_label": "apply_shared_context()"
     },
     {
       "label": "now_secs()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1638",
+      "source_location": "L1640",
       "id": "src_engine_bridge_now_secs",
-      "community": 1,
+      "community": 0,
       "norm_label": "now_secs()"
     },
     {
       "label": "apply_metadata_file_row()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1645",
+      "source_location": "L1647",
       "id": "src_engine_bridge_apply_metadata_file_row",
-      "community": 1,
+      "community": 0,
       "norm_label": "apply_metadata_file_row()"
     },
     {
       "label": "ConflictDetected",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1747",
+      "source_location": "L1749",
       "id": "src_engine_bridge_conflictdetected",
-      "community": 1,
+      "community": 0,
       "norm_label": "conflictdetected"
     },
     {
       "label": "sync_tick()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1779",
+      "source_location": "L1781",
       "id": "src_engine_bridge_sync_tick",
-      "community": 11,
+      "community": 0,
       "norm_label": "sync_tick()"
     },
     {
       "label": "test_file_state_machine_transitions()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1907",
+      "source_location": "L1913",
       "id": "src_engine_bridge_test_file_state_machine_transitions",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_file_state_machine_transitions()"
     },
     {
       "label": "test_invalid_transition_rejected()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1917",
+      "source_location": "L1923",
       "id": "src_engine_bridge_test_invalid_transition_rejected",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_invalid_transition_rejected()"
     },
     {
       "label": "test_temp_file_filter_covers_editor_and_system_names()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1923",
+      "source_location": "L1929",
       "id": "src_engine_bridge_test_temp_file_filter_covers_editor_and_system_names",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_temp_file_filter_covers_editor_and_system_names()"
     },
     {
       "label": "test_base_version_parser_reads_current_version_prefix()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1940",
+      "source_location": "L1946",
       "id": "src_engine_bridge_test_base_version_parser_reads_current_version_prefix",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_base_version_parser_reads_current_version_prefix()"
     },
     {
       "label": "test_upload_init_request_omits_new_file_id_and_preserves_existing_base()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1948",
+      "source_location": "L1954",
       "id": "src_engine_bridge_test_upload_init_request_omits_new_file_id_and_preserves_existing_base",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_upload_init_request_omits_new_file_id_and_preserves_existing_base()"
     },
     {
       "label": "test_download_chunk_decrypts_raw_and_json_formats()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1979",
+      "source_location": "L1985",
       "id": "src_engine_bridge_test_download_chunk_decrypts_raw_and_json_formats",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_download_chunk_decrypts_raw_and_json_formats()"
     },
     {
       "label": "test_staging_payload_copies_to_durable_location()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1993",
+      "source_location": "L1999",
       "id": "src_engine_bridge_test_staging_payload_copies_to_durable_location",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_staging_payload_copies_to_durable_location()"
     },
     {
       "label": "test_bridge()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2001",
+      "source_location": "L2007",
       "id": "src_engine_bridge_test_bridge",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_bridge()"
+    },
+    {
+      "label": "test_bridge_with_api()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2017",
+      "id": "src_engine_bridge_test_bridge_with_api",
+      "community": 0,
+      "norm_label": "test_bridge_with_api()"
+    },
+    {
+      "label": "RecordedRequest",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2024",
+      "id": "src_engine_bridge_recordedrequest",
+      "community": 0,
+      "norm_label": "recordedrequest"
+    },
+    {
+      "label": "UploadMockServer",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2030",
+      "id": "src_engine_bridge_uploadmockserver",
+      "community": 0,
+      "norm_label": "uploadmockserver"
+    },
+    {
+      "label": ".start()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2037",
+      "id": "src_engine_bridge_uploadmockserver_start",
+      "community": 0,
+      "norm_label": ".start()"
+    },
+    {
+      "label": ".finish()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2059",
+      "id": "src_engine_bridge_uploadmockserver_finish",
+      "community": 0,
+      "norm_label": ".finish()"
+    },
+    {
+      "label": "read_http_request()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2065",
+      "id": "src_engine_bridge_read_http_request",
+      "community": 11,
+      "norm_label": "read_http_request()"
+    },
+    {
+      "label": "http_json()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2105",
+      "id": "src_engine_bridge_http_json",
+      "community": 0,
+      "norm_label": "http_json()"
+    },
+    {
+      "label": "upload_mock_response()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2113",
+      "id": "src_engine_bridge_upload_mock_response",
+      "community": 0,
+      "norm_label": "upload_mock_response()"
     },
     {
       "label": "test_create_file_queues_upload_version_and_preserves_payload()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2012",
+      "source_location": "L2157",
       "id": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_create_file_queues_upload_version_and_preserves_payload()"
     },
     {
       "label": "test_metadata_modify_does_not_queue_content_version()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2057",
+      "source_location": "L2202",
       "id": "src_engine_bridge_test_metadata_modify_does_not_queue_content_version",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_metadata_modify_does_not_queue_content_version()"
     },
     {
       "label": "test_delete_maps_to_trash_operation()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2087",
+      "source_location": "L2232",
       "id": "src_engine_bridge_test_delete_maps_to_trash_operation",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_delete_maps_to_trash_operation()"
     },
     {
       "label": "test_recursive_pin_queues_hydration_for_cloud_only_descendants()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2107",
+      "source_location": "L2252",
       "id": "src_engine_bridge_test_recursive_pin_queues_hydration_for_cloud_only_descendants",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_recursive_pin_queues_hydration_for_cloud_only_descendants()"
     },
     {
       "label": "test_smart_cache_cleanup_never_evicts_effectively_pinned_files()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2149",
+      "source_location": "L2294",
       "id": "src_engine_bridge_test_smart_cache_cleanup_never_evicts_effectively_pinned_files",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_smart_cache_cleanup_never_evicts_effectively_pinned_files()"
     },
     {
       "label": "test_shared_invite_mapping_filters_approved_and_permissions()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2170",
+      "source_location": "L2315",
       "id": "src_engine_bridge_test_shared_invite_mapping_filters_approved_and_permissions",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_shared_invite_mapping_filters_approved_and_permissions()"
     },
     {
       "label": "test_operation_error_classification_and_backoff()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2205",
+      "source_location": "L2350",
       "id": "src_engine_bridge_test_operation_error_classification_and_backoff",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_operation_error_classification_and_backoff()"
     },
     {
       "label": "test_metadata_file_row_persists_contract_for_own_file()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2229",
+      "source_location": "L2374",
       "id": "src_engine_bridge_test_metadata_file_row_persists_contract_for_own_file",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_metadata_file_row_persists_contract_for_own_file()"
     },
     {
       "label": "test_process_due_operations_completes_pin_marker_and_invalidates_file()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2274",
+      "source_location": "L2419",
       "id": "src_engine_bridge_test_process_due_operations_completes_pin_marker_and_invalidates_file",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_process_due_operations_completes_pin_marker_and_invalidates_file()"
     },
     {
       "label": "test_process_due_operations_records_retry_for_upload_worker_handoff()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2305",
+      "source_location": "L2450",
       "id": "src_engine_bridge_test_process_due_operations_records_retry_for_upload_worker_handoff",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_process_due_operations_records_retry_for_upload_worker_handoff()"
+    },
+    {
+      "label": "test_process_due_operations_uploads_encrypted_payload_and_commits_state()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2493",
+      "id": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "community": 0,
+      "norm_label": "test_process_due_operations_uploads_encrypted_payload_and_commits_state()"
+    },
+    {
+      "label": "test_process_due_operations_preserves_payload_when_upload_chunk_fails()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2578",
+      "id": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "community": 0,
+      "norm_label": "test_process_due_operations_preserves_payload_when_upload_chunk_fails()"
     },
     {
       "label": "test_read_only_shared_item_rejects_finder_writes()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2346",
+      "source_location": "L2639",
       "id": "src_engine_bridge_test_read_only_shared_item_rejects_finder_writes",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_read_only_shared_item_rejects_finder_writes()"
     },
     {
       "label": "test_editable_shared_write_queues_actor_and_share_metadata()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2373",
+      "source_location": "L2666",
       "id": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_editable_shared_write_queues_actor_and_share_metadata()"
     },
     {
       "label": "test_version_center_feed_maps_conflicts_and_review_operations()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2418",
+      "source_location": "L2711",
       "id": "src_engine_bridge_test_version_center_feed_maps_conflicts_and_review_operations",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_version_center_feed_maps_conflicts_and_review_operations()"
     },
     {
       "label": "test_restore_version_routes_to_durable_operation_for_review()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2518",
+      "source_location": "L2811",
       "id": "src_engine_bridge_test_restore_version_routes_to_durable_operation_for_review",
-      "community": 1,
+      "community": 0,
       "norm_label": "test_restore_version_routes_to_durable_operation_for_review()"
     },
     {
       "label": "seed_bridge_row()",
       "file_type": "code",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2546",
+      "source_location": "L2839",
       "id": "src_engine_bridge_seed_bridge_row",
-      "community": 1,
+      "community": 0,
       "norm_label": "seed_bridge_row()"
     },
     {
@@ -5733,7 +5823,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L1",
       "id": "src_tauri_src_runner_rs",
-      "community": 0,
+      "community": 8,
       "norm_label": "runner.rs"
     },
     {
@@ -5742,7 +5832,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L61",
       "id": "src_runner_api_base_url",
-      "community": 0,
+      "community": 1,
       "norm_label": "api_base_url()"
     },
     {
@@ -5751,7 +5841,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L67",
       "id": "src_runner_enginerunner",
-      "community": 0,
+      "community": 8,
       "norm_label": "enginerunner"
     },
     {
@@ -5760,7 +5850,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L76",
       "id": "src_runner_enginerunner_spawn",
-      "community": 0,
+      "community": 1,
       "norm_label": ".spawn()"
     },
     {
@@ -5769,7 +5859,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L92",
       "id": "src_runner_enginerunner_abort",
-      "community": 0,
+      "community": 8,
       "norm_label": ".abort()"
     },
     {
@@ -5778,7 +5868,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L107",
       "id": "src_runner_enginerunner_drop",
-      "community": 0,
+      "community": 8,
       "norm_label": ".drop()"
     },
     {
@@ -5787,7 +5877,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L121",
       "id": "src_runner_run",
-      "community": 0,
+      "community": 1,
       "norm_label": "run()"
     },
     {
@@ -5796,7 +5886,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L272",
       "id": "src_runner_emit_status",
-      "community": 0,
+      "community": 8,
       "norm_label": "emit_status()"
     },
     {
@@ -5805,7 +5895,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L284",
       "id": "src_runner_file_provider_invalidation_payload",
-      "community": 0,
+      "community": 8,
       "norm_label": "file_provider_invalidation_payload()"
     },
     {
@@ -5814,7 +5904,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L291",
       "id": "src_runner_emit_file_provider_invalidation",
-      "community": 0,
+      "community": 8,
       "norm_label": "emit_file_provider_invalidation()"
     },
     {
@@ -5823,7 +5913,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L298",
       "id": "src_runner_now_secs",
-      "community": 0,
+      "community": 8,
       "norm_label": "now_secs()"
     },
     {
@@ -5832,7 +5922,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L305",
       "id": "src_runner_enforce_cache_budget",
-      "community": 0,
+      "community": 8,
       "norm_label": "enforce_cache_budget()"
     },
     {
@@ -5841,7 +5931,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L327",
       "id": "src_runner_handle_new_conflict",
-      "community": 0,
+      "community": 1,
       "norm_label": "handle_new_conflict()"
     },
     {
@@ -5850,7 +5940,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L363",
       "id": "src_runner_sweep_auto_resolutions",
-      "community": 11,
+      "community": 8,
       "norm_label": "sweep_auto_resolutions()"
     },
     {
@@ -5859,7 +5949,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L425",
       "id": "src_runner_unused_path",
-      "community": 0,
+      "community": 8,
       "norm_label": "_unused_path()"
     },
     {
@@ -5868,7 +5958,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L432",
       "id": "src_runner_test_file_provider_invalidation_payload_contains_only_reason_and_ids",
-      "community": 0,
+      "community": 8,
       "norm_label": "test_file_provider_invalidation_payload_contains_only_reason_and_ids()"
     },
     {
@@ -6354,7 +6444,7 @@
       "source_file": "src-tauri/src/keychain.rs",
       "source_location": "L78",
       "id": "src_keychain_secretbytes_new_master_key",
-      "community": 10,
+      "community": 1,
       "norm_label": ".new_master_key()"
     },
     {
@@ -6372,7 +6462,7 @@
       "source_file": "src-tauri/src/keychain.rs",
       "source_location": "L88",
       "id": "src_keychain_secretbytes_drop",
-      "community": 0,
+      "community": 1,
       "norm_label": ".drop()"
     },
     {
@@ -6651,7 +6741,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L1",
       "id": "src_tauri_src_ipc_socket_rs",
-      "community": 9,
+      "community": 10,
       "norm_label": "ipc_socket.rs"
     },
     {
@@ -6660,7 +6750,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L8",
       "id": "src_ipc_socket_ipcrequest",
-      "community": 9,
+      "community": 10,
       "norm_label": "ipcrequest"
     },
     {
@@ -6669,7 +6759,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L60",
       "id": "src_ipc_socket_ipcresponse",
-      "community": 9,
+      "community": 10,
       "norm_label": "ipcresponse"
     },
     {
@@ -6678,7 +6768,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L89",
       "id": "src_ipc_socket_fileprovideritempayload",
-      "community": 9,
+      "community": 10,
       "norm_label": "fileprovideritempayload"
     },
     {
@@ -6687,7 +6777,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L112",
       "id": "src_ipc_socket_ipc_socket_path",
-      "community": 0,
+      "community": 1,
       "norm_label": "ipc_socket_path()"
     },
     {
@@ -6696,7 +6786,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L117",
       "id": "src_ipc_socket_serve_ipc",
-      "community": 0,
+      "community": 1,
       "norm_label": "serve_ipc()"
     },
     {
@@ -6705,7 +6795,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L151",
       "id": "src_ipc_socket_handle_connection",
-      "community": 9,
+      "community": 10,
       "norm_label": "handle_connection()"
     },
     {
@@ -6714,7 +6804,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L296",
       "id": "src_ipc_socket_write_ipc_response",
-      "community": 9,
+      "community": 10,
       "norm_label": "write_ipc_response()"
     },
     {
@@ -6723,7 +6813,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L300",
       "id": "src_ipc_socket_parse_write_kind",
-      "community": 9,
+      "community": 10,
       "norm_label": "parse_write_kind()"
     },
     {
@@ -6732,7 +6822,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L308",
       "id": "src_ipc_socket_normalize_parent_id",
-      "community": 9,
+      "community": 10,
       "norm_label": "normalize_parent_id()"
     },
     {
@@ -6741,7 +6831,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L319",
       "id": "src_ipc_socket_write_outcome_response",
-      "community": 9,
+      "community": 10,
       "norm_label": "write_outcome_response()"
     },
     {
@@ -6750,7 +6840,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L346",
       "id": "src_ipc_socket_list_file_provider_items",
-      "community": 9,
+      "community": 10,
       "norm_label": "list_file_provider_items()"
     },
     {
@@ -6759,7 +6849,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L413",
       "id": "src_ipc_socket_namespace_payload",
-      "community": 9,
+      "community": 10,
       "norm_label": "namespace_payload()"
     },
     {
@@ -6768,7 +6858,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L427",
       "id": "src_ipc_socket_is_file_provider_root",
-      "community": 9,
+      "community": 10,
       "norm_label": "is_file_provider_root()"
     },
     {
@@ -6777,7 +6867,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L435",
       "id": "src_ipc_socket_file_entry_payload_for_db",
-      "community": 9,
+      "community": 10,
       "norm_label": "file_entry_payload_for_db()"
     },
     {
@@ -6786,7 +6876,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L446",
       "id": "src_ipc_socket_file_entry_payload",
-      "community": 9,
+      "community": 10,
       "norm_label": "file_entry_payload()"
     },
     {
@@ -6795,7 +6885,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L493",
       "id": "src_ipc_socket_file_entry_payload_without_contract",
-      "community": 9,
+      "community": 10,
       "norm_label": "file_entry_payload_without_contract()"
     },
     {
@@ -6804,7 +6894,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L516",
       "id": "src_ipc_socket_capabilities_for_status",
-      "community": 9,
+      "community": 10,
       "norm_label": "capabilities_for_status()"
     },
     {
@@ -6813,7 +6903,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L528",
       "id": "src_ipc_socket_file_status_string",
-      "community": 9,
+      "community": 10,
       "norm_label": "file_status_string()"
     },
     {
@@ -6822,7 +6912,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L539",
       "id": "src_ipc_socket_filename_from_path",
-      "community": 9,
+      "community": 10,
       "norm_label": "filename_from_path()"
     },
     {
@@ -6831,7 +6921,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L549",
       "id": "src_ipc_socket_is_top_level_path",
-      "community": 9,
+      "community": 10,
       "norm_label": "is_top_level_path()"
     },
     {
@@ -6840,7 +6930,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L561",
       "id": "src_ipc_socket_test_shared_namespace_lists_roots_with_permission_capabilities",
-      "community": 9,
+      "community": 10,
       "norm_label": "test_shared_namespace_lists_roots_with_permission_capabilities()"
     },
     {
@@ -6849,7 +6939,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L585",
       "id": "src_ipc_socket_seed_shared_root",
-      "community": 9,
+      "community": 10,
       "norm_label": "seed_shared_root()"
     },
     {
@@ -6858,7 +6948,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L1",
       "id": "src_tauri_src_windows_cf_mod_rs",
-      "community": 42,
+      "community": 43,
       "norm_label": "mod.rs"
     },
     {
@@ -6867,7 +6957,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L89",
       "id": "windows_cf_mod_set_bridge",
-      "community": 42,
+      "community": 43,
       "norm_label": "set_bridge()"
     },
     {
@@ -6876,7 +6966,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L94",
       "id": "windows_cf_mod_bridge",
-      "community": 42,
+      "community": 43,
       "norm_label": "bridge()"
     },
     {
@@ -6885,7 +6975,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L107",
       "id": "windows_cf_mod_register_sync_root",
-      "community": 42,
+      "community": 43,
       "norm_label": "register_sync_root()"
     },
     {
@@ -6894,7 +6984,7 @@
       "source_file": "src-tauri/src/windows_cf/placeholders.rs",
       "source_location": "L1",
       "id": "src_tauri_src_windows_cf_placeholders_rs",
-      "community": 10,
+      "community": 1,
       "norm_label": "placeholders.rs"
     },
     {
@@ -6903,7 +6993,7 @@
       "source_file": "src-tauri/src/windows_cf/placeholders.rs",
       "source_location": "L54",
       "id": "windows_cf_placeholders_create_placeholder",
-      "community": 10,
+      "community": 1,
       "norm_label": "create_placeholder()"
     },
     {
@@ -6912,7 +7002,7 @@
       "source_file": "src-tauri/src/windows_cf/callbacks.rs",
       "source_location": "L1",
       "id": "src_tauri_src_windows_cf_callbacks_rs",
-      "community": 42,
+      "community": 43,
       "norm_label": "callbacks.rs"
     },
     {
@@ -6921,7 +7011,7 @@
       "source_file": "src-tauri/src/windows_cf/callbacks.rs",
       "source_location": "L55",
       "id": "windows_cf_callbacks_fetch_data_callback",
-      "community": 42,
+      "community": 43,
       "norm_label": "fetch_data_callback()"
     },
     {
@@ -6930,7 +7020,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L1",
       "id": "src_tauri_src_linux_fuse_mod_rs",
-      "community": 7,
+      "community": 11,
       "norm_label": "mod.rs"
     },
     {
@@ -6939,7 +7029,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L20",
       "id": "linux_fuse_mod_beebeebfs",
-      "community": 7,
+      "community": 11,
       "norm_label": "beebeebfs"
     },
     {
@@ -6948,7 +7038,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L28",
       "id": "linux_fuse_mod_beebeebfs_new",
-      "community": 7,
+      "community": 11,
       "norm_label": ".new()"
     },
     {
@@ -6957,7 +7047,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L37",
       "id": "linux_fuse_mod_beebeebfs_entry_for_ino",
-      "community": 7,
+      "community": 11,
       "norm_label": ".entry_for_ino()"
     },
     {
@@ -6966,7 +7056,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L42",
       "id": "linux_fuse_mod_beebeebfs_entry_for_name",
-      "community": 7,
+      "community": 11,
       "norm_label": ".entry_for_name()"
     },
     {
@@ -6975,7 +7065,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L53",
       "id": "linux_fuse_mod_beebeebfs_lookup",
-      "community": 7,
+      "community": 11,
       "norm_label": ".lookup()"
     },
     {
@@ -6984,7 +7074,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L68",
       "id": "linux_fuse_mod_beebeebfs_getattr",
-      "community": 7,
+      "community": 11,
       "norm_label": ".getattr()"
     },
     {
@@ -6993,7 +7083,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L82",
       "id": "linux_fuse_mod_beebeebfs_read",
-      "community": 7,
+      "community": 11,
       "norm_label": ".read()"
     },
     {
@@ -7002,7 +7092,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L122",
       "id": "linux_fuse_mod_beebeebfs_readdir",
-      "community": 7,
+      "community": 11,
       "norm_label": ".readdir()"
     },
     {
@@ -7011,7 +7101,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L161",
       "id": "linux_fuse_mod_reply_read_slice",
-      "community": 7,
+      "community": 11,
       "norm_label": "reply_read_slice()"
     },
     {
@@ -7020,7 +7110,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L171",
       "id": "linux_fuse_mod_dir_attr",
-      "community": 7,
+      "community": 11,
       "norm_label": "dir_attr()"
     },
     {
@@ -7029,7 +7119,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L191",
       "id": "linux_fuse_mod_file_attr",
-      "community": 7,
+      "community": 11,
       "norm_label": "file_attr()"
     },
     {
@@ -7038,7 +7128,7 @@
       "source_file": "src-tauri/src/linux_fuse/mod.rs",
       "source_location": "L214",
       "id": "linux_fuse_mod_mount",
-      "community": 7,
+      "community": 11,
       "norm_label": "mount()"
     },
     {
@@ -7047,7 +7137,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L1",
       "id": "src_tauri_src_linux_fuse_inode_map_rs",
-      "community": 39,
+      "community": 40,
       "norm_label": "inode_map.rs"
     },
     {
@@ -7056,7 +7146,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L7",
       "id": "linux_fuse_inode_map_inodemap",
-      "community": 39,
+      "community": 40,
       "norm_label": "inodemap"
     },
     {
@@ -7065,7 +7155,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L11",
       "id": "linux_fuse_inode_map_inner",
-      "community": 39,
+      "community": 40,
       "norm_label": "inner"
     },
     {
@@ -7074,7 +7164,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L18",
       "id": "linux_fuse_inode_map_inodemap_new",
-      "community": 39,
+      "community": 40,
       "norm_label": ".new()"
     },
     {
@@ -7083,7 +7173,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L28",
       "id": "linux_fuse_inode_map_inodemap_get_or_assign",
-      "community": 39,
+      "community": 40,
       "norm_label": ".get_or_assign()"
     },
     {
@@ -7092,7 +7182,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L41",
       "id": "linux_fuse_inode_map_inodemap_path_for_ino",
-      "community": 39,
+      "community": 40,
       "norm_label": ".path_for_ino()"
     },
     {
@@ -7101,7 +7191,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L56",
       "id": "linux_fuse_inode_map_test_inode_assignment_stable",
-      "community": 39,
+      "community": 40,
       "norm_label": "test_inode_assignment_stable()"
     },
     {
@@ -7110,7 +7200,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L1",
       "id": "windows_src_config_rs",
-      "community": 10,
+      "community": 7,
       "norm_label": "config.rs"
     },
     {
@@ -7119,7 +7209,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L11",
       "id": "src_config_config",
-      "community": 10,
+      "community": 7,
       "norm_label": "config"
     },
     {
@@ -7128,7 +7218,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L28",
       "id": "src_config_config_default",
-      "community": 10,
+      "community": 1,
       "norm_label": ".default()"
     },
     {
@@ -7137,7 +7227,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L43",
       "id": "src_config_config_path",
-      "community": 10,
+      "community": 7,
       "norm_label": "config_path()"
     },
     {
@@ -7146,7 +7236,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L57",
       "id": "src_config_load_config",
-      "community": 10,
+      "community": 7,
       "norm_label": "load_config()"
     },
     {
@@ -7155,7 +7245,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L69",
       "id": "src_config_save_config",
-      "community": 10,
+      "community": 7,
       "norm_label": "save_config()"
     },
     {
@@ -7209,7 +7299,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L87",
       "id": "src_main_guess_mime_type",
-      "community": 1,
+      "community": 0,
       "norm_label": "guess_mime_type()"
     },
     {
@@ -7272,7 +7362,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L15",
       "id": "src_api_apiclient_new",
-      "community": 0,
+      "community": 1,
       "norm_label": ".new()"
     },
     {
@@ -7371,7 +7461,7 @@
       "source_file": "src/main.tsx",
       "source_location": "L1",
       "id": "src_main_tsx",
-      "community": 62,
+      "community": 63,
       "norm_label": "main.tsx"
     },
     {
@@ -7479,7 +7569,7 @@
       "source_file": "src/vite-env.d.ts",
       "source_location": "L1",
       "id": "src_vite_env_d_ts",
-      "community": 63,
+      "community": 64,
       "norm_label": "vite-env.d.ts"
     },
     {
@@ -7560,7 +7650,7 @@
       "source_file": "src/pages/Shared.tsx",
       "source_location": "L1",
       "id": "src_pages_shared_tsx",
-      "community": 60,
+      "community": 61,
       "norm_label": "shared.tsx"
     },
     {
@@ -7569,7 +7659,7 @@
       "source_file": "src/pages/Shared.tsx",
       "source_location": "L4",
       "id": "pages_shared_shared",
-      "community": 60,
+      "community": 61,
       "norm_label": "shared()"
     },
     {
@@ -7749,7 +7839,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L1",
       "id": "src_pages_bandwidth_tsx",
-      "community": 57,
+      "community": 58,
       "norm_label": "bandwidth.tsx"
     },
     {
@@ -7758,7 +7848,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L39",
       "id": "pages_bandwidth_formatlimit",
-      "community": 57,
+      "community": 58,
       "norm_label": "formatlimit()"
     },
     {
@@ -7767,7 +7857,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L67",
       "id": "pages_bandwidth_writeback",
-      "community": 57,
+      "community": 58,
       "norm_label": "writeback()"
     },
     {
@@ -7776,7 +7866,7 @@
       "source_file": "src/pages/Notifications.tsx",
       "source_location": "L1",
       "id": "src_pages_notifications_tsx",
-      "community": 64,
+      "community": 65,
       "norm_label": "notifications.tsx"
     },
     {
@@ -7794,7 +7884,7 @@
       "source_file": "src/pages/SelectiveSync.tsx",
       "source_location": "L12",
       "id": "pages_selectivesync_load",
-      "community": 0,
+      "community": 1,
       "norm_label": "load()"
     },
     {
@@ -13858,6 +13948,18 @@
       "confidence": "INFERRED",
       "confidence_score": 0.8,
       "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2016",
+      "weight": 1.0,
+      "_src": "src_state_db_statedb_open",
+      "_tgt": "src_engine_bridge_test_bridge_with_api",
+      "source": "src_state_db_statedb_open",
+      "target": "src_engine_bridge_test_bridge_with_api"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L1965",
       "weight": 1.0,
       "_src": "src_state_db_statedb_open",
@@ -17265,7 +17367,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1207",
+      "source_location": "L1210",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_is_ignored_finder_name",
@@ -17277,7 +17379,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1227",
+      "source_location": "L1230",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_version_conflict_feed_from_db",
@@ -17289,7 +17391,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1260",
+      "source_location": "L1263",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_encrypted_metadata_for_name",
@@ -17301,7 +17403,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1271",
+      "source_location": "L1274",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_upload_init_request_for_operation",
@@ -17313,7 +17415,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1295",
+      "source_location": "L1298",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_is_create_file_operation",
@@ -17325,7 +17427,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1299",
+      "source_location": "L1302",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_metadata_display_name",
@@ -17337,7 +17439,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1306",
+      "source_location": "L1309",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_decrypt_downloaded_chunk",
@@ -17349,7 +17451,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1320",
+      "source_location": "L1322",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_stage_finder_payload",
@@ -17361,7 +17463,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1324",
+      "source_location": "L1326",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_stage_finder_payload_with_root",
@@ -17373,7 +17475,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1346",
+      "source_location": "L1348",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_default_finder_staging_root",
@@ -17385,7 +17487,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1353",
+      "source_location": "L1355",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_sanitize_staging_name",
@@ -17397,7 +17499,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1363",
+      "source_location": "L1365",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_parse_base_version_number",
@@ -17409,7 +17511,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1373",
+      "source_location": "L1375",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_display_name_for_path",
@@ -17421,7 +17523,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1382",
+      "source_location": "L1384",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_review_entry_for_operation",
@@ -17433,7 +17535,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1413",
+      "source_location": "L1415",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_classify_review_operation",
@@ -17445,7 +17547,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1499",
+      "source_location": "L1501",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_operation_version_id",
@@ -17457,7 +17559,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1508",
+      "source_location": "L1510",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_operation_metadata",
@@ -17469,7 +17571,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1517",
+      "source_location": "L1519",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_classify_operation_error",
@@ -17481,7 +17583,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1536",
+      "source_location": "L1538",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_retry_delay_seconds",
@@ -17493,7 +17595,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1541",
+      "source_location": "L1543",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_shared_roots_from_invite_response",
@@ -17505,7 +17607,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1550",
+      "source_location": "L1552",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_shared_root_from_invite",
@@ -17517,7 +17619,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1596",
+      "source_location": "L1598",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_shared_invite_allows_write",
@@ -17529,7 +17631,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1614",
+      "source_location": "L1616",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_string_field",
@@ -17541,7 +17643,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1622",
+      "source_location": "L1624",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_parse_rfc3339_secs",
@@ -17553,7 +17655,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1628",
+      "source_location": "L1630",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_apply_shared_context",
@@ -17565,7 +17667,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1638",
+      "source_location": "L1640",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_now_secs",
@@ -17577,7 +17679,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1645",
+      "source_location": "L1647",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_apply_metadata_file_row",
@@ -17589,7 +17691,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1747",
+      "source_location": "L1749",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_conflictdetected",
@@ -17601,7 +17703,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1779",
+      "source_location": "L1781",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_sync_tick",
@@ -17613,7 +17715,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1907",
+      "source_location": "L1913",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_file_state_machine_transitions",
@@ -17625,7 +17727,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1917",
+      "source_location": "L1923",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_invalid_transition_rejected",
@@ -17637,7 +17739,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1923",
+      "source_location": "L1929",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_temp_file_filter_covers_editor_and_system_names",
@@ -17649,7 +17751,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1940",
+      "source_location": "L1946",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_base_version_parser_reads_current_version_prefix",
@@ -17661,7 +17763,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1948",
+      "source_location": "L1954",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_upload_init_request_omits_new_file_id_and_preserves_existing_base",
@@ -17673,7 +17775,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1979",
+      "source_location": "L1985",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_download_chunk_decrypts_raw_and_json_formats",
@@ -17685,7 +17787,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1993",
+      "source_location": "L1999",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_staging_payload_copies_to_durable_location",
@@ -17697,7 +17799,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2001",
+      "source_location": "L2007",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -17709,7 +17811,79 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2012",
+      "source_location": "L2017",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_test_bridge_with_api",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_test_bridge_with_api",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2024",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_recordedrequest",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_recordedrequest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2030",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_uploadmockserver",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_uploadmockserver",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2065",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_read_http_request",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_read_http_request",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2105",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_http_json",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_http_json",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2113",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_upload_mock_response",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_upload_mock_response",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2157",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
@@ -17721,7 +17895,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2057",
+      "source_location": "L2202",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_metadata_modify_does_not_queue_content_version",
@@ -17733,7 +17907,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2087",
+      "source_location": "L2232",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_delete_maps_to_trash_operation",
@@ -17745,7 +17919,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2107",
+      "source_location": "L2252",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_recursive_pin_queues_hydration_for_cloud_only_descendants",
@@ -17757,7 +17931,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2149",
+      "source_location": "L2294",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_smart_cache_cleanup_never_evicts_effectively_pinned_files",
@@ -17769,7 +17943,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2170",
+      "source_location": "L2315",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_shared_invite_mapping_filters_approved_and_permissions",
@@ -17781,7 +17955,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2205",
+      "source_location": "L2350",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_operation_error_classification_and_backoff",
@@ -17793,7 +17967,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2229",
+      "source_location": "L2374",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_metadata_file_row_persists_contract_for_own_file",
@@ -17805,7 +17979,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2274",
+      "source_location": "L2419",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_process_due_operations_completes_pin_marker_and_invalidates_file",
@@ -17817,7 +17991,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2305",
+      "source_location": "L2450",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_process_due_operations_records_retry_for_upload_worker_handoff",
@@ -17829,7 +18003,31 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2346",
+      "source_location": "L2493",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2578",
+      "weight": 1.0,
+      "_src": "src_tauri_src_engine_bridge_rs",
+      "_tgt": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "source": "src_tauri_src_engine_bridge_rs",
+      "target": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2639",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_read_only_shared_item_rejects_finder_writes",
@@ -17841,7 +18039,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2373",
+      "source_location": "L2666",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
@@ -17853,7 +18051,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2418",
+      "source_location": "L2711",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_version_center_feed_maps_conflicts_and_review_operations",
@@ -17865,7 +18063,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2518",
+      "source_location": "L2811",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_test_restore_version_routes_to_durable_operation_for_review",
@@ -17877,7 +18075,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2546",
+      "source_location": "L2839",
       "weight": 1.0,
       "_src": "src_tauri_src_engine_bridge_rs",
       "_tgt": "src_engine_bridge_seed_bridge_row",
@@ -17925,7 +18123,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1910",
+      "source_location": "L1916",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_file_state_machine_transitions",
       "_tgt": "src_engine_bridge_filesm_transition",
@@ -18021,7 +18219,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L462",
+      "source_location": "L468",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_apply_completed_upload",
@@ -18033,7 +18231,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L537",
+      "source_location": "L540",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_refresh_shared_roots",
@@ -18045,7 +18243,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L595",
+      "source_location": "L598",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_create",
@@ -18057,7 +18255,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L666",
+      "source_location": "L669",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_modify",
@@ -18069,7 +18267,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L742",
+      "source_location": "L745",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_delete",
@@ -18081,7 +18279,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L767",
+      "source_location": "L770",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_set_recursive_pin",
@@ -18093,7 +18291,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L797",
+      "source_location": "L800",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_record_smart_cache_open",
@@ -18105,7 +18303,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L808",
+      "source_location": "L811",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_enforce_smart_cache",
@@ -18117,7 +18315,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L817",
+      "source_location": "L820",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_version_conflict_feed",
@@ -18129,7 +18327,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L821",
+      "source_location": "L824",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_queue_restore_version",
@@ -18141,7 +18339,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L855",
+      "source_location": "L858",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_finder_operation",
@@ -18153,7 +18351,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L895",
+      "source_location": "L898",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_pin_tree_operation",
@@ -18165,7 +18363,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L923",
+      "source_location": "L926",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_hydrate_operation",
@@ -18177,7 +18375,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L951",
+      "source_location": "L954",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_ensure_shared_parent_allows_write",
@@ -18189,7 +18387,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L971",
+      "source_location": "L974",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_ensure_item_allows_shared_write",
@@ -18201,7 +18399,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1009",
+      "source_location": "L1012",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_hydrate_file",
@@ -18213,7 +18411,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1033",
+      "source_location": "L1036",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_do_hydrate",
@@ -18225,7 +18423,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1093",
+      "source_location": "L1096",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_resolve_keep_mine",
@@ -18237,7 +18435,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1128",
+      "source_location": "L1131",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_resolve_keep_theirs",
@@ -18249,7 +18447,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1168",
+      "source_location": "L1171",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge",
       "_tgt": "src_engine_bridge_enginebridge_auto_resolve_keep_both",
@@ -18273,7 +18471,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L805",
+      "source_location": "L808",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_record_smart_cache_open",
       "_tgt": "src_engine_bridge_cachepolicy_default",
@@ -18285,7 +18483,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1021",
+      "source_location": "L1024",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_hydrate_file",
       "_tgt": "src_engine_bridge_cachepolicy_default",
@@ -18345,7 +18543,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L574",
+      "source_location": "L577",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_refresh_shared_roots",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18357,7 +18555,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1228",
+      "source_location": "L1231",
       "weight": 1.0,
       "_src": "src_engine_bridge_version_conflict_feed_from_db",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18369,7 +18567,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1325",
+      "source_location": "L1327",
       "weight": 1.0,
       "_src": "src_engine_bridge_stage_finder_payload_with_root",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18381,7 +18579,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1374",
+      "source_location": "L1376",
       "weight": 1.0,
       "_src": "src_engine_bridge_display_name_for_path",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18393,7 +18591,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1785",
+      "source_location": "L1787",
       "weight": 1.0,
       "_src": "src_engine_bridge_sync_tick",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18405,7 +18603,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1909",
+      "source_location": "L1915",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_file_state_machine_transitions",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18417,7 +18615,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1918",
+      "source_location": "L1924",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_invalid_transition_rejected",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18429,7 +18627,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2002",
+      "source_location": "L2008",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_bridge",
       "_tgt": "src_engine_bridge_enginebridge_new",
@@ -18441,7 +18639,43 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1794",
+      "source_location": "L2018",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_bridge_with_api",
+      "_tgt": "src_engine_bridge_enginebridge_new",
+      "source": "src_engine_bridge_enginebridge_new",
+      "target": "src_engine_bridge_test_bridge_with_api",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2040",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver_start",
+      "_tgt": "src_engine_bridge_enginebridge_new",
+      "source": "src_engine_bridge_enginebridge_new",
+      "target": "src_engine_bridge_uploadmockserver_start",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2066",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_read_http_request",
+      "_tgt": "src_engine_bridge_enginebridge_new",
+      "source": "src_engine_bridge_enginebridge_new",
+      "target": "src_engine_bridge_read_http_request",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L1796",
       "weight": 1.0,
       "_src": "src_engine_bridge_sync_tick",
       "_tgt": "src_engine_bridge_enginebridge_db",
@@ -18453,7 +18687,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1780",
+      "source_location": "L1782",
       "weight": 1.0,
       "_src": "src_engine_bridge_sync_tick",
       "_tgt": "src_engine_bridge_enginebridge_api",
@@ -18501,7 +18735,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2298",
+      "source_location": "L2443",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_process_due_operations_completes_pin_marker_and_invalidates_file",
       "_tgt": "src_engine_bridge_enginebridge_process_due_operations",
@@ -18513,12 +18747,36 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2329",
+      "source_location": "L2474",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_process_due_operations_records_retry_for_upload_worker_handoff",
       "_tgt": "src_engine_bridge_enginebridge_process_due_operations",
       "source": "src_engine_bridge_enginebridge_process_due_operations",
       "target": "src_engine_bridge_test_process_due_operations_records_retry_for_upload_worker_handoff",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2529",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "_tgt": "src_engine_bridge_enginebridge_process_due_operations",
+      "source": "src_engine_bridge_enginebridge_process_due_operations",
+      "target": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2613",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "_tgt": "src_engine_bridge_enginebridge_process_due_operations",
+      "source": "src_engine_bridge_enginebridge_process_due_operations",
+      "target": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
       "confidence_score": 1.0
     },
     {
@@ -18621,7 +18879,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L445",
+      "source_location": "L451",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_upload_version",
       "_tgt": "src_engine_bridge_enginebridge_apply_completed_upload",
@@ -18633,7 +18891,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L472",
+      "source_location": "L478",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_apply_completed_upload",
       "_tgt": "src_engine_bridge_now_secs",
@@ -18645,7 +18903,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L539",
+      "source_location": "L542",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_refresh_shared_roots",
       "_tgt": "src_engine_bridge_shared_roots_from_invite_response",
@@ -18657,7 +18915,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L541",
+      "source_location": "L544",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_refresh_shared_roots",
       "_tgt": "src_engine_bridge_now_secs",
@@ -18669,7 +18927,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L596",
+      "source_location": "L599",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_is_ignored_finder_name",
@@ -18681,7 +18939,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L602",
+      "source_location": "L605",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_enginebridge_ensure_shared_parent_allows_write",
@@ -18693,7 +18951,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L606",
+      "source_location": "L609",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_encrypted_metadata_for_name",
@@ -18705,7 +18963,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L611",
+      "source_location": "L614",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_apply_shared_context",
@@ -18717,7 +18975,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L612",
+      "source_location": "L615",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_finder_operation",
@@ -18729,7 +18987,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L628",
+      "source_location": "L631",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_stage_finder_payload",
@@ -18741,7 +18999,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L641",
+      "source_location": "L644",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_create",
       "_tgt": "src_engine_bridge_now_secs",
@@ -18753,7 +19011,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2018",
+      "source_location": "L2163",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_create",
@@ -18777,7 +19035,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L667",
+      "source_location": "L670",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_is_ignored_finder_name",
@@ -18789,7 +19047,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L677",
+      "source_location": "L680",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_enginebridge_ensure_item_allows_shared_write",
@@ -18801,7 +19059,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L680",
+      "source_location": "L683",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_stage_finder_payload",
@@ -18813,7 +19071,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L686",
+      "source_location": "L689",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_encrypted_metadata_for_name",
@@ -18825,7 +19083,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L696",
+      "source_location": "L699",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_apply_shared_context",
@@ -18837,7 +19095,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L697",
+      "source_location": "L700",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_finder_operation",
@@ -18849,7 +19107,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L704",
+      "source_location": "L707",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_modify",
       "_tgt": "src_engine_bridge_parse_base_version_number",
@@ -18861,7 +19119,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2061",
+      "source_location": "L2206",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_metadata_modify_does_not_queue_content_version",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_modify",
@@ -18873,7 +19131,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2394",
+      "source_location": "L2687",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_modify",
@@ -18897,7 +19155,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L747",
+      "source_location": "L750",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_delete",
       "_tgt": "src_engine_bridge_enginebridge_ensure_item_allows_shared_write",
@@ -18909,7 +19167,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L752",
+      "source_location": "L755",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_delete",
       "_tgt": "src_engine_bridge_apply_shared_context",
@@ -18921,7 +19179,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L753",
+      "source_location": "L756",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_delete",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_finder_operation",
@@ -18933,7 +19191,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L760",
+      "source_location": "L763",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_finder_delete",
       "_tgt": "src_engine_bridge_parse_base_version_number",
@@ -18945,7 +19203,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2091",
+      "source_location": "L2236",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_delete_maps_to_trash_operation",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_delete",
@@ -18957,7 +19215,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2364",
+      "source_location": "L2657",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_read_only_shared_item_rejects_finder_writes",
       "_tgt": "src_engine_bridge_enginebridge_queue_finder_delete",
@@ -18969,7 +19227,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L768",
+      "source_location": "L771",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_set_recursive_pin",
       "_tgt": "src_engine_bridge_now_secs",
@@ -18981,7 +19239,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L772",
+      "source_location": "L775",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_set_recursive_pin",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_pin_tree_operation",
@@ -18993,7 +19251,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L785",
+      "source_location": "L788",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_set_recursive_pin",
       "_tgt": "src_engine_bridge_enginebridge_enqueue_hydrate_operation",
@@ -19005,7 +19263,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2128",
+      "source_location": "L2273",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_recursive_pin_queues_hydration_for_cloud_only_descendants",
       "_tgt": "src_engine_bridge_enginebridge_set_recursive_pin",
@@ -19017,7 +19275,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2154",
+      "source_location": "L2299",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_smart_cache_cleanup_never_evicts_effectively_pinned_files",
       "_tgt": "src_engine_bridge_enginebridge_set_recursive_pin",
@@ -19029,7 +19287,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L804",
+      "source_location": "L807",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_record_smart_cache_open",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19041,7 +19299,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L805",
+      "source_location": "L808",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_record_smart_cache_open",
       "_tgt": "src_engine_bridge_enginebridge_enforce_smart_cache",
@@ -19053,7 +19311,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L811",
+      "source_location": "L814",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_enforce_smart_cache",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19065,7 +19323,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1021",
+      "source_location": "L1024",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_hydrate_file",
       "_tgt": "src_engine_bridge_enginebridge_enforce_smart_cache",
@@ -19077,7 +19335,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2158",
+      "source_location": "L2303",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_smart_cache_cleanup_never_evicts_effectively_pinned_files",
       "_tgt": "src_engine_bridge_enginebridge_enforce_smart_cache",
@@ -19089,7 +19347,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L818",
+      "source_location": "L821",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_version_conflict_feed",
       "_tgt": "src_engine_bridge_version_conflict_feed_from_db",
@@ -19101,7 +19359,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2494",
+      "source_location": "L2787",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_version_center_feed_maps_conflicts_and_review_operations",
       "_tgt": "src_engine_bridge_enginebridge_version_conflict_feed",
@@ -19113,7 +19371,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2537",
+      "source_location": "L2830",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_restore_version_routes_to_durable_operation_for_review",
       "_tgt": "src_engine_bridge_enginebridge_version_conflict_feed",
@@ -19125,7 +19383,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L827",
+      "source_location": "L830",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_queue_restore_version",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19137,7 +19395,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2522",
+      "source_location": "L2815",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_restore_version_routes_to_durable_operation_for_review",
       "_tgt": "src_engine_bridge_enginebridge_queue_restore_version",
@@ -19149,7 +19407,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L867",
+      "source_location": "L870",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_enqueue_finder_operation",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19161,7 +19419,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1015",
+      "source_location": "L1018",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_hydrate_file",
       "_tgt": "src_engine_bridge_enginebridge_do_hydrate",
@@ -19173,7 +19431,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1020",
+      "source_location": "L1023",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_hydrate_file",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19185,7 +19443,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1137",
+      "source_location": "L1140",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_resolve_keep_theirs",
       "_tgt": "src_engine_bridge_enginebridge_hydrate_file",
@@ -19197,7 +19455,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1174",
+      "source_location": "L1177",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_auto_resolve_keep_both",
       "_tgt": "src_engine_bridge_enginebridge_hydrate_file",
@@ -19209,7 +19467,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1062",
+      "source_location": "L1065",
       "weight": 1.0,
       "_src": "src_engine_bridge_enginebridge_do_hydrate",
       "_tgt": "src_engine_bridge_decrypt_downloaded_chunk",
@@ -19221,7 +19479,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1234",
+      "source_location": "L1237",
       "weight": 1.0,
       "_src": "src_engine_bridge_version_conflict_feed_from_db",
       "_tgt": "src_engine_bridge_display_name_for_path",
@@ -19233,7 +19491,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1248",
+      "source_location": "L1251",
       "weight": 1.0,
       "_src": "src_engine_bridge_version_conflict_feed_from_db",
       "_tgt": "src_engine_bridge_review_entry_for_operation",
@@ -19245,7 +19503,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1949",
+      "source_location": "L1955",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_upload_init_request_omits_new_file_id_and_preserves_existing_base",
       "_tgt": "src_engine_bridge_upload_init_request_for_operation",
@@ -19257,7 +19515,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1321",
+      "source_location": "L1323",
       "weight": 1.0,
       "_src": "src_engine_bridge_stage_finder_payload",
       "_tgt": "src_engine_bridge_stage_finder_payload_with_root",
@@ -19269,7 +19527,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1321",
+      "source_location": "L1323",
       "weight": 1.0,
       "_src": "src_engine_bridge_stage_finder_payload",
       "_tgt": "src_engine_bridge_default_finder_staging_root",
@@ -19281,7 +19539,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1997",
+      "source_location": "L2003",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_staging_payload_copies_to_durable_location",
       "_tgt": "src_engine_bridge_stage_finder_payload_with_root",
@@ -19293,7 +19551,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1392",
+      "source_location": "L1394",
       "weight": 1.0,
       "_src": "src_engine_bridge_review_entry_for_operation",
       "_tgt": "src_engine_bridge_display_name_for_path",
@@ -19305,7 +19563,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1395",
+      "source_location": "L1397",
       "weight": 1.0,
       "_src": "src_engine_bridge_review_entry_for_operation",
       "_tgt": "src_engine_bridge_classify_review_operation",
@@ -19317,7 +19575,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1407",
+      "source_location": "L1409",
       "weight": 1.0,
       "_src": "src_engine_bridge_review_entry_for_operation",
       "_tgt": "src_engine_bridge_operation_version_id",
@@ -19329,7 +19587,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2197",
+      "source_location": "L2342",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_shared_invite_mapping_filters_approved_and_permissions",
       "_tgt": "src_engine_bridge_shared_roots_from_invite_response",
@@ -19341,7 +19599,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1555",
+      "source_location": "L1557",
       "weight": 1.0,
       "_src": "src_engine_bridge_shared_root_from_invite",
       "_tgt": "src_engine_bridge_string_field",
@@ -19353,7 +19611,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1577",
+      "source_location": "L1579",
       "weight": 1.0,
       "_src": "src_engine_bridge_shared_root_from_invite",
       "_tgt": "src_engine_bridge_shared_invite_allows_write",
@@ -19365,7 +19623,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2040",
+      "source_location": "L2185",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19377,7 +19635,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2077",
+      "source_location": "L2222",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_metadata_modify_does_not_queue_content_version",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19389,7 +19647,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2099",
+      "source_location": "L2244",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_delete_maps_to_trash_operation",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19401,7 +19659,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2132",
+      "source_location": "L2277",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_recursive_pin_queues_hydration_for_cloud_only_descendants",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19413,7 +19671,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2406",
+      "source_location": "L2699",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
       "_tgt": "src_engine_bridge_now_secs",
@@ -19425,7 +19683,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L1798",
+      "source_location": "L1800",
       "weight": 1.0,
       "_src": "src_engine_bridge_sync_tick",
       "_tgt": "src_engine_bridge_apply_metadata_file_row",
@@ -19437,7 +19695,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2243",
+      "source_location": "L2388",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_metadata_file_row_persists_contract_for_own_file",
       "_tgt": "src_engine_bridge_apply_metadata_file_row",
@@ -19449,7 +19707,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2016",
+      "source_location": "L2161",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19461,7 +19719,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2059",
+      "source_location": "L2204",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_metadata_modify_does_not_queue_content_version",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19473,7 +19731,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2089",
+      "source_location": "L2234",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_delete_maps_to_trash_operation",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19485,7 +19743,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2109",
+      "source_location": "L2254",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_recursive_pin_queues_hydration_for_cloud_only_descendants",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19497,7 +19755,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2151",
+      "source_location": "L2296",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_smart_cache_cleanup_never_evicts_effectively_pinned_files",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19509,7 +19767,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2276",
+      "source_location": "L2421",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_process_due_operations_completes_pin_marker_and_invalidates_file",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19521,7 +19779,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2307",
+      "source_location": "L2452",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_process_due_operations_records_retry_for_upload_worker_handoff",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19533,7 +19791,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2348",
+      "source_location": "L2641",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_read_only_shared_item_rejects_finder_writes",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19545,7 +19803,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2377",
+      "source_location": "L2670",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19557,7 +19815,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2420",
+      "source_location": "L2713",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_version_center_feed_maps_conflicts_and_review_operations",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19569,7 +19827,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2520",
+      "source_location": "L2813",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_restore_version_routes_to_durable_operation_for_review",
       "_tgt": "src_engine_bridge_test_bridge",
@@ -19581,7 +19839,175 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2110",
+      "source_location": "L2499",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "_tgt": "src_engine_bridge_test_bridge_with_api",
+      "source": "src_engine_bridge_test_bridge_with_api",
+      "target": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2583",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "_tgt": "src_engine_bridge_test_bridge_with_api",
+      "source": "src_engine_bridge_test_bridge_with_api",
+      "target": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2037",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver",
+      "_tgt": "src_engine_bridge_uploadmockserver_start",
+      "source": "src_engine_bridge_uploadmockserver",
+      "target": "src_engine_bridge_uploadmockserver_start",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2059",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver",
+      "_tgt": "src_engine_bridge_uploadmockserver_finish",
+      "source": "src_engine_bridge_uploadmockserver",
+      "target": "src_engine_bridge_uploadmockserver_finish",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2046",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver_start",
+      "_tgt": "src_engine_bridge_read_http_request",
+      "source": "src_engine_bridge_uploadmockserver_start",
+      "target": "src_engine_bridge_read_http_request",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2047",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver_start",
+      "_tgt": "src_engine_bridge_upload_mock_response",
+      "source": "src_engine_bridge_uploadmockserver_start",
+      "target": "src_engine_bridge_upload_mock_response",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2497",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "_tgt": "src_engine_bridge_uploadmockserver_start",
+      "source": "src_engine_bridge_uploadmockserver_start",
+      "target": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2582",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "_tgt": "src_engine_bridge_uploadmockserver_start",
+      "source": "src_engine_bridge_uploadmockserver_start",
+      "target": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2040",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver_start",
+      "_tgt": "src_runner_enginerunner_spawn",
+      "source": "src_engine_bridge_uploadmockserver_start",
+      "target": "src_runner_enginerunner_spawn"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "windows/src/main.rs",
+      "source_location": "L301",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_uploadmockserver_start",
+      "_tgt": "src_main_main",
+      "source": "src_engine_bridge_uploadmockserver_start",
+      "target": "src_main_main"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2550",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "_tgt": "src_engine_bridge_uploadmockserver_finish",
+      "source": "src_engine_bridge_uploadmockserver_finish",
+      "target": "src_engine_bridge_test_process_due_operations_uploads_encrypted_payload_and_commits_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2631",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "_tgt": "src_engine_bridge_uploadmockserver_finish",
+      "source": "src_engine_bridge_uploadmockserver_finish",
+      "target": "src_engine_bridge_test_process_due_operations_preserves_payload_when_upload_chunk_fails",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2068",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_read_http_request",
+      "_tgt": "linux_fuse_mod_beebeebfs_read",
+      "source": "src_engine_bridge_read_http_request",
+      "target": "linux_fuse_mod_beebeebfs_read"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2115",
+      "weight": 1.0,
+      "_src": "src_engine_bridge_upload_mock_response",
+      "_tgt": "src_engine_bridge_http_json",
+      "source": "src_engine_bridge_http_json",
+      "target": "src_engine_bridge_upload_mock_response",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/engine_bridge.rs",
+      "source_location": "L2255",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_recursive_pin_queues_hydration_for_cloud_only_descendants",
       "_tgt": "src_engine_bridge_seed_bridge_row",
@@ -19593,7 +20019,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2152",
+      "source_location": "L2297",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_smart_cache_cleanup_never_evicts_effectively_pinned_files",
       "_tgt": "src_engine_bridge_seed_bridge_row",
@@ -19605,7 +20031,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2349",
+      "source_location": "L2642",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_read_only_shared_item_rejects_finder_writes",
       "_tgt": "src_engine_bridge_seed_bridge_row",
@@ -19617,7 +20043,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/engine_bridge.rs",
-      "source_location": "L2378",
+      "source_location": "L2671",
       "weight": 1.0,
       "_src": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
       "_tgt": "src_engine_bridge_seed_bridge_row",
