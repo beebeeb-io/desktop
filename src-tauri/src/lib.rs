@@ -10,6 +10,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
@@ -696,11 +697,28 @@ fn finder_install_state_from_config(
 
     FinderInstallState {
         installed,
-        path: cfg.sync_root.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        path: finder_state_path(cfg, installed),
         status,
         last_error,
         last_attempt_at: cfg.finder_install_last_attempt_at,
         reason_category,
+    }
+}
+
+fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = cfg;
+        if installed {
+            return file_provider_visible_location().ok().flatten();
+        }
+        return None;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = installed;
+        cfg.sync_root.as_ref().map(|p| p.to_string_lossy().into_owned())
     }
 }
 
@@ -911,6 +929,16 @@ fn remove_file_provider_domain() -> Result<(), String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn file_provider_visible_location() -> Result<Option<String>, String> {
+    macos_file_provider::visible_url()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_provider_visible_location() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
 #[tauri::command]
 fn finder_location_state() -> Result<FinderInstallState, String> {
     let mut cfg = DesktopConfig::load()?;
@@ -933,9 +961,14 @@ async fn install_finder_location(
     state: State<'_, AppState>,
     path: Option<String>,
 ) -> Result<FinderInstallState, String> {
+    #[cfg(target_os = "macos")]
+    let root = config::default_sync_root_suggestion();
+    #[cfg(not(target_os = "macos"))]
     let root = path
         .map(PathBuf::from)
         .unwrap_or_else(config::default_sync_root_suggestion);
+    #[cfg(target_os = "macos")]
+    let _ = path;
     if !root.is_absolute() {
         return Err(format!("Finder location must be absolute: {}", root.display()));
     }
@@ -957,7 +990,7 @@ async fn install_finder_location(
     persist_finder_install_result(&mut cfg, true, None)?;
     Ok(FinderInstallState {
         installed: true,
-        path: Some(root.to_string_lossy().into_owned()),
+        path: finder_state_path(&cfg, true),
         status: "installed".to_string(),
         last_error: None,
         last_attempt_at: cfg.finder_install_last_attempt_at,
@@ -1113,37 +1146,43 @@ async fn reset_macos_integration(
 
 #[tauri::command]
 fn open_finder_location(path: Option<String>) -> Result<(), String> {
-    let root = path
-        .map(PathBuf::from)
-        .or_else(|| DesktopConfig::load().ok().and_then(|c| c.sync_root))
-        .unwrap_or_else(config::default_sync_root_suggestion);
-    config::ensure_directory(&root)?;
-
     #[cfg(target_os = "macos")]
     {
+        let _ = path;
+        let visible = file_provider_visible_location()?
+            .ok_or_else(|| "Install the Beebeeb Finder location before opening it.".to_string())?;
         std::process::Command::new("open")
-            .arg(&root)
+            .arg(&visible)
             .spawn()
             .map_err(|e| format!("open Finder: {e}"))?;
         return Ok(());
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     {
-        std::process::Command::new("explorer")
-            .arg(&root)
-            .spawn()
-            .map_err(|e| format!("open Explorer: {e}"))?;
-        return Ok(());
-    }
+        let root = path
+            .map(PathBuf::from)
+            .or_else(|| DesktopConfig::load().ok().and_then(|c| c.sync_root))
+            .unwrap_or_else(config::default_sync_root_suggestion);
+        config::ensure_directory(&root)?;
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&root)
-            .spawn()
-            .map_err(|e| format!("open file manager: {e}"))?;
-        Ok(())
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer")
+                .arg(&root)
+                .spawn()
+                .map_err(|e| format!("open Explorer: {e}"))?;
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(&root)
+                .spawn()
+                .map_err(|e| format!("open file manager: {e}"))?;
+            Ok(())
+        }
     }
 }
 
@@ -1172,6 +1211,9 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
     let sync_root_path = DesktopConfig::load().ok().and_then(|c| c.sync_root);
+    #[cfg(target_os = "macos")]
+    let sync_root = None::<String>;
+    #[cfg(not(target_os = "macos"))]
     let sync_root = sync_root_path.as_ref().map(|p| p.to_string_lossy().into_owned());
     let engine_running = state.engine.lock().await.is_some();
 
@@ -1458,58 +1500,70 @@ fn get_sync_root() -> Result<Option<String>, String> {
 /// Spec 030 §2 + §3 (lock acquired by the spawned engine).
 #[tauri::command]
 async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let suggestion = config::default_sync_root_suggestion();
-    // Best-effort create — the dialog still opens even if this fails,
-    // pointed at the parent dir.
-    let _ = config::ensure_directory(&suggestion);
-
-    let dialog = app.dialog().clone();
-    // Tauri's blocking_pick_folder is synchronous from the JS caller's
-    // perspective but runs the OS dialog modally. We're already on a
-    // tokio task because the IPC fn is async, so this is safe.
-    let chosen: Option<PathBuf> = dialog
-        .file()
-        .set_directory(&suggestion)
-        .set_title("Choose your Beebeeb sync folder")
-        .blocking_pick_folder()
-        .and_then(|fp| fp.into_path().ok());
-
-    let Some(path) = chosen else {
-        // User cancelled. Don't write anything.
-        return Ok(None);
-    };
-
-    if !path.is_absolute() {
-        return Err(format!(
-            "picker returned a non-absolute path: {} (please report)",
-            path.display()
-        ));
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        let _ = state;
+        return Err(
+            "macOS uses the system-managed Beebeeb Finder location; local state is stored privately.".to_string(),
+        );
     }
-    config::ensure_directory(&path)?;
 
-    let mut cfg = DesktopConfig::load()?;
-    cfg.sync_root = Some(path.clone());
-    cfg.save()?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let suggestion = config::default_sync_root_suggestion();
+        // Best-effort create — the dialog still opens even if this fails,
+        // pointed at the parent dir.
+        let _ = config::ensure_directory(&suggestion);
 
-    tracing::info!(path = %path.display(), "sync root set");
+        let dialog = app.dialog().clone();
+        // Tauri's blocking_pick_folder is synchronous from the JS caller's
+        // perspective but runs the OS dialog modally. We're already on a
+        // tokio task because the IPC fn is async, so this is safe.
+        let chosen: Option<PathBuf> = dialog
+            .file()
+            .set_directory(&suggestion)
+            .set_title("Choose your Beebeeb sync folder")
+            .blocking_pick_folder()
+            .and_then(|fp| fp.into_path().ok());
 
-    // If a session is already loaded, start syncing immediately.
-    // (Common path: WebView calls set_session before pick_sync_root,
-    //  so the engine couldn't start there; it starts here instead.)
-    let session = state
-        .session
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
-    if let Some((token, key)) = session {
-        let mut engine_slot = state.engine.lock().await;
-        if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
+        let Some(path) = chosen else {
+            // User cancelled. Don't write anything.
+            return Ok(None);
+        };
+
+        if !path.is_absolute() {
+            return Err(format!(
+                "picker returned a non-absolute path: {} (please report)",
+                path.display()
+            ));
         }
-        *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key));
-    }
+        config::ensure_directory(&path)?;
 
-    Ok(Some(path.to_string_lossy().into_owned()))
+        let mut cfg = DesktopConfig::load()?;
+        cfg.sync_root = Some(path.clone());
+        cfg.save()?;
+
+        tracing::info!(path = %path.display(), "sync root set");
+
+        // If a session is already loaded, start syncing immediately.
+        // (Common path: WebView calls set_session before pick_sync_root,
+        //  so the engine couldn't start there; it starts here instead.)
+        let session = state
+            .session
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
+        if let Some((token, key)) = session {
+            let mut engine_slot = state.engine.lock().await;
+            if let Some(prev) = engine_slot.take() {
+                prev.abort().await;
+            }
+            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key));
+        }
+
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
 }
 
 /// Suggested default path for the sync root, used by the WebView to
@@ -1518,6 +1572,26 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
 #[tauri::command]
 fn default_sync_root() -> String {
     config::default_sync_root_suggestion().to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+fn desktop_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "linux"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        "unknown"
+    }
 }
 
 // ── IPC commands: Task 9 — settings page ──────────────────────────────────────
@@ -2076,6 +2150,7 @@ pub fn run() {
             get_sync_root,
             pick_sync_root,
             default_sync_root,
+            desktop_platform,
             finder_location_state,
             install_finder_location,
             continue_without_finder_location,

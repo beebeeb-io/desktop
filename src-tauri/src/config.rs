@@ -17,9 +17,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "macos")]
-use std::ffi::CStr;
-
 /// Filename inside the platform config dir.
 const CONFIG_FILENAME: &str = "desktop.toml";
 
@@ -186,8 +183,7 @@ impl DesktopConfig {
     /// creating the parent directory if missing. Errors propagate as
     /// strings so they can flow through Tauri commands.
     pub fn path() -> Result<PathBuf, String> {
-        let base = dirs::config_dir()
-            .ok_or_else(|| "could not determine user config directory".to_string())?;
+        let base = dirs::config_dir().ok_or_else(|| "could not determine user config directory".to_string())?;
         let dir = base.join(APP_CONFIG_DIR);
         fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
         Ok(dir.join(CONFIG_FILENAME))
@@ -203,10 +199,8 @@ impl DesktopConfig {
             return Ok(Self::default());
         }
         // toml 0.8 removed from_slice; read as UTF-8 string and parse.
-        let s = fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let mut cfg: Self = toml::from_str(&s)
-            .map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let s = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let mut cfg: Self = toml::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
         // Reject relative paths defensively. Hand-editing the TOML to a
         // relative path would otherwise let the engine sync against
@@ -214,10 +208,7 @@ impl DesktopConfig {
         if let Some(p) = &cfg.sync_root
             && !p.is_absolute()
         {
-            tracing::warn!(
-                "ignoring non-absolute sync_root in desktop.toml: {}",
-                p.display()
-            );
+            tracing::warn!("ignoring non-absolute sync_root in desktop.toml: {}", p.display());
             cfg.sync_root = None;
         }
         Ok(cfg)
@@ -229,46 +220,22 @@ impl DesktopConfig {
     /// inheritance from the user's profile is the right default.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path()?;
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| format!("serialize: {e}"))?;
+        let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
 
         // Atomic write: temp + rename. Avoids leaving a half-written
         // file if the process is killed mid-save.
         let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, toml_str.as_bytes())
-            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        fs::write(&tmp, toml_str.as_bytes()).map_err(|e| format!("write {}: {e}", tmp.display()))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&tmp, perms)
-                .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+            fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
         }
 
-        fs::rename(&tmp, &path)
-            .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
         Ok(())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn user_visible_home_dir() -> Option<PathBuf> {
-    // In a sandboxed macOS app, HOME and dirs::home_dir() can point at
-    // ~/Library/Containers/<bundle>/Data. That is correct for app-private
-    // files, but wrong for the user-facing sync folder suggestion.
-    unsafe {
-        let passwd = libc::getpwuid(libc::getuid());
-        if passwd.is_null() || (*passwd).pw_dir.is_null() {
-            return None;
-        }
-
-        let home = CStr::from_ptr((*passwd).pw_dir).to_string_lossy();
-        if home.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(home.into_owned()))
-        }
     }
 }
 
@@ -277,11 +244,25 @@ fn user_visible_home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// Default sync root if the user accepts the suggestion: the visible
-/// account home plus `Beebeeb`.
-/// Falls back to `./Beebeeb` (cwd) only on systems where no visible home
-/// can be resolved — this is rare enough to not warrant a hard error since
-/// the user can immediately pick a real path through the dialog.
+/// Default local state root.
+///
+/// On macOS, the File Provider domain is the user-visible Finder surface. The
+/// Rust runner still needs durable SQLite/cache/staging space, but that belongs
+/// in app-private Application Support rather than a second visible `~/Beebeeb`
+/// folder. Other platforms keep the traditional user-chosen folder model until
+/// their native virtualization layers are implemented.
+#[cfg(target_os = "macos")]
+pub fn default_sync_root_suggestion() -> PathBuf {
+    dirs::data_dir()
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(APP_CONFIG_DIR)
+        .join("file-provider-state")
+}
+
+/// Default sync root if the user accepts the suggestion on platforms that
+/// expose an actual local folder as the user-facing sync surface.
+#[cfg(not(target_os = "macos"))]
 pub fn default_sync_root_suggestion() -> PathBuf {
     user_visible_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -294,15 +275,11 @@ pub fn default_sync_root_suggestion() -> PathBuf {
 pub fn ensure_directory(path: &Path) -> Result<(), String> {
     if path.exists() {
         if !path.is_dir() {
-            return Err(format!(
-                "{} exists but is not a directory",
-                path.display()
-            ));
+            return Err(format!("{} exists but is not a directory", path.display()));
         }
         return Ok(());
     }
-    fs::create_dir_all(path)
-        .map_err(|e| format!("create directory {}: {e}", path.display()))?;
+    fs::create_dir_all(path).map_err(|e| format!("create directory {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -311,15 +288,22 @@ mod tests {
     use super::default_sync_root_suggestion;
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn default_sync_root_uses_private_file_provider_state_folder() {
+        let path = default_sync_root_suggestion();
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("file-provider-state")
+        );
+        assert!(path.to_string_lossy().contains("beebeeb"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
     fn default_sync_root_uses_user_facing_beebeeb_folder() {
         let path = default_sync_root_suggestion();
 
         assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("Beebeeb"));
-        assert!(
-            !path
-                .to_string_lossy()
-                .contains("/Library/Containers/io.beebeeb.desktop/Data"),
-            "sync folder suggestion should not point at the app sandbox container"
-        );
     }
 }

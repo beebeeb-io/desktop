@@ -136,7 +136,7 @@ export default function App() {
             />
             {status?.logged_in ? (locked ? 'Needs unlock' : 'Signed in') : 'Signed out'}
           </div>
-          <div>{status?.sync_root ?? 'Finder location not installed'}</div>
+          <div>{status?.engine === 'running' ? 'Finder-backed vault' : 'Finder location not installed'}</div>
           {version && <div style={{ marginTop: 8 }}>Version {version}</div>}
         </div>
       </aside>

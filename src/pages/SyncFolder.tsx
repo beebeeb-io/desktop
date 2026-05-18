@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   command,
   commandUnavailableLabel,
+  type DesktopPlatform,
   type FinderInstallState,
   type MacosIntegrationResetResult,
   type SyncStatus,
@@ -10,10 +11,14 @@ import {
 export default function SyncFolder() {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
   const [installState, setInstallState] = useState<FinderInstallState | null>(null)
+  const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
+    command<DesktopPlatform>('desktop_platform').then((result) => {
+      if (result.ok) setPlatform(result.value)
+    })
     command<SyncStatus>('sync_status').then((result) => {
       if (result.ok) setSyncRoot(result.value.sync_root)
     })
@@ -49,7 +54,7 @@ export default function SyncFolder() {
 
   const openFinder = async () => {
     setNotice(null)
-    const result = await command<void>('open_finder_location', { path: syncRoot })
+    const result = await command<void>('open_finder_location', { path: platform === 'macos' ? null : syncRoot })
     if (!result.ok) {
       setNotice(result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason)
     }
@@ -86,6 +91,7 @@ export default function SyncFolder() {
 
   const installed = installState?.installed ?? false
   const finderLastError = installState?.last_error?.trim()
+  const isMacos = platform === 'macos'
 
   return (
     <section className="page">
@@ -93,8 +99,8 @@ export default function SyncFolder() {
         <div>
           <h1 className="page-title">Finder location</h1>
           <p className="page-copy">
-            Install Beebeeb as the Finder drive. This is the namespace users browse; pinning
-            controls local availability separately.
+            Install Beebeeb as the Finder drive. On macOS the visible location is managed by
+            File Provider; local sync state stays private.
           </p>
         </div>
         <span className="status-pill">
@@ -114,19 +120,21 @@ export default function SyncFolder() {
         <div className="panel">
           <h2 className="section-title">Location</h2>
           <div className="panel" style={{ background: '#faf8f5' }}>
-            <div className="section-label">Finder path</div>
+            <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
             <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
-              {installState?.path ?? syncRoot ?? 'No location selected'}
+              {installState?.path ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? 'No location selected')}
             </div>
           </div>
           <div className="button-row" style={{ marginTop: 14 }}>
-            <button className="button" onClick={() => void chooseFolderClick()} disabled={busy}>
-              Choose location
-            </button>
+            {!isMacos && (
+              <button className="button" onClick={() => void chooseFolderClick()} disabled={busy}>
+                Choose location
+              </button>
+            )}
             <button className="button primary" onClick={() => void installFinder()} disabled={busy}>
               Install in Finder
             </button>
-            <button className="button" onClick={() => void openFinder()} disabled={!syncRoot || busy}>
+            <button className="button" onClick={() => void openFinder()} disabled={(!isMacos && !syncRoot) || busy}>
               Open in Finder
             </button>
           </div>

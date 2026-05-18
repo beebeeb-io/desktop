@@ -134,6 +134,45 @@ int beebeeb_fp_status(char *error_buffer, unsigned long error_buffer_len) {
     }
 }
 
+int beebeeb_fp_visible_url(char *url_buffer, unsigned long url_buffer_len, char *error_buffer, unsigned long error_buffer_len) {
+    @autoreleasepool {
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            BeebeebCopyMessage(@"File Provider manager is unavailable for the Beebeeb domain",
+                               error_buffer,
+                               error_buffer_len);
+            return -1;
+        }
+
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSURL *found_url = nil;
+        __block NSError *found_error = nil;
+        [manager getUserVisibleURLForItemIdentifier:NSFileProviderRootContainerItemIdentifier
+                                  completionHandler:^(NSURL *url, NSError *error) {
+            found_url = url;
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebCopyMessage(@"Timed out resolving the Beebeeb Finder location",
+                               error_buffer,
+                               error_buffer_len);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            return -1;
+        }
+        if (found_url == nil) {
+            return 0;
+        }
+        BeebeebCopyMessage(found_url.path ?: found_url.absoluteString, url_buffer, url_buffer_len);
+        return 1;
+    }
+}
+
 int beebeeb_fp_install(char *error_buffer, unsigned long error_buffer_len) {
     @autoreleasepool {
         BOOL existed_before_add = NO;

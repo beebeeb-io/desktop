@@ -5,6 +5,8 @@ import {
   commandUnavailableLabel,
   loadSyncStatus,
   type CommandResult,
+  type DesktopPlatform,
+  type FinderInstallState,
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
@@ -27,7 +29,11 @@ export default function Onboarding() {
   useEffect(() => {
     let cancelled = false
 
-    loadSyncStatus().then((status) => {
+    Promise.all([
+      loadSyncStatus(),
+      command<DesktopPlatform>('desktop_platform'),
+      command<FinderInstallState>('finder_location_state'),
+    ]).then(([status, platform, finder]) => {
       if (cancelled || !status?.logged_in) return
 
       if (!status.vault_unlocked) {
@@ -35,9 +41,12 @@ export default function Onboarding() {
         return
       }
 
-      if (!status.sync_root) {
+      const isMacos = platform.ok && platform.value === 'macos'
+      if ((isMacos && (!finder.ok || !finder.value.installed)) || (!isMacos && !status.sync_root)) {
         setStep('finder')
+        return
       }
+      setStep('ready')
     })
 
     return () => {
@@ -294,12 +303,20 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
 
 function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
+  const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
+  const [finderPath, setFinderPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
+    command<DesktopPlatform>('desktop_platform').then((result) => {
+      if (result.ok) setPlatform(result.value)
+    })
     command<string>('default_sync_root').then((result) => {
       if (result.ok) setSyncRoot(result.value)
+    })
+    command<FinderInstallState>('finder_location_state').then((result) => {
+      if (result.ok) setFinderPath(result.value.path ?? null)
     })
   }, [])
 
@@ -318,14 +335,17 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const install = useCallback(async () => {
     setBusy(true)
     setMessage(null)
-    const result = await command<void>('install_finder_location', { path: syncRoot })
+    const result = await command<FinderInstallState>('install_finder_location', {
+      path: platform === 'macos' ? null : syncRoot,
+    })
     setBusy(false)
     if (result.ok) {
+      setFinderPath(result.value.path ?? null)
       onDone()
       return
     }
     setMessage(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
-  }, [onDone, syncRoot])
+  }, [onDone, platform, syncRoot])
 
   const continueWithoutInstall = useCallback(async () => {
     setBusy(true)
@@ -339,26 +359,34 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
     setMessage(result.unsupported ? commandUnavailableLabel('continue_without_finder_location') : result.reason)
   }, [onDone, syncRoot])
 
+  const isMacos = platform === 'macos'
+
   return (
     <Card
       title="Install the Finder location"
-      copy="Beebeeb should appear as a Finder sidebar location. This is separate from choosing optional offline folders."
+      copy={
+        isMacos
+          ? 'Beebeeb appears as a system-managed Finder location. Offline folders are controlled separately.'
+          : 'Beebeeb should appear as a file-manager location. This is separate from choosing optional offline folders.'
+      }
     >
       {message && <div className="notice">{message}</div>}
       <div className="panel" style={{ marginTop: 16, background: '#faf8f5' }}>
-        <div className="section-label">Finder path</div>
+        <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
         <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
-          {syncRoot ?? '~/Beebeeb'}
+          {finderPath ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? '~/Beebeeb')}
         </div>
       </div>
       <div className="button-row" style={{ marginTop: 16 }}>
-        <button className="button" onClick={chooseFolder} disabled={busy}>
-          Choose location
-        </button>
+        {!isMacos && (
+          <button className="button" onClick={chooseFolder} disabled={busy}>
+            Choose location
+          </button>
+        )}
         <button className="button primary" onClick={install} disabled={busy}>
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
-        {message && (
+        {message && !isMacos && (
           <button className="button" onClick={continueWithoutInstall} disabled={busy}>
             Continue without install
           </button>

@@ -15,6 +15,8 @@ export interface SyncStatus {
   conflicts: number
 }
 
+export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
+
 export interface DesktopConfig {
   upload_kbps_limit: number
   download_kbps_limit: number
