@@ -3,7 +3,7 @@ import Foundation
 
 enum BeebeebFileProviderDomain {
     static let identifier = NSFileProviderDomainIdentifier("io.beebeeb.app.domain")
-    static let displayName = "Beebeeb"
+    static let displayName = "Drive"
 
     static var domain: NSFileProviderDomain {
         NSFileProviderDomain(identifier: identifier, displayName: displayName)

@@ -4,7 +4,7 @@
 #include <string.h>
 
 static NSString *BeebeebDomainIdentifier = @"io.beebeeb.app.domain";
-static NSString *BeebeebDomainDisplayName = @"Beebeeb";
+static NSString *BeebeebDomainDisplayName = @"Drive";
 
 static void BeebeebCopyMessage(NSString *message, char *buffer, unsigned long buffer_len) {
     if (buffer == NULL || buffer_len == 0) {
