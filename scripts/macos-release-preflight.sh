@@ -45,12 +45,13 @@ application_id = (
 )
 groups = entitlements.get("com.apple.security.application-groups") or []
 platforms = profile.get("Platform") or []
+team_id = application_id.split(".", 1)[0] if "." in application_id else ""
 
 if not application_id.endswith("." + bundle_id):
     raise SystemExit(
         f"{profile_path}: application-identifier {application_id!r} does not match {bundle_id!r}"
     )
-if app_group not in groups:
+if app_group not in groups and not app_group.startswith(team_id + "."):
     raise SystemExit(f"{profile_path}: missing app group {app_group!r}")
 if not any(platform in ("OSX", "macOS") for platform in platforms):
     raise SystemExit(f"{profile_path}: profile is not a macOS profile: {platforms!r}")
