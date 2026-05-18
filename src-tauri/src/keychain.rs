@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-const KEYCHAIN_SERVICE: &str = "io.beebeeb.desktop";
+const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
 const SESSION_TOKEN_ACCOUNT: &str = "session-token";
 const WRAPPED_MASTER_KEY_ACCOUNT: &str = "wrapped-master-key";
 const MASTER_KEY_BYTES: usize = 32;

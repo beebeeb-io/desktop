@@ -71,7 +71,7 @@ PY
 
 APP_EXE="BeebeebFileProvider"
 MODULE_NAME="BeebeebFileProvider"
-BUNDLE_ID="io.beebeeb.desktop.FileProvider"
+BUNDLE_ID="io.beebeeb.app.FileProvider"
 CONTENTS_DIR="$OUT_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 INFO_PLIST="$CONTENTS_DIR/Info.plist"

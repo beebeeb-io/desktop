@@ -71,7 +71,7 @@ import json
 from pathlib import Path
 
 config = json.loads(Path("src-tauri/tauri.conf.json").read_text())
-assert config["identifier"] == "io.beebeeb.desktop"
+assert config["identifier"] == "io.beebeeb.app"
 assert config["bundle"]["macOS"]["entitlements"] == "entitlements.plist"
 assert config["bundle"]["createUpdaterArtifacts"] is True
 assert config["plugins"]["updater"]["pubkey"].strip()
@@ -107,8 +107,8 @@ if [[ "${1:-}" != "" ]]; then
       helper="$artifact/Contents/MacOS/BeebeebFileProviderCtl"
       [[ -d "$appex" ]] || fail "File Provider extension missing from app bundle: $appex"
       [[ -x "$helper" ]] || fail "File Provider helper missing from app bundle: $helper"
-      verify_provision_profile "$artifact" "io.beebeeb.desktop" "R8352WDJJR.io.beebeeb.desktop.fileprovider"
-      verify_provision_profile "$appex" "io.beebeeb.desktop.FileProvider" "R8352WDJJR.io.beebeeb.desktop.fileprovider"
+      verify_provision_profile "$artifact" "io.beebeeb.app" "R8352WDJJR.io.beebeeb.app.fileprovider"
+      verify_provision_profile "$appex" "io.beebeeb.app.FileProvider" "R8352WDJJR.io.beebeeb.app.fileprovider"
       codesign --verify --strict --verbose=2 "$appex"
       codesign --verify --strict --verbose=2 "$helper"
       codesign -dvvv --entitlements :- "$appex"

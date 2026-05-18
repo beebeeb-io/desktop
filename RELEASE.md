@@ -135,7 +135,7 @@ Required app entitlements live in `src-tauri/entitlements.plist`:
 The File Provider extension target, once embedded in an Xcode project, must be
 signed by the same Team ID as the containing app and use:
 
-- bundle id `io.beebeeb.desktop.FileProvider`;
+- bundle id `io.beebeeb.app.FileProvider`;
 - extension point `com.apple.fileprovider-nonui`;
 - principal class `$(PRODUCT_MODULE_NAME).FileProviderExtension`;
 - `NSExtensionFileProviderDocumentGroup` matching the app-group entitlement;
@@ -267,7 +267,7 @@ The File Provider domain identifier is fixed in
 `BeebeebFileProvider/DomainRegistration.swift`:
 
 ```text
-io.beebeeb.desktop.domain
+io.beebeeb.app.domain
 ```
 
 Do not change this identifier after public release without a migration plan.
@@ -325,11 +325,11 @@ pkill -x Beebeeb || true
 
 # Remove stale IPC/socket artifacts if present. Do not use sudo unless needed.
 rm -f "${TMPDIR%/}/beebeeb-fileprovider.sock"
-rm -f "$HOME/Library/Application Support/io.beebeeb.desktop/.beebeeb-sync.lock"
+rm -f "$HOME/Library/Application Support/io.beebeeb.app/.beebeeb-sync.lock"
 
 # Inspect local app containers before deletion.
-ls -la "$HOME/Library/Application Support/io.beebeeb.desktop" 2>/dev/null || true
-ls -la "$HOME/Library/Logs/io.beebeeb.desktop" 2>/dev/null || true
+ls -la "$HOME/Library/Application Support/io.beebeeb.app" 2>/dev/null || true
+ls -la "$HOME/Library/Logs/io.beebeeb.app" 2>/dev/null || true
 ```
 
 Do not script `rm -rf` of the application-support directory in release docs

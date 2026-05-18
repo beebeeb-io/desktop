@@ -39,7 +39,7 @@
     <true/>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>R8352WDJJR.io.beebeeb.desktop.fileprovider</string>
+        <string>R8352WDJJR.io.beebeeb.app.fileprovider</string>
     </array>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>

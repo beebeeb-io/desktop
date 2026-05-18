@@ -7,7 +7,7 @@
   Wired into Xcode by:
     1. Adding "BeebeebFileProvider" as a File Provider Extension target
     2. Pointing its Info.plist build setting at this file
-    3. Setting the bundle identifier to io.beebeeb.desktop.FileProvider
+    3. Setting the bundle identifier to io.beebeeb.app.FileProvider
        (parent app + ".FileProvider" suffix per Apple's convention)
     4. Setting deployment target — see scaffold notes in
        FileProviderItem.swift / FileProviderExtension.swift
@@ -49,7 +49,7 @@
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionFileProviderDocumentGroup</key>
-		<string>R8352WDJJR.io.beebeeb.desktop.fileprovider</string>
+		<string>R8352WDJJR.io.beebeeb.app.fileprovider</string>
 		<key>NSExtensionFileProviderDownloadPipelineDepth</key>
 		<integer>8</integer>
 		<key>NSExtensionFileProviderSupportsEnumeration</key>

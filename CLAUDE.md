@@ -61,7 +61,7 @@ To develop against the real web client instead of the placeholder:
 
 ## Key files
 
-- `src-tauri/tauri.conf.json` — identifier `io.beebeeb.desktop`, 1200×800 default window.
+- `src-tauri/tauri.conf.json` — identifier `io.beebeeb.app`, 1200×800 default window.
 - `src-tauri/src/lib.rs` — `run()` builds the Tauri app and registers `#[tauri::command]` handlers. Add new commands here.
 - `src-tauri/capabilities/default.json` — permissions the frontend can invoke. Add explicit permissions before exposing new tauri APIs.
 
@@ -108,7 +108,7 @@ new updates — they'll need a manual reinstall to onboard the new pubkey.
 ## Brand
 
 - Icons: amber rounded square with lowercase `b` (`icons/icon.png`). Replace with the production icon set via `bunx tauri icon path/to/source.png` once ready.
-- App name: "Beebeeb". Identifier: `io.beebeeb.desktop`.
+- App name: "Beebeeb". Identifier: `io.beebeeb.app`.
 
 ## Graphify
 

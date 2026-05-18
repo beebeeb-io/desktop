@@ -52,8 +52,8 @@ If this later moves to a full Xcode target, keep the same contract:
 
 - extension point: `com.apple.fileprovider-nonui`;
 - principal class: `$(PRODUCT_MODULE_NAME).FileProviderExtension`;
-- bundle id: `io.beebeeb.desktop.FileProvider`;
-- document group: `R8352WDJJR.io.beebeeb.desktop.fileprovider`;
+- bundle id: `io.beebeeb.app.FileProvider`;
+- document group: `R8352WDJJR.io.beebeeb.app.fileprovider`;
 - app-group entitlement shared with the containing Beebeeb app;
 - the same Apple Team ID and provisioning profile entitlement values as the
   containing Beebeeb app;
@@ -100,7 +100,7 @@ extension target. Source type-checking alone does not install a domain.
 The domain identifier is stable release state:
 
 ```text
-io.beebeeb.desktop.domain
+io.beebeeb.app.domain
 ```
 
 Do not change it after public release without an explicit migration plan. A
