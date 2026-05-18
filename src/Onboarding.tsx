@@ -24,6 +24,27 @@ const STEPS: Array<{ id: Step; title: string; detail: string }> = [
 export default function Onboarding() {
   const [step, setStep] = useState<Step>('signin')
 
+  useEffect(() => {
+    let cancelled = false
+
+    loadSyncStatus().then((status) => {
+      if (cancelled || !status?.logged_in) return
+
+      if (!status.vault_unlocked) {
+        setStep('unlock')
+        return
+      }
+
+      if (!status.sync_root) {
+        setStep('finder')
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   return (
     <div className="onboarding-shell">
       <aside className="onboarding-rail">
@@ -306,6 +327,18 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
     setMessage(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
   }, [onDone, syncRoot])
 
+  const continueWithoutInstall = useCallback(async () => {
+    setBusy(true)
+    setMessage(null)
+    const result = await command<void>('continue_without_finder_location', { path: syncRoot })
+    setBusy(false)
+    if (result.ok) {
+      onDone()
+      return
+    }
+    setMessage(result.unsupported ? commandUnavailableLabel('continue_without_finder_location') : result.reason)
+  }, [onDone, syncRoot])
+
   return (
     <Card
       title="Install the Finder location"
@@ -326,7 +359,7 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
         {message && (
-          <button className="button" onClick={onDone}>
+          <button className="button" onClick={continueWithoutInstall} disabled={busy}>
             Continue without install
           </button>
         )}

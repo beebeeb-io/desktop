@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
+
 /// Filename inside the platform config dir.
 const CONFIG_FILENAME: &str = "desktop.toml";
 
@@ -249,13 +252,38 @@ impl DesktopConfig {
     }
 }
 
-/// Default sync root if the user accepts the suggestion: `~/Beebeeb`.
-/// Falls back to `./Beebeeb` (cwd) only on systems where `dirs::home_dir()`
-/// can't resolve a home — this is rare enough to not warrant a hard
-/// error since the user immediately picks a real path through the
-/// dialog.
-pub fn default_sync_root_suggestion() -> PathBuf {
+#[cfg(target_os = "macos")]
+fn user_visible_home_dir() -> Option<PathBuf> {
+    // In a sandboxed macOS app, HOME and dirs::home_dir() can point at
+    // ~/Library/Containers/<bundle>/Data. That is correct for app-private
+    // files, but wrong for the user-facing sync folder suggestion.
+    unsafe {
+        let passwd = libc::getpwuid(libc::getuid());
+        if passwd.is_null() || (*passwd).pw_dir.is_null() {
+            return None;
+        }
+
+        let home = CStr::from_ptr((*passwd).pw_dir).to_string_lossy();
+        if home.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(home.into_owned()))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn user_visible_home_dir() -> Option<PathBuf> {
     dirs::home_dir()
+}
+
+/// Default sync root if the user accepts the suggestion: the visible
+/// account home plus `Beebeeb`.
+/// Falls back to `./Beebeeb` (cwd) only on systems where no visible home
+/// can be resolved — this is rare enough to not warrant a hard error since
+/// the user can immediately pick a real path through the dialog.
+pub fn default_sync_root_suggestion() -> PathBuf {
+    user_visible_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Beebeeb")
 }
@@ -276,4 +304,22 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path)
         .map_err(|e| format!("create directory {}: {e}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_sync_root_suggestion;
+
+    #[test]
+    fn default_sync_root_uses_user_facing_beebeeb_folder() {
+        let path = default_sync_root_suggestion();
+
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("Beebeeb"));
+        assert!(
+            !path
+                .to_string_lossy()
+                .contains("/Library/Containers/io.beebeeb.desktop/Data"),
+            "sync folder suggestion should not point at the app sandbox container"
+        );
+    }
 }

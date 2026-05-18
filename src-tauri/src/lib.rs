@@ -717,6 +717,107 @@ fn persist_finder_install_result(
     cfg.save()
 }
 
+async fn persist_sync_root_and_start_engine(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    cfg: &mut DesktopConfig,
+    root: PathBuf,
+) -> Result<(), String> {
+    cfg.sync_root = Some(root.clone());
+    cfg.save()?;
+
+    let session = state
+        .session
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
+    if let Some((token, key)) = session {
+        let mut engine_slot = state.engine.lock().await;
+        if let Some(prev) = engine_slot.take() {
+            prev.abort().await;
+        }
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, key));
+    }
+
+    Ok(())
+}
+
+async fn start_engine_for_pending_finder_install(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    root: PathBuf,
+) -> Result<bool, String> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "session mutex poisoned".to_string())?
+        .as_ref()
+        .map(|s| (s.token.clone(), s.master_key));
+
+    let Some((token, key)) = session else {
+        return Err("Unlock the vault before installing the Finder location.".to_string());
+    };
+
+    let started = {
+        let mut engine_slot = state.engine.lock().await;
+        if engine_slot.is_some() {
+            false
+        } else {
+            *engine_slot = Some(EngineRunner::spawn(app, root, token, key));
+            true
+        }
+    };
+
+    if let Err(error) = wait_for_file_provider_ipc_ready().await {
+        stop_pending_finder_install_engine(state, started).await;
+        return Err(error);
+    }
+
+    Ok(started)
+}
+
+async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started: bool) {
+    if !started {
+        return;
+    }
+    let mut engine_slot = state.engine.lock().await;
+    if let Some(prev) = engine_slot.take() {
+        prev.abort().await;
+    }
+}
+
+async fn wait_for_file_provider_ipc_ready() -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+    use tokio::time::{Duration, Instant, sleep, timeout};
+
+    let path = ipc_socket::ipc_socket_path();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let request = serde_json::to_vec(&ipc_socket::IpcRequest::GetSyncSummary)
+        .map_err(|e| format!("encode IPC readiness probe: {e}"))?;
+
+    loop {
+        match timeout(Duration::from_millis(300), UnixStream::connect(&path)).await {
+            Ok(Ok(mut stream)) => {
+                let mut response = vec![0u8; 4096];
+                if stream.write_all(&request).await.is_ok()
+                    && let Ok(Ok(bytes_read)) = timeout(Duration::from_millis(300), stream.read(&mut response)).await
+                    && bytes_read > 0
+                    && serde_json::from_slice::<ipc_socket::IpcResponse>(&response[..bytes_read]).is_ok()
+                {
+                    return Ok(());
+                }
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+
+        if Instant::now() >= deadline {
+            return Err("Timed out waiting for the local Beebeeb sync daemon before installing Finder location.".to_string());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn file_provider_installed() -> Result<bool, String> {
     macos_file_provider::status()
@@ -737,6 +838,16 @@ fn install_file_provider_domain() -> Result<(), String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn remove_file_provider_domain() -> Result<(), String> {
+    macos_file_provider::remove()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_file_provider_domain() -> Result<(), String> {
+    Err("File Provider is only available on macOS.".to_string())
+}
+
 #[tauri::command]
 fn finder_location_state() -> Result<FinderInstallState, String> {
     let mut cfg = DesktopConfig::load()?;
@@ -748,7 +859,6 @@ fn finder_location_state() -> Result<FinderInstallState, String> {
             Ok(finder_install_state_from_config(&cfg, installed, None))
         }
         Err(error) => {
-            persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
             Ok(finder_install_state_from_config(&cfg, false, Some(error)))
         }
     }
@@ -771,24 +881,17 @@ async fn install_finder_location(
     config::ensure_directory(&root)?;
 
     let mut cfg = DesktopConfig::load()?;
-    cfg.sync_root = Some(root.clone());
-    cfg.save()?;
-
-    let session = state
-        .session
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
-    if let Some((token, key)) = session {
-        let mut engine_slot = state.engine.lock().await;
-        if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
-        }
-        *engine_slot = Some(EngineRunner::spawn(app, root.clone(), token, key));
-    }
+    let started_pending_engine =
+        start_engine_for_pending_finder_install(app.clone(), &state, root.clone()).await?;
 
     if let Err(error) = install_file_provider_domain() {
+        stop_pending_finder_install_engine(&state, started_pending_engine).await;
         persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
+        return Err(error);
+    }
+    if let Err(error) = persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await {
+        stop_pending_finder_install_engine(&state, started_pending_engine).await;
+        let _ = remove_file_provider_domain();
         return Err(error);
     }
     persist_finder_install_result(&mut cfg, true, None)?;
@@ -800,6 +903,25 @@ async fn install_finder_location(
         last_attempt_at: cfg.finder_install_last_attempt_at,
         reason_category: None,
     })
+}
+
+#[tauri::command]
+async fn continue_without_finder_location(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<FinderInstallState, String> {
+    let root = path
+        .map(PathBuf::from)
+        .unwrap_or_else(config::default_sync_root_suggestion);
+    if !root.is_absolute() {
+        return Err(format!("Finder location must be absolute: {}", root.display()));
+    }
+    config::ensure_directory(&root)?;
+
+    let mut cfg = DesktopConfig::load()?;
+    persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await?;
+    Ok(finder_install_state_from_config(&cfg, false, None))
 }
 
 #[tauri::command]
@@ -1772,6 +1894,7 @@ pub fn run() {
             default_sync_root,
             finder_location_state,
             install_finder_location,
+            continue_without_finder_location,
             open_finder_location,
             // Task 9 — settings page IPC
             get_desktop_config,

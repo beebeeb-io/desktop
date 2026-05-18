@@ -78,6 +78,33 @@ static int BeebeebRemoveDomain(char *error_buffer, unsigned long error_buffer_le
     return 0;
 }
 
+static int BeebeebDomainExists(BOOL *exists, char *error_buffer, unsigned long error_buffer_len) {
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSArray<NSFileProviderDomain *> *found_domains = nil;
+    __block NSError *found_error = nil;
+
+    [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
+        found_domains = domains;
+        found_error = error;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+    if (found_error != nil) {
+        BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+        return -1;
+    }
+
+    *exists = NO;
+    for (NSFileProviderDomain *domain in found_domains) {
+        if ([domain.identifier isEqualToString:BeebeebDomainIdentifier]) {
+            *exists = YES;
+            break;
+        }
+    }
+    return 0;
+}
+
 int beebeeb_fp_status(char *error_buffer, unsigned long error_buffer_len) {
     @autoreleasepool {
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -109,6 +136,11 @@ int beebeeb_fp_status(char *error_buffer, unsigned long error_buffer_len) {
 
 int beebeeb_fp_install(char *error_buffer, unsigned long error_buffer_len) {
     @autoreleasepool {
+        BOOL existed_before_add = NO;
+        if (BeebeebDomainExists(&existed_before_add, error_buffer, error_buffer_len) != 0) {
+            return -1;
+        }
+
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         __block NSError *found_error = nil;
 
@@ -123,8 +155,18 @@ int beebeeb_fp_install(char *error_buffer, unsigned long error_buffer_len) {
             return -1;
         }
         if (BeebeebWaitForDomainReady(BeebeebDomain(), 10.0, error_buffer, error_buffer_len) != 0) {
-            char cleanup_error[1024];
-            BeebeebRemoveDomain(cleanup_error, sizeof(cleanup_error));
+            if (!existed_before_add) {
+                char setup_error[1024];
+                strlcpy(setup_error, error_buffer, sizeof(setup_error));
+
+                char cleanup_error[1024];
+                if (BeebeebRemoveDomain(cleanup_error, sizeof(cleanup_error)) != 0) {
+                    NSString *combined = [NSString stringWithFormat:@"%s; cleanup failed: %s",
+                                                                    setup_error,
+                                                                    cleanup_error];
+                    BeebeebCopyMessage(combined, error_buffer, error_buffer_len);
+                }
+            }
             return -1;
         }
         return 0;

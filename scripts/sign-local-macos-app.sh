@@ -14,6 +14,8 @@ APP_ENTITLEMENTS="src-tauri/entitlements.plist"
 EXTENSION_ENTITLEMENTS="BeebeebFileProvider/BeebeebFileProvider.entitlements"
 APPEX="$APP_PATH/Contents/PlugIns/BeebeebFileProvider.appex"
 HELPER="$APP_PATH/Contents/MacOS/BeebeebFileProviderCtl"
+APP_PROVISION_PROFILE="${MACOS_APP_PROVISION_PROFILE:-}"
+EXTENSION_PROVISION_PROFILE="${MACOS_FILE_PROVIDER_PROVISION_PROFILE:-}"
 
 [[ -d "$APP_PATH" ]] || {
   printf 'app bundle not found: %s\n' "$APP_PATH" >&2
@@ -27,6 +29,22 @@ HELPER="$APP_PATH/Contents/MacOS/BeebeebFileProviderCtl"
   printf 'File Provider helper missing: %s\n' "$HELPER" >&2
   exit 1
 }
+
+if [[ "$APP_PROVISION_PROFILE" != "" ]]; then
+  [[ -f "$APP_PROVISION_PROFILE" ]] || {
+    printf 'app provisioning profile not found: %s\n' "$APP_PROVISION_PROFILE" >&2
+    exit 1
+  }
+  cp "$APP_PROVISION_PROFILE" "$APP_PATH/Contents/embedded.provisionprofile"
+fi
+
+if [[ "$EXTENSION_PROVISION_PROFILE" != "" ]]; then
+  [[ -f "$EXTENSION_PROVISION_PROFILE" ]] || {
+    printf 'File Provider provisioning profile not found: %s\n' "$EXTENSION_PROVISION_PROFILE" >&2
+    exit 1
+  }
+  cp "$EXTENSION_PROVISION_PROFILE" "$APPEX/Contents/embedded.provisionprofile"
+fi
 
 codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none --entitlements "$EXTENSION_ENTITLEMENTS" "$APPEX"
 codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$HELPER"

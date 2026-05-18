@@ -21,6 +21,45 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+verify_provision_profile() {
+  local bundle_path="$1"
+  local bundle_id="$2"
+  local app_group="$3"
+  local profile="$bundle_path/Contents/embedded.provisionprofile"
+
+  [[ -f "$profile" ]] || fail "missing provisioning profile: $profile"
+  security cms -D -i "$profile" >/tmp/beebeeb-profile.plist 2>/dev/null ||
+    fail "could not decode provisioning profile: $profile"
+  python3 - "$profile" "$bundle_id" "$app_group" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+profile_path, bundle_id, app_group = sys.argv[1:]
+profile = plistlib.loads(Path("/tmp/beebeeb-profile.plist").read_bytes())
+entitlements = profile.get("Entitlements", {})
+application_id = (
+    entitlements.get("application-identifier")
+    or entitlements.get("com.apple.application-identifier")
+    or ""
+)
+groups = entitlements.get("com.apple.security.application-groups") or []
+platforms = profile.get("Platform") or []
+
+if not application_id.endswith("." + bundle_id):
+    raise SystemExit(
+        f"{profile_path}: application-identifier {application_id!r} does not match {bundle_id!r}"
+    )
+if app_group not in groups:
+    raise SystemExit(f"{profile_path}: missing app group {app_group!r}")
+if not any(platform in ("OSX", "macOS") for platform in platforms):
+    raise SystemExit(f"{profile_path}: profile is not a macOS profile: {platforms!r}")
+
+print(f"{profile_path} ok")
+PY
+  rm -f /tmp/beebeeb-profile.plist
+}
+
 note "validating macOS plist files"
 require_cmd plutil
 plutil -lint src-tauri/entitlements.plist
@@ -68,6 +107,8 @@ if [[ "${1:-}" != "" ]]; then
       helper="$artifact/Contents/MacOS/BeebeebFileProviderCtl"
       [[ -d "$appex" ]] || fail "File Provider extension missing from app bundle: $appex"
       [[ -x "$helper" ]] || fail "File Provider helper missing from app bundle: $helper"
+      verify_provision_profile "$artifact" "io.beebeeb.desktop" "R8352WDJJR.io.beebeeb.desktop.fileprovider"
+      verify_provision_profile "$appex" "io.beebeeb.desktop.FileProvider" "R8352WDJJR.io.beebeeb.desktop.fileprovider"
       codesign --verify --strict --verbose=2 "$appex"
       codesign --verify --strict --verbose=2 "$helper"
       codesign -dvvv --entitlements :- "$appex"
