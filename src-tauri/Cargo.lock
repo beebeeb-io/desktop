@@ -355,6 +355,7 @@ dependencies = [
  "opaque-ke",
  "rand 0.8.6",
  "reed-solomon-erasure",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

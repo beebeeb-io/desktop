@@ -657,7 +657,7 @@ fn finder_location_state() -> Result<FinderInstallState, String> {
         .ok()
         .and_then(|c| c.sync_root)
         .map(|p| p.to_string_lossy().into_owned());
-    let installed = file_provider_installed().unwrap_or(false);
+    let installed = file_provider_installed()?;
     Ok(FinderInstallState { installed, path })
 }
 
