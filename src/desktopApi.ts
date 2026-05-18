@@ -91,6 +91,17 @@ export interface FinderInstallState {
   reason_category?: string | null
 }
 
+export interface MacosIntegrationResetResult {
+  removed_file_provider_domain: boolean
+  disabled_autostart: boolean
+  removed_socket: boolean
+  removed_cache_files: number
+  skipped_cache_files: number
+  pending_operations_preserved: number
+  sync_root_preserved?: string | null
+  warnings: string[]
+}
+
 export const DEFAULT_CONFIG: DesktopConfig = {
   upload_kbps_limit: 0,
   download_kbps_limit: 0,

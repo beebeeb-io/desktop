@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { command, commandUnavailableLabel, type FinderInstallState, type SyncStatus } from '../desktopApi'
+import {
+  command,
+  commandUnavailableLabel,
+  type FinderInstallState,
+  type MacosIntegrationResetResult,
+  type SyncStatus,
+} from '../desktopApi'
 
 export default function SyncFolder() {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
@@ -47,6 +53,35 @@ export default function SyncFolder() {
     if (!result.ok) {
       setNotice(result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason)
     }
+  }
+
+  const resetFinderIntegration = async () => {
+    const confirmed = window.confirm(
+      'Reset Finder integration?\n\nBeebeeb will unregister the Finder location, turn off Start at login, remove the stale local socket, and preserve queued uploads and local sync state.'
+    )
+    if (!confirmed) return
+
+    setBusy(true)
+    setNotice(null)
+    const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
+    setBusy(false)
+    if (!result.ok) {
+      setNotice(result.unsupported ? commandUnavailableLabel('reset_macos_integration') : result.reason)
+      return
+    }
+
+    const finderState = await command<FinderInstallState>('finder_location_state')
+    if (finderState.ok) setInstallState(finderState.value)
+    const preserved = result.value.pending_operations_preserved
+    const details = [
+      'Finder integration was reset.',
+      preserved > 0 ? `${preserved} queued operation${preserved === 1 ? '' : 's'} preserved.` : null,
+      result.value.removed_cache_files > 0 ? `${result.value.removed_cache_files} disposable cache file${result.value.removed_cache_files === 1 ? '' : 's'} removed.` : null,
+      result.value.warnings.length > 0 ? result.value.warnings.join(' ') : null,
+    ]
+      .filter(Boolean)
+      .join(' ')
+    setNotice(details)
   }
 
   const installed = installState?.installed ?? false
@@ -123,6 +158,22 @@ export default function SyncFolder() {
               <div className="row-detail">Items needing version review.</div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 14 }}>
+        <h2 className="section-title">Finder repair</h2>
+        <div className="row">
+          <div>
+            <div className="row-title">Reset Finder integration</div>
+            <div className="row-detail">
+              Unregisters the Finder location, turns off Start at login, clears the local socket,
+              and keeps queued uploads.
+            </div>
+          </div>
+          <button className="button" disabled={busy} onClick={() => void resetFinderIntegration()}>
+            Reset Finder integration…
+          </button>
         </div>
       </div>
     </section>

@@ -264,11 +264,7 @@ fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
 ///
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
-async fn desktop_login(
-    state: State<'_, AppState>,
-    email: String,
-    password: String,
-) -> Result<(), String> {
+async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<(), String> {
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -585,7 +581,8 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     }
 
     let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let session = load_session_from_keychain(email)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let session =
+        load_session_from_keychain(email)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let token = session.token.clone();
     let master_key = session.master_key;
     {
@@ -634,6 +631,18 @@ struct FinderInstallState {
     last_error: Option<String>,
     last_attempt_at: Option<i64>,
     reason_category: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MacosIntegrationResetResult {
+    removed_file_provider_domain: bool,
+    disabled_autostart: bool,
+    removed_socket: bool,
+    removed_cache_files: usize,
+    skipped_cache_files: usize,
+    pending_operations_preserved: i64,
+    sync_root_preserved: Option<String>,
+    warnings: Vec<String>,
 }
 
 fn now_unix_seconds() -> i64 {
@@ -715,6 +724,58 @@ fn persist_finder_install_result(
         cfg.finder_install_reason_category = None;
     }
     cfg.save()
+}
+
+fn state_db_for_config(cfg: &DesktopConfig) -> Result<Option<state_db::StateDb>, String> {
+    let Some(sync_root) = &cfg.sync_root else {
+        return Ok(None);
+    };
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    state_db::StateDb::open(&db_path)
+        .map(Some)
+        .map_err(|e| format!("open state.db: {e}"))
+}
+
+fn disposable_cache_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    if let Some(cache_dir) = dirs::cache_dir() {
+        roots.push(cache_dir);
+    }
+    roots
+}
+
+fn is_disposable_cache_path(path: &std::path::Path) -> bool {
+    let canonical_path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            let Some(parent) = path.parent() else {
+                return false;
+            };
+            let Ok(parent) = parent.canonicalize() else {
+                return false;
+            };
+            match path.file_name() {
+                Some(name) => parent.join(name),
+                None => parent,
+            }
+        }
+    };
+    disposable_cache_roots()
+        .into_iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical_path.starts_with(root))
+}
+
+fn remove_stale_ipc_socket() -> Result<bool, String> {
+    let path = ipc_socket::ipc_socket_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("remove IPC socket {}: {error}", path.display())),
+    }
 }
 
 async fn persist_sync_root_and_start_engine(
@@ -812,7 +873,9 @@ async fn wait_for_file_provider_ipc_ready() -> Result<(), String> {
         }
 
         if Instant::now() >= deadline {
-            return Err("Timed out waiting for the local Beebeeb sync daemon before installing Finder location.".to_string());
+            return Err(
+                "Timed out waiting for the local Beebeeb sync daemon before installing Finder location.".to_string(),
+            );
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -858,9 +921,7 @@ fn finder_location_state() -> Result<FinderInstallState, String> {
             }
             Ok(finder_install_state_from_config(&cfg, installed, None))
         }
-        Err(error) => {
-            Ok(finder_install_state_from_config(&cfg, false, Some(error)))
-        }
+        Err(error) => Ok(finder_install_state_from_config(&cfg, false, Some(error))),
     }
 }
 
@@ -881,8 +942,7 @@ async fn install_finder_location(
     config::ensure_directory(&root)?;
 
     let mut cfg = DesktopConfig::load()?;
-    let started_pending_engine =
-        start_engine_for_pending_finder_install(app.clone(), &state, root.clone()).await?;
+    let started_pending_engine = start_engine_for_pending_finder_install(app.clone(), &state, root.clone()).await?;
 
     if let Err(error) = install_file_provider_domain() {
         stop_pending_finder_install_engine(&state, started_pending_engine).await;
@@ -922,6 +982,133 @@ async fn continue_without_finder_location(
     let mut cfg = DesktopConfig::load()?;
     persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await?;
     Ok(finder_install_state_from_config(&cfg, false, None))
+}
+
+#[tauri::command]
+async fn reset_macos_integration(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<MacosIntegrationResetResult, String> {
+    let mut warnings = Vec::new();
+    let mut cfg = DesktopConfig::load()?;
+    let sync_root_preserved = cfg.sync_root.as_ref().map(|path| path.to_string_lossy().into_owned());
+
+    let queue = match state_db_for_config(&cfg) {
+        Ok(Some(db)) => {
+            let now = now_unix_seconds();
+            match db.queue_diagnostics(now) {
+                Ok(queue) => Some((db, queue)),
+                Err(error) => {
+                    warnings.push(format!("Could not read sync queue diagnostics: {error}"));
+                    None
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(error) => {
+            warnings.push(error);
+            None
+        }
+    };
+
+    let pending_operations_preserved = queue.as_ref().map(|(_, queue)| queue.queued).unwrap_or(0);
+
+    let mut removed_cache_files = 0usize;
+    let mut skipped_cache_files = 0usize;
+    if let Some((db, queue)) = &queue {
+        if queue.queued > 0 {
+            warnings.push(format!(
+                "Preserved {count} queued operation(s); disposable cache cleanup was skipped.",
+                count = queue.queued
+            ));
+        } else {
+            let mut cleared_paths = Vec::new();
+            match db.disposable_unpinned_cache_paths() {
+                Ok(paths) => {
+                    for path in paths {
+                        let path_buf = PathBuf::from(&path);
+                        if !is_disposable_cache_path(&path_buf) {
+                            skipped_cache_files += 1;
+                            continue;
+                        }
+                        match std::fs::remove_file(&path_buf) {
+                            Ok(()) => {
+                                removed_cache_files += 1;
+                                cleared_paths.push(path);
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                cleared_paths.push(path);
+                            }
+                            Err(error) => {
+                                skipped_cache_files += 1;
+                                warnings.push(format!("Could not remove cache file {}: {error}", path_buf.display()));
+                            }
+                        }
+                    }
+                }
+                Err(error) => warnings.push(format!("Could not list disposable cache files: {error}")),
+            }
+            if !cleared_paths.is_empty()
+                && let Err(error) = db.clear_cache_metadata_for_paths(&cleared_paths, now_unix_seconds())
+            {
+                warnings.push(format!("Could not update cache metadata after cleanup: {error}"));
+            }
+        }
+    }
+
+    let mut engine_slot = state.engine.lock().await;
+    if let Some(prev) = engine_slot.take() {
+        prev.abort().await;
+        tracing::info!("engine aborted for macOS integration reset");
+    }
+    drop(engine_slot);
+    if let Ok(mut guard) = state.engine_state.lock() {
+        *guard = "stopped".to_string();
+    }
+
+    let removed_socket = match remove_stale_ipc_socket() {
+        Ok(removed) => removed,
+        Err(error) => {
+            warnings.push(error);
+            false
+        }
+    };
+
+    let removed_file_provider_domain = match remove_file_provider_domain() {
+        Ok(()) => true,
+        Err(error) => {
+            warnings.push(format!("Could not remove Finder File Provider domain: {error}"));
+            false
+        }
+    };
+
+    let disabled_autostart = match app.autolaunch().is_enabled() {
+        Ok(true) => match app.autolaunch().disable() {
+            Ok(()) => true,
+            Err(error) => {
+                warnings.push(format!("Could not disable Start at login: {error}"));
+                false
+            }
+        },
+        Ok(false) => false,
+        Err(error) => {
+            warnings.push(format!("Could not read Start at login state: {error}"));
+            false
+        }
+    };
+
+    persist_finder_install_result(&mut cfg, false, None)?;
+
+    Ok(MacosIntegrationResetResult {
+        removed_file_provider_domain,
+        disabled_autostart,
+        removed_socket,
+        removed_cache_files,
+        skipped_cache_files,
+        pending_operations_preserved,
+        sync_root_preserved,
+        warnings,
+    })
 }
 
 #[tauri::command]
@@ -1084,10 +1271,7 @@ struct DesktopStorageSummary {
 #[tauri::command]
 async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopStorageSummary, String> {
     let token = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         guard
             .as_ref()
             .map(|session| session.token.clone())
@@ -1895,6 +2079,7 @@ pub fn run() {
             finder_location_state,
             install_finder_location,
             continue_without_finder_location,
+            reset_macos_integration,
             open_finder_location,
             // Task 9 — settings page IPC
             get_desktop_config,
@@ -2276,7 +2461,8 @@ fn show_settings_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_finder_install_error, finder_install_state_from_config, normalize_recovery_phrase_input,
+        classify_finder_install_error, finder_install_state_from_config, is_disposable_cache_path,
+        normalize_recovery_phrase_input,
     };
     use crate::config::DesktopConfig;
 
@@ -2331,5 +2517,16 @@ mod tests {
         assert_eq!(state.last_error.as_deref(), Some("Timed out waiting for setup"));
         assert_eq!(state.last_attempt_at, Some(42));
         assert_eq!(state.reason_category.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn disposable_cache_path_check_accepts_temp_files_only() {
+        let temp_file = std::env::temp_dir().join("beebeeb-disposable-cache-test");
+        std::fs::write(&temp_file, b"cache").unwrap();
+        assert!(is_disposable_cache_path(&temp_file));
+        let _ = std::fs::remove_file(&temp_file);
+
+        let config_path = DesktopConfig::path().unwrap();
+        assert!(!is_disposable_cache_path(&config_path));
     }
 }

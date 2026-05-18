@@ -9,7 +9,7 @@
       "source_file": "vite.config.ts",
       "source_location": "L1",
       "id": "vite_config_ts",
-      "community": 62,
+      "community": 63,
       "norm_label": "vite.config.ts"
     },
     {
@@ -108,7 +108,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_mobile_extra_jsx",
-      "community": 41,
+      "community": 42,
       "norm_label": "hifi-mobile-extra.jsx"
     },
     {
@@ -117,7 +117,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_mobile_extra_mobileshell",
-      "community": 41,
+      "community": 42,
       "norm_label": "mobileshell()"
     },
     {
@@ -126,7 +126,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L33",
       "id": "hifi_hifi_mobile_extra_moboffline",
-      "community": 41,
+      "community": 42,
       "norm_label": "moboffline()"
     },
     {
@@ -135,7 +135,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L80",
       "id": "hifi_hifi_mobile_extra_mobupgrade",
-      "community": 41,
+      "community": 42,
       "norm_label": "mobupgrade()"
     },
     {
@@ -144,7 +144,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L119",
       "id": "hifi_hifi_mobile_extra_mobshareext",
-      "community": 41,
+      "community": 42,
       "norm_label": "mobshareext()"
     },
     {
@@ -153,7 +153,7 @@
       "source_file": "design/hifi/hifi-mobile-extra.jsx",
       "source_location": "L160",
       "id": "hifi_hifi_mobile_extra_mobpush",
-      "community": 41,
+      "community": 42,
       "norm_label": "mobpush()"
     },
     {
@@ -162,7 +162,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L1",
       "id": "design_hifi_browser_window_jsx",
-      "community": 42,
+      "community": 43,
       "norm_label": "browser-window.jsx"
     },
     {
@@ -171,7 +171,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L13",
       "id": "hifi_browser_window_chrometrafficlights",
-      "community": 42,
+      "community": 43,
       "norm_label": "chrometrafficlights()"
     },
     {
@@ -180,7 +180,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L24",
       "id": "hifi_browser_window_chrometab",
-      "community": 42,
+      "community": 43,
       "norm_label": "chrometab()"
     },
     {
@@ -189,7 +189,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L48",
       "id": "hifi_browser_window_chrometabbar",
-      "community": 42,
+      "community": 43,
       "norm_label": "chrometabbar()"
     },
     {
@@ -198,7 +198,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L62",
       "id": "hifi_browser_window_chrometoolbar",
-      "community": 42,
+      "community": 43,
       "norm_label": "chrometoolbar()"
     },
     {
@@ -207,7 +207,7 @@
       "source_file": "design/hifi/browser-window.jsx",
       "source_location": "L93",
       "id": "hifi_browser_window_chromewindow",
-      "community": 42,
+      "community": 43,
       "norm_label": "chromewindow()"
     },
     {
@@ -216,7 +216,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_brand_system_jsx",
-      "community": 48,
+      "community": 49,
       "norm_label": "hifi-brand-system.jsx"
     },
     {
@@ -225,7 +225,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_brand_system_swatchrow",
-      "community": 48,
+      "community": 49,
       "norm_label": "swatchrow()"
     },
     {
@@ -234,7 +234,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L25",
       "id": "hifi_hifi_brand_system_dssection",
-      "community": 48,
+      "community": 49,
       "norm_label": "dssection()"
     },
     {
@@ -243,7 +243,7 @@
       "source_file": "design/hifi/hifi-brand-system.jsx",
       "source_location": "L37",
       "id": "hifi_hifi_brand_system_hibrandsystem",
-      "community": 48,
+      "community": 49,
       "norm_label": "hibrandsystem()"
     },
     {
@@ -252,7 +252,7 @@
       "source_file": "design/hifi/hifi-team-photos.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_team_photos_jsx",
-      "community": 55,
+      "community": 56,
       "norm_label": "hifi-team-photos.jsx"
     },
     {
@@ -261,7 +261,7 @@
       "source_file": "design/hifi/hifi-team-photos.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_team_photos_hiteam",
-      "community": 55,
+      "community": 56,
       "norm_label": "hiteam()"
     },
     {
@@ -270,7 +270,7 @@
       "source_file": "design/hifi/hifi-team-photos.jsx",
       "source_location": "L90",
       "id": "hifi_hifi_team_photos_hiphotos",
-      "community": 55,
+      "community": 56,
       "norm_label": "hiphotos()"
     },
     {
@@ -279,7 +279,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_billing_jsx",
-      "community": 31,
+      "community": 32,
       "norm_label": "hifi-billing.jsx"
     },
     {
@@ -288,7 +288,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_billing_plancard",
-      "community": 31,
+      "community": 32,
       "norm_label": "plancard()"
     },
     {
@@ -297,7 +297,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L69",
       "id": "hifi_hifi_billing_hipricing",
-      "community": 31,
+      "community": 32,
       "norm_label": "hipricing()"
     },
     {
@@ -306,7 +306,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L198",
       "id": "hifi_hifi_billing_hiupgradeflow",
-      "community": 31,
+      "community": 32,
       "norm_label": "hiupgradeflow()"
     },
     {
@@ -315,7 +315,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L301",
       "id": "hifi_hifi_billing_hibilling",
-      "community": 31,
+      "community": 32,
       "norm_label": "hibilling()"
     },
     {
@@ -324,7 +324,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L447",
       "id": "hifi_hifi_billing_hiinvoice",
-      "community": 31,
+      "community": 32,
       "norm_label": "hiinvoice()"
     },
     {
@@ -333,7 +333,7 @@
       "source_file": "design/hifi/hifi-billing.jsx",
       "source_location": "L556",
       "id": "hifi_hifi_billing_totalrow",
-      "community": 31,
+      "community": 32,
       "norm_label": "totalrow()"
     },
     {
@@ -342,7 +342,7 @@
       "source_file": "design/hifi/hifi-compliance.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_compliance_jsx",
-      "community": 56,
+      "community": 57,
       "norm_label": "hifi-compliance.jsx"
     },
     {
@@ -351,7 +351,7 @@
       "source_file": "design/hifi/hifi-compliance.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_compliance_compliancetile",
-      "community": 56,
+      "community": 57,
       "norm_label": "compliancetile()"
     },
     {
@@ -360,7 +360,7 @@
       "source_file": "design/hifi/hifi-compliance.jsx",
       "source_location": "L38",
       "id": "hifi_hifi_compliance_hicompliance",
-      "community": 56,
+      "community": 57,
       "norm_label": "hicompliance()"
     },
     {
@@ -513,7 +513,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_mobile_sync_jsx",
-      "community": 32,
+      "community": 33,
       "norm_label": "hifi-mobile-sync.jsx"
     },
     {
@@ -522,7 +522,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_mobile_sync_phoneshell",
-      "community": 32,
+      "community": 33,
       "norm_label": "phoneshell()"
     },
     {
@@ -531,7 +531,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L42",
       "id": "hifi_hifi_mobile_sync_hiios",
-      "community": 32,
+      "community": 33,
       "norm_label": "hiios()"
     },
     {
@@ -540,7 +540,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L103",
       "id": "hifi_hifi_mobile_sync_hiandroid",
-      "community": 32,
+      "community": 33,
       "norm_label": "hiandroid()"
     },
     {
@@ -549,7 +549,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L175",
       "id": "hifi_hifi_mobile_sync_syncpopover",
-      "community": 32,
+      "community": 33,
       "norm_label": "syncpopover()"
     },
     {
@@ -558,7 +558,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L262",
       "id": "hifi_hifi_mobile_sync_hisyncactive",
-      "community": 32,
+      "community": 33,
       "norm_label": "hisyncactive()"
     },
     {
@@ -567,7 +567,7 @@
       "source_file": "design/hifi/hifi-mobile-sync.jsx",
       "source_location": "L284",
       "id": "hifi_hifi_mobile_sync_hisyncidle",
-      "community": 32,
+      "community": 33,
       "norm_label": "hisyncidle()"
     },
     {
@@ -666,7 +666,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L1",
       "id": "design_hifi_android_frame_jsx",
-      "community": 33,
+      "community": 34,
       "norm_label": "android-frame.jsx"
     },
     {
@@ -675,7 +675,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L22",
       "id": "hifi_android_frame_androidstatusbar",
-      "community": 33,
+      "community": 34,
       "norm_label": "androidstatusbar()"
     },
     {
@@ -684,7 +684,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L62",
       "id": "hifi_android_frame_androidappbar",
-      "community": 33,
+      "community": 34,
       "norm_label": "androidappbar()"
     },
     {
@@ -693,7 +693,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L97",
       "id": "hifi_android_frame_androidlistitem",
-      "community": 33,
+      "community": 34,
       "norm_label": "androidlistitem()"
     },
     {
@@ -702,7 +702,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L125",
       "id": "hifi_android_frame_androidnavbar",
-      "community": 33,
+      "community": 34,
       "norm_label": "androidnavbar()"
     },
     {
@@ -711,7 +711,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L141",
       "id": "hifi_android_frame_androiddevice",
-      "community": 33,
+      "community": 34,
       "norm_label": "androiddevice()"
     },
     {
@@ -720,7 +720,7 @@
       "source_file": "design/hifi/android-frame.jsx",
       "source_location": "L167",
       "id": "hifi_android_frame_androidkeyboard",
-      "community": 33,
+      "community": 34,
       "norm_label": "androidkeyboard()"
     },
     {
@@ -729,7 +729,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_invite_jsx",
-      "community": 34,
+      "community": 35,
       "norm_label": "hifi-web-invite.jsx"
     },
     {
@@ -738,7 +738,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_web_invite_hiacceptinvite",
-      "community": 34,
+      "community": 35,
       "norm_label": "hiacceptinvite()"
     },
     {
@@ -747,7 +747,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L46",
       "id": "hifi_hifi_web_invite_hiwelcometour",
-      "community": 34,
+      "community": 35,
       "norm_label": "hiwelcometour()"
     },
     {
@@ -756,7 +756,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L81",
       "id": "hifi_hifi_web_invite_hiinstalldesktop",
-      "community": 34,
+      "community": 35,
       "norm_label": "hiinstalldesktop()"
     },
     {
@@ -765,7 +765,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L114",
       "id": "hifi_hifi_web_invite_hicommandpalette",
-      "community": 34,
+      "community": 35,
       "norm_label": "hicommandpalette()"
     },
     {
@@ -774,7 +774,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L164",
       "id": "hifi_hifi_web_invite_hisearchfull",
-      "community": 34,
+      "community": 35,
       "norm_label": "hisearchfull()"
     },
     {
@@ -783,7 +783,7 @@
       "source_file": "design/hifi/hifi-web-invite.jsx",
       "source_location": "L225",
       "id": "hifi_hifi_web_invite_hishortcuts",
-      "community": 34,
+      "community": 35,
       "norm_label": "hishortcuts()"
     },
     {
@@ -792,7 +792,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_drive_jsx",
-      "community": 49,
+      "community": 50,
       "norm_label": "hifi-drive.jsx"
     },
     {
@@ -801,7 +801,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L14",
       "id": "hifi_hifi_drive_fileiconhi",
-      "community": 49,
+      "community": 50,
       "norm_label": "fileiconhi()"
     },
     {
@@ -810,7 +810,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L37",
       "id": "hifi_hifi_drive_avatarstack",
-      "community": 49,
+      "community": 50,
       "norm_label": "avatarstack()"
     },
     {
@@ -819,7 +819,7 @@
       "source_file": "design/hifi/hifi-drive.jsx",
       "source_location": "L53",
       "id": "hifi_hifi_drive_hidrive",
-      "community": 49,
+      "community": 50,
       "norm_label": "hidrive()"
     },
     {
@@ -999,7 +999,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_drive_jsx",
-      "community": 44,
+      "community": 45,
       "norm_label": "flows-drive.jsx"
     },
     {
@@ -1008,7 +1008,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L14",
       "id": "hifi_flows_drive_fileicon",
-      "community": 44,
+      "community": 45,
       "norm_label": "fileicon()"
     },
     {
@@ -1017,7 +1017,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L22",
       "id": "hifi_flows_drive_drivea",
-      "community": 44,
+      "community": 45,
       "norm_label": "drivea()"
     },
     {
@@ -1026,7 +1026,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L83",
       "id": "hifi_flows_drive_driveb",
-      "community": 44,
+      "community": 45,
       "norm_label": "driveb()"
     },
     {
@@ -1035,7 +1035,7 @@
       "source_file": "design/hifi/flows-drive.jsx",
       "source_location": "L125",
       "id": "hifi_flows_drive_drivec",
-      "community": 44,
+      "community": 45,
       "norm_label": "drivec()"
     },
     {
@@ -1044,7 +1044,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_extra_jsx",
-      "community": 50,
+      "community": 51,
       "norm_label": "hifi-web-extra.jsx"
     },
     {
@@ -1053,7 +1053,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_web_extra_webframe",
-      "community": 50,
+      "community": 51,
       "norm_label": "webframe()"
     },
     {
@@ -1062,7 +1062,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L36",
       "id": "hifi_hifi_web_extra_hirecipientshare",
-      "community": 50,
+      "community": 51,
       "norm_label": "hirecipientshare()"
     },
     {
@@ -1071,7 +1071,7 @@
       "source_file": "design/hifi/hifi-web-extra.jsx",
       "source_location": "L171",
       "id": "hifi_hifi_web_extra_hirecipientpassword",
-      "community": 50,
+      "community": 51,
       "norm_label": "hirecipientpassword()"
     },
     {
@@ -1080,7 +1080,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_tweaks_jsx",
-      "community": 35,
+      "community": 36,
       "norm_label": "hifi-tweaks.jsx"
     },
     {
@@ -1089,7 +1089,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L76",
       "id": "hifi_hifi_tweaks_tweakprovider",
-      "community": 35,
+      "community": 36,
       "norm_label": "tweakprovider()"
     },
     {
@@ -1098,7 +1098,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L133",
       "id": "hifi_hifi_tweaks_tweakpanel",
-      "community": 35,
+      "community": 36,
       "norm_label": "tweakpanel()"
     },
     {
@@ -1107,7 +1107,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L208",
       "id": "hifi_hifi_tweaks_tweakgroup",
-      "community": 35,
+      "community": 36,
       "norm_label": "tweakgroup()"
     },
     {
@@ -1116,7 +1116,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L217",
       "id": "hifi_hifi_tweaks_segments",
-      "community": 35,
+      "community": 36,
       "norm_label": "segments()"
     },
     {
@@ -1125,7 +1125,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L240",
       "id": "hifi_hifi_tweaks_personabadge",
-      "community": 35,
+      "community": 36,
       "norm_label": "personabadge()"
     },
     {
@@ -1134,7 +1134,7 @@
       "source_file": "design/hifi/hifi-tweaks.jsx",
       "source_location": "L262",
       "id": "hifi_hifi_tweaks_hipersonaoverview",
-      "community": 35,
+      "community": 36,
       "norm_label": "hipersonaoverview()"
     },
     {
@@ -1215,7 +1215,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_team_photos_jsx",
-      "community": 36,
+      "community": 37,
       "norm_label": "flows-team-photos.jsx"
     },
     {
@@ -1224,7 +1224,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L4",
       "id": "hifi_flows_team_photos_teama",
-      "community": 36,
+      "community": 37,
       "norm_label": "teama()"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L45",
       "id": "hifi_flows_team_photos_teamb",
-      "community": 36,
+      "community": 37,
       "norm_label": "teamb()"
     },
     {
@@ -1242,7 +1242,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L88",
       "id": "hifi_flows_team_photos_teamc",
-      "community": 36,
+      "community": 37,
       "norm_label": "teamc()"
     },
     {
@@ -1251,7 +1251,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L127",
       "id": "hifi_flows_team_photos_photosa",
-      "community": 36,
+      "community": 37,
       "norm_label": "photosa()"
     },
     {
@@ -1260,7 +1260,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L155",
       "id": "hifi_flows_team_photos_photosb",
-      "community": 36,
+      "community": 37,
       "norm_label": "photosb()"
     },
     {
@@ -1269,7 +1269,7 @@
       "source_file": "design/hifi/flows-team-photos.jsx",
       "source_location": "L183",
       "id": "hifi_flows_team_photos_photosc",
-      "community": 36,
+      "community": 37,
       "norm_label": "photosc()"
     },
     {
@@ -1278,7 +1278,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_empty_errors_jsx",
-      "community": 37,
+      "community": 38,
       "norm_label": "hifi-empty-errors.jsx"
     },
     {
@@ -1287,7 +1287,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_empty_errors_hiemptydrive",
-      "community": 37,
+      "community": 38,
       "norm_label": "hiemptydrive()"
     },
     {
@@ -1296,7 +1296,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L67",
       "id": "hifi_hifi_empty_errors_hiemptysearch",
-      "community": 37,
+      "community": 38,
       "norm_label": "hiemptysearch()"
     },
     {
@@ -1305,7 +1305,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L100",
       "id": "hifi_hifi_empty_errors_hiuploaderror",
-      "community": 37,
+      "community": 38,
       "norm_label": "hiuploaderror()"
     },
     {
@@ -1314,7 +1314,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L170",
       "id": "hifi_hifi_empty_errors_hilinkexpired",
-      "community": 37,
+      "community": 38,
       "norm_label": "hilinkexpired()"
     },
     {
@@ -1323,7 +1323,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L222",
       "id": "hifi_hifi_empty_errors_hiforgotphrase",
-      "community": 37,
+      "community": 38,
       "norm_label": "hiforgotphrase()"
     },
     {
@@ -1332,7 +1332,7 @@
       "source_file": "design/hifi/hifi-empty-errors.jsx",
       "source_location": "L320",
       "id": "hifi_hifi_empty_errors_hiofflinestate",
-      "community": 37,
+      "community": 38,
       "norm_label": "hiofflinestate()"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "design/hifi/hifi-web-details.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_details_jsx",
-      "community": 57,
+      "community": 58,
       "norm_label": "hifi-web-details.jsx"
     },
     {
@@ -1458,7 +1458,7 @@
       "source_file": "design/hifi/hifi-web-details.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_web_details_hifiledetails",
-      "community": 57,
+      "community": 58,
       "norm_label": "hifiledetails()"
     },
     {
@@ -1467,7 +1467,7 @@
       "source_file": "design/hifi/hifi-web-details.jsx",
       "source_location": "L164",
       "id": "hifi_hifi_web_details_hicontextmenu",
-      "community": 57,
+      "community": 58,
       "norm_label": "hicontextmenu()"
     },
     {
@@ -1476,7 +1476,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_onboarding_jsx",
-      "community": 51,
+      "community": 52,
       "norm_label": "flows-onboarding.jsx"
     },
     {
@@ -1485,7 +1485,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L11",
       "id": "hifi_flows_onboarding_onboardinga",
-      "community": 51,
+      "community": 52,
       "norm_label": "onboardinga()"
     },
     {
@@ -1494,7 +1494,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L66",
       "id": "hifi_flows_onboarding_onboardingb",
-      "community": 51,
+      "community": 52,
       "norm_label": "onboardingb()"
     },
     {
@@ -1503,7 +1503,7 @@
       "source_file": "design/hifi/flows-onboarding.jsx",
       "source_location": "L123",
       "id": "hifi_flows_onboarding_onboardingc",
-      "community": 51,
+      "community": 52,
       "norm_label": "onboardingc()"
     },
     {
@@ -1584,7 +1584,7 @@
       "source_file": "design/hifi/hifi-upload-share.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_upload_share_jsx",
-      "community": 58,
+      "community": 59,
       "norm_label": "hifi-upload-share.jsx"
     },
     {
@@ -1593,7 +1593,7 @@
       "source_file": "design/hifi/hifi-upload-share.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_upload_share_hiupload",
-      "community": 58,
+      "community": 59,
       "norm_label": "hiupload()"
     },
     {
@@ -1602,7 +1602,7 @@
       "source_file": "design/hifi/hifi-upload-share.jsx",
       "source_location": "L101",
       "id": "hifi_hifi_upload_share_hishare",
-      "community": 58,
+      "community": 59,
       "norm_label": "hishare()"
     },
     {
@@ -1611,7 +1611,7 @@
       "source_file": "design/hifi/hifi-onboarding.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_onboarding_jsx",
-      "community": 60,
+      "community": 61,
       "norm_label": "hifi-onboarding.jsx"
     },
     {
@@ -1620,7 +1620,7 @@
       "source_file": "design/hifi/hifi-onboarding.jsx",
       "source_location": "L9",
       "id": "hifi_hifi_onboarding_hionboarding",
-      "community": 60,
+      "community": 61,
       "norm_label": "hionboarding()"
     },
     {
@@ -1989,7 +1989,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_security_jsx",
-      "community": 52,
+      "community": 53,
       "norm_label": "hifi-security.jsx"
     },
     {
@@ -1998,7 +1998,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_security_securitynavitem",
-      "community": 52,
+      "community": 53,
       "norm_label": "securitynavitem()"
     },
     {
@@ -2007,7 +2007,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L13",
       "id": "hifi_hifi_security_securityscorering",
-      "community": 52,
+      "community": 53,
       "norm_label": "securityscorering()"
     },
     {
@@ -2016,7 +2016,7 @@
       "source_file": "design/hifi/hifi-security.jsx",
       "source_location": "L37",
       "id": "hifi_hifi_security_hisecurity",
-      "community": 52,
+      "community": 53,
       "norm_label": "hisecurity()"
     },
     {
@@ -2025,7 +2025,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_preview_jsx",
-      "community": 38,
+      "community": 39,
       "norm_label": "hifi-preview.jsx"
     },
     {
@@ -2034,7 +2034,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L3",
       "id": "hifi_hifi_preview_previewchrome",
-      "community": 38,
+      "community": 39,
       "norm_label": "previewchrome()"
     },
     {
@@ -2043,7 +2043,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L81",
       "id": "hifi_hifi_preview_inforail",
-      "community": 38,
+      "community": 39,
       "norm_label": "inforail()"
     },
     {
@@ -2052,7 +2052,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L113",
       "id": "hifi_hifi_preview_hipreviewimage",
-      "community": 38,
+      "community": 39,
       "norm_label": "hipreviewimage()"
     },
     {
@@ -2061,7 +2061,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L181",
       "id": "hifi_hifi_preview_hipreviewpdf",
-      "community": 38,
+      "community": 39,
       "norm_label": "hipreviewpdf()"
     },
     {
@@ -2070,7 +2070,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L253",
       "id": "hifi_hifi_preview_hipreviewvideo",
-      "community": 38,
+      "community": 39,
       "norm_label": "hipreviewvideo()"
     },
     {
@@ -2079,7 +2079,7 @@
       "source_file": "design/hifi/hifi-preview.jsx",
       "source_location": "L327",
       "id": "hifi_hifi_preview_hipreviewdoc",
-      "community": 38,
+      "community": 39,
       "norm_label": "hipreviewdoc()"
     },
     {
@@ -2241,7 +2241,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_web_admin_jsx",
-      "community": 53,
+      "community": 54,
       "norm_label": "hifi-web-admin.jsx"
     },
     {
@@ -2250,7 +2250,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_web_admin_hinotifications",
-      "community": 53,
+      "community": 54,
       "norm_label": "hinotifications()"
     },
     {
@@ -2259,7 +2259,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L108",
       "id": "hifi_hifi_web_admin_hiteamadmin",
-      "community": 53,
+      "community": 54,
       "norm_label": "hiteamadmin()"
     },
     {
@@ -2268,7 +2268,7 @@
       "source_file": "design/hifi/hifi-web-admin.jsx",
       "source_location": "L259",
       "id": "hifi_hifi_web_admin_himigrationwizard",
-      "community": 53,
+      "community": 54,
       "norm_label": "himigrationwizard()"
     },
     {
@@ -2277,7 +2277,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_actions_jsx",
-      "community": 45,
+      "community": 46,
       "norm_label": "hifi-actions.jsx"
     },
     {
@@ -2286,7 +2286,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_actions_himovemodal",
-      "community": 45,
+      "community": 46,
       "norm_label": "himovemodal()"
     },
     {
@@ -2295,7 +2295,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L91",
       "id": "hifi_hifi_actions_hitrash",
-      "community": 45,
+      "community": 46,
       "norm_label": "hitrash()"
     },
     {
@@ -2304,7 +2304,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L158",
       "id": "hifi_hifi_actions_hiversionhistory",
-      "community": 45,
+      "community": 46,
       "norm_label": "hiversionhistory()"
     },
     {
@@ -2313,7 +2313,7 @@
       "source_file": "design/hifi/hifi-actions.jsx",
       "source_location": "L255",
       "id": "hifi_hifi_actions_hisearchresults",
-      "community": 45,
+      "community": 46,
       "norm_label": "hisearchresults()"
     },
     {
@@ -2538,7 +2538,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L1",
       "id": "design_hifi_flows_mobile_desktop_jsx",
-      "community": 54,
+      "community": 55,
       "norm_label": "flows-mobile-desktop.jsx"
     },
     {
@@ -2547,7 +2547,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L4",
       "id": "hifi_flows_mobile_desktop_iosdrive",
-      "community": 54,
+      "community": 55,
       "norm_label": "iosdrive()"
     },
     {
@@ -2556,7 +2556,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L89",
       "id": "hifi_flows_mobile_desktop_androiddrive",
-      "community": 54,
+      "community": 55,
       "norm_label": "androiddrive()"
     },
     {
@@ -2565,7 +2565,7 @@
       "source_file": "design/hifi/flows-mobile-desktop.jsx",
       "source_location": "L164",
       "id": "hifi_flows_mobile_desktop_synctray",
-      "community": 54,
+      "community": 55,
       "norm_label": "synctray()"
     },
     {
@@ -2574,7 +2574,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L1",
       "id": "beebeebfileprovider_fileproviderextension_swift",
-      "community": 10,
+      "community": 8,
       "norm_label": "fileproviderextension.swift"
     },
     {
@@ -2583,7 +2583,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L5",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension",
-      "community": 10,
+      "community": 8,
       "norm_label": "fileproviderextension"
     },
     {
@@ -2592,7 +2592,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsobject",
-      "community": 10,
+      "community": 8,
       "norm_label": "nsobject"
     },
     {
@@ -2601,7 +2601,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsfileproviderreplicatedextension",
-      "community": 10,
+      "community": 8,
       "norm_label": "nsfileproviderreplicatedextension"
     },
     {
@@ -2610,7 +2610,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L9",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_init",
-      "community": 10,
+      "community": 8,
       "norm_label": ".init()"
     },
     {
@@ -2619,7 +2619,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L14",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_item",
-      "community": 10,
+      "community": 8,
       "norm_label": ".item()"
     },
     {
@@ -2628,7 +2628,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L35",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_enumerator",
-      "community": 10,
+      "community": 8,
       "norm_label": ".enumerator()"
     },
     {
@@ -2637,7 +2637,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L42",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_fetchcontents",
-      "community": 10,
+      "community": 8,
       "norm_label": ".fetchcontents()"
     },
     {
@@ -2646,7 +2646,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L64",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_createitem",
-      "community": 10,
+      "community": 8,
       "norm_label": ".createitem()"
     },
     {
@@ -2655,7 +2655,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L97",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_modifyitem",
-      "community": 10,
+      "community": 8,
       "norm_label": ".modifyitem()"
     },
     {
@@ -2664,7 +2664,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L133",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_deleteitem",
-      "community": 10,
+      "community": 8,
       "norm_label": ".deleteitem()"
     },
     {
@@ -2673,7 +2673,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L154",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_invalidate",
-      "community": 10,
+      "community": 8,
       "norm_label": ".invalidate()"
     },
     {
@@ -2682,7 +2682,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L158",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderextension_versionidentifier",
-      "community": 10,
+      "community": 8,
       "norm_label": ".versionidentifier()"
     },
     {
@@ -2691,7 +2691,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L163",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator",
-      "community": 10,
+      "community": 8,
       "norm_label": "fileproviderenumerator"
     },
     {
@@ -2700,7 +2700,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsfileproviderenumerator",
-      "community": 10,
+      "community": 8,
       "norm_label": "nsfileproviderenumerator"
     },
     {
@@ -2709,7 +2709,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L167",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_init",
-      "community": 10,
+      "community": 8,
       "norm_label": ".init()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L173",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_invalidate",
-      "community": 10,
+      "community": 8,
       "norm_label": ".invalidate()"
     },
     {
@@ -2727,7 +2727,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L175",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_enumerateitems",
-      "community": 10,
+      "community": 8,
       "norm_label": ".enumerateitems()"
     },
     {
@@ -2736,7 +2736,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L199",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_enumeratechanges",
-      "community": 10,
+      "community": 8,
       "norm_label": ".enumeratechanges()"
     },
     {
@@ -2745,7 +2745,7 @@
       "source_file": "BeebeebFileProvider/FileProviderExtension.swift",
       "source_location": "L206",
       "id": "beebeebfileprovider_fileproviderextension_fileproviderenumerator_currentsyncanchor",
-      "community": 10,
+      "community": 8,
       "norm_label": ".currentsyncanchor()"
     },
     {
@@ -3042,7 +3042,7 @@
       "source_file": "BeebeebFileProvider/FileProviderItem.swift",
       "source_location": "L62",
       "id": "beebeebfileprovider_fileprovideritem_fileprovideritem",
-      "community": 10,
+      "community": 8,
       "norm_label": "fileprovideritem"
     },
     {
@@ -3051,7 +3051,7 @@
       "source_file": "",
       "source_location": "",
       "id": "nsfileprovideritem",
-      "community": 10,
+      "community": 8,
       "norm_label": "nsfileprovideritem"
     },
     {
@@ -3060,7 +3060,7 @@
       "source_file": "BeebeebFileProvider/FileProviderItem.swift",
       "source_location": "L65",
       "id": "beebeebfileprovider_fileprovideritem_fileprovideritem_init",
-      "community": 10,
+      "community": 8,
       "norm_label": ".init()"
     },
     {
@@ -3069,7 +3069,7 @@
       "source_file": "BeebeebFileProvider/main.swift",
       "source_location": "L1",
       "id": "beebeebfileprovider_main_swift",
-      "community": 63,
+      "community": 64,
       "norm_label": "main.swift"
     },
     {
@@ -3078,7 +3078,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L1",
       "id": "beebeebfileprovider_domainregistration_swift",
-      "community": 46,
+      "community": 47,
       "norm_label": "domainregistration.swift"
     },
     {
@@ -3087,7 +3087,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L4",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain",
-      "community": 46,
+      "community": 47,
       "norm_label": "beebeebfileproviderdomain"
     },
     {
@@ -3096,7 +3096,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L12",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain_install",
-      "community": 46,
+      "community": 47,
       "norm_label": ".install()"
     },
     {
@@ -3105,7 +3105,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L16",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain_remove",
-      "community": 46,
+      "community": 47,
       "norm_label": ".remove()"
     },
     {
@@ -3114,7 +3114,7 @@
       "source_file": "BeebeebFileProvider/DomainRegistration.swift",
       "source_location": "L20",
       "id": "beebeebfileprovider_domainregistration_beebeebfileproviderdomain_signalrootenumerator",
-      "community": 46,
+      "community": 47,
       "norm_label": ".signalrootenumerator()"
     },
     {
@@ -3123,7 +3123,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L1",
       "id": "src_tauri_build_rs",
-      "community": 8,
+      "community": 9,
       "norm_label": "build.rs"
     },
     {
@@ -3132,7 +3132,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L1",
       "id": "src_tauri_build_main",
-      "community": 8,
+      "community": 9,
       "norm_label": "main()"
     },
     {
@@ -3141,7 +3141,7 @@
       "source_file": "src-tauri/build.rs",
       "source_location": "L9",
       "id": "src_tauri_build_build_macos_file_provider_bridge",
-      "community": 8,
+      "community": 9,
       "norm_label": "build_macos_file_provider_bridge()"
     },
     {
@@ -3159,7 +3159,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L1",
       "id": "src_tauri_tests_keychain_rs",
-      "community": 9,
+      "community": 10,
       "norm_label": "keychain.rs"
     },
     {
@@ -3168,7 +3168,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L8",
       "id": "tests_keychain_memorystore",
-      "community": 9,
+      "community": 10,
       "norm_label": "memorystore"
     },
     {
@@ -3177,7 +3177,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L14",
       "id": "tests_keychain_memorystore_save_session_token",
-      "community": 9,
+      "community": 10,
       "norm_label": ".save_session_token()"
     },
     {
@@ -3186,7 +3186,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L19",
       "id": "tests_keychain_memorystore_load_session_token",
-      "community": 9,
+      "community": 10,
       "norm_label": ".load_session_token()"
     },
     {
@@ -3195,7 +3195,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L23",
       "id": "tests_keychain_memorystore_delete_session_token",
-      "community": 9,
+      "community": 10,
       "norm_label": ".delete_session_token()"
     },
     {
@@ -3204,7 +3204,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L28",
       "id": "tests_keychain_memorystore_save_wrapped_master_key",
-      "community": 9,
+      "community": 10,
       "norm_label": ".save_wrapped_master_key()"
     },
     {
@@ -3213,7 +3213,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L33",
       "id": "tests_keychain_memorystore_load_wrapped_master_key",
-      "community": 9,
+      "community": 10,
       "norm_label": ".load_wrapped_master_key()"
     },
     {
@@ -3222,7 +3222,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L42",
       "id": "tests_keychain_memorystore_delete_wrapped_master_key",
-      "community": 9,
+      "community": 10,
       "norm_label": ".delete_wrapped_master_key()"
     },
     {
@@ -3231,7 +3231,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L49",
       "id": "tests_keychain_vault_starts_locked_and_fails_closed",
-      "community": 9,
+      "community": 10,
       "norm_label": "vault_starts_locked_and_fails_closed()"
     },
     {
@@ -3240,7 +3240,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L61",
       "id": "tests_keychain_install_and_clear_session_round_trips_through_store",
-      "community": 9,
+      "community": 10,
       "norm_label": "install_and_clear_session_round_trips_through_store()"
     },
     {
@@ -3249,7 +3249,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L89",
       "id": "tests_keychain_unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked",
-      "community": 9,
+      "community": 10,
       "norm_label": "unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked()"
     },
     {
@@ -3258,7 +3258,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L109",
       "id": "tests_keychain_unlock_rejects_wrong_sized_master_key_and_remains_locked",
-      "community": 9,
+      "community": 10,
       "norm_label": "unlock_rejects_wrong_sized_master_key_and_remains_locked()"
     },
     {
@@ -3267,7 +3267,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L125",
       "id": "tests_keychain_debug_output_redacts_session_token_and_key_material",
-      "community": 9,
+      "community": 10,
       "norm_label": "debug_output_redacts_session_token_and_key_material()"
     },
     {
@@ -3337,7 +3337,7 @@
       "label": "v()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L120",
+      "source_location": "L145",
       "id": "src_conflict_v",
       "community": 7,
       "norm_label": "v()"
@@ -3346,7 +3346,7 @@
       "label": "test_conflict_detected_when_both_sides_changed()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L128",
+      "source_location": "L153",
       "id": "src_conflict_test_conflict_detected_when_both_sides_changed",
       "community": 7,
       "norm_label": "test_conflict_detected_when_both_sides_changed()"
@@ -3355,7 +3355,7 @@
       "label": "test_no_conflict_when_only_remote_changed()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L137",
+      "source_location": "L162",
       "id": "src_conflict_test_no_conflict_when_only_remote_changed",
       "community": 7,
       "norm_label": "test_no_conflict_when_only_remote_changed()"
@@ -3364,7 +3364,7 @@
       "label": "test_no_conflict_when_only_local_changed()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L147",
+      "source_location": "L172",
       "id": "src_conflict_test_no_conflict_when_only_local_changed",
       "community": 7,
       "norm_label": "test_no_conflict_when_only_local_changed()"
@@ -3373,7 +3373,7 @@
       "label": "test_no_conflict_when_both_sides_landed_on_same_hash()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L157",
+      "source_location": "L182",
       "id": "src_conflict_test_no_conflict_when_both_sides_landed_on_same_hash",
       "community": 7,
       "norm_label": "test_no_conflict_when_both_sides_landed_on_same_hash()"
@@ -3382,7 +3382,7 @@
       "label": "test_auto_resolution_deadline_is_24h()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L168",
+      "source_location": "L193",
       "id": "src_conflict_test_auto_resolution_deadline_is_24h",
       "community": 7,
       "norm_label": "test_auto_resolution_deadline_is_24h()"
@@ -3391,7 +3391,7 @@
       "label": "test_auto_resolve_fires_after_24h()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L175",
+      "source_location": "L200",
       "id": "src_conflict_test_auto_resolve_fires_after_24h",
       "community": 7,
       "norm_label": "test_auto_resolve_fires_after_24h()"
@@ -3400,7 +3400,7 @@
       "label": "test_auto_resolve_does_not_fire_early()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L183",
+      "source_location": "L208",
       "id": "src_conflict_test_auto_resolve_does_not_fire_early",
       "community": 7,
       "norm_label": "test_auto_resolve_does_not_fire_early()"
@@ -3409,7 +3409,7 @@
       "label": "test_text_classification()",
       "file_type": "code",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L191",
+      "source_location": "L216",
       "id": "src_conflict_test_text_classification",
       "community": 7,
       "norm_label": "test_text_classification()"
@@ -3883,10 +3883,28 @@
       "norm_label": ".evict_unpinned_cache_until_under()"
     },
     {
+      "label": ".disposable_unpinned_cache_paths()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1062",
+      "id": "src_state_db_statedb_disposable_unpinned_cache_paths",
+      "community": 2,
+      "norm_label": ".disposable_unpinned_cache_paths()"
+    },
+    {
+      "label": ".clear_cache_metadata_for_paths()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1079",
+      "id": "src_state_db_statedb_clear_cache_metadata_for_paths",
+      "community": 2,
+      "norm_label": ".clear_cache_metadata_for_paths()"
+    },
+    {
       "label": "ensure_column()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1063",
+      "source_location": "L1105",
       "id": "src_state_db_ensure_column",
       "community": 2,
       "norm_label": "ensure_column()"
@@ -3895,7 +3913,7 @@
       "label": "has_column()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1070",
+      "source_location": "L1112",
       "id": "src_state_db_has_column",
       "community": 2,
       "norm_label": "has_column()"
@@ -3904,7 +3922,7 @@
       "label": "count_queue_groups()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1079",
+      "source_location": "L1121",
       "id": "src_state_db_count_queue_groups",
       "community": 2,
       "norm_label": "count_queue_groups()"
@@ -3913,7 +3931,7 @@
       "label": "redact_diagnostic_error()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1087",
+      "source_location": "L1129",
       "id": "src_state_db_redact_diagnostic_error",
       "community": 2,
       "norm_label": "redact_diagnostic_error()"
@@ -3922,7 +3940,7 @@
       "label": "has_table()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1117",
+      "source_location": "L1159",
       "id": "src_state_db_has_table",
       "community": 2,
       "norm_label": "has_table()"
@@ -3931,7 +3949,7 @@
       "label": "test_upsert_and_get_file()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1129",
+      "source_location": "L1171",
       "id": "src_state_db_test_upsert_and_get_file",
       "community": 2,
       "norm_label": "test_upsert_and_get_file()"
@@ -3940,7 +3958,7 @@
       "label": "test_list_by_status()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1149",
+      "source_location": "L1191",
       "id": "src_state_db_test_list_by_status",
       "community": 2,
       "norm_label": "test_list_by_status()"
@@ -3949,7 +3967,7 @@
       "label": "test_migrates_drive_contract_columns_and_operation_queue()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1168",
+      "source_location": "L1210",
       "id": "src_state_db_test_migrates_drive_contract_columns_and_operation_queue",
       "community": 2,
       "norm_label": "test_migrates_drive_contract_columns_and_operation_queue()"
@@ -3958,7 +3976,7 @@
       "label": "test_persists_drive_contract_state()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1238",
+      "source_location": "L1283",
       "id": "src_state_db_test_persists_drive_contract_state",
       "community": 2,
       "norm_label": "test_persists_drive_contract_state()"
@@ -3967,7 +3985,7 @@
       "label": "test_operation_queue_persists_retry_state()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1293",
+      "source_location": "L1338",
       "id": "src_state_db_test_operation_queue_persists_retry_state",
       "community": 2,
       "norm_label": "test_operation_queue_persists_retry_state()"
@@ -3976,7 +3994,7 @@
       "label": "test_operation_pause_survives_restart_and_diagnostics_redacts()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1328",
+      "source_location": "L1373",
       "id": "src_state_db_test_operation_pause_survives_restart_and_diagnostics_redacts",
       "community": 2,
       "norm_label": "test_operation_pause_survives_restart_and_diagnostics_redacts()"
@@ -3985,7 +4003,7 @@
       "label": "test_revoked_shared_content_is_removed_and_cache_paths_returned()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1376",
+      "source_location": "L1421",
       "id": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
       "community": 2,
       "norm_label": "test_revoked_shared_content_is_removed_and_cache_paths_returned()"
@@ -3994,7 +4012,7 @@
       "label": "test_recursive_pin_inheritance_persists_for_folder_tree()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1412",
+      "source_location": "L1457",
       "id": "src_state_db_test_recursive_pin_inheritance_persists_for_folder_tree",
       "community": 2,
       "norm_label": "test_recursive_pin_inheritance_persists_for_folder_tree()"
@@ -4003,16 +4021,25 @@
       "label": "test_cache_eviction_preserves_pinned_and_uploading_files()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1466",
+      "source_location": "L1511",
       "id": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
       "community": 2,
       "norm_label": "test_cache_eviction_preserves_pinned_and_uploading_files()"
     },
     {
+      "label": "test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1534",
+      "id": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "community": 2,
+      "norm_label": "test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files()"
+    },
+    {
       "label": "seed_contract_row()",
       "file_type": "code",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1488",
+      "source_location": "L1575",
       "id": "src_state_db_seed_contract_row",
       "community": 2,
       "norm_label": "seed_contract_row()"
@@ -4023,7 +4050,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L1",
       "id": "src_tauri_src_config_rs",
-      "community": 8,
+      "community": 9,
       "norm_label": "config.rs"
     },
     {
@@ -4041,7 +4068,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L107",
       "id": "src_config_default_true",
-      "community": 8,
+      "community": 9,
       "norm_label": "default_true()"
     },
     {
@@ -4059,7 +4086,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L148",
       "id": "src_config_desktopsettings",
-      "community": 8,
+      "community": 9,
       "norm_label": "desktopsettings"
     },
     {
@@ -4068,7 +4095,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L158",
       "id": "src_config_desktopsettings_from",
-      "community": 8,
+      "community": 9,
       "norm_label": ".from()"
     },
     {
@@ -4093,7 +4120,7 @@
       "label": ".load()",
       "file_type": "code",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L200",
+      "source_location": "L199",
       "id": "src_config_desktopconfig_load",
       "community": 0,
       "norm_label": ".load()"
@@ -4102,7 +4129,7 @@
       "label": ".save()",
       "file_type": "code",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L230",
+      "source_location": "L224",
       "id": "src_config_desktopconfig_save",
       "community": 0,
       "norm_label": ".save()"
@@ -4111,25 +4138,25 @@
       "label": "user_visible_home_dir()",
       "file_type": "code",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L256",
+      "source_location": "L246",
       "id": "src_config_user_visible_home_dir",
-      "community": 8,
+      "community": 9,
       "norm_label": "user_visible_home_dir()"
     },
     {
       "label": "default_sync_root_suggestion()",
       "file_type": "code",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L285",
+      "source_location": "L275",
       "id": "src_config_default_sync_root_suggestion",
-      "community": 8,
+      "community": 9,
       "norm_label": "default_sync_root_suggestion()"
     },
     {
       "label": "ensure_directory()",
       "file_type": "code",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L294",
+      "source_location": "L284",
       "id": "src_config_ensure_directory",
       "community": 0,
       "norm_label": "ensure_directory()"
@@ -4138,9 +4165,9 @@
       "label": "default_sync_root_uses_user_facing_beebeeb_folder()",
       "file_type": "code",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L314",
+      "source_location": "L300",
       "id": "src_config_default_sync_root_uses_user_facing_beebeeb_folder",
-      "community": 8,
+      "community": 9,
       "norm_label": "default_sync_root_uses_user_facing_beebeeb_folder()"
     },
     {
@@ -4149,7 +4176,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L1",
       "id": "src_tauri_src_lockfile_rs",
-      "community": 39,
+      "community": 40,
       "norm_label": "lockfile.rs"
     },
     {
@@ -4158,7 +4185,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L50",
       "id": "src_lockfile_lockcontents",
-      "community": 39,
+      "community": 40,
       "norm_label": "lockcontents"
     },
     {
@@ -4167,7 +4194,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L59",
       "id": "src_lockfile_lockfile",
-      "community": 39,
+      "community": 40,
       "norm_label": "lockfile"
     },
     {
@@ -4176,34 +4203,34 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L72",
       "id": "src_lockfile_lockfile_acquire",
-      "community": 39,
+      "community": 40,
       "norm_label": ".acquire()"
     },
     {
       "label": ".drop()",
       "file_type": "code",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L127",
+      "source_location": "L124",
       "id": "src_lockfile_lockfile_drop",
-      "community": 39,
+      "community": 40,
       "norm_label": ".drop()"
     },
     {
       "label": "pid_alive()",
       "file_type": "code",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L141",
+      "source_location": "L138",
       "id": "src_lockfile_pid_alive",
-      "community": 39,
+      "community": 40,
       "norm_label": "pid_alive()"
     },
     {
       "label": "hostname_or_unknown()",
       "file_type": "code",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L165",
+      "source_location": "L160",
       "id": "src_lockfile_hostname_or_unknown",
-      "community": 39,
+      "community": 40,
       "norm_label": "hostname_or_unknown()"
     },
     {
@@ -4266,7 +4293,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L114",
       "id": "src_lib_persist_session_to_keychain",
-      "community": 9,
+      "community": 0,
       "norm_label": "persist_session_to_keychain()"
     },
     {
@@ -4390,7 +4417,7 @@
       "label": "desktop_unlock_with_recovery_phrase()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L383",
+      "source_location": "L379",
       "id": "src_lib_desktop_unlock_with_recovery_phrase",
       "community": 0,
       "norm_label": "desktop_unlock_with_recovery_phrase()"
@@ -4399,7 +4426,7 @@
       "label": "normalize_recovery_phrase_input()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L422",
+      "source_location": "L418",
       "id": "src_lib_normalize_recovery_phrase_input",
       "community": 0,
       "norm_label": "normalize_recovery_phrase_input()"
@@ -4408,7 +4435,7 @@
       "label": "decode_base64()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L443",
+      "source_location": "L439",
       "id": "src_lib_decode_base64",
       "community": 0,
       "norm_label": "decode_base64()"
@@ -4417,7 +4444,7 @@
       "label": "encode_base64()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L450",
+      "source_location": "L446",
       "id": "src_lib_encode_base64",
       "community": 0,
       "norm_label": "encode_base64()"
@@ -4426,7 +4453,7 @@
       "label": "desktop_session_has_totp()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L455",
+      "source_location": "L451",
       "id": "src_lib_desktop_session_has_totp",
       "community": 0,
       "norm_label": "desktop_session_has_totp()"
@@ -4435,7 +4462,7 @@
       "label": "revoke_desktop_session()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L478",
+      "source_location": "L474",
       "id": "src_lib_revoke_desktop_session",
       "community": 0,
       "norm_label": "revoke_desktop_session()"
@@ -4444,7 +4471,7 @@
       "label": "set_session()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L502",
+      "source_location": "L498",
       "id": "src_lib_set_session",
       "community": 0,
       "norm_label": "set_session()"
@@ -4453,7 +4480,7 @@
       "label": "clear_session()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L542",
+      "source_location": "L538",
       "id": "src_lib_clear_session",
       "community": 0,
       "norm_label": "clear_session()"
@@ -4462,7 +4489,7 @@
       "label": "unlock_vault()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L575",
+      "source_location": "L571",
       "id": "src_lib_unlock_vault",
       "community": 0,
       "norm_label": "unlock_vault()"
@@ -4471,7 +4498,7 @@
       "label": "lock_vault()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L605",
+      "source_location": "L602",
       "id": "src_lib_lock_vault",
       "community": 0,
       "norm_label": "lock_vault()"
@@ -4480,16 +4507,25 @@
       "label": "FinderInstallState",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L630",
+      "source_location": "L627",
       "id": "src_lib_finderinstallstate",
       "community": 0,
       "norm_label": "finderinstallstate"
     },
     {
+      "label": "MacosIntegrationResetResult",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L637",
+      "id": "src_lib_macosintegrationresetresult",
+      "community": 0,
+      "norm_label": "macosintegrationresetresult"
+    },
+    {
       "label": "now_unix_seconds()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L639",
+      "source_location": "L648",
       "id": "src_lib_now_unix_seconds",
       "community": 0,
       "norm_label": "now_unix_seconds()"
@@ -4498,7 +4534,7 @@
       "label": "classify_finder_install_error()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L646",
+      "source_location": "L655",
       "id": "src_lib_classify_finder_install_error",
       "community": 0,
       "norm_label": "classify_finder_install_error()"
@@ -4507,7 +4543,7 @@
       "label": "finder_install_state_from_config()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L661",
+      "source_location": "L670",
       "id": "src_lib_finder_install_state_from_config",
       "community": 0,
       "norm_label": "finder_install_state_from_config()"
@@ -4516,16 +4552,52 @@
       "label": "persist_finder_install_result()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L698",
+      "source_location": "L707",
       "id": "src_lib_persist_finder_install_result",
       "community": 0,
       "norm_label": "persist_finder_install_result()"
     },
     {
+      "label": "state_db_for_config()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L729",
+      "id": "src_lib_state_db_for_config",
+      "community": 0,
+      "norm_label": "state_db_for_config()"
+    },
+    {
+      "label": "disposable_cache_roots()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L742",
+      "id": "src_lib_disposable_cache_roots",
+      "community": 0,
+      "norm_label": "disposable_cache_roots()"
+    },
+    {
+      "label": "is_disposable_cache_path()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L750",
+      "id": "src_lib_is_disposable_cache_path",
+      "community": 0,
+      "norm_label": "is_disposable_cache_path()"
+    },
+    {
+      "label": "remove_stale_ipc_socket()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L772",
+      "id": "src_lib_remove_stale_ipc_socket",
+      "community": 0,
+      "norm_label": "remove_stale_ipc_socket()"
+    },
+    {
       "label": "persist_sync_root_and_start_engine()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L720",
+      "source_location": "L781",
       "id": "src_lib_persist_sync_root_and_start_engine",
       "community": 0,
       "norm_label": "persist_sync_root_and_start_engine()"
@@ -4534,7 +4606,7 @@
       "label": "start_engine_for_pending_finder_install()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L745",
+      "source_location": "L806",
       "id": "src_lib_start_engine_for_pending_finder_install",
       "community": 0,
       "norm_label": "start_engine_for_pending_finder_install()"
@@ -4543,7 +4615,7 @@
       "label": "stop_pending_finder_install_engine()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L779",
+      "source_location": "L840",
       "id": "src_lib_stop_pending_finder_install_engine",
       "community": 0,
       "norm_label": "stop_pending_finder_install_engine()"
@@ -4552,7 +4624,7 @@
       "label": "wait_for_file_provider_ipc_ready()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L789",
+      "source_location": "L850",
       "id": "src_lib_wait_for_file_provider_ipc_ready",
       "community": 0,
       "norm_label": "wait_for_file_provider_ipc_ready()"
@@ -4561,7 +4633,7 @@
       "label": "file_provider_installed()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L822",
+      "source_location": "L885",
       "id": "src_lib_file_provider_installed",
       "community": 0,
       "norm_label": "file_provider_installed()"
@@ -4570,16 +4642,16 @@
       "label": "install_file_provider_domain()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L832",
+      "source_location": "L895",
       "id": "src_lib_install_file_provider_domain",
-      "community": 0,
+      "community": 31,
       "norm_label": "install_file_provider_domain()"
     },
     {
       "label": "remove_file_provider_domain()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L842",
+      "source_location": "L905",
       "id": "src_lib_remove_file_provider_domain",
       "community": 0,
       "norm_label": "remove_file_provider_domain()"
@@ -4588,7 +4660,7 @@
       "label": "finder_location_state()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L852",
+      "source_location": "L915",
       "id": "src_lib_finder_location_state",
       "community": 0,
       "norm_label": "finder_location_state()"
@@ -4597,7 +4669,7 @@
       "label": "install_finder_location()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L870",
+      "source_location": "L931",
       "id": "src_lib_install_finder_location",
       "community": 0,
       "norm_label": "install_finder_location()"
@@ -4606,16 +4678,25 @@
       "label": "continue_without_finder_location()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L909",
+      "source_location": "L969",
       "id": "src_lib_continue_without_finder_location",
       "community": 0,
       "norm_label": "continue_without_finder_location()"
     },
     {
+      "label": "reset_macos_integration()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L988",
+      "id": "src_lib_reset_macos_integration",
+      "community": 0,
+      "norm_label": "reset_macos_integration()"
+    },
+    {
       "label": "open_finder_location()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L928",
+      "source_location": "L1115",
       "id": "src_lib_open_finder_location",
       "community": 0,
       "norm_label": "open_finder_location()"
@@ -4624,7 +4705,7 @@
       "label": "sync_status()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L981",
+      "source_location": "L1168",
       "id": "src_lib_sync_status",
       "community": 0,
       "norm_label": "sync_status()"
@@ -4633,7 +4714,7 @@
       "label": "BillingUsageResponse",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1066",
+      "source_location": "L1253",
       "id": "src_lib_billingusageresponse",
       "community": 0,
       "norm_label": "billingusageresponse"
@@ -4642,7 +4723,7 @@
       "label": "DesktopStorageSummary",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1072",
+      "source_location": "L1259",
       "id": "src_lib_desktopstoragesummary",
       "community": 0,
       "norm_label": "desktopstoragesummary"
@@ -4651,7 +4732,7 @@
       "label": "desktop_storage_summary()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1085",
+      "source_location": "L1272",
       "id": "src_lib_desktop_storage_summary",
       "community": 0,
       "norm_label": "desktop_storage_summary()"
@@ -4660,7 +4741,7 @@
       "label": "export_diagnostics()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1133",
+      "source_location": "L1317",
       "id": "src_lib_export_diagnostics",
       "community": 0,
       "norm_label": "export_diagnostics()"
@@ -4669,7 +4750,7 @@
       "label": "list_version_conflict_center()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1167",
+      "source_location": "L1351",
       "id": "src_lib_list_version_conflict_center",
       "community": 0,
       "norm_label": "list_version_conflict_center()"
@@ -4678,7 +4759,7 @@
       "label": "list_file_versions()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1181",
+      "source_location": "L1365",
       "id": "src_lib_list_file_versions",
       "community": 0,
       "norm_label": "list_file_versions()"
@@ -4687,7 +4768,7 @@
       "label": "restore_file_version()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1195",
+      "source_location": "L1379",
       "id": "src_lib_restore_file_version",
       "community": 0,
       "norm_label": "restore_file_version()"
@@ -4696,7 +4777,7 @@
       "label": "get_sync_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1259",
+      "source_location": "L1443",
       "id": "src_lib_get_sync_root",
       "community": 0,
       "norm_label": "get_sync_root()"
@@ -4705,7 +4786,7 @@
       "label": "pick_sync_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1276",
+      "source_location": "L1460",
       "id": "src_lib_pick_sync_root",
       "community": 0,
       "norm_label": "pick_sync_root()"
@@ -4714,25 +4795,25 @@
       "label": "default_sync_root()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1335",
+      "source_location": "L1519",
       "id": "src_lib_default_sync_root",
-      "community": 8,
+      "community": 9,
       "norm_label": "default_sync_root()"
     },
     {
       "label": "get_desktop_config()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1351",
+      "source_location": "L1535",
       "id": "src_lib_get_desktop_config",
-      "community": 8,
+      "community": 0,
       "norm_label": "get_desktop_config()"
     },
     {
       "label": "set_desktop_config()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1364",
+      "source_location": "L1548",
       "id": "src_lib_set_desktop_config",
       "community": 0,
       "norm_label": "set_desktop_config()"
@@ -4741,7 +4822,7 @@
       "label": "get_selective_sync()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1383",
+      "source_location": "L1567",
       "id": "src_lib_get_selective_sync",
       "community": 0,
       "norm_label": "get_selective_sync()"
@@ -4750,7 +4831,7 @@
       "label": "set_selective_sync()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1405",
+      "source_location": "L1589",
       "id": "src_lib_set_selective_sync",
       "community": 0,
       "norm_label": "set_selective_sync()"
@@ -4759,7 +4840,7 @@
       "label": "VaultItem",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1421",
+      "source_location": "L1605",
       "id": "src_lib_vaultitem",
       "community": 0,
       "norm_label": "vaultitem"
@@ -4768,7 +4849,7 @@
       "label": "try_decrypt_name()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1439",
+      "source_location": "L1623",
       "id": "src_lib_try_decrypt_name",
       "community": 0,
       "norm_label": "try_decrypt_name()"
@@ -4777,7 +4858,7 @@
       "label": "list_vault_folders()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1467",
+      "source_location": "L1651",
       "id": "src_lib_list_vault_folders",
       "community": 0,
       "norm_label": "list_vault_folders()"
@@ -4786,7 +4867,7 @@
       "label": "list_remote_tree()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1527",
+      "source_location": "L1711",
       "id": "src_lib_list_remote_tree",
       "community": 0,
       "norm_label": "list_remote_tree()"
@@ -4795,7 +4876,7 @@
       "label": "set_recursive_pin()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1532",
+      "source_location": "L1716",
       "id": "src_lib_set_recursive_pin",
       "community": 0,
       "norm_label": "set_recursive_pin()"
@@ -4804,7 +4885,7 @@
       "label": "account_email()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1570",
+      "source_location": "L1754",
       "id": "src_lib_account_email",
       "community": 0,
       "norm_label": "account_email()"
@@ -4813,7 +4894,7 @@
       "label": "open_conflict_window_impl()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1587",
+      "source_location": "L1771",
       "id": "src_lib_open_conflict_window_impl",
       "community": 0,
       "norm_label": "open_conflict_window_impl()"
@@ -4822,7 +4903,7 @@
       "label": "open_conflict_window()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1634",
+      "source_location": "L1818",
       "id": "src_lib_open_conflict_window",
       "community": 0,
       "norm_label": "open_conflict_window()"
@@ -4831,7 +4912,7 @@
       "label": "notify_conflict_impl()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1654",
+      "source_location": "L1838",
       "id": "src_lib_notify_conflict_impl",
       "community": 0,
       "norm_label": "notify_conflict_impl()"
@@ -4840,7 +4921,7 @@
       "label": "notify_conflict()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1678",
+      "source_location": "L1862",
       "id": "src_lib_notify_conflict",
       "community": 0,
       "norm_label": "notify_conflict()"
@@ -4849,7 +4930,7 @@
       "label": "resolve_conflict()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1700",
+      "source_location": "L1884",
       "id": "src_lib_resolve_conflict",
       "community": 0,
       "norm_label": "resolve_conflict()"
@@ -4858,7 +4939,7 @@
       "label": "app_version()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1785",
+      "source_location": "L1969",
       "id": "src_lib_app_version",
       "community": 0,
       "norm_label": "app_version()"
@@ -4867,7 +4948,7 @@
       "label": "install_update()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1794",
+      "source_location": "L1978",
       "id": "src_lib_install_update",
       "community": 0,
       "norm_label": "install_update()"
@@ -4876,7 +4957,7 @@
       "label": "toggle_autostart()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1832",
+      "source_location": "L2016",
       "id": "src_lib_toggle_autostart",
       "community": 0,
       "norm_label": "toggle_autostart()"
@@ -4885,7 +4966,7 @@
       "label": "autostart_enabled()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1847",
+      "source_location": "L2031",
       "id": "src_lib_autostart_enabled",
       "community": 0,
       "norm_label": "autostart_enabled()"
@@ -4894,7 +4975,7 @@
       "label": "run()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1854",
+      "source_location": "L2038",
       "id": "src_lib_run",
       "community": 0,
       "norm_label": "run()"
@@ -4903,7 +4984,7 @@
       "label": "run_update_loop()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1985",
+      "source_location": "L2170",
       "id": "src_lib_run_update_loop",
       "community": 0,
       "norm_label": "run_update_loop()"
@@ -4912,7 +4993,7 @@
       "label": "check_for_update()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1995",
+      "source_location": "L2180",
       "id": "src_lib_check_for_update",
       "community": 0,
       "norm_label": "check_for_update()"
@@ -4921,7 +5002,7 @@
       "label": "setup_native_menu()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2036",
+      "source_location": "L2221",
       "id": "src_lib_setup_native_menu",
       "community": 0,
       "norm_label": "setup_native_menu()"
@@ -4930,7 +5011,7 @@
       "label": "build_tray_menu()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2099",
+      "source_location": "L2284",
       "id": "src_lib_build_tray_menu",
       "community": 0,
       "norm_label": "build_tray_menu()"
@@ -4939,7 +5020,7 @@
       "label": "attach_tray_status_listener()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2127",
+      "source_location": "L2312",
       "id": "src_lib_attach_tray_status_listener",
       "community": 15,
       "norm_label": "attach_tray_status_listener()"
@@ -4948,7 +5029,7 @@
       "label": "setup_tray()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2179",
+      "source_location": "L2364",
       "id": "src_lib_setup_tray",
       "community": 0,
       "norm_label": "setup_tray()"
@@ -4957,7 +5038,7 @@
       "label": "show_settings_window()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2252",
+      "source_location": "L2437",
       "id": "src_lib_show_settings_window",
       "community": 0,
       "norm_label": "show_settings_window()"
@@ -4966,7 +5047,7 @@
       "label": "normalizes_recovery_phrase_in_rust()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2284",
+      "source_location": "L2470",
       "id": "src_lib_normalizes_recovery_phrase_in_rust",
       "community": 0,
       "norm_label": "normalizes_recovery_phrase_in_rust()"
@@ -4975,7 +5056,7 @@
       "label": "rejects_non_twelve_word_recovery_phrase()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2295",
+      "source_location": "L2481",
       "id": "src_lib_rejects_non_twelve_word_recovery_phrase",
       "community": 0,
       "norm_label": "rejects_non_twelve_word_recovery_phrase()"
@@ -4984,7 +5065,7 @@
       "label": "classifies_file_provider_setup_errors()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2302",
+      "source_location": "L2488",
       "id": "src_lib_classifies_file_provider_setup_errors",
       "community": 0,
       "norm_label": "classifies_file_provider_setup_errors()"
@@ -4993,10 +5074,19 @@
       "label": "maps_persisted_file_provider_error_into_state()",
       "file_type": "code",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2318",
+      "source_location": "L2504",
       "id": "src_lib_maps_persisted_file_provider_error_into_state",
       "community": 0,
       "norm_label": "maps_persisted_file_provider_error_into_state()"
+    },
+    {
+      "label": "disposable_cache_path_check_accepts_temp_files_only()",
+      "file_type": "code",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L2523",
+      "id": "src_lib_disposable_cache_path_check_accepts_temp_files_only",
+      "community": 0,
+      "norm_label": "disposable_cache_path_check_accepts_temp_files_only()"
     },
     {
       "label": "engine_bridge.rs",
@@ -5832,7 +5922,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L2157",
       "id": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_create_file_queues_upload_version_and_preserves_payload()"
     },
     {
@@ -6084,7 +6174,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L305",
       "id": "src_runner_enforce_cache_budget",
-      "community": 9,
+      "community": 7,
       "norm_label": "enforce_cache_budget()"
     },
     {
@@ -6129,7 +6219,7 @@
       "source_file": "src-tauri/src/macos_file_provider.rs",
       "source_location": "L1",
       "id": "src_tauri_src_macos_file_provider_rs",
-      "community": 47,
+      "community": 48,
       "norm_label": "macos_file_provider.rs"
     },
     {
@@ -6138,7 +6228,7 @@
       "source_file": "src-tauri/src/macos_file_provider.rs",
       "source_location": "L10",
       "id": "src_macos_file_provider_status",
-      "community": 47,
+      "community": 48,
       "norm_label": "status()"
     },
     {
@@ -6147,7 +6237,7 @@
       "source_file": "src-tauri/src/macos_file_provider.rs",
       "source_location": "L14",
       "id": "src_macos_file_provider_install",
-      "community": 47,
+      "community": 48,
       "norm_label": "install()"
     },
     {
@@ -6156,7 +6246,7 @@
       "source_file": "src-tauri/src/macos_file_provider.rs",
       "source_location": "L19",
       "id": "src_macos_file_provider_remove",
-      "community": 47,
+      "community": 48,
       "norm_label": "remove()"
     },
     {
@@ -6165,7 +6255,7 @@
       "source_file": "src-tauri/src/macos_file_provider.rs",
       "source_location": "L23",
       "id": "src_macos_file_provider_call_bridge",
-      "community": 47,
+      "community": 48,
       "norm_label": "call_bridge()"
     },
     {
@@ -6543,7 +6633,7 @@
       "source_file": "src-tauri/src/main.rs",
       "source_location": "L1",
       "id": "src_tauri_src_main_rs",
-      "community": 8,
+      "community": 9,
       "norm_label": "main.rs"
     },
     {
@@ -6552,7 +6642,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L228",
       "id": "src_main_main",
-      "community": 8,
+      "community": 9,
       "norm_label": "main()"
     },
     {
@@ -6651,7 +6741,7 @@
       "source_file": "src-tauri/src/keychain.rs",
       "source_location": "L78",
       "id": "src_keychain_secretbytes_new_master_key",
-      "community": 9,
+      "community": 10,
       "norm_label": ".new_master_key()"
     },
     {
@@ -6804,7 +6894,7 @@
       "source_file": "src-tauri/src/keychain.rs",
       "source_location": "L181",
       "id": "src_keychain_authvault_s_fmt",
-      "community": 5,
+      "community": 9,
       "norm_label": ".fmt()"
     },
     {
@@ -7155,7 +7245,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L1",
       "id": "src_tauri_src_windows_cf_mod_rs",
-      "community": 43,
+      "community": 44,
       "norm_label": "mod.rs"
     },
     {
@@ -7164,7 +7254,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L89",
       "id": "windows_cf_mod_set_bridge",
-      "community": 43,
+      "community": 44,
       "norm_label": "set_bridge()"
     },
     {
@@ -7173,7 +7263,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L94",
       "id": "windows_cf_mod_bridge",
-      "community": 43,
+      "community": 44,
       "norm_label": "bridge()"
     },
     {
@@ -7182,7 +7272,7 @@
       "source_file": "src-tauri/src/windows_cf/mod.rs",
       "source_location": "L107",
       "id": "windows_cf_mod_register_sync_root",
-      "community": 43,
+      "community": 44,
       "norm_label": "register_sync_root()"
     },
     {
@@ -7191,7 +7281,7 @@
       "source_file": "src-tauri/src/windows_cf/placeholders.rs",
       "source_location": "L1",
       "id": "src_tauri_src_windows_cf_placeholders_rs",
-      "community": 9,
+      "community": 10,
       "norm_label": "placeholders.rs"
     },
     {
@@ -7200,7 +7290,7 @@
       "source_file": "src-tauri/src/windows_cf/placeholders.rs",
       "source_location": "L54",
       "id": "windows_cf_placeholders_create_placeholder",
-      "community": 9,
+      "community": 10,
       "norm_label": "create_placeholder()"
     },
     {
@@ -7209,7 +7299,7 @@
       "source_file": "src-tauri/src/windows_cf/callbacks.rs",
       "source_location": "L1",
       "id": "src_tauri_src_windows_cf_callbacks_rs",
-      "community": 43,
+      "community": 44,
       "norm_label": "callbacks.rs"
     },
     {
@@ -7218,7 +7308,7 @@
       "source_file": "src-tauri/src/windows_cf/callbacks.rs",
       "source_location": "L55",
       "id": "windows_cf_callbacks_fetch_data_callback",
-      "community": 43,
+      "community": 44,
       "norm_label": "fetch_data_callback()"
     },
     {
@@ -7344,7 +7434,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L1",
       "id": "src_tauri_src_linux_fuse_inode_map_rs",
-      "community": 40,
+      "community": 41,
       "norm_label": "inode_map.rs"
     },
     {
@@ -7353,7 +7443,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L7",
       "id": "linux_fuse_inode_map_inodemap",
-      "community": 40,
+      "community": 41,
       "norm_label": "inodemap"
     },
     {
@@ -7362,7 +7452,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L11",
       "id": "linux_fuse_inode_map_inner",
-      "community": 40,
+      "community": 41,
       "norm_label": "inner"
     },
     {
@@ -7371,7 +7461,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L18",
       "id": "linux_fuse_inode_map_inodemap_new",
-      "community": 40,
+      "community": 41,
       "norm_label": ".new()"
     },
     {
@@ -7380,7 +7470,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L28",
       "id": "linux_fuse_inode_map_inodemap_get_or_assign",
-      "community": 40,
+      "community": 41,
       "norm_label": ".get_or_assign()"
     },
     {
@@ -7389,7 +7479,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L41",
       "id": "linux_fuse_inode_map_inodemap_path_for_ino",
-      "community": 40,
+      "community": 41,
       "norm_label": ".path_for_ino()"
     },
     {
@@ -7398,7 +7488,7 @@
       "source_file": "src-tauri/src/linux_fuse/inode_map.rs",
       "source_location": "L56",
       "id": "linux_fuse_inode_map_test_inode_assignment_stable",
-      "community": 40,
+      "community": 41,
       "norm_label": "test_inode_assignment_stable()"
     },
     {
@@ -7407,7 +7497,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L1",
       "id": "beebeebfileprovidertools_domaincontroltool_swift",
-      "community": 0,
+      "community": 31,
       "norm_label": "domaincontroltool.swift"
     },
     {
@@ -7416,7 +7506,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L4",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool",
-      "community": 0,
+      "community": 31,
       "norm_label": "domaincontroltool"
     },
     {
@@ -7425,7 +7515,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L13",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_main",
-      "community": 0,
+      "community": 31,
       "norm_label": ".main()"
     },
     {
@@ -7434,7 +7524,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L30",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_status",
-      "community": 0,
+      "community": 31,
       "norm_label": ".status()"
     },
     {
@@ -7443,7 +7533,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L51",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_install",
-      "community": 0,
+      "community": 31,
       "norm_label": ".install()"
     },
     {
@@ -7452,7 +7542,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L69",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_remove",
-      "community": 0,
+      "community": 31,
       "norm_label": ".remove()"
     },
     {
@@ -7461,7 +7551,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L87",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_signalroot",
-      "community": 0,
+      "community": 31,
       "norm_label": ".signalroot()"
     },
     {
@@ -7470,7 +7560,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L1",
       "id": "windows_src_config_rs",
-      "community": 9,
+      "community": 10,
       "norm_label": "config.rs"
     },
     {
@@ -7479,7 +7569,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L11",
       "id": "src_config_config",
-      "community": 9,
+      "community": 10,
       "norm_label": "config"
     },
     {
@@ -7488,7 +7578,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L28",
       "id": "src_config_config_default",
-      "community": 9,
+      "community": 10,
       "norm_label": ".default()"
     },
     {
@@ -7497,7 +7587,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L43",
       "id": "src_config_config_path",
-      "community": 9,
+      "community": 10,
       "norm_label": "config_path()"
     },
     {
@@ -7506,7 +7596,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L57",
       "id": "src_config_load_config",
-      "community": 9,
+      "community": 10,
       "norm_label": "load_config()"
     },
     {
@@ -7515,7 +7605,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L69",
       "id": "src_config_save_config",
-      "community": 9,
+      "community": 10,
       "norm_label": "save_config()"
     },
     {
@@ -7524,7 +7614,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L1",
       "id": "windows_src_main_rs",
-      "community": 8,
+      "community": 9,
       "norm_label": "main.rs"
     },
     {
@@ -7533,7 +7623,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L23",
       "id": "src_main_args",
-      "community": 8,
+      "community": 9,
       "norm_label": "args"
     },
     {
@@ -7542,7 +7632,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L42",
       "id": "src_main_default_sync_path",
-      "community": 8,
+      "community": 9,
       "norm_label": "default_sync_path()"
     },
     {
@@ -7551,7 +7641,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L62",
       "id": "src_main_b64",
-      "community": 8,
+      "community": 9,
       "norm_label": "b64()"
     },
     {
@@ -7560,7 +7650,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L67",
       "id": "src_main_load_master_key",
-      "community": 8,
+      "community": 9,
       "norm_label": "load_master_key()"
     },
     {
@@ -7569,7 +7659,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L87",
       "id": "src_main_guess_mime_type",
-      "community": 8,
+      "community": 1,
       "norm_label": "guess_mime_type()"
     },
     {
@@ -7578,7 +7668,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L117",
       "id": "src_main_upload_file",
-      "community": 8,
+      "community": 9,
       "norm_label": "upload_file()"
     },
     {
@@ -7587,7 +7677,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L202",
       "id": "src_main_sync_batch",
-      "community": 8,
+      "community": 9,
       "norm_label": "sync_batch()"
     },
     {
@@ -7596,7 +7686,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L402",
       "id": "src_main_is_ignored_file",
-      "community": 8,
+      "community": 9,
       "norm_label": "is_ignored_file()"
     },
     {
@@ -7605,7 +7695,7 @@
       "source_file": "windows/src/main.rs",
       "source_location": "L424",
       "id": "src_main_futures_task_noop_waker",
-      "community": 8,
+      "community": 9,
       "norm_label": "futures_task_noop_waker()"
     },
     {
@@ -7731,7 +7821,7 @@
       "source_file": "src/main.tsx",
       "source_location": "L1",
       "id": "src_main_tsx",
-      "community": 64,
+      "community": 65,
       "norm_label": "main.tsx"
     },
     {
@@ -7774,7 +7864,7 @@
       "label": "reasonFrom()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L103",
+      "source_location": "L114",
       "id": "src_desktopapi_reasonfrom",
       "community": 3,
       "norm_label": "reasonfrom()"
@@ -7783,7 +7873,7 @@
       "label": "isUnsupported()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L108",
+      "source_location": "L119",
       "id": "src_desktopapi_isunsupported",
       "community": 3,
       "norm_label": "isunsupported()"
@@ -7792,7 +7882,7 @@
       "label": "command()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L120",
+      "source_location": "L131",
       "id": "src_desktopapi_command",
       "community": 3,
       "norm_label": "command()"
@@ -7801,7 +7891,7 @@
       "label": "loadSyncStatus()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L129",
+      "source_location": "L140",
       "id": "src_desktopapi_loadsyncstatus",
       "community": 3,
       "norm_label": "loadsyncstatus()"
@@ -7810,7 +7900,7 @@
       "label": "openUrl()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L134",
+      "source_location": "L145",
       "id": "src_desktopapi_openurl",
       "community": 3,
       "norm_label": "openurl()"
@@ -7819,7 +7909,7 @@
       "label": "formatBytes()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L141",
+      "source_location": "L152",
       "id": "src_desktopapi_formatbytes",
       "community": 3,
       "norm_label": "formatbytes()"
@@ -7828,7 +7918,7 @@
       "label": "commandUnavailableLabel()",
       "file_type": "code",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L154",
+      "source_location": "L165",
       "id": "src_desktopapi_commandunavailablelabel",
       "community": 3,
       "norm_label": "commandunavailablelabel()"
@@ -7839,7 +7929,7 @@
       "source_file": "src/vite-env.d.ts",
       "source_location": "L1",
       "id": "src_vite_env_d_ts",
-      "community": 65,
+      "community": 66,
       "norm_label": "vite-env.d.ts"
     },
     {
@@ -7920,7 +8010,7 @@
       "source_file": "src/pages/Shared.tsx",
       "source_location": "L1",
       "id": "src_pages_shared_tsx",
-      "community": 61,
+      "community": 62,
       "norm_label": "shared.tsx"
     },
     {
@@ -7929,7 +8019,7 @@
       "source_file": "src/pages/Shared.tsx",
       "source_location": "L4",
       "id": "pages_shared_shared",
-      "community": 61,
+      "community": 62,
       "norm_label": "shared()"
     },
     {
@@ -8109,7 +8199,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L1",
       "id": "src_pages_bandwidth_tsx",
-      "community": 59,
+      "community": 60,
       "norm_label": "bandwidth.tsx"
     },
     {
@@ -8118,7 +8208,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L39",
       "id": "pages_bandwidth_formatlimit",
-      "community": 59,
+      "community": 60,
       "norm_label": "formatlimit()"
     },
     {
@@ -8127,7 +8217,7 @@
       "source_file": "src/pages/Bandwidth.tsx",
       "source_location": "L67",
       "id": "pages_bandwidth_writeback",
-      "community": 59,
+      "community": 60,
       "norm_label": "writeback()"
     },
     {
@@ -8136,7 +8226,7 @@
       "source_file": "src/pages/Notifications.tsx",
       "source_location": "L1",
       "id": "src_pages_notifications_tsx",
-      "community": 66,
+      "community": 67,
       "norm_label": "notifications.tsx"
     },
     {
@@ -8233,7 +8323,7 @@
       "label": "chooseFolderClick()",
       "file_type": "code",
       "source_file": "src/pages/SyncFolder.tsx",
-      "source_location": "L20",
+      "source_location": "L26",
       "id": "pages_syncfolder_choosefolderclick",
       "community": 3,
       "norm_label": "choosefolderclick()"
@@ -8242,7 +8332,7 @@
       "label": "installFinder()",
       "file_type": "code",
       "source_file": "src/pages/SyncFolder.tsx",
-      "source_location": "L32",
+      "source_location": "L38",
       "id": "pages_syncfolder_installfinder",
       "community": 3,
       "norm_label": "installfinder()"
@@ -8251,10 +8341,19 @@
       "label": "openFinder()",
       "file_type": "code",
       "source_file": "src/pages/SyncFolder.tsx",
-      "source_location": "L44",
+      "source_location": "L50",
       "id": "pages_syncfolder_openfinder",
       "community": 3,
       "norm_label": "openfinder()"
+    },
+    {
+      "label": "resetFinderIntegration()",
+      "file_type": "code",
+      "source_file": "src/pages/SyncFolder.tsx",
+      "source_location": "L58",
+      "id": "pages_syncfolder_resetfinderintegration",
+      "community": 3,
+      "norm_label": "resetfinderintegration()"
     }
   ],
   "links": [
@@ -12774,7 +12873,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L120",
+      "source_location": "L145",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_v",
@@ -12786,7 +12885,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L128",
+      "source_location": "L153",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_conflict_detected_when_both_sides_changed",
@@ -12798,7 +12897,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L137",
+      "source_location": "L162",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_no_conflict_when_only_remote_changed",
@@ -12810,7 +12909,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L147",
+      "source_location": "L172",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_no_conflict_when_only_local_changed",
@@ -12822,7 +12921,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L157",
+      "source_location": "L182",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_no_conflict_when_both_sides_landed_on_same_hash",
@@ -12834,7 +12933,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L168",
+      "source_location": "L193",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_auto_resolution_deadline_is_24h",
@@ -12846,7 +12945,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L175",
+      "source_location": "L200",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_auto_resolve_fires_after_24h",
@@ -12858,7 +12957,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L183",
+      "source_location": "L208",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_auto_resolve_does_not_fire_early",
@@ -12870,7 +12969,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L191",
+      "source_location": "L216",
       "weight": 1.0,
       "_src": "src_tauri_src_conflict_rs",
       "_tgt": "src_conflict_test_text_classification",
@@ -12918,7 +13017,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L130",
+      "source_location": "L155",
       "weight": 1.0,
       "_src": "src_conflict_test_conflict_detected_when_both_sides_changed",
       "_tgt": "src_conflict_v",
@@ -12930,7 +13029,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L140",
+      "source_location": "L165",
       "weight": 1.0,
       "_src": "src_conflict_test_no_conflict_when_only_remote_changed",
       "_tgt": "src_conflict_v",
@@ -12942,7 +13041,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L150",
+      "source_location": "L175",
       "weight": 1.0,
       "_src": "src_conflict_test_no_conflict_when_only_local_changed",
       "_tgt": "src_conflict_v",
@@ -12954,7 +13053,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/conflict.rs",
-      "source_location": "L161",
+      "source_location": "L186",
       "weight": 1.0,
       "_src": "src_conflict_test_no_conflict_when_both_sides_landed_on_same_hash",
       "_tgt": "src_conflict_v",
@@ -13110,7 +13209,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1063",
+      "source_location": "L1105",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_ensure_column",
@@ -13122,7 +13221,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1070",
+      "source_location": "L1112",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_has_column",
@@ -13134,7 +13233,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1079",
+      "source_location": "L1121",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_count_queue_groups",
@@ -13146,7 +13245,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1087",
+      "source_location": "L1129",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_redact_diagnostic_error",
@@ -13158,7 +13257,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1117",
+      "source_location": "L1159",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_has_table",
@@ -13170,7 +13269,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1129",
+      "source_location": "L1171",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_upsert_and_get_file",
@@ -13182,7 +13281,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1149",
+      "source_location": "L1191",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_list_by_status",
@@ -13194,7 +13293,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1168",
+      "source_location": "L1210",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_migrates_drive_contract_columns_and_operation_queue",
@@ -13206,7 +13305,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1238",
+      "source_location": "L1283",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_persists_drive_contract_state",
@@ -13218,7 +13317,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1293",
+      "source_location": "L1338",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_operation_queue_persists_retry_state",
@@ -13230,7 +13329,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1328",
+      "source_location": "L1373",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_operation_pause_survives_restart_and_diagnostics_redacts",
@@ -13242,7 +13341,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1376",
+      "source_location": "L1421",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
@@ -13254,7 +13353,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1412",
+      "source_location": "L1457",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_recursive_pin_inheritance_persists_for_folder_tree",
@@ -13266,7 +13365,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1466",
+      "source_location": "L1511",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
@@ -13278,7 +13377,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1488",
+      "source_location": "L1534",
+      "weight": 1.0,
+      "_src": "src_tauri_src_state_db_rs",
+      "_tgt": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "source": "src_tauri_src_state_db_rs",
+      "target": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1575",
       "weight": 1.0,
       "_src": "src_tauri_src_state_db_rs",
       "_tgt": "src_state_db_seed_contract_row",
@@ -14043,6 +14154,30 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1062",
+      "weight": 1.0,
+      "_src": "src_state_db_statedb",
+      "_tgt": "src_state_db_statedb_disposable_unpinned_cache_paths",
+      "source": "src_state_db_statedb",
+      "target": "src_state_db_statedb_disposable_unpinned_cache_paths",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1079",
+      "weight": 1.0,
+      "_src": "src_state_db_statedb",
+      "_tgt": "src_state_db_statedb_clear_cache_metadata_for_paths",
+      "source": "src_state_db_statedb",
+      "target": "src_state_db_statedb_clear_cache_metadata_for_paths",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
@@ -14058,7 +14193,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1131",
+      "source_location": "L1173",
       "weight": 1.0,
       "_src": "src_state_db_test_upsert_and_get_file",
       "_tgt": "src_state_db_statedb_open",
@@ -14070,7 +14205,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1151",
+      "source_location": "L1193",
       "weight": 1.0,
       "_src": "src_state_db_test_list_by_status",
       "_tgt": "src_state_db_statedb_open",
@@ -14082,7 +14217,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1172",
+      "source_location": "L1214",
       "weight": 1.0,
       "_src": "src_state_db_test_migrates_drive_contract_columns_and_operation_queue",
       "_tgt": "src_state_db_statedb_open",
@@ -14094,7 +14229,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1240",
+      "source_location": "L1285",
       "weight": 1.0,
       "_src": "src_state_db_test_persists_drive_contract_state",
       "_tgt": "src_state_db_statedb_open",
@@ -14106,7 +14241,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1295",
+      "source_location": "L1340",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_queue_persists_retry_state",
       "_tgt": "src_state_db_statedb_open",
@@ -14118,7 +14253,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1331",
+      "source_location": "L1376",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_pause_survives_restart_and_diagnostics_redacts",
       "_tgt": "src_state_db_statedb_open",
@@ -14130,7 +14265,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1378",
+      "source_location": "L1423",
       "weight": 1.0,
       "_src": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
       "_tgt": "src_state_db_statedb_open",
@@ -14142,7 +14277,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1414",
+      "source_location": "L1459",
       "weight": 1.0,
       "_src": "src_state_db_test_recursive_pin_inheritance_persists_for_folder_tree",
       "_tgt": "src_state_db_statedb_open",
@@ -14154,12 +14289,24 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1468",
+      "source_location": "L1513",
       "weight": 1.0,
       "_src": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
       "_tgt": "src_state_db_statedb_open",
       "source": "src_state_db_statedb_open",
       "target": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1536",
+      "weight": 1.0,
+      "_src": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "_tgt": "src_state_db_statedb_open",
+      "source": "src_state_db_statedb_open",
+      "target": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
       "confidence_score": 1.0
     },
     {
@@ -14173,6 +14320,18 @@
       "_tgt": "src_api_apiclient_new",
       "source": "src_state_db_statedb_open",
       "target": "src_api_apiclient_new"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L737",
+      "weight": 1.0,
+      "_src": "src_lib_state_db_for_config",
+      "_tgt": "src_state_db_statedb_open",
+      "source": "src_state_db_statedb_open",
+      "target": "src_lib_state_db_for_config"
     },
     {
       "relation": "calls",
@@ -14334,7 +14493,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1141",
+      "source_location": "L1183",
       "weight": 1.0,
       "_src": "src_state_db_test_upsert_and_get_file",
       "_tgt": "src_state_db_statedb_upsert_file",
@@ -14346,7 +14505,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1161",
+      "source_location": "L1203",
       "weight": 1.0,
       "_src": "src_state_db_test_list_by_status",
       "_tgt": "src_state_db_statedb_upsert_file",
@@ -14358,7 +14517,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1241",
+      "source_location": "L1286",
       "weight": 1.0,
       "_src": "src_state_db_test_persists_drive_contract_state",
       "_tgt": "src_state_db_statedb_upsert_file",
@@ -14370,7 +14529,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1496",
+      "source_location": "L1583",
       "weight": 1.0,
       "_src": "src_state_db_seed_contract_row",
       "_tgt": "src_state_db_statedb_upsert_file",
@@ -14382,7 +14541,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1142",
+      "source_location": "L1184",
       "weight": 1.0,
       "_src": "src_state_db_test_upsert_and_get_file",
       "_tgt": "src_state_db_statedb_get_file",
@@ -14394,7 +14553,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1162",
+      "source_location": "L1204",
       "weight": 1.0,
       "_src": "src_state_db_test_list_by_status",
       "_tgt": "src_state_db_statedb_list_by_status",
@@ -14406,7 +14565,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1271",
+      "source_location": "L1316",
       "weight": 1.0,
       "_src": "src_state_db_test_persists_drive_contract_state",
       "_tgt": "src_state_db_statedb_set_file_contract_state",
@@ -14418,7 +14577,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1388",
+      "source_location": "L1433",
       "weight": 1.0,
       "_src": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
       "_tgt": "src_state_db_statedb_set_file_contract_state",
@@ -14430,7 +14589,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1509",
+      "source_location": "L1596",
       "weight": 1.0,
       "_src": "src_state_db_seed_contract_row",
       "_tgt": "src_state_db_statedb_set_file_contract_state",
@@ -14442,7 +14601,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1273",
+      "source_location": "L1318",
       "weight": 1.0,
       "_src": "src_state_db_test_persists_drive_contract_state",
       "_tgt": "src_state_db_statedb_get_file_contract_state",
@@ -14454,7 +14613,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1382",
+      "source_location": "L1427",
       "weight": 1.0,
       "_src": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
       "_tgt": "src_state_db_statedb_get_file_contract_state",
@@ -14466,7 +14625,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1506",
+      "source_location": "L1593",
       "weight": 1.0,
       "_src": "src_state_db_seed_contract_row",
       "_tgt": "src_state_db_statedb_get_file_contract_state",
@@ -14478,7 +14637,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1398",
+      "source_location": "L1443",
       "weight": 1.0,
       "_src": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
       "_tgt": "src_state_db_statedb_purge_revoked_shared_content",
@@ -14502,7 +14661,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1313",
+      "source_location": "L1358",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_queue_persists_retry_state",
       "_tgt": "src_state_db_statedb_enqueue_operation",
@@ -14514,7 +14673,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1332",
+      "source_location": "L1377",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_pause_survives_restart_and_diagnostics_redacts",
       "_tgt": "src_state_db_statedb_enqueue_operation",
@@ -14526,7 +14685,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1316",
+      "source_location": "L1361",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_queue_persists_retry_state",
       "_tgt": "src_state_db_statedb_list_due_operations",
@@ -14538,7 +14697,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1315",
+      "source_location": "L1360",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_queue_persists_retry_state",
       "_tgt": "src_state_db_statedb_record_operation_attempt",
@@ -14550,7 +14709,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1350",
+      "source_location": "L1395",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_pause_survives_restart_and_diagnostics_redacts",
       "_tgt": "src_state_db_statedb_record_operation_pause",
@@ -14574,7 +14733,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1362",
+      "source_location": "L1407",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_pause_survives_restart_and_diagnostics_redacts",
       "_tgt": "src_state_db_statedb_queue_diagnostics",
@@ -14586,7 +14745,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1323",
+      "source_location": "L1368",
       "weight": 1.0,
       "_src": "src_state_db_test_operation_queue_persists_retry_state",
       "_tgt": "src_state_db_statedb_remove_operation",
@@ -14598,7 +14757,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1441",
+      "source_location": "L1486",
       "weight": 1.0,
       "_src": "src_state_db_test_recursive_pin_inheritance_persists_for_folder_tree",
       "_tgt": "src_state_db_statedb_set_recursive_pin",
@@ -14610,7 +14769,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1474",
+      "source_location": "L1519",
       "weight": 1.0,
       "_src": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
       "_tgt": "src_state_db_statedb_set_recursive_pin",
@@ -14622,7 +14781,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1475",
+      "source_location": "L1541",
+      "weight": 1.0,
+      "_src": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "_tgt": "src_state_db_statedb_set_recursive_pin",
+      "source": "src_state_db_statedb_set_recursive_pin",
+      "target": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1520",
       "weight": 1.0,
       "_src": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
       "_tgt": "src_state_db_statedb_mark_cached",
@@ -14634,7 +14805,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1480",
+      "source_location": "L1542",
+      "weight": 1.0,
+      "_src": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "_tgt": "src_state_db_statedb_mark_cached",
+      "source": "src_state_db_statedb_mark_cached",
+      "target": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1525",
       "weight": 1.0,
       "_src": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
       "_tgt": "src_state_db_statedb_evict_unpinned_cache_until_under",
@@ -14658,7 +14841,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1064",
+      "source_location": "L1551",
+      "weight": 1.0,
+      "_src": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "_tgt": "src_state_db_statedb_clear_cache_metadata_for_paths",
+      "source": "src_state_db_statedb_clear_cache_metadata_for_paths",
+      "target": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1106",
       "weight": 1.0,
       "_src": "src_state_db_ensure_column",
       "_tgt": "src_state_db_has_column",
@@ -14694,7 +14889,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1379",
+      "source_location": "L1424",
       "weight": 1.0,
       "_src": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
       "_tgt": "src_state_db_seed_contract_row",
@@ -14706,7 +14901,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1415",
+      "source_location": "L1460",
       "weight": 1.0,
       "_src": "src_state_db_test_recursive_pin_inheritance_persists_for_folder_tree",
       "_tgt": "src_state_db_seed_contract_row",
@@ -14718,11 +14913,23 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/state_db.rs",
-      "source_location": "L1469",
+      "source_location": "L1514",
       "weight": 1.0,
       "_src": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
       "_tgt": "src_state_db_seed_contract_row",
       "source": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
+      "target": "src_state_db_seed_contract_row",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/state_db.rs",
+      "source_location": "L1537",
+      "weight": 1.0,
+      "_src": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
+      "_tgt": "src_state_db_seed_contract_row",
+      "source": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
       "target": "src_state_db_seed_contract_row",
       "confidence_score": 1.0
     },
@@ -14766,7 +14973,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L276",
+      "source_location": "L266",
       "weight": 1.0,
       "_src": "src_tauri_src_config_rs",
       "_tgt": "src_config_user_visible_home_dir",
@@ -14778,7 +14985,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L285",
+      "source_location": "L275",
       "weight": 1.0,
       "_src": "src_tauri_src_config_rs",
       "_tgt": "src_config_default_sync_root_suggestion",
@@ -14790,7 +14997,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L294",
+      "source_location": "L284",
       "weight": 1.0,
       "_src": "src_tauri_src_config_rs",
       "_tgt": "src_config_ensure_directory",
@@ -14802,7 +15009,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L314",
+      "source_location": "L300",
       "weight": 1.0,
       "_src": "src_tauri_src_config_rs",
       "_tgt": "src_config_default_sync_root_uses_user_facing_beebeeb_folder",
@@ -14850,7 +15057,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L200",
+      "source_location": "L199",
       "weight": 1.0,
       "_src": "src_config_desktopconfig",
       "_tgt": "src_config_desktopconfig_load",
@@ -14862,7 +15069,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L230",
+      "source_location": "L224",
       "weight": 1.0,
       "_src": "src_config_desktopconfig",
       "_tgt": "src_config_desktopconfig_save",
@@ -14874,7 +15081,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L203",
+      "source_location": "L202",
       "weight": 1.0,
       "_src": "src_config_desktopconfig_load",
       "_tgt": "src_config_desktopconfig_default",
@@ -14898,7 +15105,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L270",
+      "source_location": "L260",
       "weight": 1.0,
       "_src": "src_config_user_visible_home_dir",
       "_tgt": "src_config_desktopsettings_from",
@@ -14910,13 +15117,25 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L287",
+      "source_location": "L277",
       "weight": 1.0,
       "_src": "src_config_default_sync_root_suggestion",
       "_tgt": "src_config_desktopsettings_from",
       "source": "src_config_desktopsettings_from",
       "target": "src_config_default_sync_root_suggestion",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L1029",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_config_desktopsettings_from",
+      "source": "src_config_desktopsettings_from",
+      "target": "src_lib_reset_macos_integration"
     },
     {
       "relation": "calls",
@@ -14970,7 +15189,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L201",
+      "source_location": "L200",
       "weight": 1.0,
       "_src": "src_config_desktopconfig_load",
       "_tgt": "src_config_desktopconfig_path",
@@ -14982,13 +15201,25 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L231",
+      "source_location": "L225",
       "weight": 1.0,
       "_src": "src_config_desktopconfig_save",
       "_tgt": "src_config_desktopconfig_path",
       "source": "src_config_desktopconfig_path",
       "target": "src_config_desktopconfig_save",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L2529",
+      "weight": 1.0,
+      "_src": "src_lib_disposable_cache_path_check_accepts_temp_files_only",
+      "_tgt": "src_config_desktopconfig_path",
+      "source": "src_config_desktopconfig_path",
+      "target": "src_lib_disposable_cache_path_check_accepts_temp_files_only"
     },
     {
       "relation": "calls",
@@ -15090,7 +15321,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L286",
+      "source_location": "L276",
       "weight": 1.0,
       "_src": "src_config_default_sync_root_suggestion",
       "_tgt": "src_config_user_visible_home_dir",
@@ -15102,7 +15333,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/config.rs",
-      "source_location": "L315",
+      "source_location": "L301",
       "weight": 1.0,
       "_src": "src_config_default_sync_root_uses_user_facing_beebeeb_folder",
       "_tgt": "src_config_default_sync_root_suggestion",
@@ -15210,7 +15441,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L157",
+      "source_location": "L152",
       "weight": 1.0,
       "_src": "src_tauri_src_lockfile_rs",
       "_tgt": "src_lockfile_pid_alive",
@@ -15222,7 +15453,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L165",
+      "source_location": "L160",
       "weight": 1.0,
       "_src": "src_tauri_src_lockfile_rs",
       "_tgt": "src_lockfile_hostname_or_unknown",
@@ -15246,7 +15477,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L127",
+      "source_location": "L124",
       "weight": 1.0,
       "_src": "src_lockfile_lockfile",
       "_tgt": "src_lockfile_lockfile_drop",
@@ -15258,7 +15489,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L81",
+      "source_location": "L80",
       "weight": 1.0,
       "_src": "src_lockfile_lockfile_acquire",
       "_tgt": "src_lockfile_pid_alive",
@@ -15270,7 +15501,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lockfile.rs",
-      "source_location": "L114",
+      "source_location": "L113",
       "weight": 1.0,
       "_src": "src_lockfile_lockfile_acquire",
       "_tgt": "src_lockfile_hostname_or_unknown",
@@ -15498,7 +15729,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L383",
+      "source_location": "L379",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_desktop_unlock_with_recovery_phrase",
@@ -15510,7 +15741,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L422",
+      "source_location": "L418",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_normalize_recovery_phrase_input",
@@ -15522,7 +15753,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L443",
+      "source_location": "L439",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_decode_base64",
@@ -15534,7 +15765,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L450",
+      "source_location": "L446",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_encode_base64",
@@ -15546,7 +15777,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L455",
+      "source_location": "L451",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_desktop_session_has_totp",
@@ -15558,7 +15789,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L478",
+      "source_location": "L474",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_revoke_desktop_session",
@@ -15570,7 +15801,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L502",
+      "source_location": "L498",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_set_session",
@@ -15582,7 +15813,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L542",
+      "source_location": "L538",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_clear_session",
@@ -15594,7 +15825,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L575",
+      "source_location": "L571",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_unlock_vault",
@@ -15606,7 +15837,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L605",
+      "source_location": "L602",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_lock_vault",
@@ -15618,7 +15849,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L630",
+      "source_location": "L627",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_finderinstallstate",
@@ -15630,7 +15861,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L639",
+      "source_location": "L637",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_macosintegrationresetresult",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_macosintegrationresetresult",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L648",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_now_unix_seconds",
@@ -15642,7 +15885,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L646",
+      "source_location": "L655",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_classify_finder_install_error",
@@ -15654,7 +15897,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L661",
+      "source_location": "L670",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_finder_install_state_from_config",
@@ -15666,7 +15909,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L698",
+      "source_location": "L707",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_persist_finder_install_result",
@@ -15678,7 +15921,55 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L720",
+      "source_location": "L729",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_state_db_for_config",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_state_db_for_config",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L742",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_disposable_cache_roots",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_disposable_cache_roots",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L750",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_is_disposable_cache_path",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_is_disposable_cache_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L772",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_remove_stale_ipc_socket",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_remove_stale_ipc_socket",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L781",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_persist_sync_root_and_start_engine",
@@ -15690,7 +15981,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L745",
+      "source_location": "L806",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_start_engine_for_pending_finder_install",
@@ -15702,7 +15993,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L779",
+      "source_location": "L840",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_stop_pending_finder_install_engine",
@@ -15714,7 +16005,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L789",
+      "source_location": "L850",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_wait_for_file_provider_ipc_ready",
@@ -15726,7 +16017,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L827",
+      "source_location": "L890",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_file_provider_installed",
@@ -15738,7 +16029,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L837",
+      "source_location": "L900",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_install_file_provider_domain",
@@ -15750,7 +16041,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L847",
+      "source_location": "L910",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_remove_file_provider_domain",
@@ -15762,7 +16053,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L852",
+      "source_location": "L915",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_finder_location_state",
@@ -15774,7 +16065,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L870",
+      "source_location": "L931",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_install_finder_location",
@@ -15786,7 +16077,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L909",
+      "source_location": "L969",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_continue_without_finder_location",
@@ -15798,7 +16089,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L928",
+      "source_location": "L988",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_reset_macos_integration",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_reset_macos_integration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L1115",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_open_finder_location",
@@ -15810,7 +16113,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L981",
+      "source_location": "L1168",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_sync_status",
@@ -15822,7 +16125,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1066",
+      "source_location": "L1253",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_billingusageresponse",
@@ -15834,7 +16137,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1072",
+      "source_location": "L1259",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_desktopstoragesummary",
@@ -15846,7 +16149,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1085",
+      "source_location": "L1272",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_desktop_storage_summary",
@@ -15858,7 +16161,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1133",
+      "source_location": "L1317",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_export_diagnostics",
@@ -15870,7 +16173,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1167",
+      "source_location": "L1351",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_list_version_conflict_center",
@@ -15882,7 +16185,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1181",
+      "source_location": "L1365",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_list_file_versions",
@@ -15894,7 +16197,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1195",
+      "source_location": "L1379",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_restore_file_version",
@@ -15906,7 +16209,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1259",
+      "source_location": "L1443",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_get_sync_root",
@@ -15918,7 +16221,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1276",
+      "source_location": "L1460",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_pick_sync_root",
@@ -15930,7 +16233,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1335",
+      "source_location": "L1519",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_default_sync_root",
@@ -15942,7 +16245,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1351",
+      "source_location": "L1535",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_get_desktop_config",
@@ -15954,7 +16257,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1364",
+      "source_location": "L1548",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_set_desktop_config",
@@ -15966,7 +16269,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1383",
+      "source_location": "L1567",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_get_selective_sync",
@@ -15978,7 +16281,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1405",
+      "source_location": "L1589",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_set_selective_sync",
@@ -15990,7 +16293,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1421",
+      "source_location": "L1605",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_vaultitem",
@@ -16002,7 +16305,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1439",
+      "source_location": "L1623",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_try_decrypt_name",
@@ -16014,7 +16317,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1467",
+      "source_location": "L1651",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_list_vault_folders",
@@ -16026,7 +16329,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1527",
+      "source_location": "L1711",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_list_remote_tree",
@@ -16038,7 +16341,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1532",
+      "source_location": "L1716",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_set_recursive_pin",
@@ -16050,7 +16353,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1570",
+      "source_location": "L1754",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_account_email",
@@ -16062,7 +16365,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1587",
+      "source_location": "L1771",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_open_conflict_window_impl",
@@ -16074,7 +16377,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1634",
+      "source_location": "L1818",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_open_conflict_window",
@@ -16086,7 +16389,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1654",
+      "source_location": "L1838",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_notify_conflict_impl",
@@ -16098,7 +16401,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1678",
+      "source_location": "L1862",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_notify_conflict",
@@ -16110,7 +16413,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1700",
+      "source_location": "L1884",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_resolve_conflict",
@@ -16122,7 +16425,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1785",
+      "source_location": "L1969",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_app_version",
@@ -16134,7 +16437,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1794",
+      "source_location": "L1978",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_install_update",
@@ -16146,7 +16449,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1832",
+      "source_location": "L2016",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_toggle_autostart",
@@ -16158,7 +16461,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1847",
+      "source_location": "L2031",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_autostart_enabled",
@@ -16170,7 +16473,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1854",
+      "source_location": "L2038",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_run",
@@ -16182,7 +16485,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1985",
+      "source_location": "L2170",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_run_update_loop",
@@ -16194,7 +16497,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1995",
+      "source_location": "L2180",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_check_for_update",
@@ -16206,7 +16509,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2036",
+      "source_location": "L2221",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_setup_native_menu",
@@ -16218,7 +16521,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2099",
+      "source_location": "L2284",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_build_tray_menu",
@@ -16230,7 +16533,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2127",
+      "source_location": "L2312",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_attach_tray_status_listener",
@@ -16242,7 +16545,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2179",
+      "source_location": "L2364",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_setup_tray",
@@ -16254,7 +16557,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2252",
+      "source_location": "L2437",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_show_settings_window",
@@ -16266,7 +16569,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2284",
+      "source_location": "L2470",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_normalizes_recovery_phrase_in_rust",
@@ -16278,7 +16581,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2295",
+      "source_location": "L2481",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_rejects_non_twelve_word_recovery_phrase",
@@ -16290,7 +16593,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2302",
+      "source_location": "L2488",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_classifies_file_provider_setup_errors",
@@ -16302,12 +16605,24 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2318",
+      "source_location": "L2504",
       "weight": 1.0,
       "_src": "src_tauri_src_lib_rs",
       "_tgt": "src_lib_maps_persisted_file_provider_error_into_state",
       "source": "src_tauri_src_lib_rs",
       "target": "src_lib_maps_persisted_file_provider_error_into_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L2523",
+      "weight": 1.0,
+      "_src": "src_tauri_src_lib_rs",
+      "_tgt": "src_lib_disposable_cache_path_check_accepts_temp_files_only",
+      "source": "src_tauri_src_lib_rs",
+      "target": "src_lib_disposable_cache_path_check_accepts_temp_files_only",
       "confidence_score": 1.0
     },
     {
@@ -16326,7 +16641,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1855",
+      "source_location": "L2039",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_session_fmt",
@@ -16350,7 +16665,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1859",
+      "source_location": "L2043",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_appstate_default",
@@ -16362,7 +16677,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2043",
+      "source_location": "L2228",
       "weight": 1.0,
       "_src": "src_lib_setup_native_menu",
       "_tgt": "src_lib_appstate_default",
@@ -16374,7 +16689,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2324",
+      "source_location": "L2510",
       "weight": 1.0,
       "_src": "src_lib_maps_persisted_file_provider_error_into_state",
       "_tgt": "src_lib_appstate_default",
@@ -16470,7 +16785,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L514",
+      "source_location": "L510",
       "weight": 1.0,
       "_src": "src_lib_set_session",
       "_tgt": "src_lib_persist_session_to_keychain",
@@ -16506,7 +16821,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L364",
+      "source_location": "L360",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_persist_session_token_to_keychain",
@@ -16530,7 +16845,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L406",
+      "source_location": "L402",
       "weight": 1.0,
       "_src": "src_lib_desktop_unlock_with_recovery_phrase",
       "_tgt": "src_lib_persist_vault_key_to_keychain",
@@ -16566,7 +16881,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L399",
+      "source_location": "L395",
       "weight": 1.0,
       "_src": "src_lib_desktop_unlock_with_recovery_phrase",
       "_tgt": "src_lib_load_session_token_from_keychain",
@@ -16590,7 +16905,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L588",
+      "source_location": "L585",
       "weight": 1.0,
       "_src": "src_lib_unlock_vault",
       "_tgt": "src_lib_load_session_from_keychain",
@@ -16614,7 +16929,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L625",
+      "source_location": "L622",
       "weight": 1.0,
       "_src": "src_lib_lock_vault",
       "_tgt": "src_lib_keychain_session_present",
@@ -16626,7 +16941,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1926",
+      "source_location": "L2111",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_keychain_session_present",
@@ -16650,7 +16965,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L564",
+      "source_location": "L560",
       "weight": 1.0,
       "_src": "src_lib_clear_session",
       "_tgt": "src_lib_clear_keychain_session",
@@ -16674,7 +16989,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L369",
+      "source_location": "L365",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_set_auth_present",
@@ -16686,7 +17001,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L416",
+      "source_location": "L412",
       "weight": 1.0,
       "_src": "src_lib_desktop_unlock_with_recovery_phrase",
       "_tgt": "src_lib_set_auth_present",
@@ -16698,7 +17013,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L526",
+      "source_location": "L522",
       "weight": 1.0,
       "_src": "src_lib_set_session",
       "_tgt": "src_lib_set_auth_present",
@@ -16710,7 +17025,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L565",
+      "source_location": "L561",
       "weight": 1.0,
       "_src": "src_lib_clear_session",
       "_tgt": "src_lib_set_auth_present",
@@ -16722,7 +17037,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L595",
+      "source_location": "L592",
       "weight": 1.0,
       "_src": "src_lib_unlock_vault",
       "_tgt": "src_lib_set_auth_present",
@@ -16734,7 +17049,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L625",
+      "source_location": "L622",
       "weight": 1.0,
       "_src": "src_lib_lock_vault",
       "_tgt": "src_lib_set_auth_present",
@@ -16746,7 +17061,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L370",
+      "source_location": "L366",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_set_auth_email",
@@ -16758,7 +17073,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L527",
+      "source_location": "L523",
       "weight": 1.0,
       "_src": "src_lib_set_session",
       "_tgt": "src_lib_set_auth_email",
@@ -16770,7 +17085,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L566",
+      "source_location": "L562",
       "weight": 1.0,
       "_src": "src_lib_clear_session",
       "_tgt": "src_lib_set_auth_email",
@@ -16782,7 +17097,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L395",
+      "source_location": "L391",
       "weight": 1.0,
       "_src": "src_lib_desktop_unlock_with_recovery_phrase",
       "_tgt": "src_lib_start_engine_if_possible",
@@ -16794,7 +17109,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L532",
+      "source_location": "L528",
       "weight": 1.0,
       "_src": "src_lib_set_session",
       "_tgt": "src_lib_start_engine_if_possible",
@@ -16806,7 +17121,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L583",
+      "source_location": "L579",
       "weight": 1.0,
       "_src": "src_lib_unlock_vault",
       "_tgt": "src_lib_start_engine_if_possible",
@@ -16854,7 +17169,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1946",
+      "source_location": "L2131",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_open_onboarding_window_impl",
@@ -16890,7 +17205,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L285",
+      "source_location": "L281",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_encode_base64",
@@ -16902,7 +17217,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L316",
+      "source_location": "L312",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_decode_base64",
@@ -16914,7 +17229,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L359",
+      "source_location": "L355",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_desktop_session_has_totp",
@@ -16926,7 +17241,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L360",
+      "source_location": "L356",
       "weight": 1.0,
       "_src": "src_lib_desktop_login",
       "_tgt": "src_lib_revoke_desktop_session",
@@ -16974,7 +17289,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L401",
+      "source_location": "L397",
       "weight": 1.0,
       "_src": "src_lib_desktop_unlock_with_recovery_phrase",
       "_tgt": "src_lib_normalize_recovery_phrase_input",
@@ -16986,7 +17301,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2286",
+      "source_location": "L2472",
       "weight": 1.0,
       "_src": "src_lib_normalizes_recovery_phrase_in_rust",
       "_tgt": "src_lib_normalize_recovery_phrase_input",
@@ -16998,7 +17313,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2296",
+      "source_location": "L2482",
       "weight": 1.0,
       "_src": "src_lib_rejects_non_twelve_word_recovery_phrase",
       "_tgt": "src_lib_normalize_recovery_phrase_input",
@@ -17058,7 +17373,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L703",
+      "source_location": "L712",
       "weight": 1.0,
       "_src": "src_lib_persist_finder_install_result",
       "_tgt": "src_lib_now_unix_seconds",
@@ -17070,7 +17385,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L683",
+      "source_location": "L998",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_lib_now_unix_seconds",
+      "source": "src_lib_now_unix_seconds",
+      "target": "src_lib_reset_macos_integration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L692",
       "weight": 1.0,
       "_src": "src_lib_finder_install_state_from_config",
       "_tgt": "src_lib_classify_finder_install_error",
@@ -17082,7 +17409,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L710",
+      "source_location": "L719",
       "weight": 1.0,
       "_src": "src_lib_persist_finder_install_result",
       "_tgt": "src_lib_classify_finder_install_error",
@@ -17094,7 +17421,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L859",
+      "source_location": "L922",
       "weight": 1.0,
       "_src": "src_lib_finder_location_state",
       "_tgt": "src_lib_finder_install_state_from_config",
@@ -17106,7 +17433,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L924",
+      "source_location": "L984",
       "weight": 1.0,
       "_src": "src_lib_continue_without_finder_location",
       "_tgt": "src_lib_finder_install_state_from_config",
@@ -17118,7 +17445,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2327",
+      "source_location": "L2513",
       "weight": 1.0,
       "_src": "src_lib_maps_persisted_file_provider_error_into_state",
       "_tgt": "src_lib_finder_install_state_from_config",
@@ -17130,7 +17457,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L857",
+      "source_location": "L920",
       "weight": 1.0,
       "_src": "src_lib_finder_location_state",
       "_tgt": "src_lib_persist_finder_install_result",
@@ -17142,7 +17469,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L889",
+      "source_location": "L949",
       "weight": 1.0,
       "_src": "src_lib_install_finder_location",
       "_tgt": "src_lib_persist_finder_install_result",
@@ -17154,7 +17481,79 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L892",
+      "source_location": "L1100",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_lib_persist_finder_install_result",
+      "source": "src_lib_persist_finder_install_result",
+      "target": "src_lib_reset_macos_integration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L996",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_lib_state_db_for_config",
+      "source": "src_lib_state_db_for_config",
+      "target": "src_lib_reset_macos_integration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L766",
+      "weight": 1.0,
+      "_src": "src_lib_is_disposable_cache_path",
+      "_tgt": "src_lib_disposable_cache_roots",
+      "source": "src_lib_disposable_cache_roots",
+      "target": "src_lib_is_disposable_cache_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L1030",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_lib_is_disposable_cache_path",
+      "source": "src_lib_is_disposable_cache_path",
+      "target": "src_lib_reset_macos_integration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L1069",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_lib_remove_stale_ipc_socket",
+      "source": "src_lib_remove_stale_ipc_socket",
+      "target": "src_lib_reset_macos_integration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L773",
+      "weight": 1.0,
+      "_src": "src_lib_remove_stale_ipc_socket",
+      "_tgt": "src_ipc_socket_ipc_socket_path",
+      "source": "src_lib_remove_stale_ipc_socket",
+      "target": "src_ipc_socket_ipc_socket_path"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L952",
       "weight": 1.0,
       "_src": "src_lib_install_finder_location",
       "_tgt": "src_lib_persist_sync_root_and_start_engine",
@@ -17166,7 +17565,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L923",
+      "source_location": "L983",
       "weight": 1.0,
       "_src": "src_lib_continue_without_finder_location",
       "_tgt": "src_lib_persist_sync_root_and_start_engine",
@@ -17190,7 +17589,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L771",
+      "source_location": "L832",
       "weight": 1.0,
       "_src": "src_lib_start_engine_for_pending_finder_install",
       "_tgt": "src_lib_wait_for_file_provider_ipc_ready",
@@ -17202,7 +17601,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L772",
+      "source_location": "L833",
       "weight": 1.0,
       "_src": "src_lib_start_engine_for_pending_finder_install",
       "_tgt": "src_lib_stop_pending_finder_install_engine",
@@ -17214,7 +17613,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L885",
+      "source_location": "L945",
       "weight": 1.0,
       "_src": "src_lib_install_finder_location",
       "_tgt": "src_lib_start_engine_for_pending_finder_install",
@@ -17238,7 +17637,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L888",
+      "source_location": "L948",
       "weight": 1.0,
       "_src": "src_lib_install_finder_location",
       "_tgt": "src_lib_stop_pending_finder_install_engine",
@@ -17262,7 +17661,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L854",
+      "source_location": "L917",
       "weight": 1.0,
       "_src": "src_lib_finder_location_state",
       "_tgt": "src_lib_file_provider_installed",
@@ -17286,7 +17685,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L887",
+      "source_location": "L947",
       "weight": 1.0,
       "_src": "src_lib_install_finder_location",
       "_tgt": "src_lib_install_file_provider_domain",
@@ -17310,12 +17709,24 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L894",
+      "source_location": "L954",
       "weight": 1.0,
       "_src": "src_lib_install_finder_location",
       "_tgt": "src_lib_remove_file_provider_domain",
       "source": "src_lib_remove_file_provider_domain",
       "target": "src_lib_install_finder_location",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L1077",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_lib_remove_file_provider_domain",
+      "source": "src_lib_remove_file_provider_domain",
+      "target": "src_lib_reset_macos_integration",
       "confidence_score": 1.0
     },
     {
@@ -17377,6 +17788,42 @@
       "_tgt": "pages_selectivesync_load",
       "source": "src_lib_continue_without_finder_location",
       "target": "pages_selectivesync_load"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L992",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_api_apiclient_new",
+      "source": "src_lib_reset_macos_integration",
+      "target": "src_api_apiclient_new"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L993",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "pages_selectivesync_load",
+      "source": "src_lib_reset_macos_integration",
+      "target": "pages_selectivesync_load"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src-tauri/src/lib.rs",
+      "source_location": "L1064",
+      "weight": 1.0,
+      "_src": "src_lib_reset_macos_integration",
+      "_tgt": "src_keychain_secretbytes_drop",
+      "source": "src_lib_reset_macos_integration",
+      "target": "src_keychain_secretbytes_drop"
     },
     {
       "relation": "calls",
@@ -17634,7 +18081,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1503",
+      "source_location": "L1687",
       "weight": 1.0,
       "_src": "src_lib_list_vault_folders",
       "_tgt": "src_lib_try_decrypt_name",
@@ -17646,7 +18093,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1528",
+      "source_location": "L1712",
       "weight": 1.0,
       "_src": "src_lib_list_remote_tree",
       "_tgt": "src_lib_list_vault_folders",
@@ -17730,7 +18177,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1640",
+      "source_location": "L1824",
       "weight": 1.0,
       "_src": "src_lib_open_conflict_window",
       "_tgt": "src_lib_open_conflict_window_impl",
@@ -17778,7 +18225,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1680",
+      "source_location": "L1864",
       "weight": 1.0,
       "_src": "src_lib_notify_conflict",
       "_tgt": "src_lib_notify_conflict_impl",
@@ -17850,7 +18297,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1920",
+      "source_location": "L2105",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_setup_native_menu",
@@ -17862,7 +18309,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1921",
+      "source_location": "L2106",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_setup_tray",
@@ -17874,7 +18321,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1922",
+      "source_location": "L2107",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_attach_tray_status_listener",
@@ -17886,7 +18333,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1933",
+      "source_location": "L2118",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_run_update_loop",
@@ -17898,7 +18345,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1957",
+      "source_location": "L2142",
       "weight": 1.0,
       "_src": "src_lib_run",
       "_tgt": "src_lib_show_settings_window",
@@ -17970,7 +18417,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L1990",
+      "source_location": "L2175",
       "weight": 1.0,
       "_src": "src_lib_run_update_loop",
       "_tgt": "src_lib_check_for_update",
@@ -18006,7 +18453,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2182",
+      "source_location": "L2367",
       "weight": 1.0,
       "_src": "src_lib_setup_tray",
       "_tgt": "src_lib_build_tray_menu",
@@ -18030,7 +18477,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src-tauri/src/lib.rs",
-      "source_location": "L2196",
+      "source_location": "L2381",
       "weight": 1.0,
       "_src": "src_lib_setup_tray",
       "_tgt": "src_lib_show_settings_window",
@@ -24906,7 +25353,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L103",
+      "source_location": "L114",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_reasonfrom",
@@ -24918,7 +25365,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L108",
+      "source_location": "L119",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_isunsupported",
@@ -24930,7 +25377,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L120",
+      "source_location": "L131",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_command",
@@ -24942,7 +25389,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L129",
+      "source_location": "L140",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_loadsyncstatus",
@@ -24954,7 +25401,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L134",
+      "source_location": "L145",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_openurl",
@@ -24966,7 +25413,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L141",
+      "source_location": "L152",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_formatbytes",
@@ -24978,7 +25425,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L154",
+      "source_location": "L165",
       "weight": 1.0,
       "_src": "src_desktopapi_ts",
       "_tgt": "src_desktopapi_commandunavailablelabel",
@@ -24990,7 +25437,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L124",
+      "source_location": "L135",
       "weight": 1.0,
       "_src": "src_desktopapi_command",
       "_tgt": "src_desktopapi_reasonfrom",
@@ -25002,7 +25449,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/desktopApi.ts",
-      "source_location": "L125",
+      "source_location": "L136",
       "weight": 1.0,
       "_src": "src_desktopapi_command",
       "_tgt": "src_desktopapi_isunsupported",
@@ -25249,6 +25696,18 @@
       "_tgt": "pages_syncfolder_openfinder",
       "source": "src_desktopapi_commandunavailablelabel",
       "target": "pages_syncfolder_openfinder"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src/pages/SyncFolder.tsx",
+      "source_location": "L69",
+      "weight": 1.0,
+      "_src": "pages_syncfolder_resetfinderintegration",
+      "_tgt": "src_desktopapi_commandunavailablelabel",
+      "source": "src_desktopapi_commandunavailablelabel",
+      "target": "pages_syncfolder_resetfinderintegration"
     },
     {
       "relation": "contains",
@@ -25782,7 +26241,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/pages/SyncFolder.tsx",
-      "source_location": "L20",
+      "source_location": "L26",
       "weight": 1.0,
       "_src": "src_pages_syncfolder_tsx",
       "_tgt": "pages_syncfolder_choosefolderclick",
@@ -25794,7 +26253,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/pages/SyncFolder.tsx",
-      "source_location": "L32",
+      "source_location": "L38",
       "weight": 1.0,
       "_src": "src_pages_syncfolder_tsx",
       "_tgt": "pages_syncfolder_installfinder",
@@ -25806,12 +26265,24 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/pages/SyncFolder.tsx",
-      "source_location": "L44",
+      "source_location": "L50",
       "weight": 1.0,
       "_src": "src_pages_syncfolder_tsx",
       "_tgt": "pages_syncfolder_openfinder",
       "source": "src_pages_syncfolder_tsx",
       "target": "pages_syncfolder_openfinder",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/pages/SyncFolder.tsx",
+      "source_location": "L58",
+      "weight": 1.0,
+      "_src": "src_pages_syncfolder_tsx",
+      "_tgt": "pages_syncfolder_resetfinderintegration",
+      "source": "src_pages_syncfolder_tsx",
+      "target": "pages_syncfolder_resetfinderintegration",
       "confidence_score": 1.0
     }
   ],

@@ -1058,6 +1058,48 @@ impl StateDb {
         tx.commit()?;
         Ok(evicted)
     }
+
+    pub fn disposable_unpinned_cache_paths(&self) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "
+            SELECT cache_path
+            FROM files
+            WHERE cache_bytes > 0
+              AND cache_path IS NOT NULL
+              AND status = 'local'
+              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
+            ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    pub fn clear_cache_metadata_for_paths(&self, cache_paths: &[String], now: i64) -> Result<usize> {
+        if cache_paths.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut updated = 0usize;
+        for path in cache_paths {
+            updated += tx.execute(
+                "UPDATE files
+                 SET cache_path = NULL,
+                     cache_bytes = 0,
+                     status = 'cloud_only',
+                     modified_at = ?2
+                 WHERE cache_path = ?1
+                   AND status = 'local'
+                   AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))",
+                params![path, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
@@ -1221,7 +1263,10 @@ mod tests {
             "last_error_class",
             "paused_reason",
         ] {
-            assert!(has_column(&conn, "operation_queue", column).unwrap(), "missing {column}");
+            assert!(
+                has_column(&conn, "operation_queue", column).unwrap(),
+                "missing {column}"
+            );
         }
 
         let row: (String, i64, String) = conn
@@ -1483,6 +1528,48 @@ mod tests {
         assert_eq!(db.get_file("new").unwrap().unwrap().status, FileStatus::CloudOnly);
         assert_eq!(db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
         assert_eq!(db.get_file("uploading").unwrap().unwrap().status, FileStatus::Uploading);
+    }
+
+    #[test]
+    fn test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "pinned", "/Pinned.txt", None, FileStatus::Local, 800);
+        seed_contract_row(&db, "uploading", "/Uploading.txt", None, FileStatus::Uploading, 900);
+        seed_contract_row(&db, "local", "/Local.txt", None, FileStatus::Local, 700);
+
+        db.set_recursive_pin("pinned", true, 10).unwrap();
+        db.mark_cached("pinned", "/cache/pinned", 800, 10).unwrap();
+        db.mark_cached("uploading", "/cache/uploading", 900, 20).unwrap();
+        db.mark_cached("local", "/cache/local", 700, 30).unwrap();
+
+        assert_eq!(
+            db.disposable_unpinned_cache_paths().unwrap(),
+            vec!["/cache/local".to_string()]
+        );
+
+        let cleared = db
+            .clear_cache_metadata_for_paths(&["/cache/local".to_string()], 100)
+            .unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(db.get_file("local").unwrap().unwrap().status, FileStatus::CloudOnly);
+        assert_eq!(db.get_file_contract_state("local").unwrap().unwrap().cache_path, None);
+        assert_eq!(
+            db.get_file_contract_state("pinned")
+                .unwrap()
+                .unwrap()
+                .cache_path
+                .as_deref(),
+            Some("/cache/pinned")
+        );
+        assert_eq!(
+            db.get_file_contract_state("uploading")
+                .unwrap()
+                .unwrap()
+                .cache_path
+                .as_deref(),
+            Some("/cache/uploading")
+        );
     }
 
     fn seed_contract_row(
