@@ -142,6 +142,7 @@ Before public release, inspect the built app and extension:
 
 ```sh
 APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Beebeeb.app"
+scripts/sign-local-macos-app.sh "$APP" # local verification; set APPLE_SIGNING_IDENTITY for release signing
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dvvv --entitlements :- "$APP"
 find "$APP/Contents/PlugIns" -maxdepth 2 -name "*.appex" -print -exec \

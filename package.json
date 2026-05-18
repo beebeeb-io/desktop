@@ -3,11 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Beebeeb desktop — Tauri shell. Frontend in production reuses the web client (repos/web).",
+  "description": "Beebeeb desktop \u2014 Tauri shell. Frontend in production reuses the web client (repos/web).",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "macos:fileprovider": "scripts/build-fileprovider-extension.sh",
+    "macos:sign-local": "scripts/sign-local-macos-app.sh",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

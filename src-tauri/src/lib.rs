@@ -630,8 +630,50 @@ struct FinderInstallState {
 }
 
 fn file_provider_packaging_error() -> String {
-    "The Beebeeb File Provider extension is not packaged in this build, so Finder drive registration is unavailable."
+    "The Beebeeb File Provider helper is not packaged in this build, so Finder drive registration is unavailable."
         .to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn file_provider_helper_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("locate Beebeeb executable: {e}"))?;
+    let macos_dir = exe
+        .parent()
+        .ok_or_else(|| "Beebeeb executable has no parent directory".to_string())?;
+    let bundled = macos_dir.join("BeebeebFileProviderCtl");
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("fileprovider")
+        .join("BeebeebFileProviderCtl");
+    if dev.is_file() {
+        return Ok(dev);
+    }
+
+    Err(file_provider_packaging_error())
+}
+
+#[cfg(target_os = "macos")]
+fn run_file_provider_helper(command: &str) -> Result<String, String> {
+    let output = std::process::Command::new(file_provider_helper_path()?)
+        .arg(command)
+        .output()
+        .map_err(|e| format!("run File Provider helper: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(if stderr.is_empty() { stdout } else { stderr })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_file_provider_helper(_command: &str) -> Result<String, String> {
+    Err("File Provider is only available on macOS.".to_string())
 }
 
 #[tauri::command]
@@ -640,7 +682,10 @@ fn finder_location_state() -> Result<FinderInstallState, String> {
         .ok()
         .and_then(|c| c.sync_root)
         .map(|p| p.to_string_lossy().into_owned());
-    Ok(FinderInstallState { installed: false, path })
+    let installed = run_file_provider_helper("status")
+        .map(|status| status == "installed")
+        .unwrap_or(false);
+    Ok(FinderInstallState { installed, path })
 }
 
 /// Persist the chosen sync root and start the daemon when possible, but do not
@@ -676,7 +721,11 @@ async fn install_finder_location(
         *engine_slot = Some(EngineRunner::spawn(app, root.clone(), token, key));
     }
 
-    Err(file_provider_packaging_error())
+    run_file_provider_helper("install")?;
+    Ok(FinderInstallState {
+        installed: true,
+        path: Some(root.to_string_lossy().into_owned()),
+    })
 }
 
 #[tauri::command]

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.beebeeb.desktop",
   "build": {
+    "beforeBundleCommand": "scripts/build-fileprovider-extension.sh",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -58,6 +59,10 @@
     "longDescription": "Beebeeb is end-to-end encrypted, zero-knowledge cloud storage. Files are encrypted on your device before they leave your machine. Operated by Initlabs B.V., Wijchen, Netherlands.",
     "macOS": {
       "frameworks": [],
+      "files": {
+        "PlugIns/BeebeebFileProvider.appex": "target/fileprovider/BeebeebFileProvider.appex",
+        "MacOS/BeebeebFileProviderCtl": "target/fileprovider/BeebeebFileProviderCtl"
+      },
       "exceptionDomain": "",
       "signingIdentity": null,
       "entitlements": "entitlements.plist",

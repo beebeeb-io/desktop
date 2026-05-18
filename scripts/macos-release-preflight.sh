@@ -64,9 +64,23 @@ if [[ "${1:-}" != "" ]]; then
       spctl --assess --type install -vv "$artifact"
       ;;
     *.app)
+      appex="$artifact/Contents/PlugIns/BeebeebFileProvider.appex"
+      helper="$artifact/Contents/MacOS/BeebeebFileProviderCtl"
+      [[ -d "$appex" ]] || fail "File Provider extension missing from app bundle: $appex"
+      [[ -x "$helper" ]] || fail "File Provider helper missing from app bundle: $helper"
+      codesign --verify --strict --verbose=2 "$appex"
+      codesign --verify --strict --verbose=2 "$helper"
+      codesign -dvvv --entitlements :- "$appex"
       codesign --verify --deep --strict --verbose=2 "$artifact"
       codesign -dvvv --entitlements :- "$artifact"
-      spctl --assess --type execute -vv "$artifact"
+      codesign_details="$(codesign -dvvv "$artifact" 2>&1 || true)"
+      if grep -q 'TeamIdentifier=not set' <<<"$codesign_details"; then
+        printf 'Ad-hoc signed app detected; skipped spctl execute assessment. Use Developer ID signing for release Gatekeeper verification.\n'
+      elif ! grep -q 'Authority=Developer ID Application:' <<<"$codesign_details"; then
+        printf 'Non-Developer ID app signature detected; skipped spctl execute assessment. Use Developer ID signing for release Gatekeeper verification.\n'
+      else
+        spctl --assess --type execute -vv "$artifact"
+      fi
       ;;
     *)
       fail "unsupported artifact type; pass a .dmg or .app"

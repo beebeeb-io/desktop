@@ -16,8 +16,30 @@ version anchors, permissions, cache state, and queue persistence.
 
 ## Local Build Check
 
-There is not yet an Xcode project or extension target in this repository, so
-the local source-level check is:
+The local bundle build is:
+
+```sh
+scripts/build-fileprovider-extension.sh
+```
+
+It creates:
+
+```text
+src-tauri/target/fileprovider/BeebeebFileProvider.appex
+```
+
+Tauri embeds that generated bundle into
+`Beebeeb.app/Contents/PlugIns/BeebeebFileProvider.appex` during macOS bundle
+creation.
+
+After a local app build, sign the nested extension before the parent app:
+
+```sh
+scripts/sign-local-macos-app.sh \
+  src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app
+```
+
+The source-level check is still useful while editing Swift files:
 
 ```sh
 xcrun swiftc -typecheck \
@@ -25,8 +47,7 @@ xcrun swiftc -typecheck \
   BeebeebFileProvider/*.swift
 ```
 
-When the Xcode target is added, include these files in a File Provider
-Extension target with:
+If this later moves to a full Xcode target, keep the same contract:
 
 - extension point: `com.apple.fileprovider-nonui`;
 - principal class: `$(PRODUCT_MODULE_NAME).FileProviderExtension`;
