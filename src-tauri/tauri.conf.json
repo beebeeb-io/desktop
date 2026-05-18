@@ -5,7 +5,7 @@
   "identifier": "io.beebeeb.desktop",
   "build": {
     "beforeBuildCommand": "bun run build",
-    "beforeBundleCommand": "scripts/build-fileprovider-extension.sh",
+    "beforeBundleCommand": "scripts/prepare-macos-provisioning-profiles.sh && scripts/build-fileprovider-extension.sh",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -61,6 +61,7 @@
     "macOS": {
       "frameworks": [],
       "files": {
+        "embedded.provisionprofile": "target/profiles/BeebeebApp.provisionprofile",
         "PlugIns/BeebeebFileProvider.appex": "target/fileprovider/BeebeebFileProvider.appex",
         "MacOS/BeebeebFileProviderCtl": "target/fileprovider/BeebeebFileProviderCtl"
       },

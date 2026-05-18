@@ -11,6 +11,7 @@ OUT_DIR="src-tauri/target/fileprovider/BeebeebFileProvider.appex"
 HELPER_OUT="src-tauri/target/fileprovider/BeebeebFileProviderCtl"
 TARGET_TRIPLE="${BEEBEEB_FILE_PROVIDER_TARGET:-}"
 SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
+EXTENSION_PROVISION_PROFILE="${MACOS_FILE_PROVIDER_PROVISION_PROFILE:-src-tauri/target/profiles/BeebeebFileProvider.provisionprofile}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -108,6 +109,10 @@ Path("$INFO_PLIST").write_text(template)
 PY
 
 plutil -lint "$INFO_PLIST" "$ENTITLEMENTS"
+
+if [[ -f "$EXTENSION_PROVISION_PROFILE" ]]; then
+  cp "$EXTENSION_PROVISION_PROFILE" "$CONTENTS_DIR/embedded.provisionprofile"
+fi
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then
   codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT_DIR"

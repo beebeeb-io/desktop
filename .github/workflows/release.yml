@@ -86,6 +86,8 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_APP_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_APP_PROVISION_PROFILE_BASE64 }}
+          MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64 }}
           TAURI_WINDOWS_CERTIFICATE: ${{ secrets.TAURI_WINDOWS_CERTIFICATE }}
           TAURI_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -94,6 +96,13 @@ jobs:
         with:
           tauriScript: bun run tauri
           args: --target ${{ matrix.target }} --locked
+
+      - name: Validate signed macOS artifact
+        if: runner.os == 'macOS'
+        run: |
+          app_path="$(find src-tauri/target -path '*/release/bundle/macos/Beebeeb.app' -type d | head -n 1)"
+          test -n "$app_path"
+          bash scripts/macos-release-preflight.sh "$app_path"
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'

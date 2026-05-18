@@ -15153,8 +15153,8 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L920",
       "weight": 1.0,
-      "_src": "src_lib_continue_without_finder_location",
-      "_tgt": "src_config_ensure_directory",
+      "_src": "src_config_ensure_directory",
+      "_tgt": "src_lib_continue_without_finder_location",
       "source": "src_config_ensure_directory",
       "target": "src_lib_continue_without_finder_location"
     },
