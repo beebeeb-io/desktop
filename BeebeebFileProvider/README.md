@@ -14,6 +14,24 @@ This target is intentionally thin:
 The Rust daemon owns auth, unlock state, encrypted names, uploads, downloads,
 version anchors, permissions, cache state, and queue persistence.
 
+## Current Release Contract
+
+Current macOS identifiers:
+
+- containing app: `io.beebeeb.app`
+- extension: `io.beebeeb.app.FileProvider`
+- domain: `io.beebeeb.app.domain`
+- document/app group: `R8352WDJJR.io.beebeeb.app.fileprovider`
+
+The visible Finder integration must be the File Provider domain, not a fake
+local folder root. The user's local path is only cache/offline state controlled
+by the daemon.
+
+Known blocker: Finder installation times out when the app or extension is not
+signed with provisioning profiles that include the exact document/app group
+above. Treat entitlement rejection from `trustd`, `taskgated`, or File Provider
+logs as a signing/provisioning issue, not a daemon protocol issue.
+
 ## Local Build Check
 
 The local bundle build is:
@@ -93,7 +111,8 @@ For local remount during development:
 5. Open Finder and select the Beebeeb location.
 
 Full Finder verification requires a signed containing app and an embedded
-extension target. Source type-checking alone does not install a domain.
+extension target with matching app-group entitlements. Source type-checking
+alone does not install a domain.
 
 ## Production Domain Contract
 

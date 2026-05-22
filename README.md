@@ -12,7 +12,9 @@
 
 ---
 
-> **In active development.** The Rust sync engine is working. Native platform shells are in progress.
+> **In active development.** macOS is the first product target. The Rust sync
+> engine and Tauri shell are active; Finder/File Provider integration is blocked
+> on Apple provisioning profiles with the correct app-group entitlements.
 
 The [Beebeeb](https://beebeeb.io) desktop client gives you a native sync folder on macOS, Windows, and Linux. Drop files into your Beebeeb folder and they are automatically encrypted and synced to the cloud. Each platform gets a native shell that feels at home on your OS, all powered by a shared Rust sync engine from the [core](https://github.com/beebeeb-io/core) repo.
 
@@ -52,7 +54,7 @@ graph TD
 
 | Platform | Shell | Integration | Status |
 |---|---|---|---|
-| **macOS** | Swift / SwiftUI | Menu bar app, Finder extension (FinderSync) | In progress |
+| **macOS** | Tauri + Swift File Provider | Menu bar/control center, Finder File Provider location | In progress |
 | **Windows** | WinUI 3 / C++ | System tray, File Explorer overlay icons | In progress |
 | **Linux** | Rust + GTK4 / libadwaita | Tray indicator, FUSE mount for online-only files | In progress |
 
@@ -76,11 +78,23 @@ All platforms require [Rust](https://rustup.rs/) (stable, edition 2024).
 ### macOS
 
 ```sh
-# Additional: Xcode 15+, macOS SDK 14.0+, cbindgen
-cd macos
-cargo build --release
-open BeebeebDesktop.xcodeproj
+# Additional: Xcode 15+, macOS SDK 14.0+, Tauri prerequisites
+bun install
+bun run tauri:dev
+bun run tauri:build
 ```
+
+Current macOS release identifiers:
+
+- App bundle id: `io.beebeeb.app`
+- File Provider extension id: `io.beebeeb.app.FileProvider`
+- File Provider domain id: `io.beebeeb.app.domain`
+- Shared app group: `R8352WDJJR.io.beebeeb.app.fileprovider`
+
+The Finder location will not install reliably until the Apple provisioning
+profiles for both the containing app and File Provider extension include the
+exact shared app group entitlement. A Tauri updater-signing failure about
+`TAURI_SIGNING_PRIVATE_KEY` is separate from this provisioning issue.
 
 ### Windows
 
@@ -106,7 +120,7 @@ The sync engine (`beebeeb-sync` from the core repo) handles:
 
 - **File watching** -- debounced at 100ms. Ignores `.DS_Store`, `Thumbs.db`, temp files.
 - **Conflict resolution** -- never silently drops data. Default strategy is `KeepBoth`: the older version is renamed as `file (Device, HH:MM).ext`.
-- **Selective sync** -- folders can be marked online-only. They appear as placeholders until opened, then are downloaded and decrypted on demand.
+- **Selective sync** -- the vault stays remote by default. Folders marked as locally available are hydrated and kept in sync; other items remain online-only placeholders until opened.
 
 ## Security
 

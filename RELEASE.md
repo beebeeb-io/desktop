@@ -46,6 +46,27 @@ so a mismatched manifest will silently fail to roll users forward.
 
 ## Task 14 — macOS `.dmg`
 
+### Current macOS identifiers
+
+These values must match App Store Connect, Certificates/Identifiers/Profiles,
+the Tauri config, entitlements, and the File Provider bundle:
+
+| Item | Value |
+|------|-------|
+| App bundle id | `io.beebeeb.app` |
+| File Provider extension id | `io.beebeeb.app.FileProvider` |
+| File Provider domain id | `io.beebeeb.app.domain` |
+| Shared app group | `R8352WDJJR.io.beebeeb.app.fileprovider` |
+
+If Finder install times out or File Provider logs show entitlement rejection,
+verify the downloaded provisioning profiles first. Both the containing app
+profile and extension profile must include the exact shared app group. Expo/EAS
+does not build or provision this desktop app.
+
+A Tauri warning that the identifier ends in `.app` is known for the current
+App Store Connect record. Do not change bundle ids without an explicit product
+migration decision.
+
 ### Build
 
 ```sh
@@ -131,6 +152,15 @@ Required app entitlements live in `src-tauri/entitlements.plist`:
 | `com.apple.security.files.user-selected.read-write` | User-approved sync/cache folder access. |
 | `com.apple.security.network.client` | API sync and update checks. |
 | `com.apple.security.network.server` | Local daemon/socket integration where macOS applies network policy. |
+
+Provisioning profile requirement:
+
+- containing app profile for `io.beebeeb.app` includes
+  `R8352WDJJR.io.beebeeb.app.fileprovider`;
+- extension profile for `io.beebeeb.app.FileProvider` includes the same app
+  group;
+- both profiles use the same Team ID and signing certificate family as the
+  final build.
 
 The File Provider extension target, once embedded in an Xcode project, must be
 signed by the same Team ID as the containing app and use:

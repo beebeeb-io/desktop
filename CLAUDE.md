@@ -65,6 +65,29 @@ To develop against the real web client instead of the placeholder:
 - `src-tauri/src/lib.rs` — `run()` builds the Tauri app and registers `#[tauri::command]` handlers. Add new commands here.
 - `src-tauri/capabilities/default.json` — permissions the frontend can invoke. Add explicit permissions before exposing new tauri APIs.
 
+## Current macOS integration state
+
+macOS is the first desktop product target. Keep cross-platform logic in Rust
+where possible: auth/session handling, crypto, sync, queueing, conflict/version
+logic, cache policy, and API protocol code belong in `src-tauri` or shared Rust
+crates rather than being duplicated in the frontend.
+
+Current release identifiers:
+
+- App bundle id: `io.beebeeb.app`
+- File Provider extension id: `io.beebeeb.app.FileProvider`
+- File Provider domain id: `io.beebeeb.app.domain`
+- App group: `R8352WDJJR.io.beebeeb.app.fileprovider`
+
+The active Finder/File Provider blocker is Apple provisioning/profile
+entitlement mismatch. Both the containing app and extension profiles must
+include the exact app group above. Do not mask this as a UI timeout or switch to
+a fake local folder root; fix signing/provisioning first.
+
+The Tauri warning that `io.beebeeb.app` ends in `.app` is known. Keep this
+identifier unless Guus creates a new macOS App Store Connect record and chooses
+to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
+
 ## Adding commands (Rust → JS bridge)
 
 1. Add a `#[tauri::command]` function in `src-tauri/src/lib.rs`.
@@ -72,9 +95,14 @@ To develop against the real web client instead of the placeholder:
 3. Call from JS: `import { invoke } from "@tauri-apps/api/core"; await invoke("my_cmd", { arg })`.
 4. If it touches an OS API (fs, dialog, notification…), add the matching permission to `capabilities/default.json`.
 
-## Sync engine (future)
+## Sync engine
 
-Once `beebeeb-sync` integration lands: `src-tauri/Cargo.toml` will pull `beebeeb-sync = { git = "https://github.com/beebeeb-io/core" }` and a background tokio task in `lib.rs` will own the engine. Conflict resolution policy: never silently drop a version — default `KeepBoth` (rename loser as `file (Device, HH:MM).ext`). File watcher debounce: 100ms.
+`src-tauri` is expected to own the background Rust sync runtime and call shared
+core/sync logic instead of duplicating protocol behavior in TypeScript.
+Conflict resolution policy: never silently drop a version — default `KeepBoth`
+(rename loser as `file (Device, HH:MM).ext`). File watcher debounce: 100ms.
+The backend must create a new server version for Finder writes when the server
+versioning contract supports it.
 
 ## Auto-update signing
 
