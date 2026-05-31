@@ -2,6 +2,21 @@
 
 Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus the Rust sync engine from `core`. One codebase, three OS targets (macOS, Windows, Linux).
 
+## Release status — IN DEVELOPMENT, no official release yet
+
+There are **no published GitHub releases** for desktop, and the `release.yml`
+workflow currently **fails on every run** (it has never produced a successful
+build). This is expected pre-launch — desktop is the least-mature client. The
+README therefore shows a static `status: in development` badge instead of a CI/
+release badge (the previous badge pointed at a non-existent `ci.yml`).
+
+**When the first official release ships, update BOTH this section and the README
+to reflect the actual released state:** remove the in-development banner, document
+the real install method (auto-update via minisign / per-OS bundles), and point
+the README badge at the workflow that's actually green (`release.yml` or a real
+`ci.yml`). Keep this note honest — do not claim a release or a green pipeline
+that doesn't exist.
+
 ## Architecture
 
 ```mermaid

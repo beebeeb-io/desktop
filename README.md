@@ -6,15 +6,20 @@
 
 <p align="center">
   <a href="https://github.com/beebeeb-io/desktop/blob/main/LICENSE"><img src="https://img.shields.io/github/license/beebeeb-io/desktop" alt="License"></a>
-  <a href="https://github.com/beebeeb-io/desktop/actions"><img src="https://img.shields.io/github/actions/workflow/status/beebeeb-io/desktop/ci.yml" alt="CI"></a>
+  <a href="https://github.com/beebeeb-io/desktop#status"><img src="https://img.shields.io/badge/status-in%20development-f5b800" alt="Status: in development"></a>
   <a href="https://github.com/beebeeb-io/desktop/stargazers"><img src="https://img.shields.io/github/stars/beebeeb-io/desktop" alt="Stars"></a>
 </p>
 
 ---
 
-> **In active development.** macOS is the first product target. The Rust sync
-> engine and Tauri shell are active; Finder/File Provider integration is blocked
-> on Apple provisioning profiles with the correct app-group entitlements.
+## Status
+
+> **In active development — no official release yet.** There are no published
+> builds or GitHub releases, and the release pipeline (`release.yml`) is not yet
+> green. macOS is the first product target; the Rust sync engine and Tauri shell
+> are active. Finder/File Provider integration is blocked on Apple provisioning
+> profiles with the correct app-group entitlements. Install instructions and a
+> real CI/release badge will land here once the first release ships.
 
 The [Beebeeb](https://beebeeb.io) desktop client gives you a native sync folder on macOS, Windows, and Linux. Drop files into your Beebeeb folder and they are automatically encrypted and synced to the cloud. Each platform gets a native shell that feels at home on your OS, all powered by a shared Rust sync engine from the [core](https://github.com/beebeeb-io/core) repo.
 
