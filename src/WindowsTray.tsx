@@ -100,8 +100,8 @@ function Spinner({ pct }: { pct: number }) {
   return (
     <div style={{
       marginTop: 5,
-      height: 3,
-      background: 'oklch(0.90 0.008 82)',
+      height: 2,
+      background: 'oklch(0.945 0.008 82)',
       borderRadius: 999,
       overflow: 'hidden',
     }}>
@@ -131,6 +131,7 @@ export default function WindowsTray() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [paused, setPaused] = useState(false)
   const [activities, setActivities] = useState<TrayActivity[]>([])
+  const [actionError, setActionError] = useState<string | null>(null)
 
   // Poll sync status
   useEffect(() => {
@@ -188,13 +189,22 @@ export default function WindowsTray() {
   })()
 
   const handlePause = async () => {
+    setActionError(null)
     const cmd = paused ? 'tray_resume_sync' : 'tray_pause_sync'
     const result = await command<void>(cmd)
-    if (result.ok) setPaused((prev) => !prev)
+    if (result.ok) {
+      setPaused((prev) => !prev)
+    } else if (!result.unsupported) {
+      setActionError(result.reason)
+    }
   }
 
   const handleSettings = async () => {
-    await command<void>('show_settings_window')
+    setActionError(null)
+    const result = await command<void>('show_settings_window')
+    if (!result.ok && !result.unsupported) {
+      setActionError(result.reason)
+    }
   }
 
   return (
@@ -208,7 +218,7 @@ export default function WindowsTray() {
       boxShadow: '0 22px 60px -18px rgba(0,0,0,0.35), 0 0 0 1px oklch(0.83 0.01 80)',
       display: 'flex',
       flexDirection: 'column',
-      fontFamily: "'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
       fontSize: 13,
       color: 'oklch(0.18 0.01 70)',
       position: 'relative',
@@ -388,6 +398,25 @@ export default function WindowsTray() {
           </button>
         </div>
       </div>
+
+      {/* Inline action error (non-blocking) */}
+      {actionError && (
+        <div style={{
+          position: 'absolute',
+          bottom: 44,
+          left: 14,
+          right: 14,
+          padding: '6px 10px',
+          background: 'oklch(0.98 0.02 25)',
+          border: '1px solid oklch(0.88 0.05 25)',
+          borderRadius: 6,
+          fontSize: 11,
+          color: 'oklch(0.42 0.15 25)',
+          lineHeight: 1.4,
+        }}>
+          {actionError}
+        </div>
+      )}
 
       {/* Caret pointing down to the tray icon */}
       <div style={{

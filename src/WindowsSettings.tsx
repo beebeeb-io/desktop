@@ -48,7 +48,7 @@ const T = {
   amberDeep: 'oklch(0.66 0.15 72)',
   amberBg: 'oklch(0.97 0.03 92)',
   green: 'oklch(0.72 0.16 155)',
-  fontSans: "'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  fontSans: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
   fontMono: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 } as const
 
@@ -340,7 +340,16 @@ function SyncPanel({
 
   const synced7d = storage ? formatBytes(storage.used_bytes) : '…'
   const onPc = storage ? formatBytes(storage.pinned_bytes + storage.cache_bytes) : '…'
-  const lastSync = status?.syncing === 0 && status.engine === 'running' ? 'Idle' : 'Syncing…'
+  const [lastSyncLabel, setLastSyncLabel] = useState('…')
+  useEffect(() => {
+    if (status?.syncing === 0 && status.engine === 'running') {
+      setLastSyncLabel('Just now')
+    } else if (status?.engine === 'running') {
+      setLastSyncLabel('Syncing…')
+    } else {
+      setLastSyncLabel('—')
+    }
+  }, [status?.syncing, status?.engine])
 
   const freeUp = async () => {
     setFreeUpBusy(true)
@@ -400,7 +409,7 @@ function SyncPanel({
           { k: 'State', v: status?.engine === 'running' ? (status.syncing > 0 ? 'Syncing' : 'Up to date') : 'Paused' },
           { k: 'On this PC', v: onPc },
           { k: 'In vault', v: synced7d },
-          { k: 'Last sync', v: lastSync },
+          { k: 'Last sync', v: lastSyncLabel },
         ].map(({ k, v }) => (
           <div key={k}>
             <div style={{
@@ -777,7 +786,7 @@ export default function WindowsSettings() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <NavIcon name="shield" size={11} color={T.amberDeep} />
             <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-              Falkenstein · E2E
+              Falkenstein · E2E encrypted
             </span>
           </div>
         </div>

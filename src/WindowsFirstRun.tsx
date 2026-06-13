@@ -11,15 +11,14 @@
  *   1. Sign in          — desktop_login
  *   2. Unlock vault     — desktop_unlock_with_recovery_phrase
  *   3. Pick sync folder — pick_sync_root, set_sync_mode (NEW — WS1)
- *   4. Finder / Explorer integration — install_finder_location (renamed to
- *      install_explorer_integration on Windows, same command)
+ *   4. Explorer integration — install_windows_shell_integration
  *   ready               — show_settings_window
  *
  * Invoke commands used:
  *   EXISTING:  desktop_login, desktop_unlock_with_recovery_phrase,
- *              desktop_platform, pick_sync_root, install_finder_location,
- *              default_sync_root, finder_location_state, list_vault_folders,
- *              set_recursive_pin, show_settings_window
+ *              desktop_platform, pick_sync_root, default_sync_root,
+ *              list_vault_folders, set_recursive_pin, show_settings_window
+ *   NEW (WS1): install_windows_shell_integration, windows_shell_integration_state
  *   NEW (WS1): set_sync_mode (arg: mode: 'everything' | 'smart' | 'custom' | 'online_only')
  */
 
@@ -42,6 +41,9 @@ import {
   type VaultItem,
 } from './desktopApi'
 
+// Windows shell integration uses the same shape as the macOS FinderInstallState
+type ShellIntegrationState = FinderInstallState
+
 type Step = 'signin' | 'unlock' | 'sync-mode' | 'explorer' | 'ready'
 const RECOVERY_WORD_COUNT = 12
 
@@ -56,10 +58,10 @@ const STEPS: Array<{ id: Step; title: string; detail: string }> = [
 type SyncMode = 'everything' | 'smart' | 'custom' | 'online_only'
 
 const SYNC_OPTIONS: Array<{ mode: SyncMode; title: string; desc: string; recommended?: boolean }> = [
-  { mode: 'everything', title: 'Everything', desc: '23.4 GB · fastest but more disk' },
-  { mode: 'smart', title: 'Smart', desc: 'Recent + starred + shared · ~6 GB', recommended: true },
+  { mode: 'everything', title: 'Everything', desc: 'Full vault · fastest, uses most disk' },
+  { mode: 'smart', title: 'Smart', desc: 'Recent + starred + shared · smaller footprint', recommended: true },
   { mode: 'custom', title: 'Custom', desc: "I'll pick folders after setup" },
-  { mode: 'online_only', title: 'Online-only', desc: 'Placeholders only · 0 GB on disk' },
+  { mode: 'online_only', title: 'Online-only', desc: 'Placeholders only · almost no disk use' },
 ]
 
 // ── Design tokens (inline, no Tailwind dependency) ────────────────────────
@@ -79,7 +81,7 @@ const T = {
   amberBg: 'oklch(0.97 0.03 92)',
   amberSoft: 'oklch(0.94 0.06 90)',
   green: 'oklch(0.72 0.16 155)',
-  fontSans: "'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  fontSans: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
   fontMono: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 } as const
 
@@ -553,7 +555,7 @@ function SyncModeStep({ onDone }: { onDone: () => void }) {
                   borderRadius: 6,
                   fontWeight: 600,
                   letterSpacing: 0.3,
-                  fontFamily: T.fontMono,
+                  fontFamily: T.fontSans,
                   textTransform: 'uppercase' as const,
                 }}>
                   Recommended
@@ -595,20 +597,16 @@ function ExplorerStep({ onDone }: { onDone: () => void }) {
   const install = useCallback(async () => {
     setBusy(true)
     setMessage(null)
-    // On Windows we pass the chosen path (macOS uses null for the File Provider path)
-    const result = await command<FinderInstallState>('install_finder_location', { path: syncRoot })
+    const result = await command<ShellIntegrationState>('install_windows_shell_integration', { path: syncRoot })
     setBusy(false)
     if (result.ok) { onDone(); return }
-    setMessage(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
+    setMessage(result.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : result.reason)
   }, [onDone, syncRoot])
 
-  const skip = useCallback(async () => {
-    setBusy(true)
-    const result = await command<void>('continue_without_finder_location', { path: syncRoot })
-    setBusy(false)
-    if (result.ok || result.unsupported) { onDone(); return }
-    setMessage(result.reason)
-  }, [onDone, syncRoot])
+  const skip = useCallback(() => {
+    // No dedicated skip command on Windows — proceed directly
+    onDone()
+  }, [onDone])
 
   return (
     <div>
@@ -645,7 +643,7 @@ function ExplorerStep({ onDone }: { onDone: () => void }) {
         <Btn variant="outline" onClick={() => void chooseFolder()} disabled={busy}>
           Choose folder
         </Btn>
-        <Btn variant="ghost" onClick={() => void skip()} disabled={busy}>
+        <Btn variant="ghost" onClick={skip} disabled={busy}>
           Skip
         </Btn>
         <Btn variant="primary" onClick={() => void install()} disabled={busy}>
@@ -708,17 +706,24 @@ function ReadyStep() {
 export default function WindowsFirstRun() {
   const [step, setStep] = useState<Step>('signin')
 
-  // Fast-forward past completed steps on mount
+  // Fast-forward past completed steps on mount.
+  // sync-mode is ONLY skipped if a mode was already persisted (re-open scenario);
+  // on first run it always shows so the user makes an explicit choice.
   useEffect(() => {
     let cancelled = false
     Promise.all([
       loadSyncStatus(),
       command<DesktopPlatform>('desktop_platform'),
-      command<FinderInstallState>('finder_location_state'),
-    ]).then(([status, _platform, finder]) => {
+      command<ShellIntegrationState>('windows_shell_integration_state'),
+      command<{ mode: string } | null>('desktop_config'),
+    ]).then(([status, _platform, shellState, config]) => {
       if (cancelled || !status?.logged_in) return
       if (!status.vault_unlocked) { setStep('unlock'); return }
-      if (!finder.ok || !finder.value.installed) { setStep('explorer'); return }
+      // Only skip sync-mode if a mode has already been persisted (re-open, not first run).
+      // desktop_config returns null / unsupported on first run.
+      const syncModePersisted = config.ok && config.value !== null
+      if (!syncModePersisted) { setStep('sync-mode'); return }
+      if (!shellState.ok || !shellState.value.installed) { setStep('explorer'); return }
       setStep('ready')
     })
     return () => { cancelled = true }
