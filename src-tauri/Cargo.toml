@@ -87,14 +87,20 @@ libc = "0.2"
 #     CF_CALLBACK_INFO and friends.
 #   - Win32_Storage_FileSystem: FILE_BASIC_INFO struct used inside
 #     CF_FS_METADATA when minting a placeholder.
-#   - Win32_Foundation: PCWSTR / HRESULT / HANDLE.
+#   - Win32_Foundation: PCWSTR / HRESULT / HANDLE / GetLastError /
+#     ERROR_NOT_FOUND (used by the Credential Manager store too).
 #   - Win32_System_Com: GUID type used for the provider id.
+#   - Win32_Security_Credentials: CredWriteW / CredReadW / CredDeleteW /
+#     CredFree, CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_ENTERPRISE —
+#     backing for WindowsCredentialStore (keychain.rs), the
+#     Credential-Manager parallel to the macOS Keychain store.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_Security_Credentials",
 ] }
 
 [dev-dependencies]

@@ -38,7 +38,11 @@ mod state_db;
 #[cfg(target_os = "windows")]
 mod windows_cf;
 use config::DesktopConfig;
-use keychain::{AuthVault, MacOsKeychainStore, SecretBytes, SessionToken};
+// `platform_keychain_store()` resolves to the macOS Keychain store on macOS and
+// the Windows Credential Manager store on Windows (Linux keeps the fail-closed
+// stub). All session/vault persistence below routes through it so secrets land
+// in the OS-native credential vault for the current target.
+use keychain::{platform_keychain_store, AuthVault, SecretBytes, SessionToken};
 use runner::EngineRunner;
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
@@ -113,7 +117,7 @@ fn keychain_error(context: &str, error: impl fmt::Display) -> String {
 }
 
 fn persist_session_to_keychain(token: &str, master_key: [u8; 32]) -> Result<(), String> {
-    let vault = AuthVault::new(MacOsKeychainStore::new());
+    let vault = AuthVault::new(platform_keychain_store());
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
     vault
         .install_session(token)
@@ -124,7 +128,7 @@ fn persist_session_to_keychain(token: &str, master_key: [u8; 32]) -> Result<(), 
 }
 
 fn persist_session_token_to_keychain(token: &str) -> Result<(), String> {
-    let vault = AuthVault::new(MacOsKeychainStore::new());
+    let vault = AuthVault::new(platform_keychain_store());
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
     vault
         .install_session(token)
@@ -132,20 +136,20 @@ fn persist_session_token_to_keychain(token: &str) -> Result<(), String> {
 }
 
 fn persist_vault_key_to_keychain(master_key: [u8; 32]) -> Result<(), String> {
-    AuthVault::new(MacOsKeychainStore::new())
+    AuthVault::new(platform_keychain_store())
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))
 }
 
 fn load_session_token_from_keychain() -> Result<Option<String>, String> {
-    AuthVault::new(MacOsKeychainStore::new())
+    AuthVault::new(platform_keychain_store())
         .session_token()
         .map_err(|e| keychain_error("load session from Keychain", e))
         .map(|token| token.map(|t| t.expose_for_request().to_string()))
 }
 
 fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, String> {
-    let mut vault = AuthVault::new(MacOsKeychainStore::new());
+    let mut vault = AuthVault::new(platform_keychain_store());
     let Some(token) = vault
         .session_token()
         .map_err(|e| keychain_error("load session from Keychain", e))?
@@ -165,14 +169,14 @@ fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, 
 }
 
 fn keychain_session_present() -> bool {
-    AuthVault::new(MacOsKeychainStore::new())
+    AuthVault::new(platform_keychain_store())
         .session_token()
         .map(|token| token.is_some())
         .unwrap_or(false)
 }
 
 fn clear_keychain_session() -> Result<(), String> {
-    let mut vault = AuthVault::new(MacOsKeychainStore::new());
+    let mut vault = AuthVault::new(platform_keychain_store());
     vault
         .clear_session()
         .map_err(|e| keychain_error("clear Keychain session", e))

@@ -294,6 +294,275 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 }
 
+// ── Windows Credential Manager store ──────────────────────────────────────────
+//
+// Win32-Credential-Manager-backed parallel to `MacOsKeychainStore`. Mirrors the
+// same two-item model the macOS store uses:
+//   - "io.beebeeb.app/session-token"      → UTF-8 session token blob
+//   - "io.beebeeb.app/wrapped-master-key" → raw wrapped master-key bytes
+//
+// Target names embed the service prefix so credentials are namespaced under the
+// app identifier, the same way the macOS store scopes items by service
+// `io.beebeeb.app` + account. Generic credentials (`CRED_TYPE_GENERIC`) persisted
+// per-user (`CRED_PERSIST_ENTERPRISE`) so the secrets follow the signed-in user
+// rather than the machine.
+
+#[cfg(target_os = "windows")]
+pub struct WindowsCredentialStore;
+
+#[cfg(target_os = "windows")]
+impl WindowsCredentialStore {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Default for WindowsCredentialStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl AuthSecretStore for WindowsCredentialStore {
+    fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        windows_credentials::save(SESSION_TOKEN_ACCOUNT, token.expose_for_request().as_bytes())
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        windows_credentials::load(SESSION_TOKEN_ACCOUNT)?
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
+                    .and_then(SessionToken::new)
+            })
+            .transpose()
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        windows_credentials::delete(SESSION_TOKEN_ACCOUNT)
+    }
+
+    fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        windows_credentials::save(WRAPPED_MASTER_KEY_ACCOUNT, wrapped.expose_for_crypto())
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        windows_credentials::load(WRAPPED_MASTER_KEY_ACCOUNT)?
+            .map(SecretBytes::new)
+            .transpose()
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        windows_credentials::delete(WRAPPED_MASTER_KEY_ACCOUNT)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub struct WindowsCredentialStore;
+
+#[cfg(not(target_os = "windows"))]
+impl WindowsCredentialStore {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl Default for WindowsCredentialStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl AuthSecretStore for WindowsCredentialStore {
+    fn save_session_token(&self, _token: &SessionToken) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "Windows Credential Manager is unavailable on this platform",
+        ))
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        Err(AuthStoreError::Unsupported(
+            "Windows Credential Manager is unavailable on this platform",
+        ))
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "Windows Credential Manager is unavailable on this platform",
+        ))
+    }
+
+    fn save_wrapped_master_key(&self, _wrapped: SecretBytes) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "Windows Credential Manager is unavailable on this platform",
+        ))
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        Err(AuthStoreError::Unsupported(
+            "Windows Credential Manager is unavailable on this platform",
+        ))
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "Windows Credential Manager is unavailable on this platform",
+        ))
+    }
+}
+
+// ── Per-OS store selection ────────────────────────────────────────────────────
+//
+// `PlatformKeychainStore` is the concrete store the Tauri runner constructs.
+// It mirrors macOS wiring: on macOS the secrets live in the Keychain, on Windows
+// in Credential Manager. Other platforms (Linux) keep the prior behaviour — the
+// macOS store's `#[cfg(not(target_os = "macos"))]` stub, which returns
+// `Unsupported` — so the Linux build and its fail-closed semantics are unchanged.
+
+#[cfg(target_os = "macos")]
+pub type PlatformKeychainStore = MacOsKeychainStore;
+
+#[cfg(target_os = "windows")]
+pub type PlatformKeychainStore = WindowsCredentialStore;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub type PlatformKeychainStore = MacOsKeychainStore;
+
+/// Construct the secret store for the current OS. Used by the Tauri runner so
+/// session/vault persistence routes to the platform-native credential vault.
+pub fn platform_keychain_store() -> PlatformKeychainStore {
+    PlatformKeychainStore::new()
+}
+
+#[cfg(target_os = "windows")]
+mod windows_credentials {
+    //! Win32 Credential Manager backing for `WindowsCredentialStore`.
+    //!
+    //! Uses generic credentials (`CRED_TYPE_GENERIC`). Each call builds a
+    //! wide (UTF-16) target name `io.beebeeb.app/<account>` and round-trips
+    //! the secret as an opaque blob via `CredWriteW` / `CredReadW` /
+    //! `CredDeleteW`. `CredReadW` allocates a `CREDENTIALW`; we copy the blob
+    //! out and free it with `CredFree` before returning.
+
+    use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
+    use windows::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+    use windows::Win32::Security::Credentials::{
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_ENTERPRISE,
+        CRED_TYPE_GENERIC,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    /// Build the UTF-16, NUL-terminated target name `io.beebeeb.app/<account>`.
+    /// Returned `Vec<u16>` must outlive every pointer derived from it.
+    fn target_name(account: &str) -> Vec<u16> {
+        let combined = format!("{KEYCHAIN_SERVICE}/{account}");
+        combined.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn save(account: &str, secret: &[u8]) -> AuthResult<()> {
+        // `target` and `secret` must stay alive for the whole `CredWriteW` call
+        // because the struct holds raw pointers into them.
+        let mut target = target_name(account);
+        if secret.len() > u32::MAX as usize {
+            return Err(AuthStoreError::InvalidSecret("secret too large for credential blob"));
+        }
+
+        // SAFETY: zeroed CREDENTIALW is a valid "empty" credential; we fill in
+        // every field the API reads (Type, TargetName, CredentialBlob*, Persist).
+        let mut cred: CREDENTIALW = unsafe { std::mem::zeroed() };
+        cred.Type = CRED_TYPE_GENERIC;
+        // PWSTR points into `target`; valid for the duration of this call.
+        cred.TargetName = PWSTR(target.as_mut_ptr());
+        cred.CredentialBlobSize = secret.len() as u32;
+        // Cast away const — the API treats the blob as read-only for a write.
+        cred.CredentialBlob = secret.as_ptr() as *mut u8;
+        cred.Persist = CRED_PERSIST_ENTERPRISE;
+
+        // SAFETY: `cred` is fully initialised above and all its pointers
+        // (`target`, `secret`) outlive this call. Flags = 0 per the API.
+        let result = unsafe { CredWriteW(&cred, 0) };
+        result.map_err(|e| status_error("CredWriteW", e.code().0))
+    }
+
+    pub fn load(account: &str) -> AuthResult<Option<Vec<u8>>> {
+        let target = target_name(account);
+        let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+
+        // SAFETY: `target` is a valid NUL-terminated UTF-16 string that outlives
+        // the call; `credential` receives an owned pointer we must `CredFree`.
+        let result = unsafe {
+            CredReadW(
+                PCWSTR(target.as_ptr()),
+                CRED_TYPE_GENERIC,
+                0,
+                &mut credential,
+            )
+        };
+
+        if let Err(e) = result {
+            // Map "no such credential" to `Ok(None)`, mirroring the macOS
+            // store's ERR_SEC_ITEM_NOT_FOUND → Ok(None) handling.
+            let last = unsafe { GetLastError() };
+            if last == ERROR_NOT_FOUND {
+                return Ok(None);
+            }
+            return Err(status_error("CredReadW", e.code().0));
+        }
+
+        if credential.is_null() {
+            return Ok(None);
+        }
+
+        // SAFETY: `credential` is non-null and owned by us until `CredFree`.
+        // Copy the blob out before freeing. A zero-length blob yields an empty
+        // Vec, which the caller's `SecretBytes::new` rejects as InvalidSecret.
+        let bytes = unsafe {
+            let cred_ref = &*credential;
+            let len = cred_ref.CredentialBlobSize as usize;
+            if len == 0 || cred_ref.CredentialBlob.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(cred_ref.CredentialBlob, len).to_vec()
+            }
+        };
+
+        // SAFETY: `credential` was allocated by `CredReadW`; free exactly once.
+        unsafe { CredFree(credential as *const _ as *const core::ffi::c_void) };
+
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub fn delete(account: &str) -> AuthResult<()> {
+        let target = target_name(account);
+
+        // SAFETY: `target` is a valid NUL-terminated UTF-16 string for the call.
+        let result = unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0) };
+
+        if let Err(e) = result {
+            // Deleting a missing credential is a no-op success, matching the
+            // macOS store's `delete` (find returns None → Ok(())).
+            let last = unsafe { GetLastError() };
+            if last == ERROR_NOT_FOUND {
+                return Ok(());
+            }
+            return Err(status_error("CredDeleteW", e.code().0));
+        }
+        Ok(())
+    }
+
+    fn status_error(action: &'static str, code: i32) -> AuthStoreError {
+        // Never include secret bytes — only the API name and numeric code.
+        AuthStoreError::Backend(format!("Credential Manager {action} failed with code {code}"))
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_keychain {
     use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
