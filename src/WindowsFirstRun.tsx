@@ -1,0 +1,754 @@
+/**
+ * WindowsFirstRun — Windows-specific first-run setup wizard.
+ *
+ * Mounted when ?window=onboarding&platform=windows (or when the Rust side
+ * determines the platform is Windows at launch). This component takes the
+ * existing Onboarding.tsx flow and re-skins it with the two-column layout,
+ * amber gradient left rail, and step-progress list from HiFirstRun in
+ * design/hifi/hifi-desktop.jsx.
+ *
+ * Steps:
+ *   1. Sign in          — desktop_login
+ *   2. Unlock vault     — desktop_unlock_with_recovery_phrase
+ *   3. Pick sync folder — pick_sync_root, set_sync_mode (NEW — WS1)
+ *   4. Finder / Explorer integration — install_finder_location (renamed to
+ *      install_explorer_integration on Windows, same command)
+ *   ready               — show_settings_window
+ *
+ * Invoke commands used:
+ *   EXISTING:  desktop_login, desktop_unlock_with_recovery_phrase,
+ *              desktop_platform, pick_sync_root, install_finder_location,
+ *              default_sync_root, finder_location_state, list_vault_folders,
+ *              set_recursive_pin, show_settings_window
+ *   NEW (WS1): set_sync_mode (arg: mode: 'everything' | 'smart' | 'custom' | 'online_only')
+ */
+
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import {
+  command,
+  commandUnavailableLabel,
+  loadSyncStatus,
+  type DesktopPlatform,
+  type FinderInstallState,
+  type SyncStatus,
+  type VaultItem,
+} from './desktopApi'
+
+type Step = 'signin' | 'unlock' | 'sync-mode' | 'explorer' | 'ready'
+const RECOVERY_WORD_COUNT = 12
+
+const STEPS: Array<{ id: Step; title: string; detail: string }> = [
+  { id: 'signin', title: 'Sign in', detail: 'Authenticate your Beebeeb account.' },
+  { id: 'unlock', title: 'Unlock vault', detail: 'Restore encryption keys on this PC.' },
+  { id: 'sync-mode', title: 'Sync mode', detail: 'Pick what lives on this PC.' },
+  { id: 'explorer', title: 'Explorer integration', detail: 'Add Beebeeb to File Explorer.' },
+  { id: 'ready', title: 'Ready', detail: 'Open the control center.' },
+]
+
+type SyncMode = 'everything' | 'smart' | 'custom' | 'online_only'
+
+const SYNC_OPTIONS: Array<{ mode: SyncMode; title: string; desc: string; recommended?: boolean }> = [
+  { mode: 'everything', title: 'Everything', desc: '23.4 GB · fastest but more disk' },
+  { mode: 'smart', title: 'Smart', desc: 'Recent + starred + shared · ~6 GB', recommended: true },
+  { mode: 'custom', title: 'Custom', desc: "I'll pick folders after setup" },
+  { mode: 'online_only', title: 'Online-only', desc: 'Placeholders only · 0 GB on disk' },
+]
+
+// ── Design tokens (inline, no Tailwind dependency) ────────────────────────
+
+const T = {
+  paper: 'oklch(0.985 0.004 85)',
+  paper2: 'oklch(0.968 0.006 85)',
+  paper3: 'oklch(0.945 0.008 82)',
+  line: 'oklch(0.90 0.008 82)',
+  line2: 'oklch(0.83 0.01 80)',
+  ink: 'oklch(0.18 0.01 70)',
+  ink2: 'oklch(0.34 0.012 75)',
+  ink3: 'oklch(0.52 0.01 78)',
+  ink4: 'oklch(0.68 0.008 80)',
+  amber: 'oklch(0.82 0.17 84)',
+  amberDeep: 'oklch(0.66 0.15 72)',
+  amberBg: 'oklch(0.97 0.03 92)',
+  amberSoft: 'oklch(0.94 0.06 90)',
+  green: 'oklch(0.72 0.16 155)',
+  fontSans: "'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  fontMono: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+} as const
+
+// ── Small reusable pieces ─────────────────────────────────────────────────
+
+function Btn({
+  children,
+  variant = 'ghost',
+  disabled,
+  onClick,
+  type = 'button',
+  wide,
+}: {
+  children: React.ReactNode
+  variant?: 'primary' | 'ghost' | 'outline'
+  disabled?: boolean
+  onClick?: () => void
+  type?: 'button' | 'submit'
+  wide?: boolean
+}) {
+  const base: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '7px 14px',
+    fontSize: 13,
+    fontFamily: T.fontSans,
+    fontWeight: 500,
+    borderRadius: 6,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.55 : 1,
+    transition: 'all 100ms ease',
+    border: '1px solid',
+    width: wide ? '100%' : undefined,
+    letterSpacing: '-0.005em',
+    whiteSpace: 'nowrap',
+  }
+  const styles: Record<string, React.CSSProperties> = {
+    primary: { background: T.ink, color: T.paper, borderColor: T.ink },
+    ghost: { background: 'transparent', color: T.ink2, borderColor: 'transparent' },
+    outline: { background: T.paper, color: T.ink2, borderColor: T.line2 },
+  }
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      onClick={onClick}
+      style={{ ...base, ...styles[variant] }}
+    >
+      {children}
+    </button>
+  )
+}
+
+function FormInput({
+  label,
+  type,
+  value,
+  onChange,
+  disabled,
+  placeholder,
+}: {
+  label: string
+  type: string
+  value: string
+  onChange: (v: string) => void
+  disabled?: boolean
+  placeholder?: string
+}) {
+  return (
+    <label style={{ display: 'block', marginBottom: 12 }}>
+      <span style={{
+        display: 'block',
+        fontSize: 11,
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        letterSpacing: '0.07em',
+        color: T.ink3,
+        fontFamily: T.fontMono,
+        marginBottom: 5,
+      }}>
+        {label}
+      </span>
+      <input
+        type={type}
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.currentTarget.value)}
+        style={{
+          width: '100%',
+          minHeight: 40,
+          padding: '9px 12px',
+          border: `1px solid ${T.line2}`,
+          borderRadius: 6,
+          background: T.paper,
+          color: T.ink,
+          fontSize: 13,
+          fontFamily: T.fontSans,
+          outline: 'none',
+          transition: 'border-color 120ms, box-shadow 120ms',
+        }}
+        onFocus={(e) => {
+          e.currentTarget.style.borderColor = T.amberDeep
+          e.currentTarget.style.boxShadow = '0 0 0 3px oklch(0.94 0.06 90 / 0.9)'
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = T.line2
+          e.currentTarget.style.boxShadow = 'none'
+        }}
+      />
+    </label>
+  )
+}
+
+function Notice({ children, kind = 'warn' }: { children: React.ReactNode; kind?: 'warn' | 'error' }) {
+  return (
+    <div style={{
+      padding: '10px 12px',
+      borderRadius: 6,
+      border: `1px solid ${kind === 'error' ? 'oklch(0.88 0.05 25)' : 'oklch(0.87 0.08 84)'}`,
+      background: kind === 'error' ? 'oklch(0.98 0.02 25)' : T.amberBg,
+      color: kind === 'error' ? 'oklch(0.42 0.15 25)' : T.amberDeep,
+      fontSize: 12,
+      lineHeight: 1.5,
+      marginBottom: 14,
+    }}>
+      {children}
+    </div>
+  )
+}
+
+// ── Left rail ─────────────────────────────────────────────────────────────
+
+function LeftRail({ currentStep }: { currentStep: Step }) {
+  const currentIdx = STEPS.findIndex((s) => s.id === currentStep)
+  return (
+    <div style={{
+      background: `linear-gradient(160deg, ${T.amberBg}, ${T.paper2})`,
+      borderRight: `1px solid ${T.line}`,
+      padding: '32px 24px',
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
+      {/* Logo mark */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          width: 30,
+          height: 30,
+          borderRadius: 8,
+          background: T.amber,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          <span style={{
+            fontFamily: T.fontSans,
+            fontWeight: 800,
+            fontSize: 15,
+            color: T.ink,
+            lineHeight: 1,
+          }}>b</span>
+        </div>
+        <span style={{
+          fontFamily: T.fontSans,
+          fontWeight: 700,
+          fontSize: 15,
+          color: T.ink,
+          letterSpacing: '-0.02em',
+        }}>Beebeeb</span>
+      </div>
+
+      <div style={{
+        marginTop: 28,
+        fontSize: 22,
+        fontWeight: 700,
+        letterSpacing: '-0.025em',
+        lineHeight: 1.15,
+        color: T.ink,
+      }}>
+        Welcome to your vault.
+      </div>
+      <div style={{
+        marginTop: 10,
+        fontSize: 12,
+        color: T.ink3,
+        lineHeight: 1.6,
+        maxWidth: 200,
+      }}>
+        Four quick steps. No data leaves this PC without encryption.
+      </div>
+
+      {/* Step list */}
+      <div style={{ marginTop: 32, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {STEPS.filter((s) => s.id !== 'ready').map((step, i) => {
+          const stepIdx = STEPS.indexOf(step)
+          const done = stepIdx < currentIdx
+          const current = step.id === currentStep
+          return (
+            <div key={step.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{
+                width: 22,
+                height: 22,
+                borderRadius: '50%',
+                background: done ? T.ink : current ? T.amberDeep : T.paper,
+                color: (done || current) ? T.paper : T.ink4,
+                border: (done || current) ? 'none' : `1.5px solid ${T.line2}`,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 11,
+                fontWeight: 600,
+                flexShrink: 0,
+              }}>
+                {done ? '✓' : i + 1}
+              </div>
+              <span style={{
+                fontSize: 12.5,
+                fontWeight: current ? 600 : done ? 400 : 400,
+                color: current ? T.ink : done ? T.ink3 : T.ink4,
+              }}>
+                {step.title}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+
+      <div style={{ marginTop: 'auto', paddingTop: 24 }}>
+        <div style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 10.5,
+          fontFamily: T.fontMono,
+          color: T.ink3,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase' as const,
+        }}>
+          Falkenstein · E2E encrypted
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Step components ───────────────────────────────────────────────────────
+
+function SignInStep({ onDone }: { onDone: () => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    const result = await command<void>('desktop_login', { email, password })
+    setBusy(false)
+    if (result.ok) { onDone(); return }
+    setError(result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason)
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>
+        Step 1 of 4
+      </div>
+      <h1 style={{ margin: '4px 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+        Sign in to Beebeeb
+      </h1>
+      <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Unlock your encrypted vault. Credentials stay on this PC.
+      </p>
+      {error && <Notice kind="error">{error}</Notice>}
+      <form onSubmit={submit}>
+        <FormInput label="Email" type="email" value={email} onChange={setEmail} disabled={busy} placeholder="you@example.com" />
+        <FormInput label="Password" type="password" value={password} onChange={setPassword} disabled={busy} placeholder="Your password" />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+          <Btn type="submit" variant="primary" disabled={!email || !password || busy}>
+            {busy ? 'Signing in…' : 'Sign in →'}
+          </Btn>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function UnlockStep({ onDone }: { onDone: () => void }) {
+  const [words, setWords] = useState<string[]>(() => Array.from({ length: RECOVERY_WORD_COUNT }, () => ''))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const refs = useRef<Array<HTMLInputElement | null>>([])
+
+  const phrase = words.map((w) => w.trim()).join(' ').trim()
+  const filled = words.filter((w) => w.trim()).length
+  const canUnlock = filled === RECOVERY_WORD_COUNT
+
+  const applyWords = (start: number, raw: string[]) => {
+    const clean = raw.map((w) => w.trim()).filter(Boolean)
+    if (!clean.length) return
+    setError(null)
+    setWords((prev) => {
+      const next = [...prev]
+      clean.slice(0, RECOVERY_WORD_COUNT - start).forEach((w, i) => { next[start + i] = w })
+      return next
+    })
+    requestAnimationFrame(() => refs.current[Math.min(start + clean.length, RECOVERY_WORD_COUNT - 1)]?.focus())
+  }
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!canUnlock) return
+    setBusy(true)
+    setError(null)
+    const result = await command<void>('desktop_unlock_with_recovery_phrase', { recoveryPhrase: phrase })
+    setBusy(false)
+    if (result.ok) { onDone(); return }
+    setError(result.unsupported ? commandUnavailableLabel('desktop_unlock_with_recovery_phrase') : result.reason)
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>
+        Step 2 of 4
+      </div>
+      <h1 style={{ margin: '4px 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+        Unlock your vault
+      </h1>
+      <p style={{ margin: '0 0 18px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        This PC does not have your encryption keys yet. Enter your 12-word recovery phrase to restore them.
+      </p>
+      {error && <Notice kind="error">{error}</Notice>}
+      <form onSubmit={submit}>
+        <div style={{ marginBottom: 6, fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3 }}>
+          Recovery phrase
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6, marginBottom: 12 }}>
+          {words.map((word, idx) => (
+            <label
+              key={idx}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '20px minmax(0, 1fr)',
+                alignItems: 'center',
+                border: `1px solid ${T.line2}`,
+                borderRadius: 6,
+                background: T.paper,
+                overflow: 'hidden',
+                minHeight: 36,
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.ink4, textAlign: 'center', fontFamily: T.fontMono }}>{idx + 1}</span>
+              <input
+                ref={(n) => { refs.current[idx] = n }}
+                aria-label={`Recovery word ${idx + 1}`}
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                type="text"
+                value={word}
+                disabled={busy}
+                style={{
+                  width: '100%',
+                  height: 34,
+                  border: 'none',
+                  borderLeft: `1px solid ${T.line}`,
+                  borderRadius: 0,
+                  background: 'transparent',
+                  fontSize: 12,
+                  fontFamily: T.fontMono,
+                  color: T.ink,
+                  padding: '6px 7px',
+                  outline: 'none',
+                }}
+                onChange={(e) => {
+                  if (/\s/.test(e.currentTarget.value)) { applyWords(idx, e.currentTarget.value.split(/\s+/)); return }
+                  setError(null)
+                  setWords((prev) => prev.map((w, i) => i === idx ? e.currentTarget.value : w))
+                }}
+                onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+                  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); refs.current[Math.min(idx + 1, RECOVERY_WORD_COUNT - 1)]?.focus(); return }
+                  if (e.key === 'Backspace' && !word && idx > 0) refs.current[idx - 1]?.focus()
+                }}
+                onPaste={(e) => { e.preventDefault(); applyWords(idx, e.clipboardData.getData('text').split(/\s+/)) }}
+              />
+            </label>
+          ))}
+        </div>
+        <p style={{ margin: '0 0 14px', fontSize: 11, color: T.ink3, lineHeight: 1.5 }}>
+          Paste all 12 words into any box, or type them one by one.
+          Beebeeb stores the unlocked key in the Windows Credential Manager.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          {error && (
+            <Btn onClick={onDone}>Continue without unlock</Btn>
+          )}
+          <div style={{ marginLeft: 'auto' }}>
+            <Btn type="submit" variant="primary" disabled={busy || !canUnlock}>
+              {busy ? 'Unlocking…' : 'Unlock vault →'}
+            </Btn>
+          </div>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function SyncModeStep({ onDone }: { onDone: () => void }) {
+  const [selected, setSelected] = useState<SyncMode>('smart')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const proceed = async () => {
+    setBusy(true)
+    setError(null)
+    // set_sync_mode is a new command — WS1 must implement it.
+    const result = await command<void>('set_sync_mode', { mode: selected })
+    setBusy(false)
+    if (result.ok || result.unsupported) {
+      // Proceed even if not yet implemented; WS1 will wire it
+      onDone()
+      return
+    }
+    setError(result.reason)
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>
+        Step 3 of 4
+      </div>
+      <h1 style={{ margin: '4px 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+        Pick what lives on this PC
+      </h1>
+      <p style={{ margin: '0 0 18px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Keep everything, or only what you need. Online-only folders appear in File Explorer as placeholders — open them to download on demand.
+      </p>
+      {error && <Notice kind="error">{error}</Notice>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
+        {SYNC_OPTIONS.map((opt) => {
+          const active = selected === opt.mode
+          return (
+            <button
+              key={opt.mode}
+              onClick={() => setSelected(opt.mode)}
+              style={{
+                padding: 14,
+                borderRadius: 10,
+                border: `1.5px solid ${active ? T.amberDeep : T.line}`,
+                background: active ? T.amberBg : T.paper,
+                cursor: 'pointer',
+                textAlign: 'left' as const,
+                position: 'relative' as const,
+                fontFamily: T.fontSans,
+                transition: 'border-color 120ms, background 120ms',
+              }}
+            >
+              {opt.recommended && (
+                <div style={{
+                  position: 'absolute',
+                  top: -8,
+                  right: 10,
+                  fontSize: 9,
+                  padding: '2px 7px',
+                  background: T.amberDeep,
+                  color: T.paper,
+                  borderRadius: 6,
+                  fontWeight: 600,
+                  letterSpacing: 0.3,
+                  fontFamily: T.fontMono,
+                  textTransform: 'uppercase' as const,
+                }}>
+                  Recommended
+                </div>
+              )}
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: T.ink, marginBottom: 4 }}>{opt.title}</div>
+              <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4 }}>{opt.desc}</div>
+            </button>
+          )
+        })}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 11, color: T.ink4 }}>You can change this any time in Settings.</span>
+        <Btn variant="primary" disabled={busy} onClick={() => void proceed()}>
+          Continue →
+        </Btn>
+      </div>
+    </div>
+  )
+}
+
+function ExplorerStep({ onDone }: { onDone: () => void }) {
+  const [syncRoot, setSyncRoot] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    command<string>('default_sync_root').then((r) => { if (r.ok) setSyncRoot(r.value) })
+  }, [])
+
+  const chooseFolder = useCallback(async () => {
+    setBusy(true)
+    const picked = await command<string | null>('pick_sync_root')
+    setBusy(false)
+    if (picked.ok && picked.value) { setSyncRoot(picked.value); return }
+    if (!picked.ok) setMessage(picked.unsupported ? commandUnavailableLabel('pick_sync_root') : picked.reason)
+  }, [])
+
+  const install = useCallback(async () => {
+    setBusy(true)
+    setMessage(null)
+    // On Windows we pass the chosen path (macOS uses null for the File Provider path)
+    const result = await command<FinderInstallState>('install_finder_location', { path: syncRoot })
+    setBusy(false)
+    if (result.ok) { onDone(); return }
+    setMessage(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
+  }, [onDone, syncRoot])
+
+  const skip = useCallback(async () => {
+    setBusy(true)
+    const result = await command<void>('continue_without_finder_location', { path: syncRoot })
+    setBusy(false)
+    if (result.ok || result.unsupported) { onDone(); return }
+    setMessage(result.reason)
+  }, [onDone, syncRoot])
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>
+        Step 4 of 4
+      </div>
+      <h1 style={{ margin: '4px 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+        File Explorer integration
+      </h1>
+      <p style={{ margin: '0 0 18px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Beebeeb will appear as a location in File Explorer. This is separate from the sync folder you'll use every day.
+      </p>
+      {message && <Notice>{message}</Notice>}
+      <div style={{
+        padding: '14px 16px',
+        background: T.paper2,
+        border: `1px solid ${T.line}`,
+        borderRadius: 8,
+        marginBottom: 18,
+      }}>
+        <div style={{ fontSize: 10.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 6 }}>
+          Sync folder
+        </div>
+        <div style={{
+          fontSize: 13,
+          fontFamily: T.fontMono,
+          color: T.ink2,
+          wordBreak: 'break-all' as const,
+        }}>
+          {syncRoot ?? 'C:\\Users\\…\\Beebeeb'}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <Btn variant="outline" onClick={() => void chooseFolder()} disabled={busy}>
+          Choose folder
+        </Btn>
+        <Btn variant="ghost" onClick={() => void skip()} disabled={busy}>
+          Skip
+        </Btn>
+        <Btn variant="primary" onClick={() => void install()} disabled={busy}>
+          {busy ? 'Installing…' : 'Install →'}
+        </Btn>
+      </div>
+    </div>
+  )
+}
+
+function ReadyStep() {
+  const [status, setStatus] = useState<SyncStatus | null>(null)
+
+  useEffect(() => { void loadSyncStatus().then(setStatus) }, [])
+
+  const finish = async () => {
+    await command<void>('show_settings_window')
+    try { await getCurrentWindow().close() } catch { window.close() }
+  }
+
+  return (
+    <div>
+      <h1 style={{ margin: '0 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+        All set.
+      </h1>
+      <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Beebeeb is running on this PC. File Explorer is your file surface — the settings window handles everything else.
+      </p>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+        gap: 10,
+        marginBottom: 22,
+      }}>
+        {[
+          { label: 'Engine', value: status?.engine ?? '…' },
+          { label: 'Queue', value: String(status?.syncing ?? 0) },
+          { label: 'Conflicts', value: String(status?.conflicts ?? 0) },
+        ].map(({ label, value }) => (
+          <div key={label} style={{
+            padding: '14px 16px',
+            background: T.paper,
+            border: `1px solid ${T.line}`,
+            borderRadius: 8,
+          }}>
+            <div style={{ fontSize: 10, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 6 }}>{label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, fontFamily: T.fontMono, color: T.ink }}>{value}</div>
+          </div>
+        ))}
+      </div>
+      <Btn variant="primary" wide onClick={() => void finish()}>
+        Open control center →
+      </Btn>
+    </div>
+  )
+}
+
+// ── Root component ─────────────────────────────────────────────────────────
+
+export default function WindowsFirstRun() {
+  const [step, setStep] = useState<Step>('signin')
+
+  // Fast-forward past completed steps on mount
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([
+      loadSyncStatus(),
+      command<DesktopPlatform>('desktop_platform'),
+      command<FinderInstallState>('finder_location_state'),
+    ]).then(([status, _platform, finder]) => {
+      if (cancelled || !status?.logged_in) return
+      if (!status.vault_unlocked) { setStep('unlock'); return }
+      if (!finder.ok || !finder.value.installed) { setStep('explorer'); return }
+      setStep('ready')
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: T.paper,
+      display: 'grid',
+      gridTemplateColumns: '260px 1fr',
+      fontFamily: T.fontSans,
+      color: T.ink,
+    }}>
+      <LeftRail currentStep={step} />
+
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '40px 36px',
+      }}>
+        <div style={{ width: '100%', maxWidth: 420 }}>
+          {step === 'signin' && <SignInStep onDone={() => setStep('unlock')} />}
+          {step === 'unlock' && <UnlockStep onDone={() => setStep('sync-mode')} />}
+          {step === 'sync-mode' && <SyncModeStep onDone={() => setStep('explorer')} />}
+          {step === 'explorer' && <ExplorerStep onDone={() => setStep('ready')} />}
+          {step === 'ready' && <ReadyStep />}
+        </div>
+      </div>
+    </div>
+  )
+}

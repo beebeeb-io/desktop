@@ -22,6 +22,46 @@
         "visible": false,
         "center": true,
         "decorations": true
+      },
+      {
+        "label": "tray",
+        "title": "Beebeeb",
+        "url": "index.html?window=tray",
+        "width": 400,
+        "height": 280,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": false
+      },
+      {
+        "label": "windows-settings",
+        "title": "Beebeeb — Settings",
+        "url": "index.html?window=settings&platform=windows",
+        "width": 1000,
+        "height": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "decorations": true,
+        "minWidth": 780,
+        "minHeight": 520
+      },
+      {
+        "label": "windows-onboarding",
+        "title": "Welcome to Beebeeb",
+        "url": "index.html?window=onboarding&platform=windows",
+        "width": 720,
+        "height": 540,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "decorations": true
       }
     ],
     "security": {
