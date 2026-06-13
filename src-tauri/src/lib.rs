@@ -18,6 +18,10 @@ mod api_client;
 mod config;
 mod conflict;
 mod engine_bridge;
+// Unix-domain-socket IPC (macOS File Provider extension + Linux FUSE). Unix
+// sockets don't exist on Windows; the Windows Cloud Files callback runs
+// in-process (see `windows_cf`), so this module is `unix`-only.
+#[cfg(unix)]
 mod ipc_socket;
 mod keychain;
 #[cfg(target_os = "linux")]
@@ -42,7 +46,7 @@ use config::DesktopConfig;
 // the Windows Credential Manager store on Windows (Linux keeps the fail-closed
 // stub). All session/vault persistence below routes through it so secrets land
 // in the OS-native credential vault for the current target.
-use keychain::{platform_keychain_store, AuthVault, SecretBytes, SessionToken};
+use keychain::{AuthVault, SecretBytes, SessionToken, platform_keychain_store};
 use runner::EngineRunner;
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
@@ -313,12 +317,22 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         .get("server_state")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "No server_state in login start response".to_string())?;
+    // `ksf_version` selects the KSF the account's password file was registered
+    // under (0 = legacy Identity KSF, any other value = current Argon2idKsf).
+    // Mirrors web (`/opaque/login-start` → `ksf_version`). Default to the
+    // current suite (1) if the server omits it, matching the web client.
+    let ksf_version = start_body
+        .get("ksf_version")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(1);
     let server_message_bytes =
         decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
     let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
         &login_start.state,
         password.as_bytes(),
         &server_message_bytes,
+        ksf_version,
     )
     .map_err(|e| format!("Invalid email or password ({e})"))?;
 
@@ -791,6 +805,7 @@ fn is_disposable_cache_path(path: &std::path::Path) -> bool {
         .any(|root| canonical_path.starts_with(root))
 }
 
+#[cfg(unix)]
 fn remove_stale_ipc_socket() -> Result<bool, String> {
     let path = ipc_socket::ipc_socket_path();
     match std::fs::remove_file(&path) {
@@ -798,6 +813,13 @@ fn remove_stale_ipc_socket() -> Result<bool, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(format!("remove IPC socket {}: {error}", path.display())),
     }
+}
+
+// Windows has no Unix-socket daemon endpoint — the Cloud Files provider runs
+// in-process — so there is never a stale socket to remove.
+#[cfg(not(unix))]
+fn remove_stale_ipc_socket() -> Result<bool, String> {
+    Ok(false)
 }
 
 async fn persist_sync_root_and_start_engine(
@@ -851,6 +873,11 @@ async fn start_engine_for_pending_finder_install(
         }
     };
 
+    // The macOS File Provider extension talks to the daemon over a Unix
+    // socket, so we wait for that endpoint before claiming the install is
+    // ready. Windows has no such socket (the Cloud Files provider is
+    // in-process), so the readiness probe is unix-only.
+    #[cfg(unix)]
     if let Err(error) = wait_for_file_provider_ipc_ready().await {
         stop_pending_finder_install_engine(state, started).await;
         return Err(error);
@@ -869,6 +896,7 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     }
 }
 
+#[cfg(unix)]
 async fn wait_for_file_provider_ipc_ready() -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;

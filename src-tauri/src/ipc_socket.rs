@@ -1,3 +1,10 @@
+//! Unix-domain-socket IPC between the desktop daemon and the macOS File
+//! Provider extension (and the Linux FUSE mount). Unix sockets do not
+//! exist on Windows, where the Cloud Files callback runs in-process
+//! (see `crate::windows_cf`), so the whole module is gated to `unix`.
+
+#![cfg(unix)]
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};

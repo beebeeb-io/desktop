@@ -30,9 +30,9 @@
 
 #![cfg(target_os = "windows")]
 
-use windows::core::PCWSTR;
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::Storage::FileSystem::FILE_BASIC_INFO;
+use windows::core::PCWSTR;
 
 /// Create a single cloud-only placeholder under `parent_dir`. The file
 /// shows up in Explorer immediately with the cloud-icon overlay; bytes
@@ -103,15 +103,20 @@ pub fn create_placeholder(
         // placeholder" call shape. Batch creation is possible by
         // passing a longer slice, but we pace creation per-file as the
         // engine bridge discovers them, so single-entry is fine.
+        // windows 0.58 takes the placeholder array as a `&mut [..]` slice
+        // (the length is derived from it) plus an optional
+        // `entriesprocessed` out-pointer — four args total, not five.
         let entries = std::slice::from_mut(&mut entry);
-        CfCreatePlaceholders(
-            PCWSTR(parent_wide.as_ptr()),
-            entries,
-            entries.len() as u32,
-            CF_CREATE_FLAG_NONE,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("CfCreatePlaceholders: {e}"))?;
+        if let Err(e) = CfCreatePlaceholders(PCWSTR(parent_wide.as_ptr()), entries, CF_CREATE_FLAG_NONE, None) {
+            // A placeholder that already exists is the steady state on every
+            // tick after the first — `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
+            // (0x800700B7). Treat it as success: the desired end state holds.
+            const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
+            if e.code() == ALREADY_EXISTS {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfCreatePlaceholders: {e}"));
+        }
     }
 
     tracing::debug!(

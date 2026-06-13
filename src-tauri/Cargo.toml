@@ -101,6 +101,13 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_Security_Credentials",
+    # CF_CALLBACK_INFO embeds a *CORRELATION_VECTOR, so the struct itself is
+    # gated behind this feature in windows 0.58 — without it the type is
+    # absent and callbacks.rs fails to resolve CF_CALLBACK_INFO.
+    "Win32_System_CorrelationVector",
+    # OpenProcess / GetExitCodeProcess for the .beebeeb-sync.lock liveness
+    # probe (lockfile.rs) — the Windows equivalent of libc::kill(pid, 0).
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

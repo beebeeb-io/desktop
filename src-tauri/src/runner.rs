@@ -160,12 +160,19 @@ async fn run(
 
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
-    // (macOS File Provider, Windows Cloud Files, Linux FUSE) can query
-    // status and trigger hydrations without waiting for the next tick.
+    // (macOS File Provider, Linux FUSE) can query status and trigger
+    // hydrations without waiting for the next tick.
+    //
+    // Windows has no separate extension process: the desktop binary is
+    // itself the Cloud Files provider and Windows calls back into this
+    // runtime in-process (see `crate::windows_cf`), so there is no
+    // Unix-socket server on Windows.
     //
     // Keep an explicit cancel handle so lock/logout tears down the listener
     // that holds a cloned EngineBridge with the active master key.
+    #[cfg(unix)]
     let (ipc_cancel_tx, ipc_cancel_rx) = oneshot::channel::<()>();
+    #[cfg(unix)]
     let mut ipc_task = {
         let db_for_ipc = db.clone();
         let bridge_for_ipc = bridge.clone();
@@ -173,6 +180,13 @@ async fn run(
             crate::ipc_socket::serve_ipc(db_for_ipc, bridge_for_ipc, ipc_cancel_rx).await;
         })
     };
+
+    // Windows Cloud Files: register the sync root, stash the live bridge so
+    // the in-process fetch callback can reach it, and seed Explorer with
+    // cloud-only placeholders from the current file list. All idempotent —
+    // safe to run on every (re)spawn.
+    #[cfg(target_os = "windows")]
+    crate::windows_cf::activate(&app, bridge.clone(), &sync_root);
 
     emit_status(&app, "running", Some(&sync_root), None);
 
@@ -254,14 +268,17 @@ async fn run(
     }
 
     emit_status(&app, "stopped", Some(&sync_root), None);
-    let _ = ipc_cancel_tx.send(());
-    if tokio::time::timeout(Duration::from_secs(2), &mut ipc_task)
-        .await
-        .is_err()
+    #[cfg(unix)]
     {
-        ipc_task.abort();
-        let _ = ipc_task.await;
-        let _ = std::fs::remove_file(crate::ipc_socket::ipc_socket_path());
+        let _ = ipc_cancel_tx.send(());
+        if tokio::time::timeout(Duration::from_secs(2), &mut ipc_task)
+            .await
+            .is_err()
+        {
+            ipc_task.abort();
+            let _ = ipc_task.await;
+            let _ = std::fs::remove_file(crate::ipc_socket::ipc_socket_path());
+        }
     }
     // _lock + bridge drop here; SQLite closes, lock file deleted.
 }

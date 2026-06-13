@@ -52,7 +52,7 @@ use windows::Win32::Storage::CloudFilters::*;
 /// the duration of this call per Cloud Files API contract. We read
 /// them once into owned values before doing any blocking work, so
 /// nothing is held across the await/block_on boundary.
-pub extern "system" fn fetch_data_callback(
+pub unsafe extern "system" fn fetch_data_callback(
     callback_info: *const CF_CALLBACK_INFO,
     _callback_parameters: *const CF_CALLBACK_PARAMETERS,
 ) {
@@ -67,12 +67,8 @@ pub extern "system" fn fetch_data_callback(
     // Decode FileIdentity → UTF-8 file_id. We stored it as raw UTF-8
     // bytes in `placeholders::create_placeholder`, so we don't need
     // the wide-string round trip the plan sketch did.
-    let identity_bytes = unsafe {
-        std::slice::from_raw_parts(
-            info.FileIdentity as *const u8,
-            info.FileIdentityLength as usize,
-        )
-    };
+    let identity_bytes =
+        unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
     let file_id = match std::str::from_utf8(identity_bytes) {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -117,9 +113,7 @@ pub extern "system" fn fetch_data_callback(
         }
     };
 
-    let res = handle.block_on(async {
-        bridge.hydrate_file(&file_id, &dest_path).await
-    });
+    let res = handle.block_on(async { bridge.hydrate_file(&file_id, &dest_path).await });
 
     if let Err(e) = res {
         tracing::warn!(file_id = %file_id, error = %e, "hydrate_file failed for Cloud Files callback");
