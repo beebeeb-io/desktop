@@ -18,6 +18,10 @@ mod api_client;
 mod config;
 mod conflict;
 mod engine_bridge;
+// Unix-domain-socket IPC (macOS File Provider extension + Linux FUSE). Unix
+// sockets don't exist on Windows; the Windows Cloud Files callback runs
+// in-process (see `windows_cf`), so this module is `unix`-only.
+#[cfg(unix)]
 mod ipc_socket;
 mod keychain;
 #[cfg(target_os = "linux")]
@@ -42,7 +46,7 @@ use config::DesktopConfig;
 // the Windows Credential Manager store on Windows (Linux keeps the fail-closed
 // stub). All session/vault persistence below routes through it so secrets land
 // in the OS-native credential vault for the current target.
-use keychain::{platform_keychain_store, AuthVault, SecretBytes, SessionToken};
+use keychain::{AuthVault, SecretBytes, SessionToken, platform_keychain_store};
 use runner::EngineRunner;
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
@@ -313,12 +317,22 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         .get("server_state")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "No server_state in login start response".to_string())?;
+    // `ksf_version` selects the KSF the account's password file was registered
+    // under (0 = legacy Identity KSF, any other value = current Argon2idKsf).
+    // Mirrors web (`/opaque/login-start` → `ksf_version`). Default to the
+    // current suite (1) if the server omits it, matching the web client.
+    let ksf_version = start_body
+        .get("ksf_version")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(1);
     let server_message_bytes =
         decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
     let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
         &login_start.state,
         password.as_bytes(),
         &server_message_bytes,
+        ksf_version,
     )
     .map_err(|e| format!("Invalid email or password ({e})"))?;
 
@@ -791,6 +805,7 @@ fn is_disposable_cache_path(path: &std::path::Path) -> bool {
         .any(|root| canonical_path.starts_with(root))
 }
 
+#[cfg(unix)]
 fn remove_stale_ipc_socket() -> Result<bool, String> {
     let path = ipc_socket::ipc_socket_path();
     match std::fs::remove_file(&path) {
@@ -798,6 +813,13 @@ fn remove_stale_ipc_socket() -> Result<bool, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(format!("remove IPC socket {}: {error}", path.display())),
     }
+}
+
+// Windows has no Unix-socket daemon endpoint — the Cloud Files provider runs
+// in-process — so there is never a stale socket to remove.
+#[cfg(not(unix))]
+fn remove_stale_ipc_socket() -> Result<bool, String> {
+    Ok(false)
 }
 
 async fn persist_sync_root_and_start_engine(
@@ -851,6 +873,11 @@ async fn start_engine_for_pending_finder_install(
         }
     };
 
+    // The macOS File Provider extension talks to the daemon over a Unix
+    // socket, so we wait for that endpoint before claiming the install is
+    // ready. Windows has no such socket (the Cloud Files provider is
+    // in-process), so the readiness probe is unix-only.
+    #[cfg(unix)]
     if let Err(error) = wait_for_file_provider_ipc_ready().await {
         stop_pending_finder_install_engine(state, started).await;
         return Err(error);
@@ -869,6 +896,7 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     }
 }
 
+#[cfg(unix)]
 async fn wait_for_file_provider_ipc_ready() -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
@@ -1019,6 +1047,97 @@ async fn continue_without_finder_location(
     let mut cfg = DesktopConfig::load()?;
     persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await?;
     Ok(finder_install_state_from_config(&cfg, false, None))
+}
+
+// ── Windows shell integration (Cloud Files) ───────────────────────────────────
+//
+// Windows mirror of the macOS Finder commands above. The Cloud Files sync root
+// plays the role the macOS File Provider domain plays: registering it makes the
+// sync folder show up in Explorer with on-demand (cloud-only) placeholders. We
+// reuse `FinderInstallState` as the return type so the frontend only needs a
+// type alias (`FinderInstallState` → `ShellIntegrationState`); the persisted
+// `finder_install_*` config fields double as the shell-integration status store
+// on Windows, so existing state helpers apply unchanged.
+//
+// `installed` here means "the Cloud Files sync root is registered with Windows."
+// Registration is idempotent at the OS layer (re-registering the same path is a
+// no-op), so these commands are safe to call repeatedly. The live registration
+// performed by the engine runner (`windows_cf::activate`) and the one done here
+// converge on the same OS state.
+
+/// Report whether the Beebeeb Cloud Files sync root is registered with Windows.
+/// Parallels `finder_location_state`. Returns `installed: true` once the sync
+/// root has been registered (status persisted as "installed" in config).
+#[tauri::command]
+fn windows_shell_integration_state() -> Result<FinderInstallState, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let cfg = DesktopConfig::load()?;
+        // Treat a registered sync root as "installed". We persisted the
+        // outcome of the last registration attempt under the finder_install_*
+        // fields, so the state is reconstructed exactly like the macOS path.
+        let installed = cfg.finder_install_status.as_deref() == Some("installed");
+        Ok(finder_install_state_from_config(&cfg, installed, None))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Windows shell integration is only available on Windows.".to_string())
+    }
+}
+
+/// Register the chosen sync root as a Windows Cloud Files sync root and start
+/// the daemon. Parallels `install_finder_location`. On success the folder
+/// appears in Explorer as a Beebeeb cloud-synced location.
+#[tauri::command]
+async fn install_windows_shell_integration(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<FinderInstallState, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let root = path
+            .map(PathBuf::from)
+            .unwrap_or_else(config::default_sync_root_suggestion);
+        if !root.is_absolute() {
+            return Err(format!("Sync root must be absolute: {}", root.display()));
+        }
+        config::ensure_directory(&root)?;
+
+        let mut cfg = DesktopConfig::load()?;
+
+        // Register the Cloud Files sync root with Windows. Idempotent at the OS
+        // layer. The engine runner re-registers + connects callbacks on spawn
+        // (`windows_cf::activate`); doing it here gives immediate feedback in
+        // onboarding before the engine ticks.
+        if let Err(error) = windows_cf::register_sync_root(&root) {
+            let error = error.to_string();
+            persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
+            return Err(error);
+        }
+
+        // Persist the sync root and (re)start the engine, which will connect the
+        // Cloud Files fetch callbacks and seed placeholders.
+        if let Err(error) = persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await {
+            persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
+            return Err(error);
+        }
+
+        persist_finder_install_result(&mut cfg, true, None)?;
+        Ok(FinderInstallState {
+            installed: true,
+            path: Some(root.to_string_lossy().into_owned()),
+            status: "installed".to_string(),
+            last_error: None,
+            last_attempt_at: cfg.finder_install_last_attempt_at,
+            reason_category: None,
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, state, path);
+        Err("Windows shell integration is only available on Windows.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -2158,6 +2277,9 @@ pub fn run() {
             finder_location_state,
             install_finder_location,
             continue_without_finder_location,
+            // Windows shell integration (Cloud Files) — parallels the macOS finder cmds
+            windows_shell_integration_state,
+            install_windows_shell_integration,
             reset_macos_integration,
             open_finder_location,
             // Task 9 — settings page IPC
@@ -2514,16 +2636,30 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 /// `open_conflict_window` and live independently; nothing in here
 /// touches them.
 fn show_settings_window(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("settings") {
+    // Windows ships a dedicated, larger settings shell (`windows-settings`)
+    // whose React route is selected by the `platform=windows` query param.
+    // macOS keeps the original compact `settings` window untouched.
+    #[cfg(target_os = "windows")]
+    let (label, url, width, height, resizable) = (
+        "windows-settings",
+        "index.html?window=settings&platform=windows",
+        1000.0,
+        680.0,
+        true,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let (label, url, width, height, resizable) = ("settings", "index.html", 680.0, 540.0, false);
+
+    if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
         let _ = win.set_focus();
         return;
     }
 
-    match tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("index.html".into()))
+    match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
         .title("Beebeeb")
-        .inner_size(680.0, 540.0)
-        .resizable(false)
+        .inner_size(width, height)
+        .resizable(resizable)
         .center()
         .build()
     {

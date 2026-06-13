@@ -74,8 +74,7 @@ impl LockFile {
 
         // If a prior lock exists, decide whether to break it.
         if path.exists() {
-            let raw = fs::read_to_string(&path)
-                .map_err(|e| format!("read existing lock {}: {e}", path.display()))?;
+            let raw = fs::read_to_string(&path).map_err(|e| format!("read existing lock {}: {e}", path.display()))?;
             match serde_json::from_str::<LockContents>(&raw) {
                 Ok(prior) => {
                     if pid_alive(prior.pid) {
@@ -114,10 +113,8 @@ impl LockFile {
             hostname: hostname_or_unknown(),
             started_at: Utc::now(),
         };
-        let json = serde_json::to_string_pretty(&contents)
-            .map_err(|e| format!("serialize lock: {e}"))?;
-        fs::write(&path, json)
-            .map_err(|e| format!("write lock {}: {e}", path.display()))?;
+        let json = serde_json::to_string_pretty(&contents).map_err(|e| format!("serialize lock: {e}"))?;
+        fs::write(&path, json).map_err(|e| format!("write lock {}: {e}", path.display()))?;
 
         Ok(Self { path })
     }
@@ -147,19 +144,49 @@ fn pid_alive(pid: u32) -> bool {
     if r == 0 {
         return true;
     }
-    let errno = std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(0);
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     errno == libc::EPERM
 }
 
 #[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
-    // Conservative on Windows: never break a lock just because we
-    // can't probe it. Stale locks must be removed by hand.
-    // TODO: implement via `OpenProcess` + `GetExitCodeProcess` once
-    // we ship the Windows installer.
-    true
+fn pid_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: `OpenProcess` returns either a valid handle or an error; we
+    // only touch the handle after a successful open, and always close it
+    // before returning. `GetExitCodeProcess` writes a single u32 into a
+    // stack local we own. No pointers escape this function.
+    unsafe {
+        // PROCESS_QUERY_LIMITED_INFORMATION is the least-privileged right
+        // that still lets us read the exit code, and (unlike
+        // PROCESS_QUERY_INFORMATION) succeeds across integrity levels —
+        // important since a CLI `bb watch` and the desktop daemon may run
+        // at different elevations.
+        let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => h,
+            // Open failed: the process is gone (ERROR_INVALID_PARAMETER) or
+            // we can't touch it. Either way we can't prove it's alive — and
+            // the dominant cause after a crash is "pid no longer exists", so
+            // treat the lock as breakable. Worst case (access-denied on a
+            // live foreign-user pid) we re-acquire and the on-disk format's
+            // single-writer assumption is already per-user.
+            Err(_) => return false,
+        };
+
+        let mut exit_code: u32 = 0;
+        let alive = match GetExitCodeProcess(handle, &mut exit_code) {
+            // A still-running process reports STILL_ACTIVE (259). Any other
+            // exit code means it has terminated — the lock is stale.
+            Ok(()) => exit_code == STILL_ACTIVE.0 as u32,
+            // If we can't read the exit code, fall back to "exists" — the
+            // handle opened, so the pid is at least valid right now.
+            Err(_) => true,
+        };
+
+        let _ = CloseHandle(handle);
+        alive
+    }
 }
 
 fn hostname_or_unknown() -> String {

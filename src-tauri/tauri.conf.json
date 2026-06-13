@@ -5,7 +5,7 @@
   "identifier": "io.beebeeb.app",
   "build": {
     "beforeBuildCommand": "bun run build",
-    "beforeBundleCommand": "scripts/prepare-macos-provisioning-profiles.sh && scripts/build-fileprovider-extension.sh",
+    "beforeBundleCommand": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('scripts/prepare-macos-provisioning-profiles.sh && scripts/build-fileprovider-extension.sh',{stdio:'inherit'})}\"",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -33,6 +33,7 @@
         "fullscreen": false,
         "visible": false,
         "decorations": false,
+        "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": false
