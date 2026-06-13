@@ -334,7 +334,14 @@ impl AuthSecretStore for WindowsCredentialStore {
         windows_credentials::load(SESSION_TOKEN_ACCOUNT)?
             .map(|bytes| {
                 String::from_utf8(bytes)
-                    .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
+                    .map_err(|e| {
+                        // Bearer-token hygiene: the raw blob is the (malformed)
+                        // session token. Recover the bytes from the error and
+                        // zero them before discarding so the secret doesn't
+                        // linger in a freed allocation.
+                        e.into_bytes().fill(0);
+                        AuthStoreError::InvalidSecret("session token is not UTF-8")
+                    })
                     .and_then(SessionToken::new)
             })
             .transpose()
@@ -419,9 +426,14 @@ impl AuthSecretStore for WindowsCredentialStore {
 //
 // `PlatformKeychainStore` is the concrete store the Tauri runner constructs.
 // It mirrors macOS wiring: on macOS the secrets live in the Keychain, on Windows
-// in Credential Manager. Other platforms (Linux) keep the prior behaviour — the
-// macOS store's `#[cfg(not(target_os = "macos"))]` stub, which returns
-// `Unsupported` — so the Linux build and its fail-closed semantics are unchanged.
+// in Credential Manager.
+//
+// On Linux (and any other non-macOS, non-Windows target) the alias resolves to
+// `MacOsKeychainStore`, which on those targets is compiled from its
+// `#[cfg(not(target_os = "macos"))]` stub — every `AuthSecretStore` method
+// returns `AuthStoreError::Unsupported`. So Linux has no native secret backend
+// yet and stays fail-closed (no persistence, no silent plaintext fallback);
+// its behaviour is unchanged by the Windows work.
 
 #[cfg(target_os = "macos")]
 pub type PlatformKeychainStore = MacOsKeychainStore;
@@ -449,12 +461,19 @@ mod windows_credentials {
     //! out and free it with `CredFree` before returning.
 
     use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
-    use windows::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
     use windows::Win32::Security::Credentials::{
         CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_ENTERPRISE,
         CRED_TYPE_GENERIC,
     };
-    use windows::core::{PCWSTR, PWSTR};
+    use windows::core::{HRESULT, PCWSTR, PWSTR};
+
+    /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` — `ERROR_NOT_FOUND` (1168) wrapped as
+    /// an `HRESULT` (`0x80070490`). The windows 0.58 wrappers for `CredReadW` /
+    /// `CredDeleteW` already capture the Win32 error and surface it through
+    /// `Error::code()`, so we compare against this instead of a second, racy
+    /// `GetLastError()`. The `u32 as i32` cast reproduces the correct negative
+    /// `HRESULT` bit pattern (the literal exceeds `i32::MAX`).
+    const HRESULT_ERROR_NOT_FOUND: HRESULT = HRESULT(0x80070490u32 as i32);
 
     /// Build the UTF-16, NUL-terminated target name `io.beebeeb.app/<account>`.
     /// Returned `Vec<u16>` must outlive every pointer derived from it.
@@ -475,7 +494,11 @@ mod windows_credentials {
         // every field the API reads (Type, TargetName, CredentialBlob*, Persist).
         let mut cred: CREDENTIALW = unsafe { std::mem::zeroed() };
         cred.Type = CRED_TYPE_GENERIC;
-        // PWSTR points into `target`; valid for the duration of this call.
+        // `cred.TargetName` is a raw PWSTR borrowing `target`'s buffer; the
+        // borrow is untracked by the type system, so `target` (and `secret`,
+        // borrowed by `CredentialBlob` below) MUST outlive `cred` and the
+        // `CredWriteW` call. Both are owned locals dropped after the call, so
+        // the pointers stay valid for the entire `unsafe` block.
         cred.TargetName = PWSTR(target.as_mut_ptr());
         cred.CredentialBlobSize = secret.len() as u32;
         // Cast away const — the API treats the blob as read-only for a write.
@@ -504,10 +527,18 @@ mod windows_credentials {
         };
 
         if let Err(e) = result {
+            // The windows 0.58 `CredReadW` wrapper already captured the failing
+            // Win32 code into `e`; use it directly rather than a second,
+            // stale-race `GetLastError()`. On failure the out-pointer is
+            // normally left null, but guard CredFree anyway in case the API
+            // populated it before erroring (latent-leak hardening).
+            if !credential.is_null() {
+                // SAFETY: `credential` was allocated by `CredReadW`; free once.
+                unsafe { CredFree(credential as *const _ as *const core::ffi::c_void) };
+            }
             // Map "no such credential" to `Ok(None)`, mirroring the macOS
             // store's ERR_SEC_ITEM_NOT_FOUND → Ok(None) handling.
-            let last = unsafe { GetLastError() };
-            if last == ERROR_NOT_FOUND {
+            if e.code() == HRESULT_ERROR_NOT_FOUND {
                 return Ok(None);
             }
             return Err(status_error("CredReadW", e.code().0));
@@ -547,9 +578,10 @@ mod windows_credentials {
 
         if let Err(e) = result {
             // Deleting a missing credential is a no-op success, matching the
-            // macOS store's `delete` (find returns None → Ok(())).
-            let last = unsafe { GetLastError() };
-            if last == ERROR_NOT_FOUND {
+            // macOS store's `delete` (find returns None → Ok(())). The 0.58
+            // `CredDeleteW` wrapper already captured the Win32 code in `e`, so
+            // compare against it rather than a second, racy `GetLastError()`.
+            if e.code() == HRESULT_ERROR_NOT_FOUND {
                 return Ok(());
             }
             return Err(status_error("CredDeleteW", e.code().0));
@@ -558,8 +590,13 @@ mod windows_credentials {
     }
 
     fn status_error(action: &'static str, code: i32) -> AuthStoreError {
-        // Never include secret bytes — only the API name and numeric code.
-        AuthStoreError::Backend(format!("Credential Manager {action} failed with code {code}"))
+        // Never include secret bytes — only the API name and the HRESULT.
+        // Format as hex (`0x{:08X}`, via `u32`) so the high bit reads as the
+        // canonical HRESULT (e.g. 0x80070490) rather than a signed decimal.
+        AuthStoreError::Backend(format!(
+            "Credential Manager {action} failed with code 0x{:08X}",
+            code as u32
+        ))
     }
 }
 
