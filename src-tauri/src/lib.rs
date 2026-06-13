@@ -15,6 +15,7 @@ use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
 mod api_client;
+mod browser_login;
 mod config;
 mod conflict;
 mod engine_bridge;
@@ -526,25 +527,42 @@ async fn set_session(
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&master_key);
-    persist_session_to_keychain(&token, arr)?;
+    apply_session(app, &state, token, arr, email).await
+}
+
+/// Persist a freshly-authenticated session and start the engine.
+///
+/// This is the shared core of `set_session` (called by the web client) and
+/// `start_browser_login` (the Windows browser-handoff flow): both arrive at a
+/// session token + 32-byte master key + email and need the exact same
+/// side-effects — write to the platform credential store, stash in memory, and
+/// spawn the sync engine if a sync_root is already configured. Keeping it in one
+/// place means the browser handoff can never drift from the IPC path.
+pub(crate) async fn apply_session(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    token: String,
+    master_key: [u8; 32],
+    email: Option<String>,
+) -> Result<(), String> {
+    persist_session_to_keychain(&token, master_key)?;
     let token_clone = token.clone();
-    let key_clone = arr;
 
     {
         let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
             token,
-            master_key: arr,
+            master_key,
             email: email.clone(),
         });
     }
-    set_auth_present(&state, true);
-    set_auth_email(&state, email);
-    tracing::info!("session installed via IPC");
+    set_auth_present(state, true);
+    set_auth_email(state, email);
+    tracing::info!("session installed");
 
     // If we already know the sync_root, kick off the engine. Otherwise
     // it'll start when the first-launch picker resolves.
-    start_engine_if_possible(app, &state, token_clone, key_clone).await;
+    start_engine_if_possible(app, state, token_clone, master_key).await;
     Ok(())
 }
 
@@ -2299,6 +2317,8 @@ pub fn run() {
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)
             desktop_login,
+            // Browser-based device-code login handoff (Windows primary path)
+            browser_login::start_browser_login,
             open_onboarding_window,
             show_settings,
         ])

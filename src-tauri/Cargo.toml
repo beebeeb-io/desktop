@@ -63,6 +63,20 @@ urlencoding = "2"
 # before feeding it to beebeeb_core::kdf::derive_master_key.
 base64 = "0.22"
 
+# ── Browser-based device-code login handoff (browser_login.rs) ───────────────
+# The crypto + WS deps below mirror repos/cli/Cargo.toml exactly so the
+# desktop handoff is byte-for-byte interoperable with `bb login` and the
+# server's cli_auth.rs contract (P-256 ECDH + HKDF-SHA256 "beebeeb-cli-auth-v1"
+# + AES-256-GCM). `tokio-tungstenite` uses rustls (not native-tls) to avoid
+# pulling OpenSSL into the bundle.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
 # Sync engine + crypto from the core repo. Path deps so we build against
 # the local checkout; `[patch."https://github.com/beebeeb-io/core"]`
 # keeps git-dep references inside sub-crates pointing at the same tree

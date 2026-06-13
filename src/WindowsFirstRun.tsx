@@ -31,6 +31,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { listen } from '@tauri-apps/api/event'
 import {
   command,
   commandUnavailableLabel,
@@ -40,6 +41,18 @@ import {
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
+
+// Progress event emitted by the Rust `start_browser_login` handoff.
+// `phase` keys the UI state machine; the other fields are populated on
+// `waiting` (the device code) and `done` (the signed-in email).
+type BrowserLoginEvent = {
+  phase: 'connecting' | 'waiting' | 'authorized' | 'done' | 'error'
+  user_code?: string
+  verification_uri?: string
+  expires_in?: number
+  email?: string
+  message?: string
+}
 
 // Windows shell integration uses the same shape as the macOS FinderInstallState
 type ShellIntegrationState = FinderInstallState
@@ -134,67 +147,6 @@ function Btn({
     >
       {children}
     </button>
-  )
-}
-
-function FormInput({
-  label,
-  type,
-  value,
-  onChange,
-  disabled,
-  placeholder,
-}: {
-  label: string
-  type: string
-  value: string
-  onChange: (v: string) => void
-  disabled?: boolean
-  placeholder?: string
-}) {
-  return (
-    <label style={{ display: 'block', marginBottom: 12 }}>
-      <span style={{
-        display: 'block',
-        fontSize: 11,
-        fontWeight: 700,
-        textTransform: 'uppercase',
-        letterSpacing: '0.07em',
-        color: T.ink3,
-        fontFamily: T.fontMono,
-        marginBottom: 5,
-      }}>
-        {label}
-      </span>
-      <input
-        type={type}
-        value={value}
-        disabled={disabled}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.currentTarget.value)}
-        style={{
-          width: '100%',
-          minHeight: 40,
-          padding: '9px 12px',
-          border: `1px solid ${T.line2}`,
-          borderRadius: 6,
-          background: T.paper,
-          color: T.ink,
-          fontSize: 13,
-          fontFamily: T.fontSans,
-          outline: 'none',
-          transition: 'border-color 120ms, box-shadow 120ms',
-        }}
-        onFocus={(e) => {
-          e.currentTarget.style.borderColor = T.amberDeep
-          e.currentTarget.style.boxShadow = '0 0 0 3px oklch(0.94 0.06 90 / 0.9)'
-        }}
-        onBlur={(e) => {
-          e.currentTarget.style.borderColor = T.line2
-          e.currentTarget.style.boxShadow = 'none'
-        }}
-      />
-    </label>
   )
 }
 
@@ -331,21 +283,74 @@ function LeftRail({ currentStep }: { currentStep: Step }) {
 
 // ── Step components ───────────────────────────────────────────────────────
 
-function SignInStep({ onDone }: { onDone: () => void }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [busy, setBusy] = useState(false)
+/**
+ * Browser-based sign-in. Invokes the Rust `start_browser_login` handoff, which
+ * opens the system browser to the device-code verification URL and waits for
+ * the (already signed-in) browser to ECDH-encrypt the session token + master
+ * key back. On success the Rust side has already persisted the session AND the
+ * master key (the handoff returns both), so the vault is unlocked — `onDone`
+ * receives `vaultUnlocked: true` so the wizard can skip the recovery-phrase step.
+ */
+function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => void }) {
+  type Phase = 'idle' | 'connecting' | 'waiting' | 'authorized' | 'error'
+  const [phase, setPhase] = useState<Phase>('idle')
+  const [userCode, setUserCode] = useState<string | null>(null)
+  const [verificationUri, setVerificationUri] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const doneRef = useRef(false)
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    setBusy(true)
+  const busy = phase === 'connecting' || phase === 'waiting' || phase === 'authorized'
+
+  const start = useCallback(async () => {
     setError(null)
-    const result = await command<void>('desktop_login', { email, password })
-    setBusy(false)
-    if (result.ok) { onDone(); return }
-    setError(result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason)
-  }
+    setUserCode(null)
+    setVerificationUri(null)
+    setPhase('connecting')
+    doneRef.current = false
+
+    // Subscribe to handoff progress before invoking so we never miss an event.
+    const unlisten = await listen<BrowserLoginEvent>('browser-login', (event) => {
+      const p = event.payload
+      switch (p.phase) {
+        case 'connecting':
+          setPhase('connecting')
+          break
+        case 'waiting':
+          setPhase('waiting')
+          if (p.user_code) setUserCode(p.user_code)
+          if (p.verification_uri) setVerificationUri(p.verification_uri)
+          break
+        case 'authorized':
+          setPhase('authorized')
+          break
+        case 'done':
+          doneRef.current = true
+          break
+        case 'error':
+          setPhase('error')
+          setError(p.message ?? 'Sign-in failed. Please try again.')
+          break
+      }
+    })
+
+    const result = await command<void>('start_browser_login')
+    unlisten()
+
+    if (result.ok && doneRef.current) {
+      // The handoff persisted the session AND the master key, so the vault is
+      // already unlocked — no recovery phrase needed on this path.
+      onDone({ vaultUnlocked: true })
+      return
+    }
+    if (!result.ok) {
+      setPhase('error')
+      setError(
+        result.unsupported
+          ? commandUnavailableLabel('start_browser_login')
+          : result.reason,
+      )
+    }
+  }, [onDone])
 
   return (
     <div>
@@ -356,18 +361,58 @@ function SignInStep({ onDone }: { onDone: () => void }) {
         Sign in to Beebeeb
       </h1>
       <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
-        Unlock your encrypted vault. Credentials stay on this PC.
+        Sign in through your browser. Beebeeb opens a Beebeeb tab, you confirm
+        the code below, and your access &amp; refresh credentials are handed back
+        encrypted — end-to-end, never touching this app in the clear.
       </p>
       {error && <Notice kind="error">{error}</Notice>}
-      <form onSubmit={submit}>
-        <FormInput label="Email" type="email" value={email} onChange={setEmail} disabled={busy} placeholder="you@example.com" />
-        <FormInput label="Password" type="password" value={password} onChange={setPassword} disabled={busy} placeholder="Your password" />
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-          <Btn type="submit" variant="primary" disabled={!email || !password || busy}>
-            {busy ? 'Signing in…' : 'Sign in →'}
-          </Btn>
+
+      {phase === 'waiting' || phase === 'authorized' ? (
+        <div style={{
+          padding: '16px 18px',
+          background: T.amberBg,
+          border: `1px solid ${T.amberDeep}`,
+          borderRadius: 10,
+          marginBottom: 18,
+        }}>
+          <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.amberDeep, marginBottom: 8 }}>
+            {phase === 'authorized' ? 'Authorized — finishing…' : 'We opened your browser'}
+          </div>
+          <p style={{ margin: '0 0 12px', fontSize: 12, color: T.ink2, lineHeight: 1.6 }}>
+            {phase === 'authorized'
+              ? 'Decrypting your credentials and starting sync…'
+              : 'Confirm the sign-in in the browser tab we just opened. Check that the code there matches:'}
+          </p>
+          {userCode && (
+            <div style={{
+              fontSize: 26,
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              fontFamily: T.fontMono,
+              color: T.ink,
+              marginBottom: 10,
+            }}>
+              {userCode}
+            </div>
+          )}
+          {verificationUri && phase === 'waiting' && (
+            <p style={{ margin: 0, fontSize: 11, color: T.ink3, lineHeight: 1.5, wordBreak: 'break-all' as const }}>
+              Browser didn&apos;t open? Visit{' '}
+              <span style={{ fontFamily: T.fontMono, color: T.amberDeep }}>{verificationUri}</span>
+              {' '}in any signed-in browser.
+            </p>
+          )}
         </div>
-      </form>
+      ) : null}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+        <Btn variant="primary" disabled={busy} onClick={() => void start()}>
+          {phase === 'connecting' && 'Connecting…'}
+          {phase === 'waiting' && 'Waiting for browser…'}
+          {phase === 'authorized' && 'Finishing…'}
+          {(phase === 'idle' || phase === 'error') && (phase === 'error' ? 'Try again' : 'Sign in with browser →')}
+        </Btn>
+      </div>
     </div>
   )
 }
@@ -747,7 +792,15 @@ export default function WindowsFirstRun() {
         padding: '40px 36px',
       }}>
         <div style={{ width: '100%', maxWidth: 420 }}>
-          {step === 'signin' && <SignInStep onDone={() => setStep('unlock')} />}
+          {step === 'signin' && (
+            <SignInStep
+              onDone={({ vaultUnlocked }) =>
+                // The browser handoff returns the master key, so the vault is
+                // already unlocked — skip the recovery-phrase step in that case.
+                setStep(vaultUnlocked ? 'sync-mode' : 'unlock')
+              }
+            />
+          )}
           {step === 'unlock' && <UnlockStep onDone={() => setStep('sync-mode')} />}
           {step === 'sync-mode' && <SyncModeStep onDone={() => setStep('explorer')} />}
           {step === 'explorer' && <ExplorerStep onDone={() => setStep('ready')} />}

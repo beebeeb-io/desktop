@@ -563,6 +563,74 @@ function SyncPanel({
 
 // ── Sidebar placeholder panels ────────────────────────────────────────────
 
+// ── Launch panel (System → Launch) ────────────────────────────────────────
+//
+// "Start at login" maps to the tauri-plugin-autostart registry Run key on
+// Windows (HKCU\…\Run). `toggle_autostart` flips it and returns the new state;
+// `autostart_enabled` reads it. Both commands already exist in lib.rs and are
+// registered in the invoke_handler.
+function LaunchPanel() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    command<boolean>('autostart_enabled').then((r) => {
+      if (cancelled) return
+      if (r.ok) setEnabled(r.value)
+      else setError(r.unsupported ? commandUnavailableLabel('autostart_enabled') : r.reason)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const toggle = async () => {
+    setBusy(true)
+    setError(null)
+    const r = await command<boolean>('toggle_autostart')
+    setBusy(false)
+    if (r.ok) { setEnabled(r.value); return }
+    setError(r.unsupported ? commandUnavailableLabel('toggle_autostart') : r.reason)
+  }
+
+  return (
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
+        Launch
+      </h1>
+      <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Control how Beebeeb starts on this PC.
+      </p>
+      {error && (
+        <div style={{
+          padding: '10px 12px', borderRadius: 6, marginBottom: 16,
+          border: '1px solid oklch(0.88 0.05 25)', background: 'oklch(0.98 0.02 25)',
+          color: 'oklch(0.42 0.15 25)', fontSize: 12,
+        }}>
+          {error}
+        </div>
+      )}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 16, padding: '14px 16px', borderRadius: 8,
+        border: `1px solid ${T.line}`, background: T.paper2,
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>
+            Start at login
+          </div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
+            Beebeeb launches automatically and resumes syncing when you sign in to Windows.
+          </div>
+        </div>
+        <div style={{ opacity: busy || enabled === null ? 0.5 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
+          <Toggle on={enabled === true} onChange={() => void toggle()} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function PlaceholderPanel({ label }: { label: string }) {
   return (
     <div style={{
@@ -801,6 +869,8 @@ export default function WindowsSettings() {
           onConfigChange={(patch) => void handleConfigChange(patch)}
           notice={notice}
         />
+      ) : activeNav === 'launch' ? (
+        <LaunchPanel />
       ) : (
         <PlaceholderPanel label={NAV_SECTIONS.flatMap((s) => s.items).find((i) => i.id === activeNav)?.label ?? activeNav} />
       )}
