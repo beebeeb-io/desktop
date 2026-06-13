@@ -226,24 +226,39 @@ async fn start_engine_if_possible(
 ///
 /// Re-calling when the window already exists is a no-op (focus only).
 pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window("onboarding") {
+    // Windows uses a wider two-column layout (WindowsFirstRun.tsx) selected by
+    // the `platform=windows` query param, matching the pattern in
+    // `show_settings_window` and the `windows-onboarding` entry in tauri.conf.json.
+    // macOS/Linux keep the original compact single-column Onboarding.tsx (no param).
+    #[cfg(target_os = "windows")]
+    let (label, url, width, height) = (
+        "windows-onboarding",
+        "index.html?window=onboarding&platform=windows",
+        860.0_f64,
+        640.0_f64,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let (label, url, width, height) = (
+        "onboarding",
+        "index.html?window=onboarding",
+        860.0_f64,
+        640.0_f64,
+    );
+
+    if let Some(existing) = app.get_webview_window(label) {
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
     }
 
-    tauri::WebviewWindowBuilder::new(
-        app,
-        "onboarding",
-        tauri::WebviewUrl::App("index.html?window=onboarding".into()),
-    )
-    .title("Welcome to Beebeeb")
-    .inner_size(860.0, 640.0)
-    .min_inner_size(780.0, 560.0)
-    .resizable(true)
-    .center()
-    .build()
-    .map_err(|e| e.to_string())?;
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
+        .title("Welcome to Beebeeb")
+        .inner_size(width, height)
+        .min_inner_size(780.0, 560.0)
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
