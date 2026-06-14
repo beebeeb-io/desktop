@@ -134,12 +134,10 @@ pub fn create_placeholder(
         }
     }
 
-    tracing::debug!(
-        file_id = %file_id,
-        parent = %parent_dir.display(),
-        name = %name,
-        "cloud placeholder created"
-    );
+    // Zero-knowledge: log the file_id only. The decrypted plaintext filename
+    // (and the parent path, which can carry decrypted folder names) must never
+    // reach the logs.
+    tracing::debug!(file_id = %file_id, "cloud placeholder created");
     Ok(())
 }
 

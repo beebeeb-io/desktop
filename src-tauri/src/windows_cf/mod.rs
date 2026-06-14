@@ -178,23 +178,32 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
         // friendly) — this stays, the FETCH_DATA callback serves bytes
         // lazily on open.
         //
-        // Population policy `FULL` (was `PARTIAL`): the provider
-        // PRE-POPULATES the whole namespace by eagerly minting a
+        // Population policy `ALWAYS_FULL` (was `FULL`, originally `PARTIAL`):
+        // the provider PRE-POPULATES the whole namespace by eagerly minting a
         // placeholder for every cloud-only row (`populate_placeholders`,
-        // re-run on every tick via `refresh_placeholders` so newly
-        // discovered rows are added). With `PARTIAL` Windows considers
-        // each directory "not yet enumerated" and BLOCKS the first
-        // Explorer listing waiting for a `FETCH_PLACEHOLDERS` callback —
-        // which this in-process provider never registered, so Explorer
-        // enumeration hung/timed out. `FULL` tells Windows the on-disk
-        // placeholders ARE the complete listing, so it enumerates them
-        // directly with no callback round-trip. The vault is small and
-        // (today) flat — `sync_tick` lists only the root, non-recursively
-        // — so eager full population is cheap and correct. If deep
-        // recursive listing is added later and the vault grows large, the
-        // alternative is to switch back to `PARTIAL` and register a real
-        // `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` that serves a directory's
-        // children from the DB via `CfExecute(TRANSFER_PLACEHOLDERS)`.
+        // re-run on every tick via `refresh_placeholders` so newly discovered
+        // rows are added). `ALWAYS_FULL` is the "the namespace is ALWAYS
+        // present locally in full — never forward an enumeration request to
+        // the provider" contract: Windows treats every directory as fully
+        // enumerated by the on-disk placeholders and NEVER asks us for more,
+        // so no `FETCH_PLACEHOLDERS` callback is ever needed.
+        //
+        // Why not `FULL`: `FULL` only marks a directory fully-populated AFTER
+        // the provider explicitly stamps it `CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION`
+        // (or sets pin state); any directory NOT yet marked is still treated
+        // as "not fully populated" and Windows BLOCKS its first Explorer
+        // listing waiting for a `FETCH_PLACEHOLDERS` callback — which this
+        // in-process provider never registered, so enumeration hung/timed out.
+        // `ALWAYS_FULL` removes that per-directory requirement entirely: the
+        // namespace is unconditionally complete, so enumeration is served from
+        // the placeholders with no callback round-trip.
+        //
+        // The vault is small and (today) flat — `sync_tick` lists only the
+        // root, non-recursively — so eager full population is cheap and
+        // correct. If deep recursive listing is added later and the vault
+        // grows large, the alternative is to switch back to `PARTIAL` and
+        // register a real `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` that serves a
+        // directory's children from the DB via `CfExecute(TRANSFER_PLACEHOLDERS)`.
         let policies = CF_SYNC_POLICIES {
             StructSize: std::mem::size_of::<CF_SYNC_POLICIES>() as u32,
             Hydration: CF_HYDRATION_POLICY {
@@ -206,7 +215,12 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
                 Modifier: CF_HYDRATION_POLICY_MODIFIER_NONE,
             },
             Population: CF_POPULATION_POLICY {
-                Primary: CF_POPULATION_POLICY_FULL,
+                // `CF_POPULATION_POLICY_ALWAYS_FULL` (windows 0.58:
+                // `CF_POPULATION_POLICY_PRIMARY(3)`) — verified present in the
+                // vendored bindings. The namespace is ALWAYS fully present
+                // locally; Windows never forwards an enumeration request, so no
+                // FETCH_PLACEHOLDERS callback is required.
+                Primary: CF_POPULATION_POLICY_ALWAYS_FULL,
                 Modifier: CF_POPULATION_POLICY_MODIFIER_NONE,
             },
             InSync: CF_INSYNC_POLICY_NONE,
@@ -215,15 +229,15 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
         };
 
         // Flags:
-        //  - `UPDATE` so a root previously registered with the old
-        //    `PARTIAL` policy (e.g. an onboarding that ran before this
-        //    fix) is re-registered in place with the new `FULL` policy
+        //  - `UPDATE` so a root previously registered with an older policy
+        //    (`PARTIAL`, or `FULL`) — e.g. an onboarding that ran before this
+        //    fix — is re-registered in place with the new `ALWAYS_FULL` policy
         //    rather than the call no-opping on the stale registration.
         //  - `DISABLE_ON_DEMAND_POPULATION_ON_ROOT` is the explicit
         //    "this provider fully pre-populates the namespace; do NOT
         //    expect an on-demand FETCH_PLACEHOLDERS callback" contract
-        //    that pairs with `FULL` — it is what actually stops Explorer
-        //    from blocking on a placeholder fetch that never comes.
+        //    that pairs with `ALWAYS_FULL` — it reinforces, at the root, that
+        //    Explorer must not block on a placeholder fetch that never comes.
         let register_flags = CF_REGISTER_FLAG_UPDATE | CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT;
         CfRegisterSyncRoot(PCWSTR(path_wide.as_ptr()), &info, &policies, register_flags)
             .map_err(|e| anyhow::anyhow!("CfRegisterSyncRoot failed: {e}"))?;
@@ -245,7 +259,7 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
 /// `CF_CALLBACK_TYPE_NONE` sentinel, per the Cloud Files contract. We only
 /// register `FETCH_DATA` — the bytes-on-open hook — which is all we need:
 /// directory *enumeration* is served from the eagerly pre-created on-disk
-/// placeholders (the root is registered `CF_POPULATION_POLICY_FULL` +
+/// placeholders (the root is registered `CF_POPULATION_POLICY_ALWAYS_FULL` +
 /// `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
 /// placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
 /// Only the file *bytes* are fetched lazily, which is `FETCH_DATA`.
@@ -444,13 +458,18 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
         let (parent_dir, name) = match (local_path.parent(), local_path.file_name()) {
             (Some(parent), Some(name)) => (parent.to_path_buf(), name.to_string_lossy().into_owned()),
             _ => {
-                tracing::warn!(path = %entry.path, "skipping placeholder for path with no file name");
+                // Zero-knowledge: log the file_id only, never the decrypted
+                // plaintext path/name.
+                tracing::warn!(file_id = %entry.file_id, "skipping placeholder for path with no file name");
                 continue;
             }
         };
 
         if let Err(e) = crate::config::ensure_directory(&parent_dir) {
-            tracing::warn!(error = %e, parent = %parent_dir.display(), "could not create placeholder parent dir");
+            // Zero-knowledge: the parent dir is built from the decrypted
+            // relative path, so it can carry plaintext folder names — log the
+            // file_id only, not the path.
+            tracing::warn!(error = %e, file_id = %entry.file_id, "could not create placeholder parent dir");
             continue;
         }
 
@@ -458,10 +477,11 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
         {
             Ok(()) => created += 1,
             Err(e) => {
+                // Zero-knowledge: log the file_id only — never the decrypted
+                // plaintext filename.
                 tracing::warn!(
                     error = %e,
                     file_id = %entry.file_id,
-                    name = %name,
                     "placeholder creation failed"
                 );
             }
