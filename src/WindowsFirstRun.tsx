@@ -324,7 +324,12 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
           setPhase('authorized')
           break
         case 'done':
-          doneRef.current = true
+          // Advance exactly once — guard with doneRef so a late command
+          // resolve can't double-fire onDone if the event arrived first.
+          if (!doneRef.current) {
+            doneRef.current = true
+            onDone({ vaultUnlocked: true })
+          }
           break
         case 'error':
           setPhase('error')
@@ -336,9 +341,16 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
     const result = await command<void>('start_browser_login')
     unlisten()
 
-    if (result.ok && doneRef.current) {
-      // The handoff persisted the session AND the master key, so the vault is
-      // already unlocked — no recovery phrase needed on this path.
+    // If the 'done' event already fired (and advanced the wizard) before or
+    // during the await, doneRef is true — nothing left to do here.
+    if (doneRef.current) return
+
+    if (result.ok) {
+      // Command resolved OK but the 'done' event was either missed (arrived
+      // after unlisten) or not yet emitted. Advance now — this is the same
+      // success path: handoff persisted the session AND the master key, so the
+      // vault is already unlocked — no recovery phrase needed on this path.
+      doneRef.current = true
       onDone({ vaultUnlocked: true })
       return
     }
@@ -349,11 +361,9 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
     // (previously a stalled TLS handshake never returned and the UI hung on
     // "Connecting" forever with no error). We always fall back to phase 'error'
     // here — never leave the user staring at a spinner.
-    const message = !result.ok
-      ? result.unsupported
-        ? commandUnavailableLabel('start_browser_login')
-        : result.reason
-      : 'Sign-in did not complete. Please try again.'
+    const message = result.unsupported
+      ? commandUnavailableLabel('start_browser_login')
+      : result.reason
     setPhase('error')
     setError(message)
   }, [onDone])
