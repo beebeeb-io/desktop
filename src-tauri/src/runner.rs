@@ -340,6 +340,26 @@ fn now_secs() -> i64 {
 }
 
 fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
+    // Honor the Windows "Files On-Demand" toggle. When the user has turned
+    // it OFF (`Some(false)`), they want every file kept fully local — so we
+    // must NOT evict unpinned cached files down to the budget. Unset
+    // (`None`) or `Some(true)` keeps the default on-demand behaviour.
+    // A missing/unreadable config defaults to on-demand (the safe, low-disk
+    // behaviour). This is one cheap TOML read per 5s tick.
+    let files_on_demand = crate::config::DesktopConfig::load()
+        .ok()
+        .and_then(|c| c.files_on_demand)
+        .unwrap_or(true);
+    if !files_on_demand {
+        // User opted into keeping everything local — skip eviction.
+        return;
+    }
+
+    // TODO honor `metered`: when the connection is metered and the user set
+    // `metered = Some(true)`, downloads/hydration should pause. The runner
+    // has no metered-network detection on Windows yet, so this toggle is
+    // persisted only for now (see DesktopConfig::metered).
+
     match bridge.enforce_smart_cache(CachePolicy::default()) {
         Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
             tracing::info!(

@@ -108,6 +108,26 @@ pub struct DesktopConfig {
     // here means a future engine version can read and act on it.
     #[serde(default)]
     pub sync_mode: Option<String>,
+
+    // ── Windows Settings UI toggles ───────────────────────────────────
+    //
+    // Three on/off switches surfaced on the Windows Settings page. Stored
+    // as `Option<bool>` so a missing key round-trips as `None` (toggle
+    // never set) rather than forcing a default the frontend didn't choose.
+    /// Treat the current connection as metered — when `Some(true)`, the
+    /// runner pauses sync on a metered network if metered-state detection
+    /// is available. Persisted regardless; honoring is best-effort.
+    #[serde(default)]
+    pub metered: Option<bool>,
+    /// Files On-Demand: when `Some(true)` (or unset), new remote files are
+    /// kept as cloud-only placeholders until opened. When `Some(false)`,
+    /// the user wants everything kept local (pin/hydrate-all).
+    #[serde(default)]
+    pub files_on_demand: Option<bool>,
+    /// Show sync-status overlay icons in Explorer. UI-only hint today;
+    /// persisted so the choice survives a restart.
+    #[serde(default)]
+    pub sync_overlays: Option<bool>,
 }
 
 /// `#[serde(default = ...)]` needs a function returning the default.
@@ -138,6 +158,9 @@ impl Default for DesktopConfig {
             finder_install_last_attempt_at: None,
             finder_install_reason_category: None,
             sync_mode: None,
+            metered: None,
+            files_on_demand: None,
+            sync_overlays: None,
         }
     }
 }
@@ -165,6 +188,13 @@ pub struct DesktopSettings {
     /// `"online_only"`.
     #[serde(default)]
     pub sync_mode: Option<String>,
+    /// Windows Settings UI toggles. `None` when never set by the user.
+    #[serde(default)]
+    pub metered: Option<bool>,
+    #[serde(default)]
+    pub files_on_demand: Option<bool>,
+    #[serde(default)]
+    pub sync_overlays: Option<bool>,
 }
 
 impl From<&DesktopConfig> for DesktopSettings {
@@ -177,6 +207,9 @@ impl From<&DesktopConfig> for DesktopSettings {
             notify_sync_complete: c.notify_sync_complete,
             notify_quota_warnings: c.notify_quota_warnings,
             sync_mode: c.sync_mode.clone(),
+            metered: c.metered,
+            files_on_demand: c.files_on_demand,
+            sync_overlays: c.sync_overlays,
         }
     }
 }
@@ -196,6 +229,18 @@ impl DesktopConfig {
         // a plain bandwidth/notification save should not clear a persisted mode.
         if s.sync_mode.is_some() {
             self.sync_mode = s.sync_mode;
+        }
+        // Same merge rule for the Windows toggles: a save from a page that
+        // doesn't touch them (None) leaves the persisted value intact;
+        // only an explicit Some(true/false) updates it.
+        if s.metered.is_some() {
+            self.metered = s.metered;
+        }
+        if s.files_on_demand.is_some() {
+            self.files_on_demand = s.files_on_demand;
+        }
+        if s.sync_overlays.is_some() {
+            self.sync_overlays = s.sync_overlays;
         }
     }
 }
