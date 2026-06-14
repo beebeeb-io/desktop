@@ -31,6 +31,7 @@
 //! consume this stream.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -73,11 +74,21 @@ impl EngineRunner {
     /// Spawn the runner on a background tokio task. Returns the handle
     /// synchronously — actual startup (lock acquire, DB open, first
     /// tick) happens inside the task.
-    pub fn spawn(app: AppHandle, sync_root: PathBuf, session_token: String, master_key: [u8; 32]) -> Self {
+    ///
+    /// `sync_paused` is shared with [`crate::AppState`] so the
+    /// `tray_pause_sync` / `tray_resume_sync` IPC commands can signal
+    /// the loop without restarting the runner.
+    pub fn spawn(
+        app: AppHandle,
+        sync_root: PathBuf,
+        session_token: String,
+        master_key: [u8; 32],
+        sync_paused: Arc<AtomicBool>,
+    ) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(async move {
-            run(app, sync_root, session_token, master_key, rx).await;
+            run(app, sync_root, session_token, master_key, rx, sync_paused).await;
         });
 
         Self {
@@ -124,6 +135,7 @@ async fn run(
     session_token: String,
     master_key: [u8; 32],
     mut cancel: oneshot::Receiver<()>,
+    sync_paused: Arc<AtomicBool>,
 ) {
     // Acquire the mutual-exclusion lock with the CLI's `bb watch`.
     // If a CLI agent is alive in the same folder, we don't start.
@@ -197,6 +209,14 @@ async fn run(
             biased;
             _ = &mut cancel => break,
             _ = tick.tick() => {
+                // Skip all sync work while the user has paused sync.
+                // The loop keeps running so it can receive the cancel
+                // signal and so it wakes up promptly when resumed.
+                if sync_paused.load(Ordering::Relaxed) {
+                    emit_status(&app, "paused", Some(&sync_root), None);
+                    continue;
+                }
+
                 match bridge.refresh_shared_roots().await {
                     Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
                         tracing::info!(
@@ -320,6 +340,26 @@ fn now_secs() -> i64 {
 }
 
 fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
+    // Honor the Windows "Files On-Demand" toggle. When the user has turned
+    // it OFF (`Some(false)`), they want every file kept fully local — so we
+    // must NOT evict unpinned cached files down to the budget. Unset
+    // (`None`) or `Some(true)` keeps the default on-demand behaviour.
+    // A missing/unreadable config defaults to on-demand (the safe, low-disk
+    // behaviour). This is one cheap TOML read per 5s tick.
+    let files_on_demand = crate::config::DesktopConfig::load()
+        .ok()
+        .and_then(|c| c.files_on_demand)
+        .unwrap_or(true);
+    if !files_on_demand {
+        // User opted into keeping everything local — skip eviction.
+        return;
+    }
+
+    // TODO honor `metered`: when the connection is metered and the user set
+    // `metered = Some(true)`, downloads/hydration should pause. The runner
+    // has no metered-network detection on Windows yet, so this toggle is
+    // persisted only for now (see DesktopConfig::metered).
+
     match bridge.enforce_smart_cache(CachePolicy::default()) {
         Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
             tracing::info!(
