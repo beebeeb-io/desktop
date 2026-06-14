@@ -1535,6 +1535,77 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
     })
 }
 
+#[derive(Debug, serde::Serialize)]
+struct FreeUpSpaceResult {
+    bytes_freed: u64,
+}
+
+/// "Free up space now" — dehydrate every unpinned, fully-local file back to a
+/// cloud-only placeholder and delete its on-disk cache copy. Pinned files
+/// (effective pin = pinned) are always kept. Mirrors the Windows "Free up
+/// space" action and the macOS Storage panel button.
+///
+/// Returns the number of bytes reclaimed from disk. Safe to call with no sync
+/// root / no state DB (returns `bytes_freed: 0`).
+///
+/// `bytes_freed` is summed from the actual on-disk sizes of the cache files we
+/// successfully delete — so the figure reflects bytes really removed from disk,
+/// never an estimate. The DB transition (cache_path → NULL, status →
+/// cloud_only) is done by `evict_unpinned_cache_until_under(0, now)`. File
+/// deletes are bounded to paths under the sync root so a corrupt cache_path can
+/// never make us delete outside the vault's cache.
+#[tauri::command]
+fn free_up_space() -> Result<FreeUpSpaceResult, String> {
+    let cfg = DesktopConfig::load()?;
+    let Some(sync_root) = cfg.sync_root.clone() else {
+        return Ok(FreeUpSpaceResult { bytes_freed: 0 });
+    };
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Ok(FreeUpSpaceResult { bytes_freed: 0 });
+    }
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+
+    // Snapshot the on-disk paths to unlink BEFORE the DB clears them
+    // (eviction nulls cache_path, so we must read it first). These are exactly
+    // the unpinned, local files eviction will dehydrate.
+    let paths = db
+        .disposable_unpinned_cache_paths()
+        .map_err(|e| format!("list cache paths: {e}"))?;
+
+    // Flip every unpinned local file to cloud_only in the DB. A budget of 0
+    // means "evict everything unpinned."
+    let now = now_unix_seconds();
+    db.evict_unpinned_cache_until_under(0, now)
+        .map_err(|e| format!("evict unpinned cache: {e}"))?;
+
+    // Delete the actual cache files, bounded to paths under the sync root so a
+    // bad cache_path can't delete outside the vault. Sum the real file sizes we
+    // remove so `bytes_freed` is an exact count, not an estimate. A missing
+    // file contributes 0 (already gone — nothing reclaimed by us).
+    let sync_root_canon = sync_root.canonicalize().unwrap_or(sync_root);
+    let mut bytes_freed: u64 = 0;
+    for path in paths {
+        let path_buf = PathBuf::from(&path);
+        let canonical = match path_buf.canonicalize() {
+            Ok(p) if p.starts_with(&sync_root_canon) => p,
+            // Outside the sync root, or unresolvable — never delete.
+            _ => continue,
+        };
+        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+        match std::fs::remove_file(&canonical) {
+            Ok(()) => bytes_freed = bytes_freed.saturating_add(size),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(error = %error, path = %canonical.display(), "free_up_space: could not remove cache file");
+            }
+        }
+    }
+
+    tracing::info!(bytes_freed, "free_up_space evicted unpinned cache");
+    Ok(FreeUpSpaceResult { bytes_freed })
+}
+
 #[tauri::command]
 fn export_diagnostics() -> Result<serde_json::Value, String> {
     let cfg = DesktopConfig::load()?;
@@ -2495,6 +2566,7 @@ pub fn run() {
             lock_vault,
             sync_status,
             desktop_storage_summary,
+            free_up_space,
             export_diagnostics,
             list_version_conflict_center,
             list_file_versions,
