@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
@@ -101,6 +102,10 @@ pub struct AppState {
     /// `"idle"` and `"syncing"` to `"running"` for the WebView's
     /// simpler tri-state expectation.
     pub engine_state: Mutex<String>,
+    /// Runtime pause flag. Set by `tray_pause_sync` / cleared by
+    /// `tray_resume_sync`. Shared with the runner so it can skip sync
+    /// work on each tick without a lock round-trip.
+    pub sync_paused: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
@@ -113,6 +118,7 @@ impl Default for AppState {
             // Default to "stopped" — once the runner spawns and emits
             // its first event, the listener overwrites this.
             engine_state: Mutex::new("stopped".to_string()),
+            sync_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -206,11 +212,12 @@ async fn start_engine_if_possible(
     master_key: [u8; 32],
 ) {
     if let Some(root) = DesktopConfig::load().ok().and_then(|c| c.sync_root) {
+        let pause_flag = state.sync_paused.clone();
         let mut engine_slot = state.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             prev.abort().await;
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag));
     }
 }
 
@@ -251,7 +258,7 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
         return Ok(());
     }
 
-    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
+    let win = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
         .title("Welcome to Beebeeb")
         .inner_size(width, height)
         .min_inner_size(780.0, 560.0)
@@ -259,6 +266,11 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
         .center()
         .build()
         .map_err(|e| e.to_string())?;
+    // Explicit show + focus: tauri.conf.json declares the window
+    // `visible: false`; without these calls the window is created but
+    // never appears on screen.
+    let _ = win.show();
+    let _ = win.set_focus();
 
     Ok(())
 }
@@ -272,9 +284,10 @@ async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Show the settings window — called by `Onboarding.tsx` after the user
 /// completes the 3-step flow and closes the onboarding window.
+/// Also aliased as `show_settings_window` for callers in the Windows UI.
 #[tauri::command]
 fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_settings_window(&app);
+    show_settings_window_impl(&app);
     Ok(())
 }
 
@@ -870,11 +883,12 @@ async fn persist_sync_root_and_start_engine(
         .ok()
         .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
     if let Some((token, key)) = session {
+        let pause_flag = state.sync_paused.clone();
         let mut engine_slot = state.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             prev.abort().await;
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, key));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag));
     }
 
     Ok(())
@@ -897,11 +911,12 @@ async fn start_engine_for_pending_finder_install(
     };
 
     let started = {
+        let pause_flag = state.sync_paused.clone();
         let mut engine_slot = state.engine.lock().await;
         if engine_slot.is_some() {
             false
         } else {
-            *engine_slot = Some(EngineRunner::spawn(app, root, token, key));
+            *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag));
             true
         }
     };
@@ -1444,6 +1459,15 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         "syncing": counts.0,
         "cloud_only": counts.1,
         "conflicts": counts.2,
+        // WS1 — storage byte totals for the tray status line.
+        // These are `null` here because polling the billing API on every
+        // 3-second status tick would hammer the server. The tray's
+        // storage line should call `desktop_storage_summary` (which already
+        // exists and hits the API once on demand) rather than piggy-backing
+        // on the lightweight `sync_status` poll. Field names are reserved
+        // here so the frontend contract is stable once wired.
+        "used_bytes": serde_json::Value::Null,
+        "quota_bytes": serde_json::Value::Null,
     }))
 }
 
@@ -1711,11 +1735,12 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             .ok()
             .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
         if let Some((token, key)) = session {
+            let pause_flag = state.sync_paused.clone();
             let mut engine_slot = state.engine.lock().await;
             if let Some(prev) = engine_slot.take() {
                 prev.abort().await;
             }
-            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key));
+            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag));
         }
 
         Ok(Some(path.to_string_lossy().into_owned()))
@@ -1780,6 +1805,177 @@ fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
     cfg.apply_settings(config);
     cfg.save()?;
     Ok(())
+}
+
+// ── IPC aliases for frontend compatibility ────────────────────────────────────
+
+/// Alias so the frontend can call `desktop_config` (the name used in
+/// `WindowsFirstRun.tsx` and `WindowsSettings.tsx`) in addition to the
+/// canonical `get_desktop_config`. Both names are registered in
+/// `generate_handler!`. Returns `None` when the config file doesn't
+/// exist yet (first-run path), which the frontend uses as a signal that
+/// sync-mode hasn't been persisted yet.
+#[tauri::command]
+fn desktop_config() -> Result<Option<config::DesktopSettings>, String> {
+    let path = DesktopConfig::path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let cfg = DesktopConfig::load()?;
+    Ok(Some(config::DesktopSettings::from(&cfg)))
+}
+
+/// Alias so the frontend (`WindowsTray.tsx`, `WindowsFirstRun.tsx`) can
+/// call `show_settings_window` while the Rust side also keeps the
+/// original `show_settings` command for any existing callers.
+#[tauri::command]
+fn show_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    show_settings_window_impl(&app);
+    Ok(())
+}
+
+// ── IPC commands: Windows tray (WS1) ─────────────────────────────────────────
+
+/// One row in the tray's recent-activity list.
+#[derive(Debug, serde::Serialize)]
+struct TrayActivityItem {
+    id: String,
+    name: String,
+    status: String,
+    icon: String,
+    ok: Option<bool>,
+    active: Option<bool>,
+    progress: Option<u8>,
+}
+
+/// Return recent sync activity for the Windows tray flyout.
+///
+/// Derives up to 8 items from the state DB:
+///   - Files currently downloading or uploading (active, with progress = None
+///     because per-file byte progress isn't tracked at this layer)
+///   - Recently-synced local files ordered by `modified_at` descending
+///
+/// Returns an EMPTY vec when there is no state DB (no sync root configured
+/// or engine not yet started). Never fabricates rows.
+#[tauri::command]
+fn tray_recent_activity() -> Vec<TrayActivityItem> {
+    let Ok(cfg) = DesktopConfig::load() else {
+        return Vec::new();
+    };
+    let Some(sync_root) = cfg.sync_root else {
+        return Vec::new();
+    };
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let Ok(db) = state_db::StateDb::open(&db_path) else {
+        return Vec::new();
+    };
+
+    let mut items: Vec<TrayActivityItem> = Vec::new();
+
+    // In-flight transfers first (downloading + uploading, capped at 4 each).
+    for status in [state_db::FileStatus::Downloading, state_db::FileStatus::Uploading] {
+        let Ok(entries) = db.list_by_status(status) else { continue };
+        let label = if matches!(entries.first().map(|e| &e.status), Some(state_db::FileStatus::Downloading)) {
+            "Downloading…"
+        } else {
+            "Uploading…"
+        };
+        for entry in entries.into_iter().take(4) {
+            let name = entry.path.rsplit('/').next().unwrap_or(&entry.path).to_string();
+            items.push(TrayActivityItem {
+                id: entry.file_id,
+                name,
+                status: label.to_string(),
+                icon: "cloud".to_string(),
+                ok: None,
+                active: Some(true),
+                progress: None,
+            });
+        }
+    }
+
+    // Recently-synced local files (up to fill 8 total rows).
+    let remaining = 8usize.saturating_sub(items.len());
+    if remaining > 0 {
+        if let Ok(locals) = db.list_by_status(state_db::FileStatus::Local) {
+            // Sort by modified_at descending — most recently synced first.
+            let mut locals = locals;
+            locals.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+            for entry in locals.into_iter().take(remaining) {
+                let name = entry.path.rsplit('/').next().unwrap_or(&entry.path).to_string();
+                items.push(TrayActivityItem {
+                    id: entry.file_id,
+                    name,
+                    status: "Synced".to_string(),
+                    icon: "file".to_string(),
+                    ok: Some(true),
+                    active: None,
+                    progress: None,
+                });
+            }
+        }
+    }
+
+    items
+}
+
+/// Pause the sync engine at runtime. Sets the shared `sync_paused` flag
+/// so the runner's next tick no-ops. Persists `pause_sync = true` to
+/// `desktop.toml` so the paused state survives a restart.
+///
+/// Emits an `engine-status` event with `state = "paused"` so the tray
+/// tooltip and any open settings window update immediately.
+#[tauri::command]
+async fn tray_pause_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.sync_paused.store(true, Ordering::Relaxed);
+    // Persist so the paused state survives a restart.
+    let mut cfg = DesktopConfig::load()?;
+    cfg.pause_sync = true;
+    cfg.save()?;
+    // Notify the WebView + tray tooltip listener.
+    let _ = app.emit("engine-status", serde_json::json!({ "state": "paused" }));
+    tracing::info!("sync paused via tray");
+    Ok(())
+}
+
+/// Resume the sync engine. Clears the `sync_paused` flag so the runner's
+/// next tick proceeds normally. Persists `pause_sync = false` to
+/// `desktop.toml`. Emits an `engine-status` event with `state = "idle"`.
+#[tauri::command]
+async fn tray_resume_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.sync_paused.store(false, Ordering::Relaxed);
+    let mut cfg = DesktopConfig::load()?;
+    cfg.pause_sync = false;
+    cfg.save()?;
+    let _ = app.emit("engine-status", serde_json::json!({ "state": "idle" }));
+    tracing::info!("sync resumed via tray");
+    Ok(())
+}
+
+/// Persist the user's chosen sync mode from the Windows first-run wizard.
+///
+/// `mode` is one of `"everything"` | `"smart"` | `"custom"` | `"online_only"`.
+/// The value is stored in `desktop.toml` under `sync_mode`. The runner
+/// does not yet act on these modes (full smart-sync requires selective-sync
+/// logic in the engine); storing it now means a future version can read it
+/// without a migration step.
+///
+/// The frontend (`WindowsFirstRun.tsx`) uses the presence of a persisted
+/// mode as the signal that the sync-mode step was completed; `desktop_config`
+/// returns `None` when the file doesn't exist yet, triggering that step on
+/// first run.
+#[tauri::command]
+fn set_sync_mode(mode: String) -> Result<(), String> {
+    match mode.as_str() {
+        "everything" | "smart" | "custom" | "online_only" => {}
+        _ => return Err(format!("invalid sync mode: {mode}")),
+    }
+    let mut cfg = DesktopConfig::load()?;
+    cfg.sync_mode = Some(mode);
+    cfg.save()
 }
 
 // ── IPC commands: Task 0090 — selective sync ──────────────────────────────────
@@ -2336,6 +2532,13 @@ pub fn run() {
             browser_login::start_browser_login,
             open_onboarding_window,
             show_settings,
+            // WS1 — Windows UI aliases + tray commands
+            show_settings_window,
+            desktop_config,
+            tray_recent_activity,
+            tray_pause_sync,
+            tray_resume_sync,
+            set_sync_mode,
         ])
         .setup(|app| {
             setup_native_menu(app)?;
@@ -2614,7 +2817,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .tooltip("Beebeeb")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "open_settings" => show_settings_window(app),
+            "open_settings" => show_settings_window_impl(app),
             "tray_hide" => {
                 if let Some(win) = app.get_webview_window("settings") {
                     let _ = win.hide();
@@ -2642,19 +2845,53 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // Left-click toggles window visibility
+            // Left-click toggles window visibility.
+            // On Windows: show/hide the frameless tray flyout ("tray" window),
+            // positioned near the bottom-right corner so it appears above the
+            // system tray area. The "settings" window is only opened via the
+            // context-menu "Open Settings" item or the tray flyout itself.
+            // On macOS/Linux: toggle the main settings window as before.
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                position,
                 ..
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("settings") {
-                    if win.is_visible().unwrap_or(false) {
-                        let _ = win.hide();
-                    } else {
-                        show_settings_window(app);
+
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(win) = app.get_webview_window("tray") {
+                        if win.is_visible().unwrap_or(false) {
+                            let _ = win.hide();
+                        } else {
+                            // Position the flyout above the tray icon.
+                            // The window is 400×280; place it so the bottom-right
+                            // corner aligns with the click position (tray icon centre).
+                            // `set_position` takes logical pixels; Tauri's
+                            // PhysicalPosition → LogicalPosition accounts for DPI.
+                            let _ = win.set_position(tauri::Position::Physical(
+                                tauri::PhysicalPosition {
+                                    x: (position.x as i32).saturating_sub(400),
+                                    y: (position.y as i32).saturating_sub(290),
+                                },
+                            ));
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = position; // unused on non-Windows
+                    if let Some(win) = app.get_webview_window("settings") {
+                        if win.is_visible().unwrap_or(false) {
+                            let _ = win.hide();
+                        } else {
+                            show_settings_window_impl(app);
+                        }
                     }
                 }
             }
@@ -2666,11 +2903,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Show and focus the settings window — the only persistent window
-/// we ship as of Task 8B. Conflict windows are minted on demand by
-/// `open_conflict_window` and live independently; nothing in here
-/// touches them.
-fn show_settings_window(app: &tauri::AppHandle) {
+/// Internal helper — show/create the appropriate settings window for the
+/// current platform. Not an IPC command; callers use the `show_settings`
+/// or `show_settings_window` IPC commands from the frontend.
+fn show_settings_window_impl(app: &tauri::AppHandle) {
     // Windows ships a dedicated, larger settings shell (`windows-settings`)
     // whose React route is selected by the `platform=windows` query param.
     // macOS keeps the original compact `settings` window untouched.

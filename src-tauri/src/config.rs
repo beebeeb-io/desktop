@@ -98,6 +98,16 @@ pub struct DesktopConfig {
     // NOTE: persisted session deferred to a later step. For now the
     // session is in-memory only (set_session IPC). Adding it here
     // requires the OS-keychain wrapping called out in spec 030 §1.
+
+    // ── WS1 — Windows first-run sync mode ─────────────────────────────
+    //
+    // Set by the `set_sync_mode` IPC after the user picks a mode in
+    // WindowsFirstRun.tsx. The `desktop_config` IPC returns `None`
+    // when the whole file is absent (first run), which the frontend
+    // uses as the "sync-mode not yet picked" signal. Persisting it
+    // here means a future engine version can read and act on it.
+    #[serde(default)]
+    pub sync_mode: Option<String>,
 }
 
 /// `#[serde(default = ...)]` needs a function returning the default.
@@ -127,6 +137,7 @@ impl Default for DesktopConfig {
             finder_install_last_error: None,
             finder_install_last_attempt_at: None,
             finder_install_reason_category: None,
+            sync_mode: None,
         }
     }
 }
@@ -149,6 +160,11 @@ pub struct DesktopSettings {
     pub notify_conflicts: bool,
     pub notify_sync_complete: bool,
     pub notify_quota_warnings: bool,
+    /// Sync mode chosen in the Windows first-run wizard. `None` when not
+    /// yet set (first run). One of `"everything"`, `"smart"`, `"custom"`,
+    /// `"online_only"`.
+    #[serde(default)]
+    pub sync_mode: Option<String>,
 }
 
 impl From<&DesktopConfig> for DesktopSettings {
@@ -160,6 +176,7 @@ impl From<&DesktopConfig> for DesktopSettings {
             notify_conflicts: c.notify_conflicts,
             notify_sync_complete: c.notify_sync_complete,
             notify_quota_warnings: c.notify_quota_warnings,
+            sync_mode: c.sync_mode.clone(),
         }
     }
 }
@@ -175,6 +192,11 @@ impl DesktopConfig {
         self.notify_conflicts = s.notify_conflicts;
         self.notify_sync_complete = s.notify_sync_complete;
         self.notify_quota_warnings = s.notify_quota_warnings;
+        // Only overwrite sync_mode if the incoming settings carries one;
+        // a plain bandwidth/notification save should not clear a persisted mode.
+        if s.sync_mode.is_some() {
+            self.sync_mode = s.sync_mode;
+        }
     }
 }
 
