@@ -25,7 +25,7 @@ export interface DesktopConfig {
   notify_sync_complete: boolean
   notify_quota_warnings: boolean
   // Windows-specific optional fields (WS1)
-  sync_mode?: string
+  sync_mode?: 'everything' | 'smart' | 'custom' | 'online_only'
   metered?: boolean
   files_on_demand?: boolean
   sync_overlays?: boolean

@@ -27,10 +27,14 @@ import {
   loadSyncStatus,
   openUrl,
   type DesktopConfig,
+  type FinderInstallState,
   type StorageSummary,
   type SyncStatus,
   DEFAULT_CONFIG,
 } from './desktopApi'
+
+// Windows Explorer/Cloud Files integration uses the same shape as macOS Finder
+type ShellIntegrationState = FinderInstallState
 
 // ── Design tokens ─────────────────────────────────────────────────────────
 
@@ -646,6 +650,106 @@ function LaunchPanel() {
   )
 }
 
+// ── Explorer integration panel (System → Explorer integration) ────────────
+//
+// `windows_shell_integration_state` reports whether Beebeeb is registered as a
+// File Explorer sync location (Cloud Files API). `install_windows_shell_integration`
+// registers it. Both commands already exist in lib.rs.
+function ExplorerIntegrationPanel() {
+  const [state, setState] = useState<ShellIntegrationState | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = async () => {
+    const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+    if (r.ok) {
+      setState(r.value)
+      setError(null)
+    } else {
+      setError(r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason)
+    }
+    setLoading(false)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+      if (cancelled) return
+      if (r.ok) setState(r.value)
+      else setError(r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason)
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const enable = async () => {
+    setBusy(true)
+    setError(null)
+    const r = await command<ShellIntegrationState>('install_windows_shell_integration')
+    setBusy(false)
+    if (r.ok) {
+      setState(r.value)
+      // Re-read in case install returns a transitional state
+      void refresh()
+      return
+    }
+    setError(r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason)
+  }
+
+  const active = state?.installed === true
+
+  return (
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
+        Explorer integration
+      </h1>
+      <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Beebeeb appears in File Explorer as a sync folder. Files are encrypted on this PC before they
+        leave for Falkenstein — Explorer only ever shows you the decrypted view.
+      </p>
+
+      {error && (
+        <div style={{
+          padding: '10px 12px', borderRadius: 6, marginBottom: 16,
+          border: '1px solid oklch(0.88 0.05 25)', background: 'oklch(0.98 0.02 25)',
+          color: 'oklch(0.42 0.15 25)', fontSize: 12, lineHeight: 1.5,
+        }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 16, padding: '14px 16px', borderRadius: 8,
+        border: `1px solid ${T.line}`, background: T.paper2,
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>
+            File Explorer location
+          </div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
+            {loading
+              ? 'Checking…'
+              : active
+                ? 'Active — Beebeeb is registered as a sync folder on this PC.'
+                : 'Not set up yet on this PC.'}
+          </div>
+        </div>
+        {!loading && !active && (
+          <PrimaryBtn onClick={() => void enable()} disabled={busy}>
+            {busy ? 'Enabling…' : 'Enable'}
+          </PrimaryBtn>
+        )}
+        {!loading && active && (
+          <Chip>Active</Chip>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Sections that live in the web app — show a clean link-out panel
 const WEB_APP_SECTIONS: Partial<Record<NavId, { path: string; description: string }>> = {
   account: {
@@ -756,6 +860,9 @@ function PanelRouter({ navId }: { navId: NavId }) {
   const allItems = NAV_SECTIONS.flatMap((s) => s.items)
   const label = allItems.find((i) => i.id === navId)?.label ?? navId
 
+  if (navId === 'explorer-integration') {
+    return <ExplorerIntegrationPanel />
+  }
   if (navId in WEB_APP_SECTIONS) {
     return <WebAppLinkPanel navId={navId} label={label} />
   }
@@ -814,8 +921,13 @@ export default function WindowsSettings() {
   }, [])
 
   const handleConfigChange = async (patch: Partial<DesktopConfig>) => {
-    const next = { ...config, ...patch }
-    setConfig(next)
+    setNotice(null)
+    // Functional update so rapid two-field toggles don't drop a change.
+    let next: DesktopConfig = config
+    setConfig((prev) => {
+      next = { ...prev, ...patch }
+      return next
+    })
     const result = await command<void>('set_desktop_config', { config: next })
     if (!result.ok) {
       setNotice(result.reason)
