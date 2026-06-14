@@ -12,6 +12,8 @@
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-minimize",
     "opener:default",
     "window-state:default",
     "updater:default",

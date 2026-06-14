@@ -2676,12 +2676,23 @@ pub fn run() {
         .setup(|app| {
             setup_native_menu(app)?;
             setup_tray(app)?;
-            // Defensive: hide any macOS-labelled `settings` window that
-            // tauri_plugin_window_state may have restored visible on Windows.
-            // The Windows settings surface is `windows-settings`, not `settings`.
+            // Defensive: hide windows that tauri_plugin_window_state may have
+            // restored visible on Windows. Only the onboarding window should
+            // appear on first-run; tray and settings surfaces are on-demand.
             #[cfg(target_os = "windows")]
-            if let Some(settings_win) = app.get_webview_window("settings") {
-                let _ = settings_win.hide();
+            {
+                // macOS-labelled `settings` window is not used on Windows.
+                if let Some(w) = app.get_webview_window("settings") {
+                    let _ = w.hide();
+                }
+                // Tray popup — shown only on tray-icon click.
+                if let Some(w) = app.get_webview_window("tray") {
+                    let _ = w.hide();
+                }
+                // Windows settings surface — shown only on user action.
+                if let Some(w) = app.get_webview_window("windows-settings") {
+                    let _ = w.hide();
+                }
             }
             attach_tray_status_listener(&app.handle().clone());
             {
