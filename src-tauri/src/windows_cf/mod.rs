@@ -80,6 +80,31 @@ pub const PROVIDER_VERSION: &str = "1.0.0";
 /// the bridge exists).
 static BRIDGE: OnceLock<Arc<EngineBridge>> = OnceLock::new();
 
+/// Live handle to the tokio runtime that owns the daemon.
+///
+/// Cloud Files delivers the fetch callback on an OS-managed
+/// filter-driver worker thread that is *not* attached to any tokio
+/// runtime, so `Handle::try_current()` returns `Err` there and the
+/// callback can't drive `hydrate_file` (an async fn). We stash the
+/// runtime handle here from [`activate`] (which runs on a tokio
+/// worker, so `Handle::current()` is valid) and the callback reaches
+/// it through [`runtime`] to `block_on` the hydration.
+static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Stable provider GUID for the Beebeeb sync root.
+///
+/// Minted once (UUIDv4 `b33b33b0-5217-4c0a-9e3f-1f2a7c4d8e90`) and
+/// hardcoded so the sync-root identity is stable across releases and
+/// machines. Previously `GUID::zeroed()`, a dev shortcut that let
+/// Windows pick a per-machine default — fine for local testing but it
+/// would orphan placeholders if the default ever changed. A fixed GUID
+/// keeps the provider identity deterministic.
+///
+/// `GUID::from_u128` lays the value out in the canonical
+/// big-endian-string order, so the literal here matches the dashed
+/// form above.
+pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
+
 /// Set once the first time we successfully `CfConnectSyncRoot`. Used to
 /// make callback registration idempotent across engine respawns (re-login,
 /// sync-root change) — Windows rejects a second connect on a root that's
@@ -100,6 +125,14 @@ pub fn set_bridge(bridge: Arc<EngineBridge>) {
 /// Internal accessor for the callback module.
 pub(crate) fn bridge() -> Option<Arc<EngineBridge>> {
     BRIDGE.get().cloned()
+}
+
+/// Internal accessor for the daemon's tokio runtime handle, used by the
+/// fetch callback to bridge sync→async. `None` if [`activate`] never ran
+/// (e.g. registration failed before the handle was stashed) — the
+/// callback must then fail the hydration rather than hang Explorer.
+pub(crate) fn runtime() -> Option<tokio::runtime::Handle> {
+    RUNTIME.get().cloned()
 }
 
 /// Register `sync_root_path` as a Cloud Files sync root. After this
@@ -134,10 +167,11 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
             SyncRootIdentityLength: 0,
             FileIdentity: std::ptr::null(),
             FileIdentityLength: 0,
-            // GUID::zeroed() picks up the per-machine default. For
-            // production we'll mint a stable provider GUID once and
-            // hardcode it; the all-zero GUID still works for dev.
-            ProviderId: GUID::zeroed(),
+            // Stable, hardcoded provider GUID (see BEEBEEB_PROVIDER_GUID)
+            // so the sync-root identity is deterministic across releases
+            // and machines, rather than the previous GUID::zeroed() dev
+            // shortcut that let Windows pick a per-machine default.
+            ProviderId: BEEBEEB_PROVIDER_GUID,
         };
         // Hydration policy `PARTIAL` = Windows hydrates ranges on demand
         // rather than dragging down the whole file (large vault
@@ -240,6 +274,12 @@ pub fn activate(_app: &tauri::AppHandle, bridge: Arc<EngineBridge>, sync_root: &
     // The callback can fire as soon as the sync root is registered, so the
     // bridge must be reachable first.
     set_bridge(bridge.clone());
+
+    // Stash the current tokio runtime handle so the Cloud Files fetch
+    // callback (which fires on an OS filter-driver thread with no runtime
+    // attached) can `block_on` the async hydration. `activate` runs on a
+    // tokio worker, so `Handle::current()` is valid here. Idempotent.
+    let _ = RUNTIME.set(tokio::runtime::Handle::current());
 
     if let Err(e) = register_sync_root(sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; placeholders skipped");
