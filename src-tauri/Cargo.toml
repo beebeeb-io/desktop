@@ -69,7 +69,33 @@ base64 = "0.22"
 # server's cli_auth.rs contract (P-256 ECDH + HKDF-SHA256 "beebeeb-cli-auth-v1"
 # + AES-256-GCM). `tokio-tungstenite` uses rustls (not native-tls) to avoid
 # pulling OpenSSL into the bundle.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+#
+# We deliberately use BUNDLED Mozilla roots (`webpki-roots`) rather than the
+# Windows certificate store (`rustls-tls-native-roots`). On Windows the native
+# cert-store path was the cause of the desktop "Sign in with browser" handoff
+# hanging forever on "Connecting": loading the Windows root store could stall /
+# fail, and there was no timeout. api.beebeeb.io serves a public-CA
+# (Let's Encrypt-class) cert that the bundled Mozilla roots validate, so the
+# bundled set is sufficient AND deterministic across machines. The
+# `rustls-tls-webpki-roots` feature also exposes `connect_async_tls_with_config`
+# + `Connector` (it enables the `__rustls-tls` feature gate). `browser_login.rs`
+# builds an explicit rustls `ClientConfig` from `webpki_roots::TLS_SERVER_ROOTS`
+# and passes it as `Connector::Rustls`.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Bundled Mozilla CA roots for the sign-in WebSocket TLS (see above). Version
+# pinned to match the copy `tokio-tungstenite 0.24` pulls in, so there is a
+# single `webpki-roots` in the tree. The re-exported `TLS_SERVER_ROOTS` is a
+# `&[rustls_pki_types::TrustAnchor]`, which slots straight into rustls 0.23's
+# `RootCertStore { roots }`.
+webpki-roots = "0.26"
+# We construct the rustls `ClientConfig` ourselves in browser_login.rs. Both
+# `aws_lc_rs` and `ring` providers are already enabled elsewhere in the tree
+# (reqwest, tauri-plugin-updater), so rustls cannot auto-pick a process-default
+# provider — `ClientConfig::builder()` would PANIC at runtime. We therefore call
+# `builder_with_provider(aws_lc_rs::default_provider())` explicitly; requesting
+# the `aws_lc_rs` feature here makes that module's presence explicit at this
+# crate rather than relying solely on cross-crate feature unification.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 p256 = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"

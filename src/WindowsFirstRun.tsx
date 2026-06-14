@@ -342,14 +342,20 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
       onDone({ vaultUnlocked: true })
       return
     }
-    if (!result.ok) {
-      setPhase('error')
-      setError(
-        result.unsupported
-          ? commandUnavailableLabel('start_browser_login')
-          : result.reason,
-      )
-    }
+
+    // Any non-success outcome MUST leave the busy/"Connecting" state and show a
+    // visible, actionable error. The Rust handoff now bounds the WebSocket
+    // connect with a 15s timeout, so this branch is always reached on a failure
+    // (previously a stalled TLS handshake never returned and the UI hung on
+    // "Connecting" forever with no error). We always fall back to phase 'error'
+    // here — never leave the user staring at a spinner.
+    const message = !result.ok
+      ? result.unsupported
+        ? commandUnavailableLabel('start_browser_login')
+        : result.reason
+      : 'Sign-in did not complete. Please try again.'
+    setPhase('error')
+    setError(message)
   }, [onDone])
 
   return (

@@ -30,6 +30,9 @@
 //! `clear_session` then `start_browser_login` re-onboards). Do **not** invent a
 //! `/refresh` endpoint — it does not exist.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use aes_gcm::aead::Aead;
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::{Aes256Gcm, KeyInit};
@@ -40,7 +43,8 @@ use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rand::rngs::OsRng;
 use tauri::{Emitter, State};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 
 use crate::AppState;
 use crate::runner;
@@ -50,6 +54,13 @@ const HKDF_INFO: &[u8] = b"beebeeb-cli-auth-v1";
 
 /// Tauri event name the UI subscribes to for handoff progress.
 const EVENT: &str = "browser-login";
+
+/// Hard ceiling on the initial WebSocket connect (TCP + TLS handshake). On
+/// Windows this previously had NO bound: a stalled TLS handshake (the native
+/// cert-store path) left the UI frozen on "Connecting" forever and the browser
+/// never opened. 15s is generous for a healthy network yet fails fast enough to
+/// show the user an actionable error instead of an infinite spinner.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Emit a structured progress event to all windows. Non-fatal on failure.
 fn emit(app: &tauri::AppHandle, phase: &str, payload: serde_json::Value) {
@@ -65,6 +76,52 @@ fn ws_url() -> String {
     let base = runner::api_base_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
     format!("{ws}/api/v1/auth/cli")
+}
+
+/// Build a rustls `Connector` that validates the server cert against the
+/// **bundled Mozilla roots** (`webpki-roots`) rather than the OS certificate
+/// store.
+///
+/// This is the core Windows fix. With `rustls-tls-native-roots`,
+/// `tokio-tungstenite` loaded the Windows root store to validate
+/// `api.beebeeb.io`; on some Windows machines that path stalled the TLS
+/// handshake, hanging the sign-in handoff on "Connecting" with no browser ever
+/// opening. api.beebeeb.io serves a public-CA (Let's Encrypt-class) certificate
+/// that the bundled Mozilla root set validates, so this is both correct and
+/// deterministic across machines.
+///
+/// We build the `ClientConfig` with an explicit `aws_lc_rs` provider:
+/// `aws_lc_rs` AND `ring` are both enabled in this dependency tree (reqwest /
+/// tauri-plugin-updater pull them in), so rustls cannot auto-select a
+/// process-default provider and `ClientConfig::builder()` would PANIC at
+/// runtime. `builder_with_provider(...)` sidesteps that.
+fn webpki_rustls_connector() -> Connector {
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("aws_lc_rs provider supports the default TLS versions")
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    Connector::Rustls(Arc::new(config))
+}
+
+/// Append a single diagnostic line to `<data_dir>/beebeeb-signin.log`.
+///
+/// stdout is block-buffered when the app is launched detached / redirected, so
+/// `tracing` output can be lost on a hard failure. This file is a best-effort,
+/// always-flushed breadcrumb the lead can `cat` to see the last sign-in outcome.
+/// Never fatal.
+fn signin_log(line: &str) {
+    use std::io::Write;
+    let Some(dir) = dirs::data_dir() else { return };
+    let path = dir.join("beebeeb-signin.log");
+    let stamp = chrono::Utc::now().to_rfc3339();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{stamp} {line}");
+    }
 }
 
 /// Start the browser-based login handoff and, on success, install the session.
@@ -84,6 +141,8 @@ pub async fn start_browser_login(app: tauri::AppHandle, state: State<'_, AppStat
     match run_handoff(&app, &state).await {
         Ok(()) => Ok(()),
         Err(e) => {
+            tracing::error!(error = %e, "browser-login: sign-in failed");
+            signin_log(&format!("error {e}"));
             emit(&app, "error", serde_json::json!({ "message": e }));
             Err(e)
         }
@@ -96,18 +155,47 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
     let public_key = secret.public_key();
     let pub_key_b64 = B64.encode(public_key.to_encoded_point(false).as_bytes());
 
-    // 2. Connect the WebSocket.
+    // 2. Connect the WebSocket — with a hard timeout and bundled-root TLS so a
+    //    stalled handshake can no longer freeze the UI on "Connecting" forever.
     emit(app, "connecting", serde_json::json!({}));
     let url = ws_url();
-    let (mut ws, _) = connect_async(&url)
-        .await
-        .map_err(|e| format!("Could not reach Beebeeb to start sign-in: {e}"))?;
+    tracing::info!(%url, "browser-login: connecting");
+    signin_log(&format!("connecting {url}"));
+
+    let connector = webpki_rustls_connector();
+    let connect_fut = connect_async_tls_with_config(&url, None, false, Some(connector));
+    let (mut ws, _) = match tokio::time::timeout(CONNECT_TIMEOUT, connect_fut).await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, %url, "browser-login: connect failed");
+            signin_log(&format!("connect-error {url} :: {e}"));
+            return Err(format!("Could not reach Beebeeb to start sign-in: {e}"));
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                %url,
+                timeout_secs = CONNECT_TIMEOUT.as_secs(),
+                "browser-login: connect timed out"
+            );
+            signin_log(&format!("connect-timeout {url} after {}s", CONNECT_TIMEOUT.as_secs()));
+            return Err(
+                "Could not reach Beebeeb to start sign-in (connection timed out). \
+                 Check your internet connection and try again."
+                    .to_string(),
+            );
+        }
+    };
+    tracing::info!("browser-login: connected");
 
     // 3. Send our public key so the browser can complete ECDH on its end.
     let init = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
     ws.send(Message::Text(init.to_string()))
         .await
-        .map_err(|e| format!("Sign-in handshake failed: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "browser-login: failed to send public key");
+            format!("Sign-in handshake failed: {e}")
+        })?;
+    tracing::info!("browser-login: sent public key");
 
     // 4. Receive the device code + verification URI.
     let text = recv_text(&mut ws).await?;
@@ -121,6 +209,7 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
         .ok_or("Server omitted the verification URL")?
         .to_string();
     let expires_in: u64 = resp["expires_in"].as_u64().unwrap_or(300);
+    tracing::info!(%verification_uri, expires_in, "browser-login: received device code");
 
     // 5. Open the system browser and tell the UI to show the code. We surface
     //    the code FIRST so the user always has it even if the browser fails to
@@ -134,13 +223,15 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
             "expires_in": expires_in,
         }),
     );
+    tracing::info!(%verification_uri, "browser-login: opening browser");
     open_browser(app, &verification_uri);
+    tracing::info!("browser-login: waiting for browser authorization");
 
     // 6. Wait up to the code lifetime for the browser to authorise. The server
     //    closes the socket with a `{"error":"timeout"}` text frame on expiry,
     //    but we also bound the wait ourselves so a dropped connection can't hang
     //    the UI forever.
-    let result_text = tokio::time::timeout(std::time::Duration::from_secs(expires_in), recv_text(&mut ws))
+    let result_text = tokio::time::timeout(Duration::from_secs(expires_in), recv_text(&mut ws))
         .await
         .map_err(|_| "Sign-in timed out (the code expired). Please try again.".to_string())??;
     let result: serde_json::Value =
@@ -152,6 +243,7 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
         return Err(format!("Sign-in error: {err}"));
     }
 
+    tracing::info!("browser-login: authorized, decrypting credentials");
     emit(app, "authorized", serde_json::json!({}));
 
     // 7. ECDH key agreement + AES-256-GCM decrypt — identical to the CLI.
@@ -188,6 +280,8 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
 
     crate::apply_session(app.clone(), state, session_token, master_key, email.clone()).await?;
 
+    tracing::info!("browser-login: done, session installed");
+    signin_log("done session-installed");
     emit(app, "done", serde_json::json!({ "email": email }));
     Ok(())
 }
