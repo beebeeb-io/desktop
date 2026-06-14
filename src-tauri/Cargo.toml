@@ -88,14 +88,17 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # `&[rustls_pki_types::TrustAnchor]`, which slots straight into rustls 0.23's
 # `RootCertStore { roots }`.
 webpki-roots = "0.26"
-# We construct the rustls `ClientConfig` ourselves in browser_login.rs. Both
-# `aws_lc_rs` and `ring` providers are already enabled elsewhere in the tree
-# (reqwest, tauri-plugin-updater), so rustls cannot auto-pick a process-default
-# provider — `ClientConfig::builder()` would PANIC at runtime. We therefore call
-# `builder_with_provider(aws_lc_rs::default_provider())` explicitly; requesting
-# the `aws_lc_rs` feature here makes that module's presence explicit at this
-# crate rather than relying solely on cross-crate feature unification.
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+# We construct the rustls `ClientConfig` ourselves in browser_login.rs via
+# `builder_with_provider(...)` (rustls cannot auto-pick a process-default
+# provider when more than one is in the tree — `ClientConfig::builder()` would
+# PANIC at runtime). We pass the **`ring`** provider explicitly: `aws_lc_rs`
+# vendors a C library whose runtime init stalled the TLS handshake on some
+# Windows machines, freezing sign-in forever on "Connecting". `ring` is the
+# pure-Rust-friendly provider (no vendored-C init), already in the dependency
+# tree (rustls/reqwest pull it). We enable both features here so the module is
+# present at this crate regardless of cross-crate feature unification, but the
+# connector code uses `rustls::crypto::ring::default_provider()`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 p256 = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"

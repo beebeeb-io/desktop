@@ -90,22 +90,48 @@ fn ws_url() -> String {
 /// that the bundled Mozilla root set validates, so this is both correct and
 /// deterministic across machines.
 ///
-/// We build the `ClientConfig` with an explicit `aws_lc_rs` provider:
-/// `aws_lc_rs` AND `ring` are both enabled in this dependency tree (reqwest /
+/// We build the `ClientConfig` with an explicit **`ring`** provider:
+/// `ring` AND `aws_lc_rs` are both enabled in this dependency tree (reqwest /
 /// tauri-plugin-updater pull them in), so rustls cannot auto-select a
 /// process-default provider and `ClientConfig::builder()` would PANIC at
 /// runtime. `builder_with_provider(...)` sidesteps that.
-fn webpki_rustls_connector() -> Connector {
-    let root_store = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("aws_lc_rs provider supports the default TLS versions")
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    Connector::Rustls(Arc::new(config))
+///
+/// We deliberately choose `ring` over `aws_lc_rs`: `aws_lc_rs` vendors a C
+/// library whose runtime initialisation stalled/panicked on some Windows
+/// machines, hanging this handoff forever on "Connecting" with NO error and NO
+/// timeout (the panic left the IPC promise unresolved before the connect
+/// timeout could fire). `ring` has no vendored-C init and is far less likely to
+/// stall on Windows.
+///
+/// Returns `Result` and is panic-safe: the provider + config build is wrapped
+/// in `catch_unwind` (it is fully synchronous, so this is valid) so a provider
+/// init panic becomes a clean `Err` the caller surfaces as an `error` phase,
+/// instead of a silent infinite spinner.
+fn webpki_rustls_connector() -> Result<Connector, String> {
+    std::panic::catch_unwind(|| {
+        let root_store = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        eprintln!("[bb-signin] connector: before ring default_provider");
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        eprintln!("[bb-signin] connector: after ring default_provider");
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| format!("ring provider rejected default TLS versions: {e}"))?
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        eprintln!("[bb-signin] connector: after config build");
+        Ok::<Connector, String>(Connector::Rustls(Arc::new(config)))
+    })
+    .unwrap_or_else(|panic_payload| {
+        let detail = panic_payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        eprintln!("[bb-signin] connector: PANIC during TLS init :: {detail}");
+        Err(format!("TLS init failed: {detail}"))
+    })
 }
 
 /// Append a single diagnostic line to `<data_dir>/beebeeb-signin.log`.
@@ -138,6 +164,7 @@ fn signin_log(line: &str) {
 /// emit `error` and return `Err` so the UI can offer "try again".
 #[tauri::command]
 pub async fn start_browser_login(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    eprintln!("[bb-signin] start_browser_login: command entry");
     match run_handoff(&app, &state).await {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -154,24 +181,35 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
     let secret = EphemeralSecret::random(&mut OsRng);
     let public_key = secret.public_key();
     let pub_key_b64 = B64.encode(public_key.to_encoded_point(false).as_bytes());
+    eprintln!("[bb-signin] run_handoff: after keygen");
 
     // 2. Connect the WebSocket — with a hard timeout and bundled-root TLS so a
     //    stalled handshake can no longer freeze the UI on "Connecting" forever.
     emit(app, "connecting", serde_json::json!({}));
+    eprintln!("[bb-signin] run_handoff: after emit connecting");
     let url = ws_url();
+    eprintln!("[bb-signin] run_handoff: ws_url = {url}");
     tracing::info!(%url, "browser-login: connecting");
     signin_log(&format!("connecting {url}"));
 
-    let connector = webpki_rustls_connector();
+    eprintln!("[bb-signin] run_handoff: before building connector");
+    let connector = webpki_rustls_connector()?;
+    eprintln!("[bb-signin] run_handoff: connector returned ok");
     let connect_fut = connect_async_tls_with_config(&url, None, false, Some(connector));
+    eprintln!("[bb-signin] run_handoff: before timeout/connect await");
     let (mut ws, _) = match tokio::time::timeout(CONNECT_TIMEOUT, connect_fut).await {
-        Ok(Ok(pair)) => pair,
+        Ok(Ok(pair)) => {
+            eprintln!("[bb-signin] run_handoff: connect Ok");
+            pair
+        }
         Ok(Err(e)) => {
+            eprintln!("[bb-signin] run_handoff: connect Err :: {e}");
             tracing::error!(error = %e, %url, "browser-login: connect failed");
             signin_log(&format!("connect-error {url} :: {e}"));
             return Err(format!("Could not reach Beebeeb to start sign-in: {e}"));
         }
         Err(_elapsed) => {
+            eprintln!("[bb-signin] run_handoff: connect timeout-elapsed");
             tracing::error!(
                 %url,
                 timeout_secs = CONNECT_TIMEOUT.as_secs(),
@@ -185,6 +223,7 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
             );
         }
     };
+    eprintln!("[bb-signin] run_handoff: connected");
     tracing::info!("browser-login: connected");
 
     // 3. Send our public key so the browser can complete ECDH on its end.
@@ -195,6 +234,7 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
             tracing::error!(error = %e, "browser-login: failed to send public key");
             format!("Sign-in handshake failed: {e}")
         })?;
+    eprintln!("[bb-signin] run_handoff: sent public key");
     tracing::info!("browser-login: sent public key");
 
     // 4. Receive the device code + verification URI.
@@ -209,6 +249,7 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
         .ok_or("Server omitted the verification URL")?
         .to_string();
     let expires_in: u64 = resp["expires_in"].as_u64().unwrap_or(300);
+    eprintln!("[bb-signin] run_handoff: device code received (expires_in={expires_in}s)");
     tracing::info!(%verification_uri, expires_in, "browser-login: received device code");
 
     // 5. Open the system browser and tell the UI to show the code. We surface
