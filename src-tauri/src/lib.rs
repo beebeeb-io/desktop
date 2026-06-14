@@ -211,7 +211,12 @@ async fn start_engine_if_possible(
     token: String,
     master_key: [u8; 32],
 ) {
-    if let Some(root) = DesktopConfig::load().ok().and_then(|c| c.sync_root) {
+    if let Some(cfg) = DesktopConfig::load().ok() {
+        let Some(root) = cfg.sync_root else { return };
+        // Rehydrate the persisted pause state before spawning so a
+        // restart-while-paused stays paused (the in-memory AtomicBool
+        // always defaults to false; desktop.toml is the source of truth).
+        state.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
         let pause_flag = state.sync_paused.clone();
         let mut engine_slot = state.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
@@ -883,6 +888,8 @@ async fn persist_sync_root_and_start_engine(
         .ok()
         .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
     if let Some((token, key)) = session {
+        // Rehydrate the persisted pause state before spawning.
+        state.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
         let pause_flag = state.sync_paused.clone();
         let mut engine_slot = state.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
@@ -909,6 +916,11 @@ async fn start_engine_for_pending_finder_install(
     let Some((token, key)) = session else {
         return Err("Unlock the vault before installing the Finder location.".to_string());
     };
+
+    // Rehydrate the persisted pause state before spawning. Best-effort —
+    // a missing/unreadable config defaults to not-paused.
+    let paused = DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false);
+    state.sync_paused.store(paused, Ordering::Relaxed);
 
     let started = {
         let pause_flag = state.sync_paused.clone();
@@ -1552,10 +1564,43 @@ struct FreeUpSpaceResult {
 /// successfully delete — so the figure reflects bytes really removed from disk,
 /// never an estimate. The DB transition (cache_path → NULL, status →
 /// cloud_only) is done by `evict_unpinned_cache_until_under(0, now)`. File
-/// deletes are bounded to paths under the sync root so a corrupt cache_path can
-/// never make us delete outside the vault's cache.
+/// deletes are bounded to paths under EITHER the sync root OR the engine's
+/// system cache dir (`dirs::cache_dir()/beebeeb`) — the two locations the
+/// engine writes cache copies — so a corrupt cache_path can never make us
+/// delete outside the vault's cache.
+///
+/// The DB + filesystem work runs on a blocking thread (`spawn_blocking`) so the
+/// IPC command thread isn't held by SQLite + `remove_file` syscalls.
 #[tauri::command]
-fn free_up_space() -> Result<FreeUpSpaceResult, String> {
+async fn free_up_space() -> Result<FreeUpSpaceResult, String> {
+    tokio::task::spawn_blocking(free_up_space_blocking)
+        .await
+        .map_err(|e| format!("free_up_space task join: {e}"))?
+}
+
+/// Allowed roots a cache file may live under for `free_up_space` to delete it.
+/// The engine writes hydrated cache copies under the sync root (Windows
+/// Cloud Files placeholders) and under the system cache dir
+/// (`dirs::cache_dir()/beebeeb`, e.g. the macOS File Provider staging area).
+/// Both are trusted, engine-written locations.
+fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(canon) = sync_root.canonicalize() {
+        roots.push(canon);
+    } else {
+        roots.push(sync_root.to_path_buf());
+    }
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let beebeeb_cache = cache_dir.join("beebeeb");
+        match beebeeb_cache.canonicalize() {
+            Ok(canon) => roots.push(canon),
+            Err(_) => roots.push(beebeeb_cache),
+        }
+    }
+    roots
+}
+
+fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
     let cfg = DesktopConfig::load()?;
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
@@ -1579,19 +1624,23 @@ fn free_up_space() -> Result<FreeUpSpaceResult, String> {
     db.evict_unpinned_cache_until_under(0, now)
         .map_err(|e| format!("evict unpinned cache: {e}"))?;
 
-    // Delete the actual cache files, bounded to paths under the sync root so a
-    // bad cache_path can't delete outside the vault. Sum the real file sizes we
-    // remove so `bytes_freed` is an exact count, not an estimate. A missing
-    // file contributes 0 (already gone — nothing reclaimed by us).
-    let sync_root_canon = sync_root.canonicalize().unwrap_or(sync_root);
+    // Delete the actual cache files, bounded to paths under one of the allowed
+    // engine cache roots so a bad cache_path can't delete outside the vault.
+    // Sum the real file sizes we remove so `bytes_freed` is an exact count, not
+    // an estimate. A missing file contributes 0 (already gone — nothing
+    // reclaimed by us).
+    let allowed_roots = free_up_space_allowed_roots(&sync_root);
     let mut bytes_freed: u64 = 0;
     for path in paths {
         let path_buf = PathBuf::from(&path);
-        let canonical = match path_buf.canonicalize() {
-            Ok(p) if p.starts_with(&sync_root_canon) => p,
-            // Outside the sync root, or unresolvable — never delete.
-            _ => continue,
+        let Ok(canonical) = path_buf.canonicalize() else {
+            // Unresolvable path — never delete.
+            continue;
         };
+        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+            // Outside every allowed cache root — never delete.
+            continue;
+        }
         let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
         match std::fs::remove_file(&canonical) {
             Ok(()) => bytes_freed = bytes_freed.saturating_add(size),
@@ -1806,6 +1855,8 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             .ok()
             .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
         if let Some((token, key)) = session {
+            // Rehydrate the persisted pause state before spawning.
+            state.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
             let pause_flag = state.sync_paused.clone();
             let mut engine_slot = state.engine.lock().await;
             if let Some(prev) = engine_slot.take() {
@@ -1919,6 +1970,18 @@ struct TrayActivityItem {
     progress: Option<u8>,
 }
 
+/// Basename of a stored `FileEntry.path`. Uses `std::path::Path::file_name`
+/// so Windows cache paths stored with backslash separators yield the correct
+/// basename (a naive `rsplit('/')` would return the whole `C:\…\foo.txt`
+/// string on Windows). Falls back to the full path if it has no file-name
+/// component.
+fn entry_basename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
 /// Return recent sync activity for the Windows tray flyout.
 ///
 /// Derives up to 8 items from the state DB:
@@ -1948,17 +2011,16 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
 
     // In-flight transfers first (downloading + uploading, capped at 4 each).
     for status in [state_db::FileStatus::Downloading, state_db::FileStatus::Uploading] {
-        let Ok(entries) = db.list_by_status(status) else { continue };
-        let label = if matches!(entries.first().map(|e| &e.status), Some(state_db::FileStatus::Downloading)) {
+        let label = if matches!(status, state_db::FileStatus::Downloading) {
             "Downloading…"
         } else {
             "Uploading…"
         };
+        let Ok(entries) = db.list_by_status(status) else { continue };
         for entry in entries.into_iter().take(4) {
-            let name = entry.path.rsplit('/').next().unwrap_or(&entry.path).to_string();
             items.push(TrayActivityItem {
                 id: entry.file_id,
-                name,
+                name: entry_basename(&entry.path),
                 status: label.to_string(),
                 icon: "cloud".to_string(),
                 ok: None,
@@ -1976,10 +2038,9 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
             let mut locals = locals;
             locals.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
             for entry in locals.into_iter().take(remaining) {
-                let name = entry.path.rsplit('/').next().unwrap_or(&entry.path).to_string();
                 items.push(TrayActivityItem {
                     id: entry.file_id,
-                    name,
+                    name: entry_basename(&entry.path),
                     status: "Synced".to_string(),
                     icon: "file".to_string(),
                     ok: Some(true),
@@ -2941,8 +3002,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                             // Position the flyout above the tray icon.
                             // The window is 400×280; place it so the bottom-right
                             // corner aligns with the click position (tray icon centre).
-                            // `set_position` takes logical pixels; Tauri's
-                            // PhysicalPosition → LogicalPosition accounts for DPI.
+                            // The tray event's `position` is already in physical
+                            // pixels, so we pass `Position::Physical` and offset in
+                            // the same (physical) coordinate space — no DPI
+                            // conversion needed here.
                             let _ = win.set_position(tauri::Position::Physical(
                                 tauri::PhysicalPosition {
                                     x: (position.x as i32).saturating_sub(400),
