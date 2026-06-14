@@ -6,13 +6,14 @@
  * tray icon. Faithfully ported from HiWindowsTray in design/hifi/hifi-desktop.jsx.
  *
  * Invoke commands used:
- *   EXISTING:  sync_status, desktop_platform
- *   NEW (WS1): tray_pause_sync, tray_resume_sync, show_settings_window
- *              tray_recent_activity → returns TrayActivity[]
+ *   sync_status, show_settings_window
+ *   tray_pause_sync, tray_resume_sync
+ *   tray_recent_activity → returns TrayActivity[]
+ *   desktop_storage_summary → returns StorageSummary
  */
 
 import { useEffect, useState } from 'react'
-import { command, formatBytes, loadSyncStatus, type SyncStatus } from './desktopApi'
+import { command, formatBytes, loadSyncStatus, type StorageSummary, type SyncStatus } from './desktopApi'
 
 export interface TrayActivity {
   id: string
@@ -123,7 +124,7 @@ function CheckMark() {
       fontSize: 11,
       color: 'oklch(0.55 0.14 155)',
       lineHeight: 1,
-    }}>✓</span>
+    }}>&#x2713;</span>
   )
 }
 
@@ -131,6 +132,7 @@ export default function WindowsTray() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [paused, setPaused] = useState(false)
   const [activities, setActivities] = useState<TrayActivity[]>([])
+  const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   // Poll sync status
@@ -148,7 +150,23 @@ export default function WindowsTray() {
     }
   }, [])
 
-  // Load recent activity (new command — WS1 must implement)
+  // Load real storage summary on demand
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      const result = await command<StorageSummary>('desktop_storage_summary')
+      if (!cancelled && result.ok) setStorage(result.value)
+    }
+    void load()
+    // Refresh every 60s — storage totals change slowly
+    const id = window.setInterval(load, 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
+  // Load real recent activity — no fallback fake rows
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
@@ -157,13 +175,9 @@ export default function WindowsTray() {
       if (result.ok) {
         setActivities(result.value)
       } else {
-        // Graceful fallback: show placeholder rows when command not yet implemented
-        setActivities([
-          { id: '1', name: 'story-draft.md', status: 'Encrypting · 72%', icon: 'file', active: true, progress: 72 },
-          { id: '2', name: 'leak-packet.pdf', status: 'Uploaded · 2 min ago', icon: 'shield', ok: true },
-          { id: '3', name: 'interview-03.m4a', status: 'Synced · 4 min ago', icon: 'file', ok: true },
-          { id: '4', name: 'photos/', status: 'Auto-backup paused · not on Wi-Fi', icon: 'pause', warn: true },
-        ])
+        // Real command failed for a real reason — surface it, show empty list
+        setActionError(result.reason)
+        setActivities([])
       }
     }
     void refresh()
@@ -182,11 +196,10 @@ export default function WindowsTray() {
       : 'Sync paused'
     : 'Signed out'
 
-  const storageLine = (() => {
-    // Status doesn't carry total bytes — just show a fixed placeholder until
-    // the tray can receive a richer payload from WS1.
-    return 'E2E encrypted vault'
-  })()
+  // Real storage line: show used/total when available, honest neutral otherwise
+  const storageLine = storage != null
+    ? `${formatBytes(storage.pinned_bytes + storage.cache_bytes)} on this PC`
+    : 'E2E encrypted'
 
   const handlePause = async () => {
     setActionError(null)
@@ -194,7 +207,7 @@ export default function WindowsTray() {
     const result = await command<void>(cmd)
     if (result.ok) {
       setPaused((prev) => !prev)
-    } else if (!result.unsupported) {
+    } else {
       setActionError(result.reason)
     }
   }
@@ -202,7 +215,7 @@ export default function WindowsTray() {
   const handleSettings = async () => {
     setActionError(null)
     const result = await command<void>('show_settings_window')
-    if (!result.ok && !result.unsupported) {
+    if (!result.ok) {
       setActionError(result.reason)
     }
   }
@@ -237,11 +250,11 @@ export default function WindowsTray() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.2 }}>Beebeeb</div>
           <div style={{ fontSize: 11, color: 'oklch(0.52 0.01 78)', marginTop: 2, lineHeight: 1.3 }}>
-            {syncedLabel} · {storageLine}
+            {syncedLabel} &middot; {storageLine}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 2, marginLeft: 'auto' }}>
-          {(['–', '✕'] as const).map((c, i) => (
+          {(['–', '×'] as const).map((c, i) => (
             <button
               key={i}
               style={{
@@ -270,13 +283,20 @@ export default function WindowsTray() {
         {activities.length === 0 ? (
           <div style={{
             display: 'flex',
+            flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
             height: '100%',
-            fontSize: 11,
-            color: 'oklch(0.52 0.01 78)',
+            gap: 6,
           }}>
-            No recent activity
+            <TrayIcon name="shield" size={18} color="oklch(0.68 0.008 80)" />
+            <span style={{
+              fontSize: 11,
+              color: 'oklch(0.52 0.01 78)',
+              fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
+            }}>
+              No recent activity
+            </span>
           </div>
         ) : (
           activities.map((row) => (
@@ -356,8 +376,9 @@ export default function WindowsTray() {
           fontSize: 11,
           color: 'oklch(0.34 0.012 75)',
           lineHeight: 1,
+          fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
         }}>
-          Falkenstein · E2E encrypted
+          Falkenstein &middot; E2E encrypted
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           <button
@@ -365,7 +386,7 @@ export default function WindowsTray() {
             style={{
               padding: '3px 8px',
               fontSize: 11,
-              fontFamily: 'inherit',
+              fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
               fontWeight: 500,
               background: 'transparent',
               border: '1px solid transparent',
@@ -383,7 +404,7 @@ export default function WindowsTray() {
             style={{
               padding: '3px 8px',
               fontSize: 11,
-              fontFamily: 'inherit',
+              fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
               fontWeight: 500,
               background: 'transparent',
               border: '1px solid transparent',

@@ -546,11 +546,9 @@ function SyncModeStep({ onDone }: { onDone: () => void }) {
   const proceed = async () => {
     setBusy(true)
     setError(null)
-    // set_sync_mode is a new command — WS1 must implement it.
     const result = await command<void>('set_sync_mode', { mode: selected })
     setBusy(false)
-    if (result.ok || result.unsupported) {
-      // Proceed even if not yet implemented; WS1 will wire it
+    if (result.ok) {
       onDone()
       return
     }
