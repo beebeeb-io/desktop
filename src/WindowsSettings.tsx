@@ -12,12 +12,11 @@
  * Account).
  *
  * Invoke commands used:
- *   EXISTING:  sync_status, desktop_storage_summary, desktop_config,
- *              save_desktop_config, finder_location_state
- *   NEW (WS1): free_up_space (returns bytes_freed: number)
- *              windows_shell_integration_state → { installed: boolean }
- *              install_windows_shell_integration
- *              desktop_linked_devices → LinkedDevice[]
+ *   sync_status, desktop_storage_summary, desktop_config, set_desktop_config
+ *   free_up_space (returns bytes_freed: number)
+ *   windows_shell_integration_state → { installed: boolean }
+ *   install_windows_shell_integration
+ *   autostart_enabled, toggle_autostart
  */
 
 import { useEffect, useState } from 'react'
@@ -26,11 +25,16 @@ import {
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
+  openUrl,
   type DesktopConfig,
+  type FinderInstallState,
   type StorageSummary,
   type SyncStatus,
   DEFAULT_CONFIG,
 } from './desktopApi'
+
+// Windows Explorer/Cloud Files integration uses the same shape as macOS Finder
+type ShellIntegrationState = FinderInstallState
 
 // ── Design tokens ─────────────────────────────────────────────────────────
 
@@ -363,10 +367,10 @@ function SyncPanel({
     }
   }
 
-  // Toggle state tracking for non-config rows
-  const [metered, setMetered] = useState(false)
-  const [filesOnDemand, setFilesOnDemand] = useState(true)
-  const [overlays, setOverlays] = useState(true)
+  // Toggle values come from config — no separate local state
+  const metered = config.metered ?? false
+  const filesOnDemand = config.files_on_demand ?? true
+  const overlays = config.sync_overlays ?? true
 
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
@@ -387,7 +391,7 @@ function SyncPanel({
           fontFamily: T.fontMono,
           color: T.ink3,
         }}>
-          · {status?.engine === 'running' && status.syncing === 0 ? 'All devices up to date' : 'Syncing…'}
+          &middot; {status?.engine === 'running' && status.syncing === 0 ? 'All devices up to date' : 'Syncing…'}
         </span>
       </div>
       <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
@@ -448,16 +452,31 @@ function SyncPanel({
               </div>
             )
           } else if (row.label === 'Sync on metered connections') {
-            control = <Toggle on={metered} onChange={setMetered} />
+            control = (
+              <Toggle
+                on={metered}
+                onChange={(v) => onConfigChange({ metered: v })}
+              />
+            )
           } else if (row.label === 'Files on Demand (online-only by default)') {
-            control = <Toggle on={filesOnDemand} onChange={setFilesOnDemand} />
+            control = (
+              <Toggle
+                on={filesOnDemand}
+                onChange={(v) => onConfigChange({ files_on_demand: v })}
+              />
+            )
           } else if (row.label === 'Show sync overlays in File Explorer') {
-            control = <Toggle on={overlays} onChange={setOverlays} />
+            control = (
+              <Toggle
+                on={overlays}
+                onChange={(v) => onConfigChange({ sync_overlays: v })}
+              />
+            )
           } else if (row.value !== undefined) {
             const limit = row.configKey === 'upload_kbps_limit' ? config.upload_kbps_limit : config.download_kbps_limit
             control = (
               <span style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3 }}>
-                {limit === 0 ? 'Auto' : `${limit} KB/s`} ▾
+                {limit === 0 ? 'Auto' : `${limit} KB/s`} &#x25be;
               </span>
             )
           }
@@ -631,30 +650,232 @@ function LaunchPanel() {
   )
 }
 
-function PlaceholderPanel({ label }: { label: string }) {
+// ── Explorer integration panel (System → Explorer integration) ────────────
+//
+// `windows_shell_integration_state` reports whether Beebeeb is registered as a
+// File Explorer sync location (Cloud Files API). `install_windows_shell_integration`
+// registers it. Both commands already exist in lib.rs.
+function ExplorerIntegrationPanel() {
+  const [state, setState] = useState<ShellIntegrationState | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = async () => {
+    const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+    if (r.ok) {
+      setState(r.value)
+      setError(null)
+    } else {
+      setError(r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason)
+    }
+    setLoading(false)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+      if (cancelled) return
+      if (r.ok) setState(r.value)
+      else setError(r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason)
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const enable = async () => {
+    setBusy(true)
+    setError(null)
+    const r = await command<ShellIntegrationState>('install_windows_shell_integration')
+    setBusy(false)
+    if (r.ok) {
+      setState(r.value)
+      // Re-read in case install returns a transitional state
+      void refresh()
+      return
+    }
+    setError(r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason)
+  }
+
+  const active = state?.installed === true
+
   return (
-    <div style={{
-      flex: 1,
-      overflow: 'auto',
-      padding: '28px 36px',
-      display: 'flex',
-      alignItems: 'flex-start',
-    }}>
-      <div>
-        <h1 style={{
-          margin: '0 0 8px',
-          fontSize: 26,
-          fontWeight: 700,
-          letterSpacing: '-0.025em',
-          color: T.ink,
-          lineHeight: 1.15,
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
+        Explorer integration
+      </h1>
+      <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Beebeeb appears in File Explorer as a sync folder. Files are encrypted on this PC before they
+        leave for Falkenstein — Explorer only ever shows you the decrypted view.
+      </p>
+
+      {error && (
+        <div style={{
+          padding: '10px 12px', borderRadius: 6, marginBottom: 16,
+          border: '1px solid oklch(0.88 0.05 25)', background: 'oklch(0.98 0.02 25)',
+          color: 'oklch(0.42 0.15 25)', fontSize: 12, lineHeight: 1.5,
         }}>
-          {label}
-        </h1>
-        <p style={{ margin: 0, fontSize: 13, color: T.ink3, lineHeight: 1.6 }}>
-          This section is coming soon.
-        </p>
+          {error}
+        </div>
+      )}
+
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 16, padding: '14px 16px', borderRadius: 8,
+        border: `1px solid ${T.line}`, background: T.paper2,
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>
+            File Explorer location
+          </div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
+            {loading
+              ? 'Checking…'
+              : active
+                ? 'Active — Beebeeb is registered as a sync folder on this PC.'
+                : 'Not set up yet on this PC.'}
+          </div>
+        </div>
+        {!loading && !active && (
+          <PrimaryBtn onClick={() => void enable()} disabled={busy}>
+            {busy ? 'Enabling…' : 'Enable'}
+          </PrimaryBtn>
+        )}
+        {!loading && active && (
+          <Chip>Active</Chip>
+        )}
       </div>
+    </div>
+  )
+}
+
+// Sections that live in the web app — show a clean link-out panel
+const WEB_APP_SECTIONS: Partial<Record<NavId, { path: string; description: string }>> = {
+  account: {
+    path: '/account',
+    description: 'Manage your email, display name, and account preferences.',
+  },
+  'vault-passphrase': {
+    path: '/security/passphrase',
+    description: 'Change the passphrase that unlocks your vault on this PC and all linked devices.',
+  },
+  'recovery-kit': {
+    path: '/security/recovery',
+    description: 'Download or print your 12-word recovery phrase — the only way to recover your vault if you lose all devices.',
+  },
+  'linked-devices': {
+    path: '/security/devices',
+    description: 'View every device that has access to your vault. Remove devices you no longer use.',
+  },
+}
+
+// Sections that are desktop-native but have no backend yet — honest empty state
+const NATIVE_PENDING_SECTIONS: Partial<Record<NavId, string>> = {
+  'selective-sync': 'Selective sync lets you pick which folders live on this PC. Not available in this build.',
+  bandwidth: 'Per-transfer rate limits are not configurable in this build. Upload and download adapt to available bandwidth automatically.',
+  advanced: 'Advanced options are not available in this build.',
+}
+
+const WEB_APP_BASE_URL = 'https://app.beebeeb.io'
+
+function WebAppLinkPanel({ navId, label }: { navId: NavId; label: string }) {
+  const meta = WEB_APP_SECTIONS[navId]
+  if (!meta) return null
+
+  const url = `${WEB_APP_BASE_URL}${meta.path}`
+
+  const handleOpen = () => { void openUrl(url) }
+
+  return (
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
+        {label}
+      </h1>
+      <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        {meta.description}
+      </p>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        padding: '16px 18px',
+        borderRadius: 10,
+        border: `1px solid ${T.line}`,
+        background: T.paper2,
+      }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, marginBottom: 2 }}>
+            Open in web app
+          </div>
+          <div style={{
+            fontSize: 11.5,
+            color: T.ink3,
+            fontFamily: T.fontMono,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap' as const,
+          }}>
+            {url}
+          </div>
+        </div>
+        <button
+          onClick={handleOpen}
+          style={{
+            padding: '7px 14px',
+            fontSize: 12.5,
+            fontFamily: T.fontSans,
+            fontWeight: 500,
+            borderRadius: 6,
+            border: `1px solid ${T.ink}`,
+            background: T.ink,
+            color: T.paper,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap' as const,
+            letterSpacing: '-0.005em',
+            flexShrink: 0,
+          }}
+        >
+          Open
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function NativePendingPanel({ label, description }: { label: string; description: string }) {
+  return (
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
+        {label}
+      </h1>
+      <p style={{ margin: 0, fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        {description}
+      </p>
+    </div>
+  )
+}
+
+function PanelRouter({ navId }: { navId: NavId }) {
+  const allItems = NAV_SECTIONS.flatMap((s) => s.items)
+  const label = allItems.find((i) => i.id === navId)?.label ?? navId
+
+  if (navId === 'explorer-integration') {
+    return <ExplorerIntegrationPanel />
+  }
+  if (navId in WEB_APP_SECTIONS) {
+    return <WebAppLinkPanel navId={navId} label={label} />
+  }
+  const pendingDesc = NATIVE_PENDING_SECTIONS[navId]
+  if (pendingDesc) {
+    return <NativePendingPanel label={label} description={pendingDesc} />
+  }
+  // Fallback for any future nav items not yet categorised
+  return (
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
+        {label}
+      </h1>
     </div>
   )
 }
@@ -692,18 +913,23 @@ export default function WindowsSettings() {
     return () => { cancelled = true }
   }, [status?.logged_in, status?.engine])
 
-  // Load config
+  // Load config — desktop_config returns null on first run (no config file yet)
   useEffect(() => {
-    command<DesktopConfig>('desktop_config').then((result) => {
-      if (result.ok) setConfig(result.value)
+    command<DesktopConfig | null>('desktop_config').then((result) => {
+      if (result.ok && result.value != null) setConfig(result.value)
     })
   }, [])
 
   const handleConfigChange = async (patch: Partial<DesktopConfig>) => {
-    const next = { ...config, ...patch }
-    setConfig(next)
-    const result = await command<void>('save_desktop_config', { config: next })
-    if (!result.ok && !result.unsupported) {
+    setNotice(null)
+    // Functional update so rapid two-field toggles don't drop a change.
+    let next: DesktopConfig = config
+    setConfig((prev) => {
+      next = { ...prev, ...patch }
+      return next
+    })
+    const result = await command<void>('set_desktop_config', { config: next })
+    if (!result.ok) {
       setNotice(result.reason)
     }
   }
@@ -872,7 +1098,7 @@ export default function WindowsSettings() {
       ) : activeNav === 'launch' ? (
         <LaunchPanel />
       ) : (
-        <PlaceholderPanel label={NAV_SECTIONS.flatMap((s) => s.items).find((i) => i.id === activeNav)?.label ?? activeNav} />
+        <PanelRouter navId={activeNav} />
       )}
     </div>
   )
