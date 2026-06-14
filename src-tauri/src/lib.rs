@@ -2711,7 +2711,7 @@ pub fn run() {
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    show_settings_window(&h);
+                    show_settings_window_impl(&h);
                 });
             }
 
