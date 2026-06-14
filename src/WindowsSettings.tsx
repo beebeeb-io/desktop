@@ -970,7 +970,7 @@ export default function WindowsSettings() {
     if (!loggedIn && !ALWAYS_ACCESSIBLE.has(activeNav)) {
       setActiveNav('launch')
     }
-  }, [loggedIn, activeNav])
+  }, [loggedIn])
 
   // Filter nav by search query AND auth state.
   const query = searchQuery.toLowerCase()
