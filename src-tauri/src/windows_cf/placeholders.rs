@@ -48,15 +48,17 @@ use windows::core::PCWSTR;
 ///   filename never reaches Windows.
 /// - `size_bytes`: plaintext size — what the user expects to see in
 ///   the size column.
-/// - `_modified_at`: kept for API parity; we don't currently mint a
-///   `FILETIME` from it (Windows is happy enough with the 0 default,
-///   and the engine_bridge has the real value if we need to backfill).
+/// - `modified_at`: unix timestamp (seconds; millis tolerated — see
+///   [`unix_to_filetime`]) of the file's last modification. Converted to
+///   a Windows `FILETIME` tick count and written to the placeholder's
+///   `LastWriteTime` / `ChangeTime` / `CreationTime` so Explorer shows a
+///   real modified date instead of a blank/epoch one.
 pub fn create_placeholder(
     parent_dir: &std::path::Path,
     file_id: &str,
     name: &str,
     size_bytes: i64,
-    _modified_at: i64,
+    modified_at: i64,
 ) -> anyhow::Result<()> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
@@ -67,6 +69,11 @@ pub fn create_placeholder(
     // FileIdentity is opaque to Windows — we use raw UTF-8 bytes of
     // the file_id so the fetch callback can decode it directly.
     let identity: Vec<u8> = file_id.as_bytes().to_vec();
+
+    // Convert the file's unix modified timestamp into the Windows
+    // FILETIME tick count (100-ns intervals since 1601-01-01) that
+    // FILE_BASIC_INFO stores as an i64.
+    let modified_ticks = unix_to_filetime(modified_at);
 
     // SAFETY: `entry`, `parent_wide`, `name_wide`, `identity` all live
     // on this stack frame for the duration of the FFI call. The
@@ -82,6 +89,14 @@ pub fn create_placeholder(
                     // refuses the placeholder. We don't carry over
                     // hidden/system bits; we have no use for them.
                     FileAttributes: 0x20,
+                    // Real timestamps so Explorer's Date Modified column
+                    // is populated. We only have a single modified time
+                    // from the server, so we mirror it across
+                    // creation/write/change. LastAccessTime is left at 0
+                    // (Windows treats 0 as "don't change / unknown").
+                    CreationTime: modified_ticks,
+                    LastWriteTime: modified_ticks,
+                    ChangeTime: modified_ticks,
                     ..Default::default()
                 },
                 FileSize: size_bytes,
@@ -126,4 +141,39 @@ pub fn create_placeholder(
         "cloud placeholder created"
     );
     Ok(())
+}
+
+/// Number of seconds between the Windows FILETIME epoch (1601-01-01) and
+/// the Unix epoch (1970-01-01).
+const FILETIME_UNIX_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
+
+/// Convert a Unix timestamp into a Windows FILETIME tick count: the
+/// number of 100-nanosecond intervals since 1601-01-01, as stored in
+/// `FILE_BASIC_INFO`'s i64 timestamp fields.
+///
+/// The desktop DB stores `modified_at` in **seconds** (see
+/// `engine_bridge::now_secs`). As a defensive measure we also accept
+/// millisecond values: anything implausibly large to be seconds (beyond
+/// ~year 5000) is treated as milliseconds. A non-positive or zero input
+/// yields 0, which Windows renders as "no date".
+fn unix_to_filetime(modified_at: i64) -> i64 {
+    if modified_at <= 0 {
+        return 0;
+    }
+
+    // Year ~5000 in unix seconds. A value larger than this is almost
+    // certainly milliseconds, not seconds.
+    const SECONDS_SANITY_CEILING: i64 = 95_617_584_000;
+    let unix_secs = if modified_at > SECONDS_SANITY_CEILING {
+        modified_at / 1000
+    } else {
+        modified_at
+    };
+
+    // Shift to the 1601 epoch, then scale seconds → 100-ns ticks.
+    // saturating_* keeps a pathological value from overflowing into a
+    // negative (which Explorer would render as a bogus 1601 date).
+    unix_secs
+        .saturating_add(FILETIME_UNIX_EPOCH_OFFSET_SECS)
+        .saturating_mul(10_000_000)
 }
