@@ -1122,8 +1122,8 @@ async fn continue_without_finder_location(
 // `installed` here means "the Cloud Files sync root is registered with Windows."
 // Registration is idempotent at the OS layer (re-registering the same path is a
 // no-op), so these commands are safe to call repeatedly. The live registration
-// performed by the engine runner (`windows_cf::activate`) and the one done here
-// converge on the same OS state.
+// performed by the engine runner (`windows_cf::connect_root`) and the one done
+// here converge on the same OS state.
 
 /// Report whether the Beebeeb Cloud Files sync root is registered with Windows.
 /// Parallels `finder_location_state`. Returns `installed: true` once the sync
@@ -1168,7 +1168,8 @@ async fn install_windows_shell_integration(
 
         // Register the Cloud Files sync root with Windows. Idempotent at the OS
         // layer. The engine runner re-registers + connects callbacks on spawn
-        // (`windows_cf::activate`); doing it here gives immediate feedback in
+        // (`windows_cf::connect_root`, called before the engine writes its lock
+        // and state.db into the root); doing it here gives immediate feedback in
         // onboarding before the engine ticks.
         if let Err(error) = windows_cf::register_sync_root(&root) {
             let error = error.to_string();

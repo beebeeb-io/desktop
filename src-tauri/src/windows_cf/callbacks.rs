@@ -25,7 +25,7 @@
 //! Cloud Files callbacks are delivered on a worker thread the
 //! filter-driver picks. That thread is *not* attached to any tokio
 //! runtime, so `Handle::try_current()` returns `Err` there. We instead
-//! reach the daemon's runtime handle stashed by [`super::activate`]
+//! reach the daemon's runtime handle stashed by [`super::connect_root`]
 //! (via [`super::runtime`]) and `block_on` the hydration. Blocking the
 //! worker for the full hydration is OK; the Windows runtime keeps the
 //! placeholder marked "loading" without UI-thread impact.

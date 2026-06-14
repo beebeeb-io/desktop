@@ -255,39 +255,57 @@ fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One-shot Windows Cloud Files activation, called from `runner::run` after
-/// the engine bridge is built and before the sync loop starts ticking.
+/// **Phase 1 of activation — run EARLY in `runner::run`, BEFORE the engine
+/// writes anything into the sync root** (the `.beebeeb-sync.lock` file and the
+/// `.beebeeb/state.db` database both live inside the root).
 ///
-/// Idempotent end-to-end — safe to call on every (re)spawn:
+/// This is the fix for the bootstrap-ordering deadlock: `CfRegisterSyncRoot`
+/// alone puts the folder under Cloud Files control but leaves it
+/// *disconnected*, and a registered-but-disconnected root rejects **all**
+/// writes with `0x801F0005 ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING`. If the
+/// engine tries to acquire the lock or open the state DB before the provider
+/// connects, those writes fail and `run()` bails out — so the connect step
+/// below never runs and the root is permanently non-functional. By connecting
+/// here, before the first write, the root is live and writable when the lock
+/// and DB are created.
 ///
-/// 1. Stash the live [`EngineBridge`] so the in-process fetch callback
-///    ([`callbacks::fetch_data_callback`]) can reach it on hydration.
+/// Steps (no DB / bridge required — connecting only needs the registered root):
+///
+/// 1. Stash the current tokio runtime handle so the Cloud Files fetch callback
+///    (which fires on an OS filter-driver thread with no runtime attached) can
+///    `block_on` the async hydration. `run` calls this on a tokio worker, so
+///    `Handle::current()` is valid here. Idempotent.
 /// 2. Register the sync root with Windows ([`register_sync_root`]).
-///    Re-registering the same path is a no-op at the OS layer.
-/// 3. Seed Explorer with cloud-only placeholders from the current DB file
-///    list ([`populate_placeholders`]). Existing placeholders return
-///    `ERROR_ALREADY_EXISTS`, which we swallow.
+///    Re-registering the same path is a no-op at the OS layer (and
+///    `install_windows_shell_integration` already registered it during
+///    onboarding — this makes the engine path self-contained for re-logins).
+/// 3. Connect the in-process fetch callback table via `CfConnectSyncRoot`,
+///    exactly once per process (guarded by the `CONNECTED` OnceLock — Windows
+///    rejects a second connect on an already-connected root).
 ///
-/// All failures are logged rather than propagated: a Cloud Files hiccup
-/// must not take down the sync loop, which still works headlessly.
-pub fn activate(_app: &tauri::AppHandle, bridge: Arc<EngineBridge>, sync_root: &std::path::Path) {
-    // The callback can fire as soon as the sync root is registered, so the
-    // bridge must be reachable first.
-    set_bridge(bridge.clone());
-
+/// The fetch callback reaches the bridge through the `BRIDGE` OnceLock, which
+/// is set later in [`seed_placeholders`]. That ordering is safe: no
+/// placeholders exist yet (they are minted in `seed_placeholders`), so Windows
+/// has nothing to fetch and the callback cannot fire before the bridge is set.
+///
+/// All failures are logged rather than propagated: a Cloud Files hiccup must
+/// not take down the sync loop, which still works headlessly.
+pub fn connect_root(sync_root: &std::path::Path) {
     // Stash the current tokio runtime handle so the Cloud Files fetch
     // callback (which fires on an OS filter-driver thread with no runtime
-    // attached) can `block_on` the async hydration. `activate` runs on a
-    // tokio worker, so `Handle::current()` is valid here. Idempotent.
+    // attached) can `block_on` the async hydration. This runs on a tokio
+    // worker, so `Handle::current()` is valid here. Idempotent.
     let _ = RUNTIME.set(tokio::runtime::Handle::current());
 
     if let Err(e) = register_sync_root(sync_root) {
-        tracing::error!(error = %e, "Cloud Files sync root registration failed; placeholders skipped");
+        tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
         return;
     }
 
     // Connect the in-process fetch callback exactly once per process. Without
-    // this, Windows shows placeholders but never asks us to hydrate them.
+    // this, Windows shows placeholders but never asks us to hydrate them — and,
+    // critically, the root stays DISCONNECTED and rejects the engine's lock +
+    // state.db writes with ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
     if CONNECTED.get().is_none() {
         match connect_callbacks(sync_root) {
             Ok(()) => {
@@ -299,6 +317,26 @@ pub fn activate(_app: &tauri::AppHandle, bridge: Arc<EngineBridge>, sync_root: &
             }
         }
     }
+}
+
+/// **Phase 2 of activation — run LATE in `runner::run`, AFTER the state DB is
+/// opened and the engine bridge is built.**
+///
+/// 1. Stash the live [`EngineBridge`] so the in-process fetch callback
+///    ([`callbacks::fetch_data_callback`]) can reach it on hydration. Done here
+///    (not in [`connect_root`]) because the bridge needs the open DB, and the
+///    callback cannot fire until a placeholder exists — which only happens in
+///    step 2 below — so setting the bridge just before populating is in time.
+/// 2. Seed Explorer with cloud-only placeholders from the current DB file list
+///    ([`populate_placeholders`]). Existing placeholders return
+///    `ERROR_ALREADY_EXISTS`, which we swallow.
+///
+/// Requires [`connect_root`] to have run first so the root is connected and the
+/// placeholder writes land in a live (writable) Cloud Files root.
+pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path) {
+    // The callback can fire as soon as a placeholder exists, so the bridge must
+    // be reachable before we create any placeholder below.
+    set_bridge(bridge.clone());
 
     let created = populate_placeholders(&bridge, sync_root);
     tracing::info!(

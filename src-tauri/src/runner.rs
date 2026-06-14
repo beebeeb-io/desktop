@@ -137,6 +137,20 @@ async fn run(
     mut cancel: oneshot::Receiver<()>,
     sync_paused: Arc<AtomicBool>,
 ) {
+    // Windows Cloud Files: connect the sync root FIRST, before any write into
+    // it. `CfRegisterSyncRoot` (run during onboarding) puts the folder under
+    // Cloud Files control but leaves it DISCONNECTED, and a disconnected root
+    // rejects every write with 0x801F0005 ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
+    // The very next steps below — `LockFile::acquire` writing
+    // `.beebeeb-sync.lock` and `StateDb::open` creating `.beebeeb/state.db` —
+    // both write INSIDE the root, so the root must be connected (live) before
+    // them. `connect_root` registers (idempotent) + `CfConnectSyncRoot`s the
+    // root; it needs neither the lock nor the DB, only the path. Placeholder
+    // seeding (which DOES need the DB + bridge) stays late via
+    // `seed_placeholders` after the bridge is built.
+    #[cfg(target_os = "windows")]
+    crate::windows_cf::connect_root(&sync_root);
+
     // Acquire the mutual-exclusion lock with the CLI's `bb watch`.
     // If a CLI agent is alive in the same folder, we don't start.
     let _lock = match LockFile::acquire(&sync_root, "desktop") {
@@ -193,12 +207,14 @@ async fn run(
         })
     };
 
-    // Windows Cloud Files: register the sync root, stash the live bridge so
-    // the in-process fetch callback can reach it, and seed Explorer with
-    // cloud-only placeholders from the current file list. All idempotent —
-    // safe to run on every (re)spawn.
+    // Windows Cloud Files: stash the live bridge so the in-process fetch
+    // callback can reach it, and seed Explorer with cloud-only placeholders
+    // from the current file list. The sync root was already registered +
+    // connected by `connect_root` at the top of `run` (before the lock/state.db
+    // writes), so by here the root is live and the placeholder writes succeed.
+    // All idempotent — safe to run on every (re)spawn.
     #[cfg(target_os = "windows")]
-    crate::windows_cf::activate(&app, bridge.clone(), &sync_root);
+    crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);
 
     emit_status(&app, "running", Some(&sync_root), None);
 
