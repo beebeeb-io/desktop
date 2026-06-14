@@ -600,6 +600,104 @@ mod windows_credentials {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    //! Decision-boundary tests for the startup auto-unlock.
+    //!
+    //! On launch, `lib::restore_session_on_startup` resumes a fully UNLOCKED
+    //! session iff the credential store holds both the session token and a
+    //! valid 32-byte master key; otherwise it leaves onboarding to prompt for
+    //! the recovery phrase. The exact gate is `AuthVault::unlock()`, exercised
+    //! here against an in-memory store so it runs on any platform (the real
+    //! OS credential vaults are platform-gated and can't run in CI).
+
+    use super::*;
+    use std::sync::Mutex;
+
+    /// In-memory `AuthSecretStore` standing in for the OS credential vault.
+    #[derive(Default)]
+    struct MemoryStore {
+        token: Mutex<Option<Vec<u8>>>,
+        key: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl AuthSecretStore for MemoryStore {
+        fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+            *self.token.lock().unwrap() = Some(token.expose_for_request().as_bytes().to_vec());
+            Ok(())
+        }
+        fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+            self.token
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|bytes| SessionToken::new(String::from_utf8(bytes).unwrap()))
+                .transpose()
+        }
+        fn delete_session_token(&self) -> AuthResult<()> {
+            *self.token.lock().unwrap() = None;
+            Ok(())
+        }
+        fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+            *self.key.lock().unwrap() = Some(wrapped.expose_for_crypto().to_vec());
+            Ok(())
+        }
+        fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+            self.key.lock().unwrap().clone().map(SecretBytes::new).transpose()
+        }
+        fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+            *self.key.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    /// Token + 32-byte key present → unlock succeeds and the key is readable.
+    /// This is the startup auto-unlock path: relaunch resumes signed-in +
+    /// unlocked with no recovery-phrase prompt.
+    #[test]
+    fn unlock_succeeds_when_master_key_present() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("token").unwrap()).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key([7u8; MASTER_KEY_BYTES]))
+            .unwrap();
+
+        assert_eq!(vault.lock_state(), VaultLockState::Locked);
+        vault.unlock().expect("present 32-byte key must unlock");
+        assert_eq!(vault.lock_state(), VaultLockState::Unlocked);
+        assert_eq!(vault.master_key().unwrap(), &[7u8; MASTER_KEY_BYTES]);
+    }
+
+    /// Token present but master key genuinely ABSENT → unlock returns NotFound
+    /// and the vault stays locked. This is the only state where onboarding must
+    /// still show "this PC doesn't have your keys" / prompt for the recovery
+    /// phrase. The startup restore treats this as a no-op.
+    #[test]
+    fn unlock_reports_not_found_when_master_key_absent() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("token").unwrap()).unwrap();
+        // No master key stored.
+
+        assert_eq!(vault.unlock(), Err(AuthStoreError::NotFound));
+        assert_eq!(vault.lock_state(), VaultLockState::Locked);
+        assert!(vault.master_key().is_err());
+    }
+
+    /// A stored blob of the wrong length is rejected rather than unlocking with
+    /// a malformed key — defensive, in case the credential blob is corrupt.
+    #[test]
+    fn unlock_rejects_wrong_length_key() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("token").unwrap()).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new(vec![1u8; 16]).unwrap())
+            .unwrap();
+
+        assert!(matches!(vault.unlock(), Err(AuthStoreError::InvalidSecret(_))));
+        assert_eq!(vault.lock_state(), VaultLockState::Locked);
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_keychain {
     use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};

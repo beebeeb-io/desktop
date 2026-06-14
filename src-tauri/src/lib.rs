@@ -193,6 +193,75 @@ fn clear_keychain_session() -> Result<(), String> {
         .map_err(|e| keychain_error("clear Keychain session", e))
 }
 
+/// On launch, resume a fully signed-in **and unlocked** session when the
+/// platform credential store still holds BOTH the session token and the
+/// vault master key.
+///
+/// This is the persistence guarantee desktop users expect from OneDrive /
+/// Dropbox: quit + relaunch returns to a working, unlocked state with no
+/// recovery-phrase prompt. The stored `wrapped-master-key` is the raw
+/// 32-byte vault root key, protected at rest by the per-user OS credential
+/// vault (DPAPI on Windows, Keychain on macOS) — reading it back is all that
+/// is required to unlock; there is no passphrase to enter.
+///
+/// `load_session_from_keychain` is the same path `unlock_vault` uses: it
+/// loads the token, calls `AuthVault::unlock()` (which validates the key is
+/// 32 bytes and flips the vault to Unlocked), and returns the in-memory
+/// `Session`. We then perform exactly the side-effects `apply_session` /
+/// `unlock_vault` perform — stash the session in memory, mark auth present,
+/// and start the engine for the configured sync root — so the resumed state
+/// is indistinguishable from a fresh in-session unlock.
+///
+/// This function deliberately does NOTHING (no error surfaced) when:
+///   - there is no stored session token (never signed in / logged out), or
+///   - the token is present but the master key is genuinely absent
+///     (`AuthStoreError::NotFound` from `unlock()`).
+/// The second case is the legitimate "this PC doesn't have your keys" state
+/// where onboarding's recovery-phrase step must still appear. `auth_present`
+/// is already seeded from `keychain_session_present()` in `setup()`, so a
+/// token-only restore still reports `logged_in: true` and routes to unlock.
+async fn restore_session_on_startup(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+
+    // Don't clobber a session already installed this run (e.g. a fresh login
+    // that landed before this startup task ran).
+    if state.session.lock().map(|g| g.is_some()).unwrap_or(false) {
+        return;
+    }
+
+    let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
+    let session = match load_session_from_keychain(email) {
+        // Both token + master key present → vault is unlocked; resume.
+        Ok(Some(session)) => session,
+        // Token absent, or token present but master key genuinely missing.
+        // Leave onboarding to prompt for the recovery phrase. Not an error.
+        Ok(None) => return,
+        Err(error) => {
+            // `unlock()` returns NotFound when the key is absent; that is the
+            // expected "needs unlock" path, not a failure to log. Any other
+            // error (backend/credential-store failure) is worth a warning, but
+            // must not block startup — onboarding can still recover.
+            tracing::debug!(%error, "no unlocked session to resume at startup");
+            return;
+        }
+    };
+
+    let token = session.token.clone();
+    let master_key = session.master_key;
+    {
+        match state.session.lock() {
+            Ok(mut guard) => *guard = Some(session),
+            Err(_) => {
+                tracing::warn!("session mutex poisoned during startup restore");
+                return;
+            }
+        }
+    }
+    set_auth_present(&state, true);
+    tracing::info!("vault auto-unlocked from credential store on startup");
+    start_engine_if_possible(app.clone(), &state, token, master_key).await;
+}
+
 fn set_auth_present(state: &State<'_, AppState>, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
         *guard = present;
@@ -2701,6 +2770,21 @@ pub fn run() {
                 if let Ok(mut guard) = app_state.auth_present.lock() {
                     *guard = keychain_session_present();
                 }
+            }
+
+            // Resume a fully unlocked session from the OS credential store.
+            // When the per-user credential vault still holds the session token
+            // AND the (DPAPI/Keychain-protected) raw master key, this loads the
+            // key, unlocks the vault, and starts the engine — so quit+relaunch
+            // returns to a working signed-in state with no recovery-phrase
+            // prompt (the persistence guarantee users expect). When the master
+            // key is genuinely absent, this is a no-op and onboarding still
+            // routes to the recovery-phrase unlock step.
+            {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    restore_session_on_startup(&h).await;
+                });
             }
 
             // Spawn background update checker

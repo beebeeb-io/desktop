@@ -770,14 +770,38 @@ export default function WindowsFirstRun() {
   // on first run it always shows so the user makes an explicit choice.
   useEffect(() => {
     let cancelled = false
+
+    // The Rust side auto-unlocks the vault on launch when the OS credential
+    // store still holds the master key (see `restore_session_on_startup`).
+    // That runs concurrently with this window opening, so a status read taken
+    // the instant the wizard mounts can briefly see `logged_in: true` but
+    // `vault_unlocked: false` even though the key IS present and is about to
+    // load. Re-poll for a short window before falling back to the
+    // recovery-phrase step, so we never show "this PC doesn't have your keys"
+    // to a user whose keys are simply still loading.
+    async function resolveVaultUnlocked(): Promise<boolean | null> {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const status = await loadSyncStatus()
+        if (cancelled) return null
+        if (!status?.logged_in) return null
+        if (status.vault_unlocked) return true
+        // Not unlocked yet — wait for the startup auto-unlock to land.
+        await new Promise((r) => setTimeout(r, 250))
+        if (cancelled) return null
+      }
+      // Genuinely still locked after retrying → the key is absent; the
+      // recovery-phrase step is correct.
+      return false
+    }
+
     Promise.all([
-      loadSyncStatus(),
+      resolveVaultUnlocked(),
       command<DesktopPlatform>('desktop_platform'),
       command<ShellIntegrationState>('windows_shell_integration_state'),
       command<{ mode: string } | null>('desktop_config'),
-    ]).then(([status, _platform, shellState, config]) => {
-      if (cancelled || !status?.logged_in) return
-      if (!status.vault_unlocked) { setStep('unlock'); return }
+    ]).then(([unlocked, _platform, shellState, config]) => {
+      if (cancelled || unlocked === null) return
+      if (!unlocked) { setStep('unlock'); return }
       // Only skip sync-mode if a mode has already been persisted (re-open, not first run).
       // desktop_config returns null / unsupported on first run.
       const syncModePersisted = config.ok && config.value !== null
