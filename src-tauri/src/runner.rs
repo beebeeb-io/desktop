@@ -289,6 +289,15 @@ async fn run(
                             }
                         }
                         enforce_cache_budget(&bridge);
+
+                        // Windows Cloud Files: the one-shot `seed_placeholders`
+                        // at engine spawn ran against a (usually empty) DB, so
+                        // rows discovered by this and later ticks need a
+                        // placeholder minted now. Idempotent — existing
+                        // placeholders are a no-op (ERROR_ALREADY_EXISTS → Ok).
+                        #[cfg(target_os = "windows")]
+                        crate::windows_cf::refresh_placeholders(&sync_root);
+
                         emit_status(&app, "idle", Some(&sync_root), None);
                     }
                     Err(e) => {

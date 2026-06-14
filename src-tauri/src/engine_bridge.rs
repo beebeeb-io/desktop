@@ -1644,6 +1644,55 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Resolve the plaintext relative path for a server file row.
+///
+/// This is an **E2EE** product: the `GET /api/v1/files` listing returns the
+/// filename only as the encrypted `name_encrypted` blob — there is NO
+/// plaintext `path`/`display_path`/`name` field on the wire (confirmed in
+/// `server/.../routes/files.rs::list_files`). The desktop must therefore
+/// decrypt the name itself, with the unlocked master key, before it can
+/// place a placeholder or compute a hydration destination.
+///
+/// Decryption goes through the **shared core primitive**
+/// [`beebeeb_core::encrypt::decrypt_name`] — the exact same path the CLI
+/// (`repos/cli/src/crypto::decrypt_name`) and the desktop SelectiveSync page
+/// ([`crate::try_decrypt_name`]) use, so every client decrypts identically.
+/// The per-file key is HKDF-derived in core (`derive_file_key(master_key,
+/// file_id)`); the `MasterKey` zeroizes on drop. We never log the plaintext
+/// name here.
+///
+/// `sync_tick` lists only the vault root (`list_files(None)` is one level —
+/// the server endpoint is non-recursive), so a decrypted name IS the file's
+/// relative path under the sync root. When nested traversal is added, this is
+/// the single place that must compose `<parent rel path>/<name>`.
+///
+/// Fallback order (keeps legacy/test rows that DO carry a plaintext path
+/// working, and degrades safely if a blob is missing/garbled):
+///   1. decrypt `name_encrypted` (the canonical zero-knowledge path)
+///   2. a plaintext `path`/`display_path`/`name` field if the server ever
+///      surfaces one (older rows / test fixtures)
+///   3. empty string — caller skips placeholder seeding for the row
+fn resolve_relative_path(f: &serde_json::Value, file_id: &str, master_key: &[u8; 32]) -> String {
+    if let Some(name_enc) = f["name_encrypted"].as_str() {
+        let mk_bytes: [u8; 32] = *master_key;
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        if let Ok(name) = beebeeb_core::encrypt::decrypt_name(&mk, file_id, name_enc) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        // Decryption failed (wrong key, garbled blob, legacy envelope) —
+        // fall through to any plaintext field rather than abort the sweep.
+    }
+    f["path"]
+        .as_str()
+        .or_else(|| f["display_path"].as_str())
+        .or_else(|| f["name"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn apply_metadata_file_row(
     db: &StateDb,
     f: &serde_json::Value,
@@ -1652,6 +1701,7 @@ fn apply_metadata_file_row(
     share_id: Option<String>,
     permission_bits: i64,
     now: i64,
+    master_key: &[u8; 32],
 ) -> anyhow::Result<Option<FileEntry>> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
@@ -1661,12 +1711,7 @@ fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let path = f["path"]
-        .as_str()
-        .or_else(|| f["display_path"].as_str())
-        .or_else(|| f["name"].as_str())
-        .unwrap_or("")
-        .to_string();
+    let path = resolve_relative_path(f, file_id, master_key);
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
@@ -1805,6 +1850,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                     None,
                     PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
                     now_secs,
+                    bridge.api().master_key(),
                 )?;
             }
             Some(entry) if entry.status == FileStatus::Local => {
@@ -1850,6 +1896,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                         None,
                         PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
                         now_secs,
+                        bridge.api().master_key(),
                     )?;
                     continue;
                 }
@@ -1892,6 +1939,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                         None,
                         PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
                         now_secs,
+                        bridge.api().master_key(),
                     )?;
                 }
                 continue;
@@ -2385,6 +2433,9 @@ mod tests {
             "object_version_id": "object-7"
         });
 
+        // This fixture carries a plaintext `path` and no `name_encrypted`, so
+        // it exercises the plaintext fallback in `resolve_relative_path`; the
+        // master key is unused on that branch.
         let entry = apply_metadata_file_row(
             &db,
             &metadata,
@@ -2393,6 +2444,7 @@ mod tests {
             None,
             PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
             2000,
+            &[0u8; 32],
         )
         .unwrap()
         .unwrap();
@@ -2413,6 +2465,85 @@ mod tests {
         assert_eq!(contract.current_version, 7);
         assert_eq!(contract.current_object_version_id.as_deref(), Some("object-7"));
         assert_eq!(contract.last_sync_at, 2000);
+    }
+
+    #[test]
+    fn test_metadata_file_row_decrypts_encrypted_name_into_path() {
+        // E2EE invariant: the server returns the filename only as the
+        // encrypted `name_encrypted` blob (no plaintext path). The ingest must
+        // decrypt it with the master key and store the plaintext relative path
+        // so placeholder seeding + hydration can resolve a real destination.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let master_key = [7u8; 32];
+        let file_id = "f1e2d3c4-0000-4000-8000-000000000001";
+        // Encrypt the name exactly as every client does (shared core path).
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name_encrypted =
+            beebeeb_core::encrypt::encrypt_name(&mk, file_id, "Quarterly Report.pdf", Some("application/pdf"))
+                .unwrap();
+
+        let metadata = serde_json::json!({
+            "id": file_id,
+            "name_encrypted": name_encrypted,
+            "size_bytes": 2048,
+            "updated_at": 5555,
+            "is_folder": false,
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            6000,
+            &master_key,
+        )
+        .unwrap()
+        .unwrap();
+
+        // The decrypted name lands in `path` (a root-level item's relative
+        // path under the sync root IS its name), not an empty string.
+        assert_eq!(entry.path, "Quarterly Report.pdf");
+        assert_eq!(entry.status, FileStatus::CloudOnly);
+        let stored = db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(stored.path, "Quarterly Report.pdf");
+    }
+
+    #[test]
+    fn test_metadata_file_row_falls_back_when_name_undecryptable() {
+        // A garbled/foreign blob must not abort the sweep nor poison the row:
+        // resolve_relative_path falls through to any plaintext field, else "".
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let metadata = serde_json::json!({
+            "id": "f1e2d3c4-0000-4000-8000-000000000002",
+            "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\",\"nonce\":[],\"ciphertext\":[]}",
+            "size_bytes": 10,
+            "updated_at": 1,
+            "is_folder": false,
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            1,
+            &[9u8; 32],
+        )
+        .unwrap()
+        .unwrap();
+
+        // No plaintext field present → empty path (caller skips seeding),
+        // but the row still upserts so the rest of the sweep proceeds.
+        assert_eq!(entry.path, "");
     }
 
     #[tokio::test]

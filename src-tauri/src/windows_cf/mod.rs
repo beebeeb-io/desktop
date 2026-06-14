@@ -175,9 +175,26 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
         };
         // Hydration policy `PARTIAL` = Windows hydrates ranges on demand
         // rather than dragging down the whole file (large vault
-        // friendly). Population `PARTIAL` = directory listings expand
-        // on demand instead of forcing us to enumerate the whole
-        // server tree at registration.
+        // friendly) — this stays, the FETCH_DATA callback serves bytes
+        // lazily on open.
+        //
+        // Population policy `FULL` (was `PARTIAL`): the provider
+        // PRE-POPULATES the whole namespace by eagerly minting a
+        // placeholder for every cloud-only row (`populate_placeholders`,
+        // re-run on every tick via `refresh_placeholders` so newly
+        // discovered rows are added). With `PARTIAL` Windows considers
+        // each directory "not yet enumerated" and BLOCKS the first
+        // Explorer listing waiting for a `FETCH_PLACEHOLDERS` callback —
+        // which this in-process provider never registered, so Explorer
+        // enumeration hung/timed out. `FULL` tells Windows the on-disk
+        // placeholders ARE the complete listing, so it enumerates them
+        // directly with no callback round-trip. The vault is small and
+        // (today) flat — `sync_tick` lists only the root, non-recursively
+        // — so eager full population is cheap and correct. If deep
+        // recursive listing is added later and the vault grows large, the
+        // alternative is to switch back to `PARTIAL` and register a real
+        // `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` that serves a directory's
+        // children from the DB via `CfExecute(TRANSFER_PLACEHOLDERS)`.
         let policies = CF_SYNC_POLICIES {
             StructSize: std::mem::size_of::<CF_SYNC_POLICIES>() as u32,
             Hydration: CF_HYDRATION_POLICY {
@@ -189,7 +206,7 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
                 Modifier: CF_HYDRATION_POLICY_MODIFIER_NONE,
             },
             Population: CF_POPULATION_POLICY {
-                Primary: CF_POPULATION_POLICY_PARTIAL,
+                Primary: CF_POPULATION_POLICY_FULL,
                 Modifier: CF_POPULATION_POLICY_MODIFIER_NONE,
             },
             InSync: CF_INSYNC_POLICY_NONE,
@@ -197,7 +214,18 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
             PlaceholderManagement: CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
         };
 
-        CfRegisterSyncRoot(PCWSTR(path_wide.as_ptr()), &info, &policies, CF_REGISTER_FLAG_NONE)
+        // Flags:
+        //  - `UPDATE` so a root previously registered with the old
+        //    `PARTIAL` policy (e.g. an onboarding that ran before this
+        //    fix) is re-registered in place with the new `FULL` policy
+        //    rather than the call no-opping on the stale registration.
+        //  - `DISABLE_ON_DEMAND_POPULATION_ON_ROOT` is the explicit
+        //    "this provider fully pre-populates the namespace; do NOT
+        //    expect an on-demand FETCH_PLACEHOLDERS callback" contract
+        //    that pairs with `FULL` — it is what actually stops Explorer
+        //    from blocking on a placeholder fetch that never comes.
+        let register_flags = CF_REGISTER_FLAG_UPDATE | CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT;
+        CfRegisterSyncRoot(PCWSTR(path_wide.as_ptr()), &info, &policies, register_flags)
             .map_err(|e| anyhow::anyhow!("CfRegisterSyncRoot failed: {e}"))?;
     }
 
@@ -215,8 +243,12 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
 ///
 /// The callback table is a static array terminated by a
 /// `CF_CALLBACK_TYPE_NONE` sentinel, per the Cloud Files contract. We only
-/// register `FETCH_DATA` — the bytes-on-open hook — which is all on-demand
-/// hydration needs.
+/// register `FETCH_DATA` — the bytes-on-open hook — which is all we need:
+/// directory *enumeration* is served from the eagerly pre-created on-disk
+/// placeholders (the root is registered `CF_POPULATION_POLICY_FULL` +
+/// `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
+/// placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
+/// Only the file *bytes* are fetched lazily, which is `FETCH_DATA`.
 fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
     let path_wide: Vec<u16> = sync_root_path
         .to_string_lossy()
@@ -344,6 +376,41 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
         sync_root = %sync_root.display(),
         "Cloud Files placeholders seeded"
     );
+}
+
+/// Re-run placeholder population from the current DB so cloud-only rows
+/// discovered by LATER `sync_tick`s (after the one-shot [`seed_placeholders`]
+/// at engine spawn) also appear in Explorer.
+///
+/// This is the fix for the "placeholders only seeded once on an empty DB" bug:
+/// `seed_placeholders` runs a single time at startup, when the DB is typically
+/// empty (placeholders=0), so the first metadata pull's rows — and every row
+/// added on subsequent ticks — never got a placeholder. The runner now calls
+/// this after each successful sync tick.
+///
+/// Idempotent and cheap to repeat: [`populate_placeholders`] only walks rows
+/// currently in `CloudOnly` status and skips any with an empty `path` (so a
+/// row whose name hasn't decrypted yet is simply retried next tick once the
+/// path is populated). `create_placeholder` maps the steady-state
+/// `ERROR_ALREADY_EXISTS` to `Ok`, so re-creating an existing placeholder is a
+/// no-op rather than an error — calling this every tick is safe.
+///
+/// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
+/// the runner only calls this on ticks that run after the bridge is built, so
+/// in practice the bridge is always present here.
+pub fn refresh_placeholders(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        tracing::debug!("refresh_placeholders called before bridge was set; skipping");
+        return;
+    };
+    let created = populate_placeholders(&bridge, sync_root);
+    if created > 0 {
+        tracing::info!(
+            placeholders = created,
+            sync_root = %sync_root.display(),
+            "Cloud Files placeholders refreshed (new cloud-only rows)"
+        );
+    }
 }
 
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
