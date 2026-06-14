@@ -87,6 +87,7 @@ pub unsafe extern "system" fn fetch_data_callback(
     // the transfer regardless of which exit path we take below.
     let connection_key = info.ConnectionKey;
     let transfer_key = info.TransferKey;
+    let request_key = info.RequestKey;
     let file_size = info.FileSize;
 
     // The fetch range. We must satisfy at least the *required* span; the
@@ -104,7 +105,7 @@ pub unsafe extern "system" fn fetch_data_callback(
         Ok(s) => s.to_owned(),
         Err(e) => {
             tracing::warn!(error = %e, "FileIdentity is not valid UTF-8 — failing hydrate");
-            unsafe { fail_transfer(connection_key, transfer_key, required_offset, required_length) };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
@@ -117,7 +118,7 @@ pub unsafe extern "system" fn fetch_data_callback(
         Some(b) => b,
         None => {
             tracing::warn!(file_id = %file_id, "fetch callback fired but no EngineBridge registered");
-            unsafe { fail_transfer(connection_key, transfer_key, required_offset, required_length) };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
@@ -132,7 +133,7 @@ pub unsafe extern "system" fn fetch_data_callback(
                 file_id = %file_id,
                 "no tokio runtime handle registered; cannot hydrate Cloud Files request"
             );
-            unsafe { fail_transfer(connection_key, transfer_key, required_offset, required_length) };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
@@ -148,7 +149,7 @@ pub unsafe extern "system" fn fetch_data_callback(
         // decrypted bytes; hydrate_file errors are status strings only.
         tracing::warn!(file_id = %file_id, error = %e, "hydrate_file failed for Cloud Files callback");
         secure_remove_temp(&dest_path);
-        unsafe { fail_transfer(connection_key, transfer_key, required_offset, required_length) };
+        unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
         return;
     }
 
@@ -160,16 +161,36 @@ pub unsafe extern "system" fn fetch_data_callback(
         Err(e) => {
             tracing::warn!(file_id = %file_id, error = %e, "could not read hydrated temp file");
             secure_remove_temp(&dest_path);
-            unsafe { fail_transfer(connection_key, transfer_key, required_offset, required_length) };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
+
+    // Size sanity: the decrypted plaintext length must match the size
+    // Windows recorded on the placeholder (info.FileSize). A mismatch
+    // means our view of the file diverged from the OS's (re-upload with a
+    // new layout, truncation, a stale placeholder…). Transferring anyway
+    // risks an unaligned, non-EOF final chunk → STATUS_INVALID_PARAMETER
+    // on the last CfExecute. Fail cleanly on the required range instead.
+    if plaintext.len() as i64 != file_size {
+        tracing::warn!(
+            file_id = %file_id,
+            plaintext_len = plaintext.len(),
+            file_size,
+            "hydrated size != placeholder size; failing transfer to avoid a misaligned chunk"
+        );
+        zero_bytes(&mut plaintext);
+        secure_remove_temp(&dest_path);
+        unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
+        return;
+    }
 
     // Splice the required range back into the placeholder.
     let transfer_ok = unsafe {
         transfer_range(
             connection_key,
             transfer_key,
+            request_key,
             &plaintext,
             required_offset,
             required_length,
@@ -205,7 +226,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             tracing::warn!(file_id = %file_id, error = %e, "CfExecute(TRANSFER_DATA) failed");
             // The transfer call itself failed; tell Explorer to stop
             // spinning. If this also fails there's nothing more we can do.
-            unsafe { fail_transfer(connection_key, transfer_key, required_offset, required_length) };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
         }
     }
 }
@@ -224,6 +245,7 @@ pub unsafe extern "system" fn fetch_data_callback(
 unsafe fn transfer_range(
     connection_key: CF_CONNECTION_KEY,
     transfer_key: i64,
+    request_key: i64,
     plaintext: &[u8],
     required_offset: i64,
     required_length: i64,
@@ -236,7 +258,15 @@ unsafe fn transfer_range(
         // Nothing to send for this range; report a zero-length success so
         // Cloud Files marks the request satisfied rather than aborted.
         return unsafe {
-            transfer_one(connection_key, transfer_key, std::ptr::null(), start, 0, STATUS_SUCCESS)
+            transfer_one(
+                connection_key,
+                transfer_key,
+                request_key,
+                std::ptr::null(),
+                start,
+                0,
+                STATUS_SUCCESS,
+            )
         };
     }
 
@@ -245,7 +275,17 @@ unsafe fn transfer_range(
         let remaining = end - off;
         let len = remaining.min(TRANSFER_CHUNK);
         let buf_ptr = unsafe { plaintext.as_ptr().add(off as usize) } as *const core::ffi::c_void;
-        unsafe { transfer_one(connection_key, transfer_key, buf_ptr, off, len, STATUS_SUCCESS) }?;
+        unsafe {
+            transfer_one(
+                connection_key,
+                transfer_key,
+                request_key,
+                buf_ptr,
+                off,
+                len,
+                STATUS_SUCCESS,
+            )
+        }?;
         off += len;
     }
     Ok(())
@@ -260,6 +300,7 @@ unsafe fn transfer_range(
 unsafe fn fail_transfer(
     connection_key: CF_CONNECTION_KEY,
     transfer_key: i64,
+    request_key: i64,
     required_offset: i64,
     required_length: i64,
 ) {
@@ -270,6 +311,7 @@ unsafe fn fail_transfer(
         transfer_one(
             connection_key,
             transfer_key,
+            request_key,
             std::ptr::null(),
             required_offset,
             len,
@@ -291,6 +333,7 @@ unsafe fn fail_transfer(
 unsafe fn transfer_one(
     connection_key: CF_CONNECTION_KEY,
     transfer_key: i64,
+    request_key: i64,
     buffer: *const core::ffi::c_void,
     offset: i64,
     length: i64,
@@ -303,11 +346,22 @@ unsafe fn transfer_one(
         TransferKey: transfer_key,
         CorrelationVector: std::ptr::null::<CORRELATION_VECTOR>(),
         SyncStatus: std::ptr::null::<CF_SYNC_STATUS>(),
-        RequestKey: 0,
+        // Plumb the callback's RequestKey through so CfExecute correlates
+        // this transfer with the originating fetch request. TransferKey is
+        // the primary correlator, but a meaningful RequestKey shouldn't be
+        // discarded — a 0 here is the first suspect if Explorer hangs
+        // despite a STATUS_SUCCESS transfer.
+        RequestKey: request_key,
     };
 
     let mut op_params = CF_OPERATION_PARAMETERS {
-        ParamSize: std::mem::size_of::<CF_OPERATION_PARAMETERS>() as u32,
+        // Per the Cloud Files contract, ParamSize is the size of the
+        // specific operation arm in use (TransferData), NOT the full
+        // union. CF_OPERATION_PARAMETERS_0_6 is not the largest arm, so
+        // size_of::<CF_OPERATION_PARAMETERS>() would be oversized; compute
+        // the arm size exactly: offset of the union + size of the arm.
+        ParamSize: (std::mem::offset_of!(CF_OPERATION_PARAMETERS, Anonymous)
+            + std::mem::size_of::<CF_OPERATION_PARAMETERS_0_6>()) as u32,
         Anonymous: CF_OPERATION_PARAMETERS_0 {
             TransferData: CF_OPERATION_PARAMETERS_0_6 {
                 Flags: CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
