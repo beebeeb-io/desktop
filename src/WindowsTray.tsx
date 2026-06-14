@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { command, formatBytes, loadSyncStatus, type StorageSummary, type SyncStatus } from './desktopApi'
 
 export interface TrayActivity {
@@ -254,27 +255,46 @@ export default function WindowsTray() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 2, marginLeft: 'auto' }}>
-          {(['–', '×'] as const).map((c, i) => (
-            <button
-              key={i}
-              style={{
-                width: 24,
-                height: 24,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 11,
-                color: 'oklch(0.52 0.01 78)',
-                background: 'transparent',
-                border: 'none',
-                borderRadius: 4,
-                cursor: 'pointer',
-                lineHeight: 1,
-              }}
-            >
-              {c}
-            </button>
-          ))}
+          <button
+            title="Minimize"
+            onClick={() => { void getCurrentWindow().hide() }}
+            style={{
+              width: 24,
+              height: 24,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 11,
+              color: 'oklch(0.52 0.01 78)',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+              lineHeight: 1,
+            }}
+          >
+            –
+          </button>
+          <button
+            title="Close"
+            onClick={() => { void getCurrentWindow().hide() }}
+            style={{
+              width: 24,
+              height: 24,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 11,
+              color: 'oklch(0.52 0.01 78)',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
         </div>
       </div>
 

@@ -70,6 +70,10 @@ type NavId =
   | 'explorer-integration'
   | 'advanced'
 
+// Nav items that are always reachable, whether or not the user is signed in.
+// Everything else is auth-gated: hidden from the sidebar when logged_in is false.
+const ALWAYS_ACCESSIBLE: ReadonlySet<NavId> = new Set(['launch', 'explorer-integration', 'advanced'])
+
 interface NavItem {
   id: NavId
   label: string
@@ -276,6 +280,30 @@ function PrimaryBtn({
     >
       {children}
     </button>
+  )
+}
+
+// ── Signed-out gate ───────────────────────────────────────────────────────
+
+function SignedOutGate() {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flex: 1,
+      padding: '28px 36px',
+      gap: 10,
+    }}>
+      <NavIcon name="lock" size={24} color={T.ink3} />
+      <div style={{ fontSize: 15, fontWeight: 600, color: T.ink, marginTop: 6 }}>
+        Sign in required
+      </div>
+      <div style={{ fontSize: 12, color: T.ink3, textAlign: 'center' as const, lineHeight: 1.6, maxWidth: 280 }}>
+        Sign in to Beebeeb to access settings.
+      </div>
+    </div>
   )
 }
 
@@ -934,15 +962,30 @@ export default function WindowsSettings() {
     }
   }
 
-  // Filter nav by search query
+  const loggedIn = status?.logged_in ?? false
+
+  // When the user signs out, reset to a always-accessible nav item so
+  // auth-gated panels are never left on screen.
+  useEffect(() => {
+    if (!loggedIn && !ALWAYS_ACCESSIBLE.has(activeNav)) {
+      setActiveNav('launch')
+    }
+  }, [loggedIn, activeNav])
+
+  // Filter nav by search query AND auth state.
   const query = searchQuery.toLowerCase()
   const filteredSections = NAV_SECTIONS.map((section) => ({
     ...section,
     items: section.items.filter(
       (item) =>
-        !query ||
-        item.label.toLowerCase().includes(query) ||
-        section.heading.toLowerCase().includes(query),
+        // Auth gate: hide items that require login when signed out
+        (loggedIn || ALWAYS_ACCESSIBLE.has(item.id)) &&
+        // Search filter
+        (
+          !query ||
+          item.label.toLowerCase().includes(query) ||
+          section.heading.toLowerCase().includes(query)
+        ),
     ),
   })).filter((section) => section.items.length > 0)
 
@@ -1087,7 +1130,9 @@ export default function WindowsSettings() {
       </div>
 
       {/* Main content area */}
-      {activeNav === 'sync' ? (
+      {activeNav === 'sync' && !loggedIn ? (
+        <SignedOutGate />
+      ) : activeNav === 'sync' ? (
         <SyncPanel
           status={status}
           storage={storage}

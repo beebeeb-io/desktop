@@ -2676,6 +2676,13 @@ pub fn run() {
         .setup(|app| {
             setup_native_menu(app)?;
             setup_tray(app)?;
+            // Defensive: hide any macOS-labelled `settings` window that
+            // tauri_plugin_window_state may have restored visible on Windows.
+            // The Windows settings surface is `windows-settings`, not `settings`.
+            #[cfg(target_os = "windows")]
+            if let Some(settings_win) = app.get_webview_window("settings") {
+                let _ = settings_win.hide();
+            }
             attach_tray_status_listener(&app.handle().clone());
             {
                 let app_state = app.state::<AppState>();
