@@ -92,6 +92,28 @@ static BRIDGE: OnceLock<Arc<EngineBridge>> = OnceLock::new();
 /// it through [`runtime`] to `block_on` the hydration.
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
+/// Absolute path of the connected Cloud Files sync root.
+///
+/// The FETCH_DATA callback only receives a `CF_CALLBACK_INFO`, which carries
+/// the file's volume-relative `NormalizedPath` ONLY when the root was connected
+/// with `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH` — we connect WITHOUT it (task
+/// 0783 finding), so `NormalizedPath` can be empty on a fetch. When the
+/// callback needs an on-disk placeholder path it can't get from the callback
+/// info (e.g. the resolve-or-error resize in [`callbacks::fetch_data_callback`]),
+/// it falls back to `<SYNC_ROOT>/<state_db rel path>` — the same on-disk layout
+/// `populate_placeholders` mints. Stashed here from [`connect_root`] (which
+/// already owns the path); set-once for the process lifetime (a re-login reuses
+/// the same root).
+static SYNC_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Internal accessor for the callback module: the connected sync-root path, or
+/// `None` if [`connect_root`] hasn't run yet. Used to reconstruct an on-disk
+/// placeholder path from a state-DB relative path when the callback's
+/// `NormalizedPath` is unavailable.
+pub(crate) fn sync_root() -> Option<std::path::PathBuf> {
+    SYNC_ROOT.get().cloned()
+}
+
 /// Stable provider GUID for the Beebeeb sync root.
 ///
 /// Minted once (UUIDv4 `b33b33b0-5217-4c0a-9e3f-1f2a7c4d8e90`) and
@@ -417,6 +439,11 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // attached) can `block_on` the async hydration. This runs on a tokio
     // worker, so `Handle::current()` is valid here. Idempotent.
     let _ = RUNTIME.set(tokio::runtime::Handle::current());
+
+    // Stash the sync-root path so the fetch callback can reconstruct an on-disk
+    // placeholder path from a state-DB relative path when `CF_CALLBACK_INFO`'s
+    // `NormalizedPath` is unavailable (task 0783 resolve-or-error fallback).
+    let _ = SYNC_ROOT.set(sync_root.to_path_buf());
 
     if let Err(e) = register_sync_root(sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");

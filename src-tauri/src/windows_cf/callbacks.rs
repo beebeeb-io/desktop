@@ -47,6 +47,8 @@
 
 #![cfg(target_os = "windows")]
 
+use std::os::windows::ffi::OsStrExt;
+
 use windows::Win32::Foundation::{NTSTATUS, STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::System::CorrelationVector::CORRELATION_VECTOR;
@@ -306,14 +308,27 @@ pub unsafe extern "system" fn fetch_data_callback(
 ///   1. Rewrite the state_db `size_bytes` to `true_size` so the row (and every
 ///      other client reading the local mirror) reflects the real size, and so
 ///      a future placeholder (re)creation mints the aligned size.
-///   2. Resize the on-disk CF placeholder to `true_size` and re-mark it
-///      in-sync, so the NEXT open fires an aligned FETCH_DATA that succeeds.
+///   2. Resolve the on-disk placeholder path (see below), resize the CF
+///      placeholder to `true_size` and re-mark it in-sync, so the NEXT open
+///      fires an aligned FETCH_DATA that succeeds.
 ///
-/// If step 2 fails (placeholder gone, or any other CF error), we DO NOT leave
-/// the file in a silently-broken state: flip the row to `Error` and mark the
-/// placeholder NOT in-sync so Explorer surfaces a non-synced/error overlay
-/// (Tier-2). The earlier `fail_transfer` already surfaced an error on the open
-/// that triggered this.
+/// ## Path resolution (the 0783 follow-up fix)
+///
+/// The FETCH_DATA callback's `CF_CALLBACK_INFO.NormalizedPath` is only
+/// populated when the root is connected with
+/// `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH`, which we do NOT set — so on a real
+/// fetch `normalized_path(info)` returns `None` and the resize was previously
+/// never attempted (Tier-1 was dead; only Tier-2 fired). We now fall back to
+/// reconstructing the path from the state DB: `<sync_root>/<entry.path>`, the
+/// SAME on-disk layout `windows_cf::populate_placeholders` mints. A path-safety
+/// guard (see [`db_placeholder_path`]) rejects any relative path that escapes
+/// the sync root before we touch it.
+///
+/// If the path cannot be resolved by EITHER route, or the resize genuinely
+/// fails, we DO NOT leave the file silently broken: flip the row to `Error` and
+/// (if we have a wide path) mark the placeholder NOT in-sync so Explorer
+/// surfaces a non-synced/error overlay (Tier-2). The earlier `fail_transfer`
+/// already surfaced an error on the open that triggered this.
 ///
 /// Best-effort throughout: every DB / CF failure is logged (without sensitive
 /// content) and swallowed — there is no caller to propagate to (this runs at
@@ -340,20 +355,41 @@ unsafe fn resolve_size_mismatch(
         }
     }
 
-    // Resolve the on-disk placeholder path from the callback's normalized path.
-    // Without it we cannot resize — fall straight to Tier-2 (mark Error).
-    let Some(path) = normalized_path(info) else {
-        tracing::warn!(file_id = %file_id, "no placeholder path on callback; marking Error");
+    // Resolve the on-disk placeholder path. PRIMARY: the callback's
+    // NormalizedPath (a NUL-terminated wide string we strip below). FALLBACK
+    // (the common case — we connect without REQUIRE_FULL_FILE_PATH so this is
+    // usually empty): reconstruct `<sync_root>/<state-DB rel path>` by file_id.
+    // We keep the wide form (when available) so Tier-2's mark_not_in_sync can
+    // reuse the exact openable path the OS gave us.
+    let mut wide_path: Option<Vec<u16>> = normalized_path(info);
+    let os_path: Option<std::path::PathBuf> = match &wide_path {
+        Some(path) => {
+            let path_no_nul: Vec<u16> = path.iter().copied().take_while(|&c| c != 0).collect();
+            Some(std::path::PathBuf::from(String::from_utf16_lossy(&path_no_nul)))
+        }
+        None => db_placeholder_path(bridge, file_id),
+    };
+
+    let Some(os_path) = os_path else {
+        // Neither route yielded a path — cannot resize. Tier-2: visible Error.
+        // (No wide path either, so no overlay to flip beyond the row status.)
+        tracing::warn!(file_id = %file_id, "no placeholder path (callback + state DB both unresolved); marking Error");
         let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::Error);
         return;
     };
 
+    // If we resolved via the DB (no wide path from the callback), build a
+    // NUL-terminated wide form too so a Tier-2 fallback can mark_not_in_sync the
+    // same on-disk file.
+    if wide_path.is_none() {
+        let mut w: Vec<u16> = os_path.as_os_str().encode_wide().collect();
+        w.push(0);
+        wide_path = Some(w);
+    }
+
     // Step 2 (Tier-1) — resize the placeholder to the authenticated length. On
     // success the next open hydrates against the aligned size and the file is
-    // openable. resize_placeholder takes a &Path, so rebuild a PathBuf from the
-    // wide string (drop the trailing NUL we appended for the openable form).
-    let path_no_nul: Vec<u16> = path.iter().copied().take_while(|&c| c != 0).collect();
-    let os_path = std::path::PathBuf::from(String::from_utf16_lossy(&path_no_nul));
+    // openable.
     match super::placeholders::resize_placeholder(&os_path, true_size) {
         Ok(()) => {
             // The placeholder is now an in-sync, cloud-only stub at the correct
@@ -369,9 +405,74 @@ unsafe fn resolve_size_mismatch(
             // Tier-2: the resize could not be applied — never leave it silent.
             tracing::warn!(file_id = %file_id, error = %e, "placeholder resize failed; marking Error + not-in-sync");
             let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::Error);
-            unsafe { mark_not_in_sync(&path) };
+            if let Some(path) = wide_path.as_deref() {
+                unsafe { mark_not_in_sync(path) };
+            }
         }
     }
+}
+
+/// Reconstruct the on-disk placeholder path for `file_id` from the state DB:
+/// `<sync_root>/<entry.path>` using the SAME mapping `populate_placeholders`
+/// uses (`trim_matches('/')` → `replace('/', MAIN_SEPARATOR)`). Used as the
+/// fallback when the FETCH_DATA callback's `NormalizedPath` is unavailable
+/// (task 0783).
+///
+/// PATH SAFETY: the relative path comes from server-controlled metadata, so we
+/// reject any component that could escape the sync root — an empty rel path, an
+/// absolute/root-prefixed component, or any `..` / `.` / non-normal component.
+/// Only when the rel path is a clean sequence of normal components do we join
+/// it onto the sync root. Returns `None` (→ Tier-2) on any failure: missing
+/// sync root, absent row, empty/illegal rel path.
+fn db_placeholder_path(bridge: &crate::engine_bridge::EngineBridge, file_id: &str) -> Option<std::path::PathBuf> {
+    let sync_root = super::sync_root()?;
+
+    let entry = match bridge.db().get_file(file_id) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            tracing::warn!(file_id = %file_id, "size-resolve fallback: file_id absent from state DB");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(file_id = %file_id, error = %e, "size-resolve fallback: state DB read failed");
+            return None;
+        }
+    };
+
+    match safe_join_under_root(&sync_root, &entry.path) {
+        Some(p) => Some(p),
+        None => {
+            tracing::warn!(file_id = %file_id, "size-resolve fallback: rejecting unsafe/empty relative path");
+            None
+        }
+    }
+}
+
+/// Join a server-relative, '/'-separated `rel_path` onto `sync_root`, returning
+/// the on-disk path ONLY if it is provably contained under the root. Pure +
+/// unit-testable (no CF / DB state). Mirrors `populate_placeholders`'
+/// `trim_matches('/')` → `replace('/', MAIN_SEPARATOR)` mapping, but rejects:
+///   - an empty rel path (would resolve to the root itself),
+///   - any segment that is empty, `.`, or `..` (traversal),
+/// then re-checks lexical containment as belt-and-suspenders. Returns `None` on
+/// any rejection so the caller falls through to Tier-2 (visible error).
+fn safe_join_under_root(sync_root: &std::path::Path, rel_path: &str) -> Option<std::path::PathBuf> {
+    let rel = rel_path.trim_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return None;
+    }
+    let native_rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+    let candidate = sync_root.join(&native_rel);
+    // The joined path must still be under the sync root. We compare lexically
+    // (we avoid canonicalize() — it would resolve the placeholder's reparse
+    // point; the per-segment check above already blocks traversal).
+    if !candidate.starts_with(sync_root) {
+        return None;
+    }
+    Some(candidate)
 }
 
 // ── Upload triggers — Cloud Files NOTIFY callbacks (task 0780) ───────────────
@@ -849,5 +950,39 @@ mod tests {
             decide_size_action(100, 40),
             SizeDecision::ResolveTo { corrected_size: 100 }
         );
+    }
+
+    /// The DB-fallback path builder (task 0783 follow-up): a clean relative
+    /// path joins onto the sync root with native separators, tolerating a
+    /// leading/trailing slash exactly as populate_placeholders does.
+    #[test]
+    fn safe_join_builds_path_under_root() {
+        let root = std::path::Path::new("C:\\Users\\me\\Beebeeb");
+        // Leading slash + nested path → joined under the root.
+        assert_eq!(
+            safe_join_under_root(root, "/docs/report.txt"),
+            Some(root.join("docs").join("report.txt"))
+        );
+        // Bare leaf, no slash.
+        assert_eq!(
+            safe_join_under_root(root, "bb-test-upload.txt"),
+            Some(root.join("bb-test-upload.txt"))
+        );
+    }
+
+    /// Path-safety guard: empty, root-only, and traversal rel paths are all
+    /// rejected so a server-controlled path can never escape the sync root.
+    #[test]
+    fn safe_join_rejects_unsafe_paths() {
+        let root = std::path::Path::new("C:\\Users\\me\\Beebeeb");
+        assert_eq!(safe_join_under_root(root, ""), None);
+        assert_eq!(safe_join_under_root(root, "/"), None);
+        assert_eq!(safe_join_under_root(root, "///"), None);
+        // `..` traversal anywhere in the path is refused.
+        assert_eq!(safe_join_under_root(root, "../escape.txt"), None);
+        assert_eq!(safe_join_under_root(root, "docs/../../escape.txt"), None);
+        assert_eq!(safe_join_under_root(root, "docs/./report.txt"), None);
+        // Empty interior segment (double slash) is refused.
+        assert_eq!(safe_join_under_root(root, "docs//report.txt"), None);
     }
 }
