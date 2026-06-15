@@ -19,7 +19,7 @@
  *   autostart_enabled, toggle_autostart
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   command,
   commandUnavailableLabel,
@@ -915,6 +915,12 @@ export default function WindowsSettings() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [config, setConfig] = useState<DesktopConfig>(DEFAULT_CONFIG)
+  // Synchronous source of truth for the freshest config. `config` (state) lags
+  // by a render; `configRef.current` is updated the instant a patch is applied,
+  // so two same-tick toggle clicks merge cumulatively instead of each starting
+  // from the same stale closure. Kept in sync wherever config is authoritatively
+  // set: the initial load-from-disk below, and every patch in handleConfigChange.
+  const configRef = useRef<DesktopConfig>(DEFAULT_CONFIG)
   const [notice, setNotice] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -944,21 +950,27 @@ export default function WindowsSettings() {
   // Load config — desktop_config returns null on first run (no config file yet)
   useEffect(() => {
     command<DesktopConfig | null>('desktop_config').then((result) => {
-      if (result.ok && result.value != null) setConfig(result.value)
+      if (result.ok && result.value != null) {
+        // Seed both the ref (synchronous source of truth) and the state so the
+        // first patch merges against the on-disk config, not DEFAULT_CONFIG.
+        configRef.current = result.value
+        setConfig(result.value)
+      }
     })
   }, [])
 
   const handleConfigChange = async (patch: Partial<DesktopConfig>) => {
     setNotice(null)
-    // Compute `next` synchronously from the closed-over `config` plus `patch`,
-    // then use that one value for BOTH the optimistic UI update and the IPC
-    // write — so they can never disagree. This is correct because `patch`
-    // already carries the intended *new* value of the toggled field (the Toggle
-    // passes its target state, not the current one). We do NOT use setConfig's
-    // functional form here: deriving `next` first guarantees the value sent to
-    // set_desktop_config is exactly what the click intended (the prior bug sent
-    // a stale snapshot because it read `next` before the functional update ran).
-    const next: DesktopConfig = { ...config, ...patch }
+    // Merge against configRef.current (the freshest value), NOT the closed-over
+    // `config` state, then advance the ref synchronously BEFORE awaiting the IPC.
+    // This is what makes two same-tick toggle clicks both persist: the second
+    // call runs after the first has already written its merged result into the
+    // ref, so it merges on top of that — both patches survive. (Reading the
+    // lagging `config` state instead would make the second click clobber the
+    // first.) We update the ref outside any setConfig updater so StrictMode's
+    // double-invocation of updaters can't fire the IPC twice.
+    const next: DesktopConfig = { ...configRef.current, ...patch }
+    configRef.current = next
     setConfig(next)
     const result = await command<void>('set_desktop_config', { config: next })
     if (!result.ok) {
