@@ -9,6 +9,13 @@ use std::fmt;
 const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
 const SESSION_TOKEN_ACCOUNT: &str = "session-token";
 const WRAPPED_MASTER_KEY_ACCOUNT: &str = "wrapped-master-key";
+// Account email (PII) persisted alongside the session so the Account page can
+// show it after an auto-unlock on relaunch — the credential store is the only
+// place it survives, since neither the token nor the wrapped key carries it.
+// Stored in the SAME protected credential vault as the secrets above (NOT a
+// plaintext config file). It is account metadata, not key material, so it is
+// handled as a plain UTF-8 string rather than `SecretBytes`.
+const ACCOUNT_EMAIL_ACCOUNT: &str = "account-email";
 const MASTER_KEY_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +110,24 @@ pub trait AuthSecretStore: Send + Sync {
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()>;
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>>;
     fn delete_wrapped_master_key(&self) -> AuthResult<()>;
+    /// Persist the signed-in account email (PII metadata) in the credential
+    /// vault. Stored as a UTF-8 blob under a dedicated account so it can be
+    /// recovered on the auto-unlock path. Default impls below provide
+    /// backward-compatible behaviour for any store that predates this entry.
+    fn save_account_email(&self, _email: &str) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported("account email storage not supported by this store"))
+    }
+    /// Read the persisted account email. Returns `Ok(None)` when none was ever
+    /// stored (an existing session created before this entry existed), so the
+    /// auto-unlock path falls back to `email = None` without erroring.
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        Ok(None)
+    }
+    /// Remove the persisted account email. A no-op success when absent, matching
+    /// the token/key delete semantics so logout stays idempotent.
+    fn delete_account_email(&self) -> AuthResult<()> {
+        Ok(())
+    }
 }
 
 pub struct AuthVault<S: AuthSecretStore> {
@@ -136,6 +161,28 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.store.save_wrapped_master_key(wrapped)
     }
 
+    /// Persist the account email alongside the session. Empty/whitespace-only
+    /// input is treated as "no email" and skips the write so we never store a
+    /// blank credential blob (the backends reject empty blobs anyway).
+    pub fn store_account_email(&self, email: &str) -> AuthResult<()> {
+        if email.trim().is_empty() {
+            return Ok(());
+        }
+        self.store.save_account_email(email)
+    }
+
+    /// Read the persisted account email, or `None` if none was stored (e.g. a
+    /// session created before email persistence existed). On a store that does
+    /// not support email persistence (the Unsupported error), treat it as
+    /// "no email" rather than failing the whole restore.
+    pub fn account_email(&self) -> AuthResult<Option<String>> {
+        match self.store.load_account_email() {
+            Ok(email) => Ok(email),
+            Err(AuthStoreError::Unsupported(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn unlock(&mut self) -> AuthResult<()> {
         let Some(master_key) = self.store.load_wrapped_master_key()? else {
             self.lock();
@@ -159,6 +206,10 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.lock();
         self.store.delete_session_token()?;
         self.store.delete_wrapped_master_key()?;
+        // Also drop the persisted account email so logout leaves no PII behind.
+        // `delete_account_email` is a no-op success when absent, so this stays
+        // idempotent and never fails just because email was never stored.
+        self.store.delete_account_email()?;
         Ok(())
     }
 
@@ -235,6 +286,20 @@ impl AuthSecretStore for MacOsKeychainStore {
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
         macos_keychain::delete(WRAPPED_MASTER_KEY_ACCOUNT)
+    }
+
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        macos_keychain::save(ACCOUNT_EMAIL_ACCOUNT, email.as_bytes())
+    }
+
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        macos_keychain::load(ACCOUNT_EMAIL_ACCOUNT)?
+            .map(|bytes| String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8")))
+            .transpose()
+    }
+
+    fn delete_account_email(&self) -> AuthResult<()> {
+        macos_keychain::delete(ACCOUNT_EMAIL_ACCOUNT)
     }
 }
 
@@ -363,6 +428,20 @@ impl AuthSecretStore for WindowsCredentialStore {
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
         windows_credentials::delete(WRAPPED_MASTER_KEY_ACCOUNT)
+    }
+
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        windows_credentials::save(ACCOUNT_EMAIL_ACCOUNT, email.as_bytes())
+    }
+
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        windows_credentials::load(ACCOUNT_EMAIL_ACCOUNT)?
+            .map(|bytes| String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8")))
+            .transpose()
+    }
+
+    fn delete_account_email(&self) -> AuthResult<()> {
+        windows_credentials::delete(ACCOUNT_EMAIL_ACCOUNT)
     }
 }
 
@@ -619,6 +698,7 @@ mod tests {
     struct MemoryStore {
         token: Mutex<Option<Vec<u8>>>,
         key: Mutex<Option<Vec<u8>>>,
+        email: Mutex<Option<String>>,
     }
 
     impl AuthSecretStore for MemoryStore {
@@ -647,6 +727,17 @@ mod tests {
         }
         fn delete_wrapped_master_key(&self) -> AuthResult<()> {
             *self.key.lock().unwrap() = None;
+            Ok(())
+        }
+        fn save_account_email(&self, email: &str) -> AuthResult<()> {
+            *self.email.lock().unwrap() = Some(email.to_string());
+            Ok(())
+        }
+        fn load_account_email(&self) -> AuthResult<Option<String>> {
+            Ok(self.email.lock().unwrap().clone())
+        }
+        fn delete_account_email(&self) -> AuthResult<()> {
+            *self.email.lock().unwrap() = None;
             Ok(())
         }
     }
@@ -695,6 +786,56 @@ mod tests {
 
         assert!(matches!(vault.unlock(), Err(AuthStoreError::InvalidSecret(_))));
         assert_eq!(vault.lock_state(), VaultLockState::Locked);
+    }
+
+    /// The account email round-trips through the store so the auto-unlock path
+    /// can recover it: persist on login, read back on relaunch.
+    #[test]
+    fn account_email_round_trips() {
+        let vault = AuthVault::new(MemoryStore::default());
+        vault.store_account_email("user@example.com").unwrap();
+        assert_eq!(vault.account_email().unwrap().as_deref(), Some("user@example.com"));
+    }
+
+    /// Backward-compat: a session stored BEFORE email persistence existed has no
+    /// email entry, so `account_email()` returns `None` cleanly — never an error
+    /// or panic. This is the existing-stored-session upgrade path.
+    #[test]
+    fn account_email_absent_returns_none() {
+        let vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("token").unwrap()).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key([7u8; MASTER_KEY_BYTES]))
+            .unwrap();
+        // No email was ever stored.
+        assert_eq!(vault.account_email().unwrap(), None);
+    }
+
+    /// An empty/whitespace email is treated as "no email" and never written, so
+    /// we don't persist a blank credential blob.
+    #[test]
+    fn empty_account_email_is_not_stored() {
+        let vault = AuthVault::new(MemoryStore::default());
+        vault.store_account_email("   ").unwrap();
+        assert_eq!(vault.account_email().unwrap(), None);
+    }
+
+    /// Logout (`clear_session`) wipes the persisted email along with the token
+    /// and key — no PII left behind.
+    #[test]
+    fn clear_session_removes_account_email() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("token").unwrap()).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key([7u8; MASTER_KEY_BYTES]))
+            .unwrap();
+        vault.store_account_email("user@example.com").unwrap();
+        assert_eq!(vault.account_email().unwrap().as_deref(), Some("user@example.com"));
+
+        vault.clear_session().unwrap();
+
+        assert_eq!(vault.account_email().unwrap(), None);
+        assert_eq!(vault.session_token().unwrap(), None);
     }
 }
 

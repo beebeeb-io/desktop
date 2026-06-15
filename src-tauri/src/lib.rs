@@ -141,7 +141,7 @@ fn keychain_error(context: &str, error: impl fmt::Display) -> String {
     format!("{context}: {error}")
 }
 
-fn persist_session_to_keychain(token: &str, master_key: [u8; 32]) -> Result<(), String> {
+fn persist_session_to_keychain(token: &str, master_key: [u8; 32], email: Option<&str>) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store());
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
     vault
@@ -149,15 +149,41 @@ fn persist_session_to_keychain(token: &str, master_key: [u8; 32]) -> Result<(), 
         .map_err(|e| keychain_error("store session in Keychain", e))?;
     vault
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
-        .map_err(|e| keychain_error("store vault key in Keychain", e))
+        .map_err(|e| keychain_error("store vault key in Keychain", e))?;
+    // Persist the account email alongside the secrets so the Account page can
+    // show it after an auto-unlock on relaunch. Non-fatal (see helper): the email
+    // is display metadata, so a store that can't hold it never fails the login.
+    // Empty/None → skip.
+    persist_account_email_to_keychain(&vault, email)
 }
 
-fn persist_session_token_to_keychain(token: &str) -> Result<(), String> {
+fn persist_session_token_to_keychain(token: &str, email: Option<&str>) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store());
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
     vault
         .install_session(token)
-        .map_err(|e| keychain_error("store session in Keychain", e))
+        .map_err(|e| keychain_error("store session in Keychain", e))?;
+    persist_account_email_to_keychain(&vault, email)
+}
+
+/// Store the account email in the credential vault if one is provided.
+///
+/// Always returns `Ok(())`: the email is display metadata (it lets the Account
+/// page show who is signed in after an auto-unlock), NOT key material required
+/// to authenticate or unlock. A store that can't hold it must never fail an
+/// otherwise-successful login — so a persist error is logged and swallowed
+/// rather than surfaced. `None`/empty is a no-op.
+fn persist_account_email_to_keychain(
+    vault: &AuthVault<keychain::PlatformKeychainStore>,
+    email: Option<&str>,
+) -> Result<(), String> {
+    let Some(email) = email else {
+        return Ok(());
+    };
+    if let Err(e) = vault.store_account_email(email) {
+        tracing::warn!(error = %e, "could not persist account email to credential store (non-fatal)");
+    }
+    Ok(())
 }
 
 fn persist_vault_key_to_keychain(master_key: [u8; 32]) -> Result<(), String> {
@@ -186,6 +212,17 @@ fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, 
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;
     let mut master_key = [0u8; 32];
     master_key.copy_from_slice(vault.master_key().map_err(|e| keychain_error("read vault key", e))?);
+    // Prefer an email already known in memory (e.g. carried through from a live
+    // unlock). Otherwise recover the one persisted in the credential vault so the
+    // Account page can show it after an auto-unlock on relaunch. A session stored
+    // before email persistence existed simply yields `None` here (no error) —
+    // backward-compatible by construction.
+    let email = match email {
+        Some(email) => Some(email),
+        None => vault
+            .account_email()
+            .map_err(|e| keychain_error("read account email", e))?,
+    };
     Ok(Some(Session {
         token: token.expose_for_request().to_string(),
         master_key,
@@ -516,7 +553,7 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
     }
 
-    if let Err(e) = persist_session_token_to_keychain(&session_token) {
+    if let Err(e) = persist_session_token_to_keychain(&session_token, Some(&email)) {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err(e);
     }
@@ -559,6 +596,16 @@ async fn desktop_unlock_with_recovery_phrase(
     let master_key: [u8; 32] = master_key_struct.to_bytes();
 
     persist_vault_key_to_keychain(master_key)?;
+    // `desktop_login` already persisted the email when it stored the token, but
+    // persist again here (idempotent) so the invariant "a fully-provisioned
+    // session has its email in the store" holds even if memory and store drift.
+    if let Some(email) = email.as_deref() {
+        let vault = AuthVault::new(platform_keychain_store());
+        if let Err(e) = vault.store_account_email(email) {
+            // Non-fatal: the email is display metadata, not required to unlock.
+            tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
+        }
+    }
 
     {
         let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
@@ -684,7 +731,7 @@ pub(crate) async fn apply_session(
     master_key: [u8; 32],
     email: Option<String>,
 ) -> Result<(), String> {
-    persist_session_to_keychain(&token, master_key)?;
+    persist_session_to_keychain(&token, master_key, email.as_deref())?;
     let token_clone = token.clone();
 
     {
