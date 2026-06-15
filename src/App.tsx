@@ -9,6 +9,7 @@ import Notifications from './pages/Notifications'
 import Account from './pages/Account'
 import Shared from './pages/Shared'
 import VersionCenter from './pages/VersionCenter'
+import UpdateBanner from './UpdateBanner'
 
 type Page =
   | 'status'
@@ -106,42 +107,45 @@ export default function App() {
   const locked = status?.logged_in && status.engine !== 'running'
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">b</div>
-          <div>
-            <div className="brand-name">Beebeeb</div>
-            <div className="brand-subtitle">macOS Drive</div>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      <UpdateBanner />
+      <div className="app-shell" style={{ flex: 1 }}>
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">b</div>
+            <div>
+              <div className="brand-name">Beebeeb</div>
+              <div className="brand-subtitle">macOS Drive</div>
+            </div>
           </div>
-        </div>
 
-        <div className="nav-group">
-          {NAV.map((item) => (
-            <button
-              key={item.id}
-              className={`nav-button ${page === item.id ? 'active' : ''}`}
-              onClick={() => setPage(item.id)}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="sidebar-footer">
-          <div className="status-pill" style={{ marginBottom: 10 }}>
-            <span
-              className={`dot ${status?.engine === 'running' ? 'ok' : locked ? 'warn' : ''}`}
-            />
-            {status?.logged_in ? (locked ? 'Needs unlock' : 'Signed in') : 'Signed out'}
+          <div className="nav-group">
+            {NAV.map((item) => (
+              <button
+                key={item.id}
+                className={`nav-button ${page === item.id ? 'active' : ''}`}
+                onClick={() => setPage(item.id)}
+              >
+                <span className="nav-icon">{item.icon}</span>
+                <span>{item.label}</span>
+              </button>
+            ))}
           </div>
-          <div>{status?.engine === 'running' ? 'Finder-backed vault' : 'Finder location not installed'}</div>
-          {version && <div style={{ marginTop: 8 }}>Version {version}</div>}
-        </div>
-      </aside>
 
-      <main className="content">{renderPage()}</main>
+          <div className="sidebar-footer">
+            <div className="status-pill" style={{ marginBottom: 10 }}>
+              <span
+                className={`dot ${status?.engine === 'running' ? 'ok' : locked ? 'warn' : ''}`}
+              />
+              {status?.logged_in ? (locked ? 'Needs unlock' : 'Signed in') : 'Signed out'}
+            </div>
+            <div>{status?.engine === 'running' ? 'Finder-backed vault' : 'Finder location not installed'}</div>
+            {version && <div style={{ marginTop: 8 }}>Version {version}</div>}
+          </div>
+        </aside>
+
+        <main className="content">{renderPage()}</main>
+      </div>
     </div>
   )
 }

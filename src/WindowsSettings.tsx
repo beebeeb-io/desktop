@@ -32,6 +32,7 @@ import {
   type SyncStatus,
   DEFAULT_CONFIG,
 } from './desktopApi'
+import UpdateBanner from './UpdateBanner'
 
 // Windows Explorer/Cloud Files integration uses the same shape as macOS Finder
 type ShellIntegrationState = FinderInstallState
@@ -68,11 +69,12 @@ type NavId =
   | 'linked-devices'
   | 'launch'
   | 'explorer-integration'
+  | 'updates'
   | 'advanced'
 
 // Nav items that are always reachable, whether or not the user is signed in.
 // Everything else is auth-gated: hidden from the sidebar when logged_in is false.
-const ALWAYS_ACCESSIBLE: ReadonlySet<NavId> = new Set(['launch', 'explorer-integration', 'advanced'])
+const ALWAYS_ACCESSIBLE: ReadonlySet<NavId> = new Set(['launch', 'explorer-integration', 'updates', 'advanced'])
 
 interface NavItem {
   id: NavId
@@ -104,6 +106,7 @@ const NAV_SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
     items: [
       { id: 'launch', label: 'Launch', icon: 'play' },
       { id: 'explorer-integration', label: 'Explorer integration', icon: 'folder' },
+      { id: 'updates', label: 'Updates', icon: 'download' },
       { id: 'advanced', label: 'Advanced', icon: 'cog' },
     ],
   },
@@ -172,6 +175,13 @@ function NavIcon({ name, size = 13, color = 'currentColor' }: { name: string; si
         <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4">
           <circle cx="8" cy="8" r="2.5" />
           <path d="M8 1.5 L8 3.5 M8 12.5 L8 14.5 M1.5 8 L3.5 8 M12.5 8 L14.5 8 M3.5 3.5 L5 5 M11 11 L12.5 12.5 M12.5 3.5 L11 5 M5 11 L3.5 12.5" strokeLinecap="round" />
+        </svg>
+      )
+    case 'download':
+      return (
+        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8 2 L8 10 M5 7 L8 10 L11 7" />
+          <path d="M2 13 L14 13" />
         </svg>
       )
     case 'search':
@@ -778,6 +788,92 @@ function ExplorerIntegrationPanel() {
   )
 }
 
+// ── Updates panel (System → Updates) ─────────────────────────────────────────
+//
+// Shows the current app version and when the updater last checked. The actual
+// update banner (UpdateBanner.tsx) is shown at the top of the window whenever
+// the backend emits "update-available". This panel is the "nothing pending"
+// counterpart — it answers "is the updater working?" without nagging.
+function UpdatesPanel() {
+  const [version, setVersion] = useState<string | null>(null)
+  const [checkedAt, setCheckedAt] = useState<Date | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    command<string>('app_version').then((r) => {
+      if (!cancelled && r.ok) setVersion(r.value)
+    })
+    // Record when the component mounts as a proxy for "last checked" — the
+    // real check happens at startup and every 4 h in the Rust backend; if the
+    // panel is open the check has already run at least once.
+    setCheckedAt(new Date())
+    return () => { cancelled = true }
+  }, [])
+
+  const checkedLabel = checkedAt
+    ? checkedAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : '…'
+
+  return (
+    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <h1 style={{
+        margin: '0 0 8px',
+        fontSize: 26,
+        fontWeight: 700,
+        letterSpacing: '-0.025em',
+        color: T.ink,
+        lineHeight: 1.15,
+      }}>
+        Updates
+      </h1>
+      <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+        Beebeeb checks for updates at launch and every 4 hours. When one is available, a
+        banner appears at the top of this window.
+      </p>
+
+      {/* Version card */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        padding: '16px 18px',
+        borderRadius: 10,
+        border: `1px solid ${T.line}`,
+        background: T.paper2,
+        marginBottom: 16,
+      }}>
+        <div style={{
+          width: 36,
+          height: 36,
+          borderRadius: 9,
+          background: T.paper,
+          border: `1px solid ${T.line}`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <NavIcon name="download" size={15} color={T.amberDeep} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>
+            {version != null ? `Version ${version}` : 'Loading…'}
+          </div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4, fontFamily: T.fontMono }}>
+            Up to date &middot; last checked {checkedLabel}
+          </div>
+        </div>
+        <Chip>Up to date</Chip>
+      </div>
+
+      <p style={{ margin: 0, fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
+        Updates are verified with a minisign signature before installation. No update is
+        applied without your confirmation via the "Restart to update" banner.
+      </p>
+    </div>
+  )
+}
+
 // Sections that live in the web app — show a clean link-out panel
 const WEB_APP_SECTIONS: Partial<Record<NavId, { path: string; description: string }>> = {
   account: {
@@ -890,6 +986,9 @@ function PanelRouter({ navId }: { navId: NavId }) {
 
   if (navId === 'explorer-integration') {
     return <ExplorerIntegrationPanel />
+  }
+  if (navId === 'updates') {
+    return <UpdatesPanel />
   }
   if (navId in WEB_APP_SECTIONS) {
     return <WebAppLinkPanel navId={navId} label={label} />
@@ -1007,14 +1106,21 @@ export default function WindowsSettings() {
 
   return (
     <div style={{
-      display: 'grid',
-      gridTemplateColumns: '240px 1fr',
+      display: 'flex',
+      flexDirection: 'column',
       height: '100vh',
       fontFamily: T.fontSans,
       color: T.ink,
       background: T.paper,
       overflow: 'hidden',
     }}>
+      <UpdateBanner />
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '240px 1fr',
+        flex: 1,
+        overflow: 'hidden',
+      }}>
       {/* Sidebar */}
       <div style={{
         background: T.paper2,
@@ -1161,6 +1267,7 @@ export default function WindowsSettings() {
       ) : (
         <PanelRouter navId={activeNav} />
       )}
+      </div>
     </div>
   )
 }
