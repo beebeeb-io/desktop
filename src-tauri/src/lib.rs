@@ -952,6 +952,24 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     }
     drop(engine_slot);
 
+    // Windows: remove the Explorer SHELL registration (nav-pane entry, Status
+    // column, overlays) on sign-out so a logged-out machine doesn't show a dead
+    // "Beebeeb" sidebar entry pointing at a folder the user is no longer signed
+    // into. The Win32 Cloud Files registration + placeholders are left in place
+    // (they re-converge on the next login via connect_root); this strips only the
+    // shell chrome. Best-effort and engine-independent: the Id is reconstructed
+    // from the persisted sync-root path, so this works after the engine is
+    // aborted above. A failure (incl. "not registered") is logged, not surfaced —
+    // logout must always appear to succeed.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(root) = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
+            if let Err(error) = windows_cf::unregister_shell_sync_root(&root) {
+                tracing::warn!(error = %error, "Explorer shell sync-root unregister on logout failed (best-effort)");
+            }
+        }
+    }
+
     match state.session.lock() {
         Ok(mut guard) => {
             guard.take();
@@ -1530,6 +1548,19 @@ async fn install_windows_shell_integration(
             return Err(error);
         }
 
+        // Write the Explorer SHELL registration (Status column + cloud/check
+        // overlays + "Beebeeb" sidebar entry + "Free up space" menu) right after
+        // the Win32 platform registration. PURELY ADDITIVE — the Win32 path above
+        // already drives placeholders + hydration; this adds only the shell
+        // metadata that makes the folder look like OneDrive in Explorer. The
+        // engine runner re-runs it on spawn (windows_cf::connect_root), so a
+        // re-login reconverges. Best-effort: a shell-registration failure must
+        // NOT fail onboarding (placeholders + hydration still work without it),
+        // so we log and continue rather than returning an error here.
+        if let Err(error) = windows_cf::register_shell_sync_root(&root) {
+            tracing::warn!(error = %error, "Explorer shell sync-root registration failed during onboarding; overlays/column/sidebar may be absent (hydration unaffected)");
+        }
+
         // Persist the sync root and (re)start the engine, which will connect the
         // Cloud Files fetch callbacks and seed placeholders.
         if let Err(error) = persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await {
@@ -1634,6 +1665,23 @@ async fn reset_macos_integration(
     drop(engine_slot);
     if let Ok(mut guard) = state.engine_state.lock() {
         *guard = "stopped".to_string();
+    }
+
+    // Windows: strip the Explorer SHELL registration (nav-pane entry, Status
+    // column, overlays) as part of a full integration reset — the analogue of
+    // removing the Finder File Provider domain on macOS below. The Win32 Cloud
+    // Files registration + placeholders are intentionally left intact (the reset
+    // preserves the sync root + queued operations); this removes only the shell
+    // chrome, which a subsequent install / login re-creates via connect_root.
+    // Best-effort: a failure (incl. "not registered") is collected as a warning,
+    // never fatal.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(root) = cfg.sync_root.clone() {
+            if let Err(error) = windows_cf::unregister_shell_sync_root(&root) {
+                warnings.push(format!("Could not remove Explorer shell sync-root entry: {error}"));
+            }
+        }
     }
 
     let removed_socket = match remove_stale_ipc_socket() {

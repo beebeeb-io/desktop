@@ -178,6 +178,31 @@ windows = { version = "0.58", features = [
     # ever pass `None` for the overlapped arg (synchronous calls), but the
     # type must still resolve for the function to compile.
     "Win32_System_IO",
+    # ── WinRT Explorer SHELL registration (task: OneDrive-class shell entry) ──
+    # `register_sync_root` above registers the sync root with the Cloud Files
+    # PLATFORM (Win32 CfRegisterSyncRoot) — that drives placeholders + hydration
+    # but writes NO Explorer shell metadata, so Explorer shows no Status column,
+    # no overlays, no sidebar entry, no "Free up space" menu. The WinRT
+    # `StorageProviderSyncRootManager::Register(StorageProviderSyncRootInfo)`
+    # call (windows_cf::register_shell_sync_root) writes the SyncRootManager shell
+    # entry + CLSID namespace tree + nav-pane mount in one call. These features
+    # expose that API surface (verified present in windows-0.58 on disk):
+    #   - Storage_Provider: StorageProviderSyncRootManager / …SyncRootInfo /
+    #     StorageProviderItemPropertyDefinition + the policy enums.
+    #   - Storage: StorageFolder::GetFolderFromPathAsync (Path = a StorageFolder).
+    #   - Foundation / Foundation_Collections: IAsyncOperation::get() +
+    #     the IVector<…> for the Status-column property definitions.
+    #   - Storage_Streams: the IBuffer type for StorageProviderSyncRootInfo.Context
+    #     (its setter is `#[cfg(feature = "Storage_Streams")]`-gated in 0.58).
+    #   - Security_Cryptography: CryptographicBuffer::CreateFromByteArray to build
+    #     the opaque Context IBuffer from the Id bytes without hand-rolling a
+    #     DataWriter.
+    "Storage_Provider",
+    "Storage",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+    "Security_Cryptography",
 ] }
 
 [dev-dependencies]

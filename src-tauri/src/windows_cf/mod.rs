@@ -313,6 +313,284 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
     Ok(())
 }
 
+/// Stable, deterministic 64-bit FNV-1a hash of the sync-root path bytes.
+///
+/// Used only to mint the WinRT shell-registration `Id` (see
+/// [`shell_sync_root_id`]). FNV-1a is chosen because it is tiny, dependency
+/// free, and — critically — STABLE across releases and machines (a fixed
+/// algorithm with fixed constants), which is exactly what the shell `Id`
+/// requires: the same sync root must hash to the same Id on every launch so
+/// re-registration is idempotent and [`unregister_shell_sync_root`] can
+/// reconstruct the Id from the persisted sync-root path alone.
+#[cfg(target_os = "windows")]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// The stable WinRT shell-registration `Id` for a given sync root.
+///
+/// ## Id scheme — `Beebeeb!<fnv1a64(sync_root)>` (chosen + why)
+///
+/// `StorageProviderSyncRootManager::Register` keys every shell entry by this
+/// string Id; `Unregister` takes the same Id. So the Id MUST be:
+///
+/// 1. **Stable across releases/launches** — a re-register of the same root must
+///    hit the same entry (idempotent), and sign-out must be able to unregister
+///    it. We derive it purely from the sync-root path, which is persisted in
+///    `desktop.toml` (`DesktopConfig.sync_root`) and is the one piece of
+///    identity reachable from BOTH `register_shell_sync_root(sync_root)` and the
+///    sign-out path (`clear_session`, which has only the config, not the running
+///    engine). A fixed FNV-1a of the path is fully deterministic.
+/// 2. **Forward-compatible with multi-account** — each account maps to its own
+///    sync-root folder, so distinct accounts naturally hash to distinct Ids
+///    without any schema change here. When real multi-account lands, the same
+///    function keeps working per-root; if a SID/account component is later wanted
+///    for nav-pane grouping it can be appended as a third `!`-segment
+///    (`Beebeeb!<sid>!<account>`) without disturbing existing single-account Ids.
+///
+/// We deliberately do NOT embed the Windows user SID here (the OneDrive
+/// `OneDrive!<sid>!Business1` form): pulling the SID needs extra Win32 token +
+/// authorization features and an unsafe `GetTokenInformation`/`ConvertSidToStringSidW`
+/// dance, and `Register` accepts a plain `provider!stableid` Id for a
+/// single-account provider. The path hash gives the same stability with zero
+/// extra deps and trivial reconstruction at sign-out.
+///
+/// The `Beebeeb!` prefix namespaces the provider (mirrors OneDrive/ProtonDrive's
+/// `<Provider>!…` convention) and matches the Win32 [`PROVIDER_ID`] name so the
+/// two registrations read as the same provider in tooling.
+#[cfg(target_os = "windows")]
+fn shell_sync_root_id(sync_root: &std::path::Path) -> String {
+    // Normalise the path string the same way `register_sync_root` does (lossy
+    // UTF-8 of the OS path) so the Id is computed from a canonical byte form and
+    // both register + unregister agree.
+    let canonical = sync_root.to_string_lossy();
+    format!("{}!{:016x}", PROVIDER_ID, fnv1a64(canonical.as_bytes()))
+}
+
+/// Write the Explorer SHELL registration for the Beebeeb sync root via WinRT
+/// `StorageProviderSyncRootManager::Register`.
+///
+/// ## What this adds (and why it's separate from [`register_sync_root`])
+///
+/// [`register_sync_root`] registers the root with the Cloud Files **platform**
+/// (Win32 `CfRegisterSyncRoot`) — that is what drives placeholders + on-demand
+/// hydration, and it is verified working. But it writes **no Explorer shell
+/// metadata**, so Explorer shows no Status column, no cloud/check overlays, no
+/// "Beebeeb" sidebar entry, and no "Free up space" context menu. This function
+/// writes that shell metadata — the `…\Explorer\SyncRootManager\<id>` shell
+/// entry, the `CLSID\{…}` namespace tree, and the nav-pane mount — in one WinRT
+/// call. The per-file in-sync / pin state is already stamped by
+/// `create_placeholder` (MARK_IN_SYNC) and `mark_in_sync`/`mark_not_in_sync`, so
+/// once the provider is shell-registered the overlays, Status column, sidebar
+/// entry, and menu all render from existing state — no per-file rework.
+///
+/// **Purely additive.** It does NOT touch the Win32 registration, the FETCH_DATA
+/// callback, or the ALWAYS_FULL/PARTIAL population/hydration contract. The two
+/// registrations are kept in agreement: the WinRT policies below mirror the
+/// Win32 `CF_SYNC_POLICIES` — `HydrationPolicy = Partial` ↔ `CF_HYDRATION_POLICY_PARTIAL`,
+/// `PopulationPolicy = AlwaysFull` ↔ `CF_POPULATION_POLICY_ALWAYS_FULL`.
+///
+/// Best-effort: every failure is returned as `Err` for the caller to log-and-
+/// continue. A shell-registration failure must never break login / engine /
+/// hydration — those run off the Win32 path, which is independent of this.
+///
+/// Idempotent: if a sync root is already shell-registered for this folder we
+/// skip the re-register (a duplicate `Register` for the same Id throws), and a
+/// "already registered" error is swallowed as success.
+#[cfg(target_os = "windows")]
+pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
+    use windows::Foundation::Collections::IVector;
+    use windows::Security::Cryptography::CryptographicBuffer;
+    use windows::Storage::Provider::{
+        StorageProviderHardlinkPolicy, StorageProviderHydrationPolicy,
+        StorageProviderHydrationPolicyModifier, StorageProviderInSyncPolicy,
+        StorageProviderItemPropertyDefinition, StorageProviderPopulationPolicy,
+        StorageProviderProtectionMode, StorageProviderSyncRootInfo, StorageProviderSyncRootManager,
+    };
+    use windows::Storage::{IStorageFolder, StorageFolder};
+    use windows::core::{HSTRING, Interface};
+
+    let id = shell_sync_root_id(sync_root);
+    let id_h = HSTRING::from(id.as_str());
+
+    // Resolve the sync-root folder as a WinRT StorageFolder (the `Path` property
+    // is a StorageFolder, not a string). `GetFolderFromPathAsync` is async; we are
+    // on a normal (non-callback) thread here so blocking on `.get()` is fine.
+    let path_h = HSTRING::from(&*sync_root.to_string_lossy());
+    let folder: StorageFolder = StorageFolder::GetFolderFromPathAsync(&path_h)
+        .map_err(|e| anyhow::anyhow!("GetFolderFromPathAsync queue failed: {e}"))?
+        .get()
+        .map_err(|e| anyhow::anyhow!("GetFolderFromPathAsync failed for sync root: {e}"))?;
+
+    // Idempotency guard: if this folder is already shell-registered, do not
+    // re-register (a second Register with the same Id throws). We probe by Id
+    // rather than by folder so a stale registration whose folder moved is still
+    // found.
+    if StorageProviderSyncRootManager::GetSyncRootInformationForId(&id_h).is_ok() {
+        tracing::info!(
+            sync_root = %sync_root.display(),
+            "Explorer shell sync root already registered; skipping re-register"
+        );
+        return Ok(());
+    }
+
+    let info = StorageProviderSyncRootInfo::new()
+        .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootInfo::new failed: {e}"))?;
+
+    info.SetId(&id_h)
+        .map_err(|e| anyhow::anyhow!("SetId failed: {e}"))?;
+    // `SetPath` takes `Param<IStorageFolder>` (the interface), and the
+    // `Param<…, InterfaceType> for &U` blanket impl only fires when `U:
+    // CanInto<IStorageFolder>`. `StorageFolder` (the concrete runtime class) does
+    // NOT auto-declare `CanInto<IStorageFolder>` in windows-0.58 — its
+    // `interface_hierarchy!` lists only IUnknown/IInspectable — so `&folder`
+    // fails to satisfy the bound. QueryInterface the class to the interface it
+    // implements, then pass that owned `IStorageFolder` (which trivially
+    // satisfies `Param<IStorageFolder>`).
+    let folder_iface: IStorageFolder = folder
+        .cast::<IStorageFolder>()
+        .map_err(|e| anyhow::anyhow!("cast StorageFolder→IStorageFolder failed: {e}"))?;
+    info.SetPath(&folder_iface)
+        .map_err(|e| anyhow::anyhow!("SetPath failed: {e}"))?;
+    info.SetDisplayNameResource(&HSTRING::from("Beebeeb"))
+        .map_err(|e| anyhow::anyhow!("SetDisplayNameResource failed: {e}"))?;
+
+    // Icon: the running exe's first icon resource, the same pattern OneDrive /
+    // ProtonDrive use (`"<exe>,0"`). Best-effort — if the exe path can't be
+    // resolved we fall back to just the index-0 reference, which Explorer renders
+    // as a generic icon rather than failing the whole registration.
+    let icon_resource = std::env::current_exe()
+        .ok()
+        .map(|exe| format!("{},0", exe.to_string_lossy()))
+        .unwrap_or_else(|| ",0".to_string());
+    info.SetIconResource(&HSTRING::from(icon_resource.as_str()))
+        .map_err(|e| anyhow::anyhow!("SetIconResource failed: {e}"))?;
+
+    // ── Policies — MUST mirror the Win32 CF_SYNC_POLICIES so the platform and
+    //    shell registrations agree (see register_sync_root) ──
+    //
+    // Partial hydration ↔ CF_HYDRATION_POLICY_PARTIAL: ranges hydrate on open via
+    // the FETCH_DATA callback rather than dragging the whole file.
+    info.SetHydrationPolicy(StorageProviderHydrationPolicy::Partial)
+        .map_err(|e| anyhow::anyhow!("SetHydrationPolicy failed: {e}"))?;
+    // AutoDehydrationAllowed | StreamingAllowed — let Windows reclaim space on
+    // idle ("Free up space") and stream bytes during hydration.
+    info.SetHydrationPolicyModifier(
+        StorageProviderHydrationPolicyModifier::AutoDehydrationAllowed
+            | StorageProviderHydrationPolicyModifier::StreamingAllowed,
+    )
+    .map_err(|e| anyhow::anyhow!("SetHydrationPolicyModifier failed: {e}"))?;
+    // AlwaysFull ↔ CF_POPULATION_POLICY_ALWAYS_FULL: the namespace is always fully
+    // present locally (we eagerly mint a placeholder per cloud-only row), so
+    // Explorer never asks the provider to enumerate.
+    info.SetPopulationPolicy(StorageProviderPopulationPolicy::AlwaysFull)
+        .map_err(|e| anyhow::anyhow!("SetPopulationPolicy failed: {e}"))?;
+    // InSync `Default`: consistent with the per-file in-sync state we stamp
+    // ourselves (create_placeholder MARK_IN_SYNC; mark_in_sync→CfSetInSyncState).
+    // We manage in-sync explicitly, so the shell needs no extra attribute-based
+    // in-sync inference.
+    info.SetInSyncPolicy(StorageProviderInSyncPolicy::Default)
+        .map_err(|e| anyhow::anyhow!("SetInSyncPolicy failed: {e}"))?;
+    info.SetHardlinkPolicy(StorageProviderHardlinkPolicy::None)
+        .map_err(|e| anyhow::anyhow!("SetHardlinkPolicy failed: {e}"))?;
+    info.SetShowSiblingsAsGroup(false)
+        .map_err(|e| anyhow::anyhow!("SetShowSiblingsAsGroup failed: {e}"))?;
+    info.SetProtectionMode(StorageProviderProtectionMode::Unknown)
+        .map_err(|e| anyhow::anyhow!("SetProtectionMode failed: {e}"))?;
+    info.SetVersion(&HSTRING::from(PROVIDER_VERSION))
+        .map_err(|e| anyhow::anyhow!("SetVersion failed: {e}"))?;
+
+    // Context is an opaque per-provider blob Windows hands back to us; encode the
+    // Id bytes so it is non-empty and self-describing. Built via CryptographicBuffer
+    // to avoid hand-rolling a DataWriter.
+    let context = CryptographicBuffer::CreateFromByteArray(id.as_bytes())
+        .map_err(|e| anyhow::anyhow!("CryptographicBuffer::CreateFromByteArray failed: {e}"))?;
+    info.SetContext(&context)
+        .map_err(|e| anyhow::anyhow!("SetContext failed: {e}"))?;
+
+    // Declare a Status column so Explorer renders the sync-state column for this
+    // provider. Property id 0 is the canonical per-item sync-status property; the
+    // per-file value is supplied through the in-sync/pin state we already stamp.
+    let props: IVector<StorageProviderItemPropertyDefinition> = info
+        .StorageProviderItemPropertyDefinitions()
+        .map_err(|e| anyhow::anyhow!("StorageProviderItemPropertyDefinitions failed: {e}"))?;
+    let status_def = StorageProviderItemPropertyDefinition::new()
+        .map_err(|e| anyhow::anyhow!("StorageProviderItemPropertyDefinition::new failed: {e}"))?;
+    status_def
+        .SetId(0)
+        .map_err(|e| anyhow::anyhow!("property SetId failed: {e}"))?;
+    status_def
+        .SetDisplayNameResource(&HSTRING::from("Status"))
+        .map_err(|e| anyhow::anyhow!("property SetDisplayNameResource failed: {e}"))?;
+    props
+        .Append(&status_def)
+        .map_err(|e| anyhow::anyhow!("append Status property definition failed: {e}"))?;
+
+    // Register. Swallow an "already registered" race as success (idempotent) —
+    // the guard above usually catches it, but a concurrent register could still
+    // collide.
+    match StorageProviderSyncRootManager::Register(&info) {
+        Ok(()) => {
+            tracing::info!(
+                sync_root = %sync_root.display(),
+                shell_id = %id,
+                "Explorer shell sync root registered (Status column + overlays + sidebar)"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) == 0x800700B7. Treat an
+            // already-registered entry as success so a re-login reconverges
+            // without surfacing a spurious error.
+            if e.code().0 as u32 == 0x8007_00B7 {
+                tracing::info!(
+                    sync_root = %sync_root.display(),
+                    "Explorer shell sync root already registered (Register returned ALREADY_EXISTS)"
+                );
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("StorageProviderSyncRootManager::Register failed: {e}"))
+            }
+        }
+    }
+}
+
+/// Remove the Explorer SHELL registration for `sync_root` (the inverse of
+/// [`register_shell_sync_root`]).
+///
+/// Called on sign-out / reset so a logout does not leave a dead "Beebeeb"
+/// nav-pane entry, Status column, or overlays pointing at a folder the user is
+/// no longer signed into. Best-effort: a failure (including "not registered")
+/// is returned for the caller to log-and-continue and must never break the
+/// sign-out flow.
+///
+/// The Id is reconstructed from the sync-root path via the same stable
+/// [`shell_sync_root_id`] scheme used to register, so the caller only needs the
+/// persisted `DesktopConfig.sync_root` — not the running engine.
+#[cfg(target_os = "windows")]
+pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
+    use windows::Storage::Provider::StorageProviderSyncRootManager;
+    use windows::core::HSTRING;
+
+    let id = shell_sync_root_id(sync_root);
+    let id_h = HSTRING::from(id.as_str());
+    StorageProviderSyncRootManager::Unregister(&id_h)
+        .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
+    tracing::info!(
+        sync_root = %sync_root.display(),
+        shell_id = %id,
+        "Explorer shell sync root unregistered"
+    );
+    Ok(())
+}
+
 /// Connect the Cloud Files callback table for `sync_root_path` so Windows
 /// fires [`callbacks::fetch_data_callback`] when a user opens a cloud-only
 /// placeholder. Must be called after [`register_sync_root`]. Returns the
@@ -448,6 +726,16 @@ pub fn connect_root(sync_root: &std::path::Path) {
     if let Err(e) = register_sync_root(sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
         return;
+    }
+
+    // Write the Explorer SHELL registration (Status column + overlays + nav-pane
+    // entry + "Free up space" menu) via WinRT. PURELY ADDITIVE on top of the
+    // verified Win32 `register_sync_root` above. Best-effort: a failure here must
+    // NOT abort the connect/hydration path (which runs entirely off the Win32
+    // registration), so we log-and-continue exactly like a Cloud Files hiccup.
+    // Re-running on every engine spawn makes a re-login reconverge the shell entry.
+    if let Err(e) = register_shell_sync_root(sync_root) {
+        tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
     }
 
     // Connect the in-process fetch callback exactly once per process. Without
