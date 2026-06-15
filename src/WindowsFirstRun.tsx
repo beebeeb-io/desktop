@@ -716,7 +716,18 @@ function ExplorerStep({ onDone }: { onDone: () => void }) {
 function ReadyStep() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
 
-  useEffect(() => { void loadSyncStatus().then(setStatus) }, [])
+  // Poll sync_status so the engine badge reflects reality instead of a
+  // one-shot snapshot taken before the engine has fully started.
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const next = await loadSyncStatus()
+      if (!cancelled) setStatus(next)
+    }
+    void refresh()
+    const id = window.setInterval(refresh, 2000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
 
   const finish = async () => {
     await command<void>('show_settings_window')
@@ -764,6 +775,31 @@ function ReadyStep() {
 
 export default function WindowsFirstRun() {
   const [step, setStep] = useState<Step>('signin')
+  const [loggedIn, setLoggedIn] = useState<boolean>(true)
+
+  // Watch for sign-out: if the backend clears the session while we are on
+  // the "ready" screen, reset the wizard back to step 1 so the user sees
+  // the sign-in form rather than a stale "All set." screen.
+  useEffect(() => {
+    let cancelled = false
+    const checkSession = async () => {
+      const status = await loadSyncStatus()
+      if (cancelled) return
+      const nowLoggedIn = status?.logged_in ?? false
+      setLoggedIn(nowLoggedIn)
+    }
+    void checkSession()
+    const id = window.setInterval(checkSession, 3000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
+  // When the session is cleared (loggedIn transitions to false) and we are
+  // past the sign-in step, snap back to step 1.
+  useEffect(() => {
+    if (!loggedIn && step !== 'signin') {
+      setStep('signin')
+    }
+  }, [loggedIn, step])
 
   // Fast-forward past completed steps on mount.
   // sync-mode is ONLY skipped if a mode was already persisted (re-open scenario);

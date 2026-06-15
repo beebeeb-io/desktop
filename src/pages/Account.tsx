@@ -16,15 +16,36 @@ export default function Account() {
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
+  // Poll sync_status so the component reflects auto-unlock state that
+  // occurs on startup — the vault may unlock a few seconds after mount.
   useEffect(() => {
-    void loadSyncStatus().then(setStatus)
-    command<string | null>('account_email').then((result) => {
-      if (result.ok) setEmail(result.value)
-    })
+    let cancelled = false
+    const refresh = async () => {
+      const next = await loadSyncStatus()
+      if (!cancelled) setStatus(next)
+    }
+    void refresh()
+    const id = window.setInterval(refresh, 5000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
+  useEffect(() => {
     command<boolean>('autostart_enabled').then((result) => {
       if (result.ok) setAutostart(result.value)
     })
   }, [])
+
+  // Re-fetch the account email whenever we become logged-in/unlocked so the
+  // field populates correctly after an auto-unlock at startup (the IPC
+  // account_email returns null until auth_email is populated by the Rust side).
+  const loggedInKey = status?.logged_in ? (status.vault_unlocked ? 'unlocked' : 'locked') : 'out'
+  useEffect(() => {
+    if (!status?.logged_in) return
+    command<string | null>('account_email').then((result) => {
+      if (result.ok && result.value) setEmail(result.value)
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loggedInKey])
 
   const runAction = async (name: string, args?: Record<string, unknown>) => {
     setBusy(name)

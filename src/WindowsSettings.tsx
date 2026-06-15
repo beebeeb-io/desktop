@@ -950,12 +950,15 @@ export default function WindowsSettings() {
 
   const handleConfigChange = async (patch: Partial<DesktopConfig>) => {
     setNotice(null)
-    // Functional update so rapid two-field toggles don't drop a change.
-    let next: DesktopConfig = config
-    setConfig((prev) => {
-      next = { ...prev, ...patch }
-      return next
-    })
+    // Compute the new config value directly so the IPC write and the optimistic
+    // UI state both use the same snapshot — using the closed-over `config` then
+    // overriding with patch is correct here because `patch` already contains the
+    // intended *new* value of the toggled field (the Toggle passes the target
+    // state, not the current one).  We use setConfig's functional form only as a
+    // safeguard against rapid multi-field patches; the `next` value computed here
+    // is what we send to the backend.
+    const next: DesktopConfig = { ...config, ...patch }
+    setConfig(next)
     const result = await command<void>('set_desktop_config', { config: next })
     if (!result.ok) {
       setNotice(result.reason)
