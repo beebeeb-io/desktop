@@ -688,13 +688,18 @@ export default function WindowsApp() {
 
   const loggedIn = status?.logged_in ?? false
 
-  // Load billing usage once signed in (storage widget + Home). Fall back to the
-  // local desktop_storage_summary so the widget is never blank when the billing
-  // endpoint is unavailable in this build.
+  // Load billing usage once signed in (storage widget + Home). Retries every
+  // 4 s on transient failure — the engine may not have a valid session ready on
+  // the very first `logged_in: true` tick, so a single fire-and-forget call can
+  // permanently strand the widget at the skeleton state.
   useEffect(() => {
-    if (!loggedIn || usageLoaded.current) return
+    if (!loggedIn) return
+    // If we already have data, don't re-fetch on every status poll re-render.
+    if (usageLoaded.current) return
+
     let cancelled = false
-    void (async () => {
+
+    const attempt = async () => {
       const r = await accountUsage()
       if (cancelled) return
       if (r.ok) {
@@ -702,11 +707,28 @@ export default function WindowsApp() {
         usageLoaded.current = true
         return
       }
-      // Fallback: local mirror summary.
+      // accountUsage() failed — try the local mirror for a partial signal.
       const s = await command<StorageSummary>('desktop_storage_summary')
-      if (!cancelled && s.ok) setStorage(s.value)
-    })()
-    return () => { cancelled = true }
+      if (cancelled) return
+      if (s.ok) {
+        setStorage(s.value)
+        // storage is a partial fallback; keep retrying accountUsage() so the
+        // progress bar eventually shows accurate billing quota.
+      }
+      // Both failed (engine session not ready yet) — schedule a retry so the
+      // widget doesn't stay stuck at the skeleton forever.
+      if (!cancelled) {
+        retryTimer = window.setTimeout(attempt, 4000)
+      }
+    }
+
+    let retryTimer: ReturnType<typeof window.setTimeout> | undefined
+    void attempt()
+
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    }
   }, [loggedIn])
 
   // When signed out, snap back to an always-accessible view.
