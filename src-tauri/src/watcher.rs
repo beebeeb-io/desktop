@@ -336,6 +336,10 @@ async fn handle_rename(
         file_id: Some(existing.file_id.clone()),
         parent_id: new_parent_id,
         filename: new_name,
+        // A metadata-only move/rename: the server path is derived from
+        // parent_id + name, and the local row's path is re-keyed by the next
+        // sync_tick. No new-file path key to carry here.
+        rel_path: None,
         kind: crate::engine_bridge::FinderWriteItemKind::File,
         // No new bytes — this is a metadata-only move/rename.
         contents_path: None,

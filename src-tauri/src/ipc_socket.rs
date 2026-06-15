@@ -210,6 +210,11 @@ async fn handle_connection(
                     file_id: None,
                     parent_id: normalize_parent_id(parent_id),
                     filename,
+                    // OS-extension IPC supplies the leaf name only; keep the
+                    // leaf-as-path fallback (queue_finder_create defaults
+                    // rel_path → filename). The macOS/Linux extensions thread
+                    // their own nesting via parent_id, not a relative path.
+                    rel_path: None,
                     kind: parse_write_kind(&kind),
                     contents_path,
                     content_type,
@@ -230,6 +235,8 @@ async fn handle_connection(
                     file_id: Some(file_id),
                     parent_id: normalize_parent_id(parent_id),
                     filename,
+                    // Modify is metadata/version only; no new-file path key.
+                    rel_path: None,
                     kind: parse_write_kind(&kind),
                     contents_path,
                     content_type,

@@ -116,6 +116,23 @@ pub struct FinderWriteTarget {
     pub file_id: Option<String>,
     pub parent_id: Option<String>,
     pub filename: String,
+    /// Full server-relative, '/'-joined path of this item under the sync root
+    /// (e.g. `docs/a.txt` for a nested file, `a.txt` at the root). When `None`,
+    /// the path defaults to the leaf `filename` — the legacy top-level behaviour.
+    ///
+    /// **Why this exists (task 0780 nested correctness):** the local-create path
+    /// stores this as the row's `path` and threads it through as the upload's
+    /// `target_path`, so (a) `classify_local_path`'s "already a known server
+    /// file?" filter (which queries the FULL relative key) matches a nested
+    /// file's row immediately, (b) `finalize_local_upload_placeholder` joins
+    /// `sync_root + rel_path` to find the file on disk and re-stamp it in-sync,
+    /// and (c) a local delete looks up the full key and trashes it on the server.
+    /// Without it, nested rows were keyed by the leaf only and all three broke
+    /// until the next `sync_tick` re-keyed them. Top-level is unaffected (leaf ==
+    /// full key). The OS-extension IPC paths that don't supply it keep the leaf
+    /// fallback.
+    #[serde(default)]
+    pub rel_path: Option<String>,
     pub kind: FinderWriteItemKind,
     pub contents_path: Option<String>,
     pub content_type: Option<String>,
@@ -659,6 +676,13 @@ impl EngineBridge {
 
         let parent_contract = self.ensure_shared_parent_allows_write(target.parent_id.as_deref())?;
         let file_id = uuid::Uuid::new_v4().to_string();
+        // Full server-relative key for this item: the FULL nested path when the
+        // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
+        // legacy IPC). This is stored as the row's `path` AND threaded as the
+        // upload's `target_path`, so filter-3, finalize, and delete all key off
+        // the same path. `clone` because `filename` is still needed for the
+        // server `name` (always the leaf).
+        let rel_path = target.rel_path.clone().unwrap_or_else(|| target.filename.clone());
         match target.kind {
             FinderWriteItemKind::Folder => {
                 let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
@@ -671,7 +695,7 @@ impl EngineBridge {
                     OperationKind::CreateFolder,
                     Some(file_id),
                     target.parent_id,
-                    Some(target.filename),
+                    Some(rel_path),
                     payload,
                     None,
                     None,
@@ -693,7 +717,11 @@ impl EngineBridge {
                     encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
                 self.db.upsert_file(&FileEntry {
                     file_id: file_id.clone(),
-                    path: target.filename.clone(),
+                    // FULL relative key (e.g. `docs/a.txt`), so a nested file's
+                    // row is found by `get_file_by_path(full_key)` immediately —
+                    // not keyed by the leaf, which classify_local_path's filter-3
+                    // would miss for a nested file → spurious re-upload.
+                    path: rel_path.clone(),
                     status: FileStatus::Uploading,
                     size_bytes,
                     modified_at: now_secs(),
@@ -714,7 +742,10 @@ impl EngineBridge {
                     OperationKind::UploadVersion,
                     Some(file_id),
                     target.parent_id,
-                    Some(target.filename),
+                    // target_path = the FULL relative key, so
+                    // finalize_local_upload_placeholder joins sync_root + this
+                    // and finds the nested file on disk to re-stamp it in-sync.
+                    Some(rel_path),
                     payload,
                     Some(staged_path),
                     None,
@@ -916,6 +947,11 @@ impl EngineBridge {
             file_id: None,
             parent_id,
             filename: file_name.clone(),
+            // The FULL '/'-joined relative key (e.g. `docs/a.txt`), so the row is
+            // stored + the upload's target_path is threaded under the same key
+            // that filter-3, finalize, and delete all query. `rel` was computed
+            // above for the filter-3 lookup; reuse it verbatim.
+            rel_path: Some(rel),
             kind: FinderWriteItemKind::File,
             contents_path: Some(path.to_string_lossy().into_owned()),
             content_type: beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string),
@@ -2555,6 +2591,7 @@ mod tests {
                 file_id: None,
                 parent_id: None,
                 filename: "report.txt".into(),
+                rel_path: None,
                 kind: FinderWriteItemKind::File,
                 contents_path: Some(source.to_string_lossy().into_owned()),
                 content_type: Some("text/plain".into()),
@@ -2598,6 +2635,7 @@ mod tests {
                 file_id: Some("file-1".into()),
                 parent_id: Some("folder-1".into()),
                 filename: "renamed.txt".into(),
+                rel_path: None,
                 kind: FinderWriteItemKind::File,
                 contents_path: None,
                 content_type: Some("text/plain".into()),
@@ -3261,6 +3299,7 @@ mod tests {
                 file_id: Some("shared-editable".into()),
                 parent_id: None,
                 filename: "Editable.txt".into(),
+                rel_path: None,
                 kind: FinderWriteItemKind::File,
                 contents_path: Some(source.to_string_lossy().into_owned()),
                 content_type: Some("text/plain".into()),
