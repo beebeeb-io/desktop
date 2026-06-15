@@ -549,7 +549,7 @@ function SettingsView() {
             <NavIcon name="cog" size={16} color={T.ink2} />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 2 }}>Open Settings</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 2 }}>Device &amp; system settings</div>
             <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4 }}>Sync, bandwidth, Explorer integration, launch, and updates.</div>
           </div>
           <PrimaryBtn onClick={() => void open()}>Open Settings</PrimaryBtn>

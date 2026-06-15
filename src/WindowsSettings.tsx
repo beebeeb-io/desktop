@@ -25,7 +25,6 @@ import {
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
-  openUrl,
   type DesktopConfig,
   type FinderInstallState,
   type StorageSummary,
@@ -61,13 +60,7 @@ const T = {
 // ── Nav structure ─────────────────────────────────────────────────────────
 
 type NavId =
-  | 'account'
   | 'sync'
-  | 'selective-sync'
-  | 'bandwidth'
-  | 'vault-passphrase'
-  | 'recovery-kit'
-  | 'linked-devices'
   | 'launch'
   | 'explorer-integration'
   | 'updates'
@@ -88,18 +81,7 @@ const NAV_SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   {
     heading: 'Beebeeb',
     items: [
-      { id: 'account', label: 'Account', icon: 'user' },
       { id: 'sync', label: 'Sync', icon: 'cloud', active: true },
-      { id: 'selective-sync', label: 'Selective sync', icon: 'folder' },
-      { id: 'bandwidth', label: 'Bandwidth', icon: 'bolt' },
-    ],
-  },
-  {
-    heading: 'Security',
-    items: [
-      { id: 'vault-passphrase', label: 'Vault passphrase', icon: 'lock' },
-      { id: 'recovery-kit', label: 'Recovery kit', icon: 'key' },
-      { id: 'linked-devices', label: 'Linked devices', icon: 'device' },
     ],
   },
   {
@@ -877,97 +859,9 @@ function UpdatesPanel() {
   )
 }
 
-// Sections that live in the web app — show a clean link-out panel
-const WEB_APP_SECTIONS: Partial<Record<NavId, { path: string; description: string }>> = {
-  account: {
-    path: '/account',
-    description: 'Manage your email, display name, and account preferences.',
-  },
-  'vault-passphrase': {
-    path: '/security/passphrase',
-    description: 'Change the passphrase that unlocks your vault on this PC and all linked devices.',
-  },
-  'recovery-kit': {
-    path: '/security/recovery',
-    description: 'Download or print your 12-word recovery phrase — the only way to recover your vault if you lose all devices.',
-  },
-  'linked-devices': {
-    path: '/security/devices',
-    description: 'View every device that has access to your vault. Remove devices you no longer use.',
-  },
-}
-
 // Sections that are desktop-native but have no backend yet — honest empty state
 const NATIVE_PENDING_SECTIONS: Partial<Record<NavId, string>> = {
-  'selective-sync': 'Selective sync lets you pick which folders live on this PC. Not available in this build.',
-  bandwidth: 'Per-transfer rate limits are not configurable in this build. Upload and download adapt to available bandwidth automatically.',
   advanced: 'Advanced options are not available in this build.',
-}
-
-const WEB_APP_BASE_URL = 'https://app.beebeeb.io'
-
-function WebAppLinkPanel({ navId, label }: { navId: NavId; label: string }) {
-  const meta = WEB_APP_SECTIONS[navId]
-  if (!meta) return null
-
-  const url = `${WEB_APP_BASE_URL}${meta.path}`
-
-  const handleOpen = () => { void openUrl(url) }
-
-  return (
-    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
-      <h1 style={{ margin: '0 0 8px', fontSize: 26, fontWeight: 700, letterSpacing: '-0.025em', color: T.ink, lineHeight: 1.15 }}>
-        {label}
-      </h1>
-      <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
-        {meta.description}
-      </p>
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 14,
-        padding: '16px 18px',
-        borderRadius: 10,
-        border: `1px solid ${T.line}`,
-        background: T.paper2,
-      }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, marginBottom: 2 }}>
-            Open in web app
-          </div>
-          <div style={{
-            fontSize: 11.5,
-            color: T.ink3,
-            fontFamily: T.fontMono,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap' as const,
-          }}>
-            {url}
-          </div>
-        </div>
-        <button
-          onClick={handleOpen}
-          style={{
-            padding: '7px 14px',
-            fontSize: 12.5,
-            fontFamily: T.fontSans,
-            fontWeight: 500,
-            borderRadius: 6,
-            border: `1px solid ${T.ink}`,
-            background: T.ink,
-            color: T.paper,
-            cursor: 'pointer',
-            whiteSpace: 'nowrap' as const,
-            letterSpacing: '-0.005em',
-            flexShrink: 0,
-          }}
-        >
-          Open
-        </button>
-      </div>
-    </div>
-  )
 }
 
 function NativePendingPanel({ label, description }: { label: string; description: string }) {
@@ -992,9 +886,6 @@ function PanelRouter({ navId }: { navId: NavId }) {
   }
   if (navId === 'updates') {
     return <UpdatesPanel />
-  }
-  if (navId in WEB_APP_SECTIONS) {
-    return <WebAppLinkPanel navId={navId} label={label} />
   }
   const pendingDesc = NATIVE_PENDING_SECTIONS[navId]
   if (pendingDesc) {
