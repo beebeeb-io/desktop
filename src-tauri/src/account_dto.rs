@@ -90,6 +90,10 @@ pub struct Subscription {
     pub stripe_configured: Option<bool>,
     #[serde(default)]
     pub billing_state: Option<String>,
+    /// RFC3339 timestamp the account first went past-due, or null. Lets the
+    /// billing/account view surface an overdue-payment state.
+    #[serde(default)]
+    pub past_due_since: Option<String>,
     #[serde(default)]
     pub pending_downgrade_plan: Option<String>,
     #[serde(default)]
@@ -585,8 +589,8 @@ mod tests {
             "used_bytes": 12345,
             "extra_storage_tb": 1,
             "extra_users": 0,
-            "billing_state": "active",
-            "past_due_since": null,
+            "billing_state": "past_due",
+            "past_due_since": "2026-06-10T00:00:00Z",
             "pending_downgrade_plan": null,
             "downgrade_cooldown_until": null,
             "storage_grace_deadline": null,
@@ -597,6 +601,8 @@ mod tests {
         assert_eq!(s.current_period_end.as_deref(), Some("2027-01-01T00:00:00Z"));
         assert_eq!(s.quota_bytes, 2199023255552);
         assert_eq!(s.extra_storage_tb, 1);
+        // past_due_since is now captured (was silently dropped before).
+        assert_eq!(s.past_due_since.as_deref(), Some("2026-06-10T00:00:00Z"));
     }
 
     #[test]
@@ -621,6 +627,8 @@ mod tests {
         assert_eq!(s.created_at, None);
         assert_eq!(s.current_period_end, None);
         assert_eq!(s.quota_bytes, 10737418240);
+        // Absent from the free-plan branch → defaults to None (no parse error).
+        assert_eq!(s.past_due_since, None);
     }
 
     #[test]
