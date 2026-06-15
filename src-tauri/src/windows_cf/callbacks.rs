@@ -125,7 +125,7 @@ pub unsafe extern "system" fn fetch_data_callback(
 
     // Reach the daemon's tokio runtime. The filter-driver worker thread
     // we're on has no runtime attached, so `Handle::try_current()` would
-    // fail — we use the handle stashed in `activate()` instead.
+    // fail — we use the handle stashed in `connect_root()` instead.
     let handle = match super::runtime() {
         Some(h) => h,
         None => {

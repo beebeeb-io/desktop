@@ -86,7 +86,7 @@ static BRIDGE: OnceLock<Arc<EngineBridge>> = OnceLock::new();
 /// filter-driver worker thread that is *not* attached to any tokio
 /// runtime, so `Handle::try_current()` returns `Err` there and the
 /// callback can't drive `hydrate_file` (an async fn). We stash the
-/// runtime handle here from [`activate`] (which runs on a tokio
+/// runtime handle here from [`connect_root`] (which runs on a tokio
 /// worker, so `Handle::current()` is valid) and the callback reaches
 /// it through [`runtime`] to `block_on` the hydration.
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
@@ -128,7 +128,7 @@ pub(crate) fn bridge() -> Option<Arc<EngineBridge>> {
 }
 
 /// Internal accessor for the daemon's tokio runtime handle, used by the
-/// fetch callback to bridge sync→async. `None` if [`activate`] never ran
+/// fetch callback to bridge sync→async. `None` if [`connect_root`] never ran
 /// (e.g. registration failed before the handle was stashed) — the
 /// callback must then fail the hydration rather than hang Explorer.
 pub(crate) fn runtime() -> Option<tokio::runtime::Handle> {
@@ -417,12 +417,17 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         tracing::debug!("refresh_placeholders called before bridge was set; skipping");
         return;
     };
-    let created = populate_placeholders(&bridge, sync_root);
-    if created > 0 {
-        tracing::info!(
-            placeholders = created,
+    let ensured = populate_placeholders(&bridge, sync_root);
+    if ensured > 0 {
+        // `ensured` counts every cloud-only row whose placeholder is now present,
+        // INCLUDING ones that already existed (re-creating an existing placeholder
+        // maps ERROR_ALREADY_EXISTS → Ok). So this is "placeholders present after
+        // refresh", not "newly added rows" — keep the wording neutral so a
+        // steady-state tick doesn't read as if new files appeared every time.
+        tracing::debug!(
+            placeholders = ensured,
             sync_root = %sync_root.display(),
-            "Cloud Files placeholders refreshed (new cloud-only rows)"
+            "Cloud Files placeholders refreshed"
         );
     }
 }

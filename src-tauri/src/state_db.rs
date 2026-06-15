@@ -470,7 +470,34 @@ impl StateDb {
     /// Fetch a single row by its path inside the sync root. `Ok(None)`
     /// if absent. Used by OS virtual-filesystem layers that receive
     /// path/inode callbacks instead of server UUIDs.
+    /// Look up a file row by its server-relative path.
+    ///
+    /// Stored `files.path` values come from `resolve_relative_path`, which can
+    /// yield EITHER a leading-slash form (`/leaf`, e.g. when the row falls
+    /// through to a server-provided plaintext `path` field) OR a bare relative
+    /// form (`docs/a.txt`). The upload watcher (`watcher::relative_db_path`)
+    /// always queries the bare form. An exact-only match would therefore MISS a
+    /// row stored as `/leaf` when the watcher asks for `leaf`, causing the
+    /// watcher to treat an already-tracked server file as brand-new and
+    /// re-upload it. To stay robust to that shape mismatch we try the path as
+    /// given first, then the leading-slash-toggled variant. This is a read-only
+    /// defense-in-depth lookup — it never mutates state.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>> {
+        if let Some(entry) = self.get_file_by_exact_path(path)? {
+            return Ok(Some(entry));
+        }
+        // Toggle the leading slash and try once more: `/leaf` ⇄ `leaf`.
+        let alt = match path.strip_prefix('/') {
+            Some(stripped) => stripped.to_string(),
+            None => format!("/{path}"),
+        };
+        if alt == path {
+            return Ok(None);
+        }
+        self.get_file_by_exact_path(&alt)
+    }
+
+    fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
@@ -1249,6 +1276,60 @@ mod tests {
         assert_eq!(got.status, FileStatus::CloudOnly);
         assert_eq!(got.size_bytes, 1024);
         assert_eq!(got.remote_updated_at, 1700000000);
+    }
+
+    #[test]
+    fn get_file_by_path_matches_across_leading_slash() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // Row stored WITH a leading slash (the `/leaf` shape resolve_relative_path
+        // can produce). The watcher queries the bare form — must still hit.
+        db.upsert_file(&FileEntry {
+            file_id: "slash-row".into(),
+            path: "/docs/a.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            db.get_file_by_path("docs/a.txt").unwrap().map(|e| e.file_id),
+            Some("slash-row".to_string())
+        );
+        // Exact form still hits.
+        assert_eq!(
+            db.get_file_by_path("/docs/a.txt").unwrap().map(|e| e.file_id),
+            Some("slash-row".to_string())
+        );
+
+        // Row stored WITHOUT a leading slash (the bare relative shape). A query
+        // that arrives with a leading slash must still hit.
+        db.upsert_file(&FileEntry {
+            file_id: "bare-row".into(),
+            path: "photo.jpg".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            db.get_file_by_path("/photo.jpg").unwrap().map(|e| e.file_id),
+            Some("bare-row".to_string())
+        );
+        assert_eq!(
+            db.get_file_by_path("photo.jpg").unwrap().map(|e| e.file_id),
+            Some("bare-row".to_string())
+        );
+
+        // A genuinely-absent path returns None (and the slash-toggle of an
+        // empty string must not panic / false-match).
+        assert!(db.get_file_by_path("nope.txt").unwrap().is_none());
+        assert!(db.get_file_by_path("").unwrap().is_none());
     }
 
     #[test]

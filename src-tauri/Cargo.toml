@@ -72,6 +72,12 @@ base64 = "0.22"
 # ourselves in `watcher.rs`. Pinned to "8" to match `beebeeb-sync`'s
 # `notify = "8"` so there is a SINGLE notify version in the dependency tree.
 notify = "8"
+# Zeroize the in-memory `Session` (master key + session token) on drop —
+# lock_vault / clear_session / process exit must not leave key material in
+# freed heap/stack. `derive` enables `#[derive(ZeroizeOnDrop)]`. Pinned to "1"
+# and already present transitively via beebeeb-core (zeroize 1.8.x), so this
+# adds no new tree entry — it only promotes it to a direct dep we can derive on.
+zeroize = { version = "1", features = ["derive"] }
 
 # ── Browser-based device-code login handoff (browser_login.rs) ───────────────
 # The crypto + WS deps below mirror repos/cli/Cargo.toml exactly so the

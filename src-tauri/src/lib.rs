@@ -70,6 +70,14 @@ use runner::EngineRunner;
 /// authoritative copy of the master key in this process at any moment.
 /// `take()` removes it from the registry on logout; everything else
 /// reads it through a borrow under the `Mutex`.
+///
+/// `ZeroizeOnDrop` wipes the secret bytes when the `Session` is dropped — on
+/// `lock_vault` / `clear_session` (both `take()` the `Option<Session>`, dropping
+/// it) and on process teardown — so the master key and the session token never
+/// linger in freed memory. All three fields are `Zeroize`: `[u8; 32]`,
+/// `String` (token), and `Option<String>` (email) each implement it in
+/// `zeroize` 1.x, so no field needs `#[zeroize(skip)]`.
+#[derive(zeroize::ZeroizeOnDrop)]
 pub struct Session {
     pub token: String,
     pub master_key: [u8; 32],
@@ -219,13 +227,19 @@ fn clear_keychain_session() -> Result<(), String> {
 /// is indistinguishable from a fresh in-session unlock.
 ///
 /// This function deliberately does NOTHING (no error surfaced) when:
-///   - there is no stored session token (never signed in / logged out), or
-///   - the token is present but the master key is genuinely absent
-///     (`AuthStoreError::NotFound` from `unlock()`).
+///   - there is no stored session token (never signed in / logged out) —
+///     `load_session_from_keychain` returns `Ok(None)`; or
+///   - the token IS present but the master key is genuinely absent —
+///     `AuthVault::unlock()` returns `AuthStoreError::NotFound`, which
+///     `load_session_from_keychain` surfaces as `Err(..)` (NOT `Ok(None)`),
+///     logged at `debug!`.
 /// The second case is the legitimate "this PC doesn't have your keys" state
 /// where onboarding's recovery-phrase step must still appear. `auth_present`
 /// is already seeded from `keychain_session_present()` in `setup()`, so a
 /// token-only restore still reports `logged_in: true` and routes to unlock.
+/// A genuine credential-store/backend failure (anything other than
+/// `NotFound`) is logged at `warn!` instead — it is unexpected but must still
+/// not block startup, since onboarding can recover.
 async fn restore_session_on_startup(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
 
@@ -239,21 +253,30 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
     let session = match load_session_from_keychain(email) {
         // Both token + master key present → vault is unlocked; resume.
         Ok(Some(session)) => session,
-        // Token absent, or token present but master key genuinely missing.
-        // Leave onboarding to prompt for the recovery phrase. Not an error.
+        // No stored session TOKEN at all (never signed in / logged out).
+        // Leave onboarding to prompt for sign-in. Not an error.
         Ok(None) => return,
         Err(error) => {
-            // `unlock()` returns NotFound when the key is absent; that is the
-            // expected "needs unlock" path, not a failure to log. Any other
-            // error (backend/credential-store failure) is worth a warning, but
-            // must not block startup — onboarding can still recover.
-            tracing::debug!(%error, "no unlocked session to resume at startup");
+            // The token IS present but `unlock()` failed. Two very different cases:
+            //   1. Key genuinely ABSENT — `AuthStoreError::NotFound` (Display:
+            //      "secret not found"). This is the legitimate "this PC has your
+            //      session but not your vault key" state; onboarding's recovery-
+            //      phrase step must appear. Expected → log at debug, not warn.
+            //   2. A real credential-store / backend failure (locked keychain,
+            //      DPAPI error, deserialisation). Worth a warning so the user can
+            //      see why auto-unlock didn't happen — but must NOT block startup.
+            if error.contains("secret not found") {
+                tracing::debug!(%error, "no vault key to auto-unlock at startup; recovery-phrase unlock required");
+            } else {
+                tracing::warn!(%error, "credential-store error while attempting auto-unlock at startup");
+            }
             return;
         }
     };
 
     let token = session.token.clone();
     let master_key = session.master_key;
+    let email = session.email.clone();
     {
         match state.session.lock() {
             Ok(mut guard) => *guard = Some(session),
@@ -264,6 +287,14 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
         }
     }
     set_auth_present(&state, true);
+    // Mirror `apply_session` / the live-unlock path: keep `auth_email` in step
+    // with the restored session so the Account page shows the signed-in email
+    // after an auto-unlock, instead of going blank until the next login. Only
+    // overwrite when the restored session actually carries an email — never
+    // clobber an already-known address with `None`.
+    if email.is_some() {
+        set_auth_email(&state, email);
+    }
     tracing::info!("vault auto-unlocked from credential store on startup");
     start_engine_if_possible(app.clone(), &state, token, master_key).await;
 }
@@ -1747,6 +1778,23 @@ fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) ->
         if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
             continue;
         }
+        // Pin TOCTOU re-check: `unpinned_local_files_for_dehydration()` filtered
+        // on pin state at query time, but the user could have PINNED this file in
+        // the window between that query and now. Dehydrating it would evict bytes
+        // the user just asked to keep offline. `mark_cloud_only_after_dehydrate`
+        // already re-applies the pin predicate (so a newly-pinned file is never
+        // flipped to cloud_only — it self-heals on next open), but that runs
+        // AFTER the destructive dehydrate. Re-read the row's effective pin state
+        // immediately before dehydrating and skip if it is now pinned, so we
+        // never reclaim a pinned file's bytes in the first place. A read error
+        // here is non-fatal: fall through to the existing dehydrate + the
+        // post-dehydrate predicate guard.
+        if let Ok(Some(contract)) = db.get_file_contract_state(&file_id) {
+            if contract.effective_pin_state() == crate::state_db::PinState::Pinned {
+                tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
+                continue;
+            }
+        }
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
             Ok(freed) => {
                 bytes_freed = bytes_freed.saturating_add(freed);
@@ -2341,23 +2389,23 @@ struct VaultItem {
 /// an entry encrypted under a different key, should still appear in
 /// the list (with a fallback name) rather than abort the whole call.
 ///
-/// Mirrors the decrypt flow in `repos/cli/src/commands/pull.rs`:
-///   - parse `id` as a UUID for the HKDF info
-///   - parse `name_encrypted` (a JSON-encoded `EncryptedBlob` string)
-///   - derive per-file key, decrypt to UTF-8
+/// Routes through the consolidated `beebeeb_core::encrypt::decrypt_name`, the
+/// single decrypt path all clients share (web/cli/desktop). Unlike the previous
+/// local helper — which handled only native `EncryptedBlob` blobs derived from
+/// the BINARY UUID — `decrypt_name` covers the full format/key matrix: native
+/// blobs AND web base64 `{nonce,ciphertext}` envelopes, derived from EITHER the
+/// string-UUID (the web app's `TextEncoder.encode(fileId)`) or the binary UUID.
+/// A bare plaintext name passes straight through. We deliberately swallow the
+/// error to `None` so the SelectiveSync row falls back to a stable id label.
 fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
-    let file_uuid = uuid::Uuid::parse_str(id).ok()?;
-
     let name_enc_str = file_meta.get("name_encrypted").and_then(|v| v.as_str())?;
-    let blob: beebeeb_types::EncryptedBlob = serde_json::from_str(name_enc_str).ok()?;
 
     // MasterKey::from_bytes consumes the array (it zeroizes on drop),
     // so copy from the borrow first.
     let mk_bytes: [u8; 32] = *master_key;
     let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-    let file_key = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.as_bytes());
 
-    beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob).ok()
+    beebeeb_core::encrypt::decrypt_name(&mk, id, name_enc_str).ok()
 }
 
 /// Fetch the top-level entries in the user's vault (parent_id =
@@ -3338,6 +3386,36 @@ mod tests {
         assert_eq!(state.last_error.as_deref(), Some("Timed out waiting for setup"));
         assert_eq!(state.last_attempt_at, Some(42));
         assert_eq!(state.reason_category.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn session_zeroizes_master_key_on_drop() {
+        use zeroize::Zeroize;
+
+        // Compile-time guarantee: `Session` derives `ZeroizeOnDrop` (which
+        // requires `Drop`). If the derive is ever removed this stops compiling.
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<super::Session>();
+
+        // Sanity-check the field types the derive relies on are themselves
+        // `Zeroize` — the property the `ZeroizeOnDrop` derive expands to per
+        // field. `[u8; 32]`, `String`, and `Option<String>` all qualify.
+        let mut key = [7u8; 32];
+        key.zeroize();
+        assert_eq!(key, [0u8; 32]);
+        let mut token = String::from("super-secret-session-token");
+        token.zeroize();
+        assert!(token.is_empty());
+
+        // Exercise the real drop path (no panic / double-free) on a populated
+        // session; the wipe itself runs inside `Drop` where the bytes are no
+        // longer observably aliased.
+        let session = super::Session {
+            token: "tok".to_string(),
+            master_key: [9u8; 32],
+            email: Some("user@example.com".to_string()),
+        };
+        drop(session);
     }
 
     #[test]
