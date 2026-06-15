@@ -698,6 +698,15 @@ async fn run(
                         #[cfg(target_os = "windows")]
                         crate::windows_cf::refresh_placeholders(&sync_root);
 
+                        // Reconcile native Explorer pin / "Free up space" changes
+                        // (which never touch our DB) back into state_db so the app
+                        // view matches and `free_up_space` respects native pins.
+                        // Delta-only + idempotent — no-op when nothing changed
+                        // natively. Runs after refresh so newly minted placeholders
+                        // are present before we read their attributes.
+                        #[cfg(target_os = "windows")]
+                        crate::windows_cf::reconcile_placeholder_state(&sync_root);
+
                         emit_status(&app, "idle", Some(&sync_root), None);
                         // Feed the heartbeat producer the post-tick state. It
                         // promotes this to "syncing" itself when the DB snapshot

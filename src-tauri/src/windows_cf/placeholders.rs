@@ -32,8 +32,9 @@
 
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
-    GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_PINNED,
+    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED,
+    FILE_BASIC_INFO, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
 };
 use windows::core::PCWSTR;
 
@@ -595,6 +596,43 @@ pub fn is_cloud_placeholder(path: &std::path::Path) -> bool {
         return false;
     }
     (attrs & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
+}
+
+/// Raw `GetFileAttributesW` result for the on-disk entry at `path`, or `None`
+/// if the query fails (path gone, access denied → `INVALID_FILE_ATTRIBUTES`).
+///
+/// This is the thin Windows-only reader feeding the per-tick reconcile pass
+/// ([`super::reconcile_placeholder_state`]): the returned `u32` carries the
+/// Cloud Files placeholder bits (`RECALL_ON_DATA_ACCESS`, `PINNED`, `UNPINNED`)
+/// that [`crate::state_db::decode_os_state`] turns into a status/pin delta. The
+/// decode itself is platform-agnostic and unit-tested on Linux; this fn just
+/// fetches the mask the same way [`is_cloud_placeholder`] does.
+///
+/// `decode_os_state` (in `state_db`, cross-platform) hardcodes the same three
+/// bit values as plain `u32`s because it must compile on Linux where the
+/// `windows` crate doesn't resolve. The compile-time asserts below pin those
+/// literals to the real `windows`-crate constants so the two can never drift:
+/// if Microsoft ever changed a value, THIS file would fail to compile on
+/// Windows rather than silently mis-decoding placeholders.
+const _: () = {
+    assert!(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0x0040_0000);
+    assert!(FILE_ATTRIBUTE_PINNED.0 == 0x0008_0000);
+    assert!(FILE_ATTRIBUTE_UNPINNED.0 == 0x0010_0000);
+};
+
+pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `path_wide` is a valid NUL-terminated wide string alive for the
+    // duration of the call. `GetFileAttributesW` does not retain the pointer.
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(path_wide.as_ptr())) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return None;
+    }
+    Some(attrs)
 }
 
 /// Resize the Cloud Files placeholder at `path` so its `FileSize` matches

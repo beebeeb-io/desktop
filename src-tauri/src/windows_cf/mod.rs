@@ -947,6 +947,113 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
     }
 }
 
+/// Per-tick reconcile of on-disk Cloud Files placeholder state back into the
+/// state DB. Runs right after [`refresh_placeholders`] on every successful sync
+/// tick (see `runner::run`).
+///
+/// ## Why this exists
+///
+/// The in-app pin / free-up path writes the DB **and** the OS placeholder
+/// together, so the app's view always matches. But a user can pin or "Free up
+/// space" a file **natively** in Explorer's right-click menu — that path NEVER
+/// touches our DB. Without this pass, a native pin/free-up would be invisible to
+/// the app (wrong status badge, stale pin) and `free_up_space` would ignore a
+/// file the user pinned in Explorer. This pass reads each placeholder's actual
+/// on-disk attributes and writes back any DELTA, so native changes converge.
+///
+/// ## Idempotent + delta-only
+///
+/// We compute the desired status/pin from the on-disk attribute mask
+/// ([`crate::state_db::decode_os_state`]) and push to the batch **only** when it
+/// differs from the live row. In steady state — and for every file changed via
+/// the in-app path (DB + OS written together) — there is no delta, so nothing is
+/// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
+/// are never overridden — `decode_os_state` returns `None` for them.
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only the aggregate update count.
+#[cfg(target_os = "windows")]
+pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
+    use crate::state_db::{decode_os_state, FileStatus, PinState};
+
+    let Some(bridge) = bridge() else {
+        tracing::debug!("reconcile_placeholder_state called before bridge was set; skipping");
+        return;
+    };
+
+    // `file_overview_rows` pairs each row with its EFFECTIVE-pinned flag, computed
+    // with the same predicate the in-app "Files" tab uses — exactly the current
+    // pin truth we must diff the OS-reported pin against.
+    let rows = match bridge.db().file_overview_rows() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_placeholder_state: could not list files");
+            return;
+        }
+    };
+
+    let mut deltas: Vec<(String, Option<FileStatus>, Option<PinState>)> = Vec::new();
+    for (entry, pinned) in rows {
+        // Directory placeholders carry their own pin/hydration semantics handled
+        // by the engine's recursive pin path; reconcile only leaf files, the same
+        // surface `populate_placeholders` mints file placeholders for.
+        if entry.is_dir() {
+            continue;
+        }
+
+        // Map the server-relative '/'-joined key to the on-disk placeholder path
+        // the SAME way `populate_placeholders` does.
+        let rel = entry.path.trim_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        let Some(attrs) = placeholders::read_os_placeholder_state(&local_path) else {
+            // Placeholder gone / unreadable this tick — skip; a later tick retries.
+            continue;
+        };
+
+        let (desired_status, desired_pin) = decode_os_state(attrs, entry.status.clone());
+
+        // Status delta: only when decode produced a candidate that differs.
+        let status_delta = match desired_status {
+            Some(s) if s != entry.status => Some(s),
+            _ => None,
+        };
+
+        // Pin delta: decode reports the EXPLICIT per-file pin the OS carries
+        // (Pinned/Unpinned) or None. Compare its boolean meaning to the row's
+        // current effective-pinned flag so we don't churn on equivalent states.
+        let pin_delta = match desired_pin {
+            Some(PinState::Pinned) if !pinned => Some(PinState::Pinned),
+            Some(PinState::Unpinned) if pinned => Some(PinState::Unpinned),
+            _ => None,
+        };
+
+        if status_delta.is_some() || pin_delta.is_some() {
+            deltas.push((entry.file_id, status_delta, pin_delta));
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match bridge.db().reconcile_os_state(&deltas, now) {
+        Ok(updated) => {
+            if updated > 0 {
+                // Zero-knowledge: count only, never a path.
+                tracing::debug!(updates = updated, "reconcile_os_state");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_os_state failed");
+        }
+    }
+}
+
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
 /// into Explorer for every file currently marked `CloudOnly`. Returns the
 /// number of placeholders successfully created (already-existing ones are

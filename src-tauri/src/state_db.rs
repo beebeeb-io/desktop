@@ -140,6 +140,70 @@ impl PinState {
     }
 }
 
+/// Windows Cloud Files on-disk placeholder attribute bits, decoded into the
+/// app's [`FileStatus`] / [`PinState`] vocabulary. **Pure + cross-platform** so
+/// it is unit-testable on Linux: it takes a raw `u32` attribute mask (what
+/// `GetFileAttributesW` returns) plus the row's current status, and returns the
+/// *desired* status/pin — the caller (the Windows reconcile pass) does the delta
+/// check against the live row and only persists when something actually changed.
+///
+/// Bit values are the `Win32_Storage_FileSystem` `FILE_ATTRIBUTE_*` constants
+/// (hardcoded here as plain `u32` so this fn never references a windows-only
+/// symbol):
+/// - `RECALL_ON_DATA_ACCESS` (`0x0040_0000`) — the placeholder is *dehydrated*
+///   (cloud-only). Cleared ⇒ the bytes are resident on disk (local).
+/// - `PINNED` (`0x0008_0000`) — "Always keep on this device".
+/// - `UNPINNED` (`0x0010_0000`) — "Free up space" / online-only pin.
+///
+/// ## Status rule (never fight the engine)
+///
+/// Status is only decoded when the current status is one of the two
+/// *user/OS-owned* terminal states — [`FileStatus::Local`] or
+/// [`FileStatus::CloudOnly`]. The transient/engine-owned states
+/// (`Uploading` / `Downloading` / `Conflict` / `Error`) are left ALONE
+/// (`None`) because a native Explorer attribute snapshot must never clobber an
+/// in-flight transfer or a conflict the engine is mid-resolving.
+///
+/// Returned status is the *desired* one for Local/CloudOnly candidates; the
+/// caller compares it to the live row and skips no-op writes.
+///
+/// ## Pin rule (don't fight inheritance)
+///
+/// `PINNED` set ⇒ [`PinState::Pinned`]; `UNPINNED` set ⇒ [`PinState::Unpinned`];
+/// neither bit set ⇒ `None` (leave the row's pin as-is — most placeholders
+/// simply inherit their parent's pin and carry no explicit bit).
+pub fn decode_os_state(attrs: u32, current_status: FileStatus) -> (Option<FileStatus>, Option<PinState>) {
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+    const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
+
+    let status = match current_status {
+        // Only the user/OS-owned terminal states are reconciled from disk.
+        FileStatus::Local | FileStatus::CloudOnly => {
+            if attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS != 0 {
+                Some(FileStatus::CloudOnly)
+            } else {
+                Some(FileStatus::Local)
+            }
+        }
+        // Engine-owned: leave it alone.
+        FileStatus::Uploading
+        | FileStatus::Downloading
+        | FileStatus::Conflict
+        | FileStatus::Error => None,
+    };
+
+    let pin = if attrs & FILE_ATTRIBUTE_PINNED != 0 {
+        Some(PinState::Pinned)
+    } else if attrs & FILE_ATTRIBUTE_UNPINNED != 0 {
+        Some(PinState::Unpinned)
+    } else {
+        None
+    };
+
+    (status, pin)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum OperationKind {
     HydrateFile,
@@ -355,6 +419,7 @@ impl StateDb {
     /// are cheap.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // Base schema. `CREATE TABLE IF NOT EXISTS` covers both the
         // first-run case and subsequent opens against an existing DB
         // that already has every column we need.
@@ -567,6 +632,56 @@ impl StateDb {
             params![status.as_str(), file_id],
         )?;
         Ok(())
+    }
+
+    /// Apply a batch of native-Explorer-derived state deltas in ONE
+    /// transaction. Each tuple is `(file_id, status_opt, pin_opt)` where a
+    /// `Some` means "the on-disk placeholder disagrees with the DB, write this";
+    /// a `None` means "leave that column untouched".
+    ///
+    /// Drives the Windows per-tick reconcile pass
+    /// ([`crate::windows_cf::reconcile_placeholder_state`]): a NATIVE pin /
+    /// free-up the user did in Explorer (not through the in-app pin path) shows
+    /// up here as a delta and is written back so the app's view matches reality.
+    /// Callers pass DELTAS ONLY — the reconcile pass compares each desired value
+    /// to the live row and never enqueues a no-op — so this method stays churn-
+    /// free in steady state. The in-app pin path writes DB + OS together, so the
+    /// next reconcile sees no delta for those files.
+    ///
+    /// - A `Some(status)` updates `status` and re-stamps `last_sync_at = now`.
+    /// - A `Some(pin)` updates `pin_state` only (inheritance/effective resolution
+    ///   is unchanged — we only persist the explicit per-file pin the OS reports).
+    ///
+    /// Returns the number of rows touched (a row updated for both status and pin
+    /// counts the affected-row total across both statements). Empty input is a
+    /// fast `Ok(0)` with no transaction opened.
+    pub fn reconcile_os_state(
+        &self,
+        deltas: &[(String, Option<FileStatus>, Option<PinState>)],
+        now: i64,
+    ) -> Result<usize> {
+        if deltas.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut touched = 0usize;
+        for (file_id, status_opt, pin_opt) in deltas {
+            if let Some(status) = status_opt {
+                touched += tx.execute(
+                    "UPDATE files SET status = ?1, last_sync_at = ?2 WHERE file_id = ?3",
+                    params![status.as_str(), now, file_id],
+                )?;
+            }
+            if let Some(pin) = pin_opt {
+                touched += tx.execute(
+                    "UPDATE files SET pin_state = ?1 WHERE file_id = ?2",
+                    params![pin.as_str(), file_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(touched)
     }
 
     /// Correct the logical plaintext `size_bytes` for a known file row.
@@ -1533,6 +1648,113 @@ mod tests {
         let conflicts = db.list_by_status(FileStatus::Conflict).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].file_id, "x1");
+    }
+
+    #[test]
+    fn decode_os_state_status_only_for_user_owned_states() {
+        // Cloud-only on disk → RECALL bit set.
+        const RECALL: u32 = 0x0040_0000;
+        const PINNED: u32 = 0x0008_0000;
+        const UNPINNED: u32 = 0x0010_0000;
+
+        // Local row, RECALL set on disk ⇒ desired CloudOnly; no pin bits ⇒ None.
+        let (status, pin) = decode_os_state(RECALL, FileStatus::Local);
+        assert_eq!(status, Some(FileStatus::CloudOnly));
+        assert_eq!(pin, None);
+
+        // CloudOnly row, RECALL clear (bytes resident) ⇒ desired Local.
+        let (status, pin) = decode_os_state(0, FileStatus::CloudOnly);
+        assert_eq!(status, Some(FileStatus::Local));
+        assert_eq!(pin, None);
+
+        // Engine-owned statuses are NEVER touched, regardless of attrs.
+        for owned in [
+            FileStatus::Uploading,
+            FileStatus::Downloading,
+            FileStatus::Conflict,
+            FileStatus::Error,
+        ] {
+            let (status, _) = decode_os_state(RECALL, owned.clone());
+            assert_eq!(status, None, "{owned:?} must be left alone");
+        }
+
+        // Pin bits decode independently of status.
+        let (_, pin) = decode_os_state(PINNED, FileStatus::Local);
+        assert_eq!(pin, Some(PinState::Pinned));
+        let (_, pin) = decode_os_state(UNPINNED, FileStatus::Local);
+        assert_eq!(pin, Some(PinState::Unpinned));
+        // Both set: PINNED wins (checked first — a placeholder shouldn't carry
+        // both, but be deterministic if it does).
+        let (_, pin) = decode_os_state(PINNED | UNPINNED, FileStatus::CloudOnly);
+        assert_eq!(pin, Some(PinState::Pinned));
+        // RECALL set, no pin bit, engine-owned status: status None, pin None.
+        let (status, pin) = decode_os_state(RECALL, FileStatus::Uploading);
+        assert_eq!(status, None);
+        assert_eq!(pin, None);
+    }
+
+    #[test]
+    fn reconcile_os_state_applies_status_and_pin_deltas() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // Empty input → fast Ok(0), no writes.
+        assert_eq!(db.reconcile_os_state(&[], 100).unwrap(), 0);
+
+        let seed = |file_id: &str| FileEntry {
+            file_id: file_id.into(),
+            path: format!("/{file_id}.txt"),
+            status: FileStatus::CloudOnly,
+            size_bytes: 0,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        // status-only target, pin-only target, both target.
+        for id in ["s_only", "p_only", "both"] {
+            db.upsert_file(&seed(id)).unwrap();
+        }
+
+        let deltas = vec![
+            // status-only: flip CloudOnly → Local, re-stamps last_sync_at.
+            ("s_only".to_string(), Some(FileStatus::Local), None),
+            // pin-only: leave status, set pinned.
+            ("p_only".to_string(), None, Some(PinState::Pinned)),
+            // both: status + pin.
+            (
+                "both".to_string(),
+                Some(FileStatus::CloudOnly),
+                Some(PinState::Unpinned),
+            ),
+            // missing row: WHERE matches nothing, contributes 0 to the count.
+            ("ghost".to_string(), Some(FileStatus::Local), None),
+        ];
+        // s_only(1) + p_only(1) + both(2) + ghost(0) = 4 rows touched.
+        let touched = db.reconcile_os_state(&deltas, 12345).unwrap();
+        assert_eq!(touched, 4);
+
+        // status-only applied and last_sync_at re-stamped.
+        let s = db.get_file("s_only").unwrap().unwrap();
+        assert_eq!(s.status, FileStatus::Local);
+        let s_contract = db.get_file_contract_state("s_only").unwrap().unwrap();
+        assert_eq!(s_contract.last_sync_at, 12345);
+
+        // pin-only applied, status untouched.
+        let p = db.get_file("p_only").unwrap().unwrap();
+        assert_eq!(p.status, FileStatus::CloudOnly);
+        let p_contract = db.get_file_contract_state("p_only").unwrap().unwrap();
+        assert_eq!(p_contract.pin_state, PinState::Pinned);
+
+        // both applied.
+        let b_contract = db.get_file_contract_state("both").unwrap().unwrap();
+        assert_eq!(b_contract.pin_state, PinState::Unpinned);
+        assert_eq!(b_contract.last_sync_at, 12345);
+        assert_eq!(
+            db.get_file("both").unwrap().unwrap().status,
+            FileStatus::CloudOnly
+        );
     }
 
     #[test]
