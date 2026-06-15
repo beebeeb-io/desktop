@@ -444,6 +444,173 @@ impl ApiClient {
     pub fn master_key(&self) -> &[u8; 32] {
         &self.master_key
     }
+
+    // ── Read-only data-layer wrappers (account / billing / devices / etc.) ────
+    //
+    // These power the desktop's data-backed views. They are plain
+    // `GET`/`DELETE`/`POST` calls returning typed DTOs from `account_dto`.
+    // Unlike the sync-engine binary paths above, they go through
+    // `get_typed` / `send_typed`, which:
+    //   * retry once on HTTP 429 (rate limit) after honouring `Retry-After`,
+    //     mirroring the web `request()` client's backoff (capped, single
+    //     retry — the daemon is not a hot loop),
+    //   * surface a clean `<status>: <body-snippet>` error on any other
+    //     non-2xx instead of reqwest's opaque default.
+
+    /// Internal: GET a JSON endpoint and deserialize it, with a single 429
+    /// backoff. `path` is the API path (leading slash); auth is attached.
+    async fn get_typed<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        let url = self.url(path);
+        let resp = self.send_with_retry(|| self.client.get(&url)).await?;
+        Ok(resp.json::<T>().await?)
+    }
+
+    /// Internal: issue an arbitrary request (built by `build`) with a single
+    /// 429 backoff, returning a 2xx response or a descriptive error.
+    async fn send_with_retry(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> anyhow::Result<reqwest::Response> {
+        // First attempt.
+        let resp = build()
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Self::check_status(resp).await;
+        }
+        // 429 — honour Retry-After (seconds), capped at 10s, then retry once.
+        let wait = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(1)
+            .min(10);
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+        let resp = build()
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        Self::check_status(resp).await
+    }
+
+    /// Map a non-2xx response to a descriptive error (status + a short body
+    /// snippet); pass a 2xx response through unchanged.
+    async fn check_status(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
+        anyhow::bail!("HTTP {status}: {snippet}")
+    }
+
+    /// `GET /api/v1/auth/me` — account profile.
+    pub async fn account_profile(&self) -> anyhow::Result<crate::account_dto::AccountProfile> {
+        self.get_typed("/api/v1/auth/me").await
+    }
+
+    /// `GET /api/v1/billing/subscription` — plan + quota + lifecycle.
+    pub async fn subscription(&self) -> anyhow::Result<crate::account_dto::Subscription> {
+        self.get_typed("/api/v1/billing/subscription").await
+    }
+
+    /// `GET /api/v1/billing/usage` — used/quota bytes + percentage.
+    pub async fn billing_usage(&self) -> anyhow::Result<crate::account_dto::BillingUsage> {
+        self.get_typed("/api/v1/billing/usage").await
+    }
+
+    /// `GET /api/v1/account/activity` — events + summary.
+    pub async fn account_activity(&self) -> anyhow::Result<crate::account_dto::AccountActivity> {
+        self.get_typed("/api/v1/account/activity").await
+    }
+
+    /// `GET /api/v1/account/security-score` — numeric score + factors.
+    pub async fn security_score(&self) -> anyhow::Result<crate::account_dto::SecurityScore> {
+        self.get_typed("/api/v1/account/security-score").await
+    }
+
+    /// `GET /api/v1/account/sessions` — active account sessions.
+    pub async fn account_sessions(&self) -> anyhow::Result<crate::account_dto::AccountSessionList> {
+        self.get_typed("/api/v1/account/sessions").await
+    }
+
+    /// `DELETE /api/v1/account/sessions/{id}` — revoke one session.
+    /// Server returns `{ revoked: true }`; we don't need the body.
+    pub async fn revoke_account_session(&self, session_id: &str) -> anyhow::Result<()> {
+        let url = self.url(&format!("/api/v1/account/sessions/{}", encode(session_id)));
+        self.send_with_retry(|| self.client.delete(&url)).await?;
+        Ok(())
+    }
+
+    /// `POST /api/v1/account/sessions/revoke-all-others` — revoke every
+    /// session except the current one. Returns the count revoked.
+    pub async fn revoke_other_sessions(&self) -> anyhow::Result<crate::account_dto::RevokeAllResult> {
+        let url = self.url("/api/v1/account/sessions/revoke-all-others");
+        let resp = self.send_with_retry(|| self.client.post(&url)).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `GET /api/v1/clients/devices` — registered client devices.
+    pub async fn client_devices(&self) -> anyhow::Result<crate::account_dto::ClientDeviceList> {
+        self.get_typed("/api/v1/clients/devices").await
+    }
+
+    /// `GET /api/v1/clients/sessions` — per-device sync sessions.
+    pub async fn client_sync_sessions(
+        &self,
+    ) -> anyhow::Result<crate::account_dto::ClientSyncSessionList> {
+        self.get_typed("/api/v1/clients/sessions").await
+    }
+
+    /// `GET /api/v1/activity` — paginated audit-log feed. `page`/`limit`
+    /// are optional; when `None` the server defaults apply.
+    pub async fn activity_feed(
+        &self,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<crate::account_dto::ActivityFeed> {
+        let mut query = Vec::new();
+        if let Some(page) = page {
+            query.push(format!("page={page}"));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let path = if query.is_empty() {
+            "/api/v1/activity".to_string()
+        } else {
+            format!("/api/v1/activity?{}", query.join("&"))
+        };
+        self.get_typed(&path).await
+    }
+
+    /// `GET /api/v1/notifications` — notification list + unread count.
+    pub async fn notifications(&self) -> anyhow::Result<crate::account_dto::NotificationList> {
+        self.get_typed("/api/v1/notifications").await
+    }
+
+    /// `GET /api/v1/notifications/preferences` — push-preference toggles.
+    pub async fn notification_preferences(
+        &self,
+    ) -> anyhow::Result<crate::account_dto::NotificationPreferences> {
+        self.get_typed("/api/v1/notifications/preferences").await
+    }
+
+    /// `PUT /api/v1/notifications/preferences` — partial update; omitted
+    /// fields keep their current server value.
+    pub async fn update_notification_preferences(
+        &self,
+        update: &crate::account_dto::NotificationPreferencesUpdate,
+    ) -> anyhow::Result<crate::account_dto::NotificationPreferences> {
+        let url = self.url("/api/v1/notifications/preferences");
+        let resp = self
+            .send_with_retry(|| self.client.put(&url).json(update))
+            .await?;
+        Ok(resp.json().await?)
+    }
 }
 
 #[cfg(test)]

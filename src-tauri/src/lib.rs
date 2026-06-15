@@ -15,6 +15,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
+mod account_dto;
 mod api_client;
 mod browser_login;
 mod config;
@@ -120,6 +121,12 @@ pub struct AppState {
     /// `tray_resume_sync`. Shared with the runner so it can skip sync
     /// work on each tick without a lock round-trip.
     pub sync_paused: Arc<AtomicBool>,
+    /// Account profile fetched once from `/api/v1/auth/me`. Populated by
+    /// the startup session-verification path (which already hits that
+    /// endpoint, so we cache the payload instead of discarding it) and
+    /// served by the `account_profile` IPC without a second round-trip.
+    /// `None` until the first fetch lands.
+    pub cached_profile: Mutex<Option<account_dto::AccountProfile>>,
 }
 
 impl Default for AppState {
@@ -133,6 +140,7 @@ impl Default for AppState {
             // its first event, the listener overwrites this.
             engine_state: Mutex::new("stopped".to_string()),
             sync_paused: Arc::new(AtomicBool::new(false)),
+            cached_profile: Mutex::new(None),
         }
     }
 }
@@ -548,9 +556,15 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         .ok_or_else(|| "No session_token in login finish response".to_string())?
         .to_string();
 
-    if desktop_session_has_totp(&client, &base_url, &session_token).await? {
+    let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+    if profile.totp_enabled.unwrap_or(false) {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
+    }
+    // Cache the profile we just fetched so the `account_profile` IPC can serve
+    // the Account page immediately without re-hitting `/auth/me`.
+    if let Ok(mut guard) = state.cached_profile.lock() {
+        *guard = Some(profile);
     }
 
     if let Err(e) = persist_session_token_to_keychain(&session_token, Some(&email)) {
@@ -654,11 +668,18 @@ fn encode_base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-async fn desktop_session_has_totp(
+/// Verify a freshly-minted session by fetching `/api/v1/auth/me`, returning
+/// the parsed [`account_dto::AccountProfile`].
+///
+/// This used to discard the payload after reading only `totp_enabled`. We
+/// now return the whole profile so the caller can both gate on 2FA AND cache
+/// the profile into `AppState` — that's what powers the `account_profile`
+/// IPC without a second round-trip (the "all pages empty" data-layer fix).
+async fn fetch_session_profile(
     client: &reqwest::Client,
     base_url: &str,
     session_token: &str,
-) -> Result<bool, String> {
+) -> Result<account_dto::AccountProfile, String> {
     let resp = client
         .get(format!("{base_url}/api/v1/auth/me"))
         .bearer_auth(session_token)
@@ -670,11 +691,9 @@ async fn desktop_session_has_totp(
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Session verification failed ({status}): {body}"));
     }
-    let body: serde_json::Value = resp
-        .json()
+    resp.json::<account_dto::AccountProfile>()
         .await
-        .map_err(|e| format!("parse session verification response: {e}"))?;
-    Ok(body.get("totp_enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+        .map_err(|e| format!("parse session verification response: {e}"))
 }
 
 async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, session_token: &str) -> Result<(), String> {
@@ -2580,6 +2599,236 @@ fn account_email(state: State<'_, AppState>) -> Result<Option<String>, String> {
     Ok(state.auth_email.lock().ok().and_then(|guard| guard.clone()))
 }
 
+// ── IPC commands: data layer (account / billing / devices / activity) ─────────
+//
+// PKG-DATA: wrap the EXISTING server endpoints the desktop never called, so
+// the data-backed views ("all pages empty") have something to render. Each
+// command builds a short-lived `ApiClient` from the in-memory session,
+// fetches a typed DTO, and maps any transport error to a `String` the
+// WebView can surface. They share the same "vault locked" gate as
+// `desktop_storage_summary`: no in-memory session → `Err("vault is locked")`.
+
+/// Build an [`api_client::ApiClient`] from the current in-memory session.
+///
+/// Returns `Err("vault is locked")` when there is no session — the same
+/// signal `desktop_storage_summary` uses, so the frontend can treat "locked"
+/// uniformly. Clones the token + master key out from under the lock so the
+/// returned client owns its credentials (the `ApiClient` is intentionally
+/// `!Clone`, but constructing a fresh one per call is cheap and keeps the
+/// one-authoritative-copy invariant on `Session` itself intact).
+fn api_client_from_session(state: &State<'_, AppState>) -> Result<api_client::ApiClient, String> {
+    let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    let session = guard.as_ref().ok_or_else(|| "vault is locked".to_string())?;
+    Ok(api_client::ApiClient::new(
+        runner::api_base_url(),
+        session.token.clone(),
+        session.master_key,
+    ))
+}
+
+/// `GET /api/v1/auth/me` (cached). Serves the profile cached at login if
+/// present; otherwise fetches once and caches it. Never double-fetches.
+#[tauri::command]
+async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
+    {
+        let guard = state.cached_profile.lock().map_err(|_| "profile mutex poisoned".to_string())?;
+        if let Some(profile) = guard.as_ref() {
+            return Ok(profile.clone());
+        }
+    }
+    let api = api_client_from_session(&state)?;
+    let profile = api.account_profile().await.map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = state.cached_profile.lock() {
+        *guard = Some(profile.clone());
+    }
+    Ok(profile)
+}
+
+/// `GET /api/v1/billing/subscription` — plan + quota + lifecycle.
+#[tauri::command]
+async fn account_subscription(state: State<'_, AppState>) -> Result<account_dto::Subscription, String> {
+    api_client_from_session(&state)?
+        .subscription()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/billing/usage` — used/quota bytes + percentage.
+#[tauri::command]
+async fn account_usage(state: State<'_, AppState>) -> Result<account_dto::BillingUsage, String> {
+    api_client_from_session(&state)?
+        .billing_usage()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/account/activity` — recent events + security summary.
+#[tauri::command]
+async fn account_activity(state: State<'_, AppState>) -> Result<account_dto::AccountActivity, String> {
+    api_client_from_session(&state)?
+        .account_activity()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/account/security-score` — numeric score + factors.
+#[tauri::command]
+async fn account_security_score(state: State<'_, AppState>) -> Result<account_dto::SecurityScore, String> {
+    api_client_from_session(&state)?
+        .security_score()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/account/sessions` — active account sessions.
+#[tauri::command]
+async fn account_session_list(
+    state: State<'_, AppState>,
+) -> Result<account_dto::AccountSessionList, String> {
+    api_client_from_session(&state)?
+        .account_sessions()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `DELETE /api/v1/account/sessions/{id}` — revoke one session.
+#[tauri::command]
+async fn account_revoke_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    api_client_from_session(&state)?
+        .revoke_account_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `POST /api/v1/account/sessions/revoke-all-others` — revoke every other
+/// session; returns the count revoked.
+#[tauri::command]
+async fn account_revoke_other_sessions(
+    state: State<'_, AppState>,
+) -> Result<account_dto::RevokeAllResult, String> {
+    api_client_from_session(&state)?
+        .revoke_other_sessions()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/clients/devices` — registered client devices.
+#[tauri::command]
+async fn account_devices(state: State<'_, AppState>) -> Result<account_dto::ClientDeviceList, String> {
+    api_client_from_session(&state)?
+        .client_devices()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/clients/sessions` — per-device sync sessions.
+#[tauri::command]
+async fn account_client_sessions(
+    state: State<'_, AppState>,
+) -> Result<account_dto::ClientSyncSessionList, String> {
+    api_client_from_session(&state)?
+        .client_sync_sessions()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/activity` — paginated audit-log feed. `page`/`limit` are
+/// optional; `None` lets the server defaults apply.
+#[tauri::command]
+async fn account_activity_feed(
+    state: State<'_, AppState>,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Result<account_dto::ActivityFeed, String> {
+    api_client_from_session(&state)?
+        .activity_feed(page, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/notifications` — notification list + unread count.
+#[tauri::command]
+async fn account_notifications(
+    state: State<'_, AppState>,
+) -> Result<account_dto::NotificationList, String> {
+    api_client_from_session(&state)?
+        .notifications()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/v1/notifications/preferences` — push-preference toggles.
+#[tauri::command]
+async fn account_notification_preferences(
+    state: State<'_, AppState>,
+) -> Result<account_dto::NotificationPreferences, String> {
+    api_client_from_session(&state)?
+        .notification_preferences()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `PUT /api/v1/notifications/preferences` — partial update; omitted fields
+/// keep their current server value.
+#[tauri::command]
+async fn account_update_notification_preferences(
+    state: State<'_, AppState>,
+    update: account_dto::NotificationPreferencesUpdate,
+) -> Result<account_dto::NotificationPreferences, String> {
+    api_client_from_session(&state)?
+        .update_notification_preferences(&update)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Local storage breakdown by content type (Media / Documents / Other) plus
+/// the N largest files, computed from the desktop SQLite mirror. No server
+/// endpoint exists for this — it is computed client-side from
+/// `state_db::list_files` (size + path extension). Folders are excluded.
+///
+/// `largest_limit` caps the returned `largest_files` list; defaults to 10
+/// when `None`. Returns an empty breakdown (all three categories present at
+/// zero) when no sync root is configured or the state DB is absent — the UI
+/// renders a stable empty state rather than an error.
+#[tauri::command]
+async fn account_storage_breakdown(
+    largest_limit: Option<usize>,
+) -> Result<account_dto::StorageBreakdown, String> {
+    let limit = largest_limit.unwrap_or(10);
+
+    // Resolve the state DB from the configured sync root, mirroring
+    // `desktop_storage_summary`. No root / no DB → empty (not an error).
+    let db_path = match DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
+        Some(root) => root.join(".beebeeb").join("state.db"),
+        None => return Ok(account_dto::compute_storage_breakdown(&[], limit)),
+    };
+    if !db_path.exists() {
+        return Ok(account_dto::compute_storage_breakdown(&[], limit));
+    }
+
+    // SQLite work is blocking; run it off the async executor (mirrors
+    // `free_up_space`, which uses the same `tokio::task::spawn_blocking` + `??`).
+    let breakdown = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+        let entries = db.list_files().map_err(|e| format!("list files: {e}"))?;
+        // Folders carry no real size; exclude them from the breakdown.
+        let inputs: Vec<account_dto::BreakdownInput> = entries
+            .into_iter()
+            .filter(|e| !e.is_dir())
+            .map(|e| account_dto::BreakdownInput {
+                file_id: e.file_id,
+                path: e.path,
+                size_bytes: e.size_bytes,
+            })
+            .collect();
+        Ok(account_dto::compute_storage_breakdown(&inputs, limit))
+    })
+    .await
+    .map_err(|e| format!("storage breakdown task failed: {e}"))??;
+
+    Ok(breakdown)
+}
+
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
 
 /// Internal helper that does the actual window-building work. Called
@@ -2910,6 +3159,24 @@ pub fn run() {
             get_desktop_config,
             set_desktop_config,
             account_email,
+            // PKG-DATA — account / billing / devices / activity data layer.
+            // Wrappers over existing server endpoints (the "all pages empty"
+            // fix) plus the locally-computed storage breakdown.
+            account_profile,
+            account_subscription,
+            account_usage,
+            account_activity,
+            account_security_score,
+            account_session_list,
+            account_revoke_session,
+            account_revoke_other_sessions,
+            account_devices,
+            account_client_sessions,
+            account_activity_feed,
+            account_notifications,
+            account_notification_preferences,
+            account_update_notification_preferences,
+            account_storage_breakdown,
             // Task 0090 — selective sync
             get_selective_sync,
             set_selective_sync,
