@@ -210,6 +210,8 @@ export interface Subscription {
   created_at?: string | null
   /** RFC3339; null on the free-plan default branch. */
   current_period_end?: string | null
+  /** RFC3339; when the subscription first entered `past_due`, else null. Mirrors the Rust DTO field. */
+  past_due_since?: string | null
   quota_bytes: number
   used_bytes: number
   extra_storage_tb?: number
