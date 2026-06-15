@@ -433,6 +433,115 @@ pub fn is_cloud_placeholder(path: &std::path::Path) -> bool {
     (attrs & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
 }
 
+/// Resize the Cloud Files placeholder at `path` so its `FileSize` matches
+/// the AES-256-GCM-authenticated decrypted plaintext length, and re-stamp
+/// it in-sync. This is **Tier-1 of the hydration resolve-or-error path**
+/// (task 0783): when `hydrate_file` decrypts successfully but the decrypted
+/// length disagrees with the placeholder's recorded size (the server stored
+/// the *encrypted* size on some upload paths — see the 0783 decision file),
+/// the decrypted length is ground truth, so we correct the placeholder to it.
+///
+/// ## Why this runs AFTER the fetch fails, not during it
+///
+/// `CfUpdatePlaceholder` cannot legally resize a placeholder that has an
+/// in-flight hydration: the file is in-use by the active `FETCH_DATA`
+/// transfer, and the call returns `ERROR_CLOUD_FILE_IN_USE`. The documented
+/// way to abort a hydration mid-callback is `CfExecute(TRANSFER_DATA)` with a
+/// non-success status (our `fail_transfer`). So the callback fails THIS fetch
+/// cleanly first, THEN calls this to correct the size out-of-band. The file
+/// stays openable: the very next open fires a fresh `FETCH_DATA` against the
+/// now-aligned size and hydrates successfully. The end state — an openable
+/// file whose size equals the decrypted length — is reached, just one open
+/// later, which is the only point at which the resize is API-legal.
+///
+/// ## What we change
+///
+/// We pass a `CF_FS_METADATA` carrying ONLY the corrected `FileSize` plus
+/// `FILE_ATTRIBUTE_NORMAL`; the `FILE_BASIC_INFO` timestamp fields are left at
+/// 0, which Windows treats as "do not change" so the file keeps its real
+/// Date Modified. `CF_UPDATE_FLAG_MARK_IN_SYNC` re-anchors the placeholder to
+/// the corrected metadata so Windows does not treat the resize as a local
+/// edit needing re-upload. We pass `None` for the file identity (keep the
+/// existing UTF-8 `file_id` blob) and no dehydrate range (the whole file is
+/// already cloud-only after the failed fetch).
+///
+/// Best-effort: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// and always closes it before returning. A failure here leaves the
+/// placeholder at the stale size (the file is no worse off than before this
+/// path existed — Tier-2 still surfaced a real error on the failed fetch), so
+/// the caller only logs.
+///
+/// SAFETY: `path_wide` lives for the whole call; the handle is closed on every
+/// exit path.
+pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `path_wide` is alive for the whole call; `metadata` lives on this
+    // stack frame and `CfUpdatePlaceholder` copies what it needs before return.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (resize): {e}"))?;
+
+        let metadata = CF_FS_METADATA {
+            BasicInfo: FILE_BASIC_INFO {
+                // 0 timestamps = "leave unchanged" so the placeholder keeps its
+                // real Date Modified; only the size is being corrected here.
+                CreationTime: 0,
+                LastAccessTime: 0,
+                LastWriteTime: 0,
+                ChangeTime: 0,
+                // A non-zero attribute is required; NORMAL matches what
+                // create_placeholder mints for a file.
+                FileAttributes: FILE_ATTRIBUTE_NORMAL.0,
+            },
+            // The correction: the placeholder's logical size becomes the
+            // decrypted plaintext length (clamped non-negative).
+            FileSize: true_size_bytes.max(0),
+        };
+
+        let result = CfUpdatePlaceholder(
+            handle,
+            Some(&metadata as *const CF_FS_METADATA),
+            // Keep the existing FileIdentity blob (the UTF-8 file_id) — passing
+            // None means "do not touch the identity".
+            None,
+            0,
+            // No dehydrate range: the file is fully cloud-only after the failed
+            // fetch, so there is no hydrated range to invalidate.
+            None,
+            // MARK_IN_SYNC: the corrected metadata IS the latest truth, so don't
+            // let Windows read the resize as a local modification.
+            CF_UPDATE_FLAG_MARK_IN_SYNC,
+            None,
+            None,
+        );
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // ERROR_NOT_A_CLOUD_FILE (0x80070178) — the path isn't a placeholder
+            // (e.g. it was hydrated to a plain file or removed). Nothing to
+            // resize; treat as the end state rather than erroring the sweep.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == NOT_A_CLOUD_FILE {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfUpdatePlaceholder (resize): {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the corrected size only, never the decrypted path.
+    tracing::debug!(true_size_bytes, "resized cloud placeholder to decrypted length");
+    Ok(())
+}
+
 /// Number of seconds between the Windows FILETIME epoch (1601-01-01) and
 /// the Unix epoch (1970-01-01).
 const FILETIME_UNIX_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;

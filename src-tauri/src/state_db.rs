@@ -569,6 +569,27 @@ impl StateDb {
         Ok(())
     }
 
+    /// Correct the logical plaintext `size_bytes` for a known file row.
+    ///
+    /// Used by the Windows Cloud Files hydration resolve-or-error path
+    /// (task 0783): when a placeholder's recorded `size_bytes` (mirrored
+    /// from the server) disagrees with the AES-256-GCM-authenticated
+    /// decrypted plaintext length, the decrypted length is ground truth —
+    /// so we rewrite the row to the true plaintext size. The next
+    /// placeholder (re)creation then mints an aligned size and hydration
+    /// succeeds. Returns the number of rows affected (0 if `file_id` is
+    /// absent). A negative size is clamped to 0: a caller should never
+    /// pass a negative length, but clamping keeps a pathological value
+    /// from corrupting the column.
+    pub fn set_size_bytes(&self, file_id: &str, size_bytes: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let updated = conn.execute(
+            "UPDATE files SET size_bytes = ?1 WHERE file_id = ?2",
+            params![size_bytes.max(0), file_id],
+        )?;
+        Ok(updated)
+    }
+
     /// Return every row whose `status` matches. Used by the conflict
     /// resolution UI (status = Conflict) and the daemon's
     /// "what still needs uploading?" sweep (status = Uploading).
@@ -1395,6 +1416,44 @@ mod tests {
         let conflicts = db.list_by_status(FileStatus::Conflict).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].file_id, "x1");
+    }
+
+    #[test]
+    fn set_size_bytes_corrects_row_to_decrypted_length() {
+        // Task 0783 Tier-1: a placeholder seeded with the (wrong) encrypted
+        // size must be correctable to the AES-256-GCM-authenticated plaintext
+        // length so the next hydration mints an aligned placeholder.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // file_size = plaintext_len + 28 (one single-chunk GCM nonce+tag) is
+        // exactly the bad-row shape from the live trace.
+        let plaintext_len: i64 = 20;
+        let bad_size: i64 = plaintext_len + 28; // 48
+        db.upsert_file(&FileEntry {
+            file_id: "size-mismatch".into(),
+            path: "/bb-test-upload.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: bad_size,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+
+        // Correcting an existing row rewrites the column and reports 1 row.
+        let updated = db.set_size_bytes("size-mismatch", plaintext_len).unwrap();
+        assert_eq!(updated, 1);
+        assert_eq!(db.get_file("size-mismatch").unwrap().unwrap().size_bytes, plaintext_len);
+
+        // A negative length is clamped to 0 (defensive; never expected).
+        db.set_size_bytes("size-mismatch", -5).unwrap();
+        assert_eq!(db.get_file("size-mismatch").unwrap().unwrap().size_bytes, 0);
+
+        // An absent file_id is a no-op (0 rows), not an error.
+        assert_eq!(db.set_size_bytes("does-not-exist", 10).unwrap(), 0);
     }
 
     #[test]
