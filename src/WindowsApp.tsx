@@ -44,6 +44,7 @@ import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card } from './wind
 import AccountView from './windows/views/AccountView'
 import InsightsView from './windows/views/InsightsView'
 import BandwidthView from './windows/views/BandwidthView'
+import SelectiveSyncView from './windows/views/SelectiveSyncView'
 import DevicesView from './windows/views/DevicesView'
 import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
@@ -499,6 +500,8 @@ export default function WindowsApp() {
         return <ActivityView />
       case 'bandwidth':
         return <BandwidthView />
+      case 'selective-sync':
+        return <SelectiveSyncView />
       default:
         return <PlaceholderView navId={activeNav} />
     }

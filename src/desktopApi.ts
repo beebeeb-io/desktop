@@ -31,12 +31,34 @@ export interface DesktopConfig {
   sync_overlays?: boolean
 }
 
+/**
+ * A folder node in the selective-sync tree returned by `list_vault_folders`
+ * (now a NESTED tree of folders only — no files). Each node carries its
+ * online-only (excluded) state plus subtree aggregates over its files.
+ *
+ * - `excluded`     — this folder id is currently in the user's online-only set.
+ * - `size_bytes`   — SUBTREE total of all file bytes under this folder.
+ * - `file_count`   — SUBTREE total file count under this folder.
+ * - `on_disk_bytes`— SUBTREE bytes currently hydrated on local disk. The
+ *   online-only (not-yet-downloaded) bytes are `size_bytes - on_disk_bytes`.
+ *
+ * Folders carry no own bytes; the aggregates roll up their descendant files.
+ */
 export interface VaultItem {
   id: string
   name: string
   is_folder: boolean
+  excluded: boolean
+  size_bytes: number
+  file_count: number
+  on_disk_bytes: number
+  children: VaultItem[]
+  // ── Legacy UI-state fields (pre-Tauri pages: src/pages/SelectiveSync.tsx,
+  // src/Onboarding.tsx, backed by list_remote_tree / set_recursive_pin). The new
+  // list_vault_folders backing does NOT emit these; they're optional so the
+  // legacy pin-tree pages still type-check without affecting the new selective-
+  // sync view, which never reads them. ──
   path?: string
-  children?: VaultItem[]
   pinned?: boolean
   inheritedPinned?: boolean
 }
@@ -499,4 +521,28 @@ export function accountStorageBreakdown(
  *  command is not registered in this build. */
 export function showMainAppWindow(): Promise<CommandResult<void>> {
   return command<void>('show_main_app_window')
+}
+
+// ── Selective sync (wave-2) ──────────────────────────────────────────────────
+//
+// The folder tree + the user's online-only (excluded) set. `list_vault_folders`
+// returns a nested tree of VaultItem folders, each carrying its `excluded` flag
+// and subtree aggregates. `set_selective_sync` persists the excluded set AND
+// dehydrates newly-excluded subtrees to free local disk.
+
+/** Nested folder tree for selective sync (folders only; carries `excluded` +
+ *  subtree aggregates). */
+export function listVaultFolders(): Promise<CommandResult<VaultItem[]>> {
+  return command<VaultItem[]>('list_vault_folders')
+}
+
+/** The user's current online-only (excluded) folder-id set. */
+export function getSelectiveSync(): Promise<CommandResult<string[]>> {
+  return command<string[]>('get_selective_sync')
+}
+
+/** Persist the online-only (excluded) folder-id set. Newly-excluded subtrees
+ *  are dehydrated from local disk (the files stay safe in the vault). */
+export function setSelectiveSync(excluded: string[]): Promise<CommandResult<void>> {
+  return command<void>('set_selective_sync', { excluded })
 }
