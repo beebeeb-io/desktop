@@ -329,13 +329,14 @@ impl ApiClient {
             }),
             None => self.list_files_url(ListFilesScope::default()),
         };
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        // Route through `send_with_retry` so a transient 429 backs off and
+        // retries (honouring Retry-After / x-ratelimit-reset) instead of
+        // erroring immediately — the hot-path full-tree re-walk would
+        // otherwise self-saturate the per-IP rate limit. The closure rebuilds
+        // the full request (with the same query params baked into `url`) each
+        // attempt so retries re-send identically; the auth header is added
+        // inside `send_with_retry`, so it must NOT be added here.
+        let resp = self.send_with_retry(|| self.client.get(&url)).await?;
         let body: serde_json::Value = resp.json().await?;
         Ok(body["files"].as_array().cloned().unwrap_or_default())
     }

@@ -46,10 +46,13 @@ use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 
 /// How often the runner pulls the file list from the server and
-/// refreshes the state DB. Same cadence as the previous engine; small
-/// enough that newly-uploaded remote files appear in the local mirror
-/// quickly without hammering the API.
-const TICK_INTERVAL: Duration = Duration::from_secs(5);
+/// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
+/// remote tree (`GET /api/v1/files`) every tick, which by itself could
+/// saturate the server's per-IP rate limit and pin the client in a 429
+/// loop. 30s is a stopgap to stop the bleeding; once the `/sync`
+/// snapshot+ops delta path lands (task 0789) refresh becomes
+/// event-driven and this fixed poll goes away.
+const TICK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Subdirectory inside the sync root where the daemon keeps its
 /// SQLite state DB. Hidden by leading dot so it doesn't pollute the
