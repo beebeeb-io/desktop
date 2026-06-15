@@ -66,11 +66,22 @@ use crate::engine_bridge::EngineBridge;
 /// changing this between releases would orphan existing placeholders.
 pub const PROVIDER_ID: &str = "Beebeeb";
 
-/// Provider version reported alongside `PROVIDER_ID`. Bumping this is
-/// how we tell Windows "schema for the FileIdentity blob may have
-/// changed; recreate placeholders" — for now we keep it pinned to
-/// "1.0.0" and rely on the `FileIdentity` being a UTF-8 file_id.
-pub const PROVIDER_VERSION: &str = "1.0.0";
+/// Provider version reported alongside `PROVIDER_ID`. It is written into the
+/// Explorer SHELL registration (`StorageProviderSyncRootInfo::SetVersion`).
+///
+/// Bumping this is ALSO how we force a re-registration of the shell sync root
+/// when its policies change: `register_shell_sync_root` skips the
+/// `StorageProviderSyncRootManager::Register` call when an entry already exists
+/// for the (stable) Id. A first-launch entry registered with the old policy set
+/// would otherwise never pick up a policy change. The version is part of the
+/// shell metadata, so a re-register IS still required to apply the new policies
+/// — see `register_shell_sync_root`, which now force-unregisters a stale entry
+/// whose recorded version differs from this constant before re-registering.
+///
+/// `1.0.0` → `1.1.0`: dropped `AutoDehydrationAllowed` from the hydration
+/// modifier (pinned/opened files must stay resident — see line ~486). Existing
+/// installs registered at 1.0.0 must re-register to apply the new modifier.
+pub const PROVIDER_VERSION: &str = "1.1.0";
 
 /// Live handle to the engine bridge, set once at runner startup and
 /// read by the Cloud Files fetch callback. We can't capture the
@@ -430,16 +441,42 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
         .get()
         .map_err(|e| anyhow::anyhow!("GetFolderFromPathAsync failed for sync root: {e}"))?;
 
-    // Idempotency guard: if this folder is already shell-registered, do not
-    // re-register (a second Register with the same Id throws). We probe by Id
-    // rather than by folder so a stale registration whose folder moved is still
-    // found.
-    if StorageProviderSyncRootManager::GetSyncRootInformationForId(&id_h).is_ok() {
+    // Idempotency + policy-version guard. The shell Id is derived purely from the
+    // sync-root PATH (stable across releases) — it does NOT encode the provider
+    // version — so a plain "Id already exists" check would skip re-registration
+    // forever, and a policy change (e.g. dropping AutoDehydrationAllowed in
+    // PROVIDER_VERSION 1.1.0) would never reach an existing install. So we probe
+    // by Id and then compare the REGISTERED version against the current
+    // `PROVIDER_VERSION`:
+    //   - versions match  → genuine no-op, skip the re-register (a second Register
+    //     with the same Id throws ALREADY_EXISTS).
+    //   - versions differ (or the version can't be read) → the registration is
+    //     stale; Unregister it and fall through to Register with the new policies.
+    // This is what actually makes a PROVIDER_VERSION bump take effect on upgrade.
+    if let Ok(existing) = StorageProviderSyncRootManager::GetSyncRootInformationForId(&id_h) {
+        let registered_version = existing.Version().map(|h| h.to_string_lossy()).unwrap_or_default();
+        if registered_version == PROVIDER_VERSION {
+            tracing::info!(
+                sync_root = %sync_root.display(),
+                version = %PROVIDER_VERSION,
+                "Explorer shell sync root already registered at current version; skipping re-register"
+            );
+            return Ok(());
+        }
+        // Stale registration from an older provider version — tear it down so the
+        // Register below applies the new policy set (e.g. the new hydration
+        // modifier). Best-effort: if the Unregister fails the Register below will
+        // surface ALREADY_EXISTS, which we swallow, so the worst case is the old
+        // policies linger until the next clean sign-out — never a crash.
         tracing::info!(
             sync_root = %sync_root.display(),
-            "Explorer shell sync root already registered; skipping re-register"
+            from_version = %registered_version,
+            to_version = %PROVIDER_VERSION,
+            "Explorer shell sync root registered at an older version; re-registering with new policies"
         );
-        return Ok(());
+        if let Err(e) = StorageProviderSyncRootManager::Unregister(&id_h) {
+            tracing::warn!(error = %e, "Unregister of stale shell sync root failed; will attempt Register anyway");
+        }
     }
 
     let info = StorageProviderSyncRootInfo::new()
@@ -481,13 +518,17 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
     // the FETCH_DATA callback rather than dragging the whole file.
     info.SetHydrationPolicy(StorageProviderHydrationPolicy::Partial)
         .map_err(|e| anyhow::anyhow!("SetHydrationPolicy failed: {e}"))?;
-    // AutoDehydrationAllowed | StreamingAllowed — let Windows reclaim space on
-    // idle ("Free up space") and stream bytes during hydration.
-    info.SetHydrationPolicyModifier(
-        StorageProviderHydrationPolicyModifier::AutoDehydrationAllowed
-            | StorageProviderHydrationPolicyModifier::StreamingAllowed,
-    )
-    .map_err(|e| anyhow::anyhow!("SetHydrationPolicyModifier failed: {e}"))?;
+    // StreamingAllowed ONLY — stream bytes during hydration. We deliberately
+    // DROP `AutoDehydrationAllowed`: with it set, Windows freely auto-dehydrates
+    // an UNPINNED file the moment it is idle after a read, so a just-opened file
+    // never stays present — the root cause of "every file is perpetually
+    // cloud-only". Without it, an opened/hydrated file stays resident until the
+    // user (or our app via `free_up_space`) explicitly frees it, and "Always keep
+    // on this device" pins (CfSetPinState) are honoured rather than silently
+    // reclaimed. The native "Free up space" menu still works — it dehydrates on
+    // explicit user action regardless of this modifier.
+    info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::StreamingAllowed)
+        .map_err(|e| anyhow::anyhow!("SetHydrationPolicyModifier failed: {e}"))?;
     // AlwaysFull ↔ CF_POPULATION_POLICY_ALWAYS_FULL: the namespace is always fully
     // present locally (we eagerly mint a placeholder per cloud-only row), so
     // Explorer never asks the provider to enumerate.

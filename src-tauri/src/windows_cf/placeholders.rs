@@ -106,6 +106,16 @@ pub fn create_placeholder(
     //    block on a FETCH_PLACEHOLDERS callback (which this in-process provider
     //    never registers — see mod.rs). This is what keeps nested folders from
     //    reintroducing the enumeration hang while staying in the eager model.
+    //  - PIN STATE (inherit): we deliberately set NO pin flag here. A freshly
+    //    created placeholder has pin state `CF_PIN_STATE_INHERIT` by default,
+    //    which resolves to the EFFECTIVE pin state of its parent directory. So a
+    //    child minted under a directory the user pinned ("Always keep on this
+    //    device", i.e. `set_pin_state(parent, pinned=true, recurse=true)`)
+    //    automatically inherits `pinned` and is kept resident — no per-child
+    //    CfSetPinState needed (the recursive parent pin also stamps existing
+    //    children; inherit covers children created LATER). Adding an explicit
+    //    `CF_PIN_STATE_PINNED` here would be wrong: it would force every new
+    //    placeholder resident regardless of the parent, defeating cloud-only.
     let mut create_flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
     if is_dir {
         create_flags |= CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION;
@@ -403,6 +413,81 @@ pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
     }
 
     Ok(size_before)
+}
+
+/// Set the **pin state** of the Cloud Files placeholder at `path` — the
+/// OS-level "available offline" flag that drives Explorer's "Always keep on
+/// this device" green-check (pinned) vs the cloud-only overlay (unpinned).
+///
+/// ## Why this exists (the missing half of the pin model)
+///
+/// Before this, `set_recursive_pin` only flipped the DB `pin_state` column and
+/// enqueued an out-of-band hydrate — Windows itself was never told, so it kept
+/// auto-dehydrating "pinned" files (the DB said pinned, the OS had no idea).
+/// `CfSetPinState(CF_PIN_STATE_PINNED)` is the correct OS contract: a pinned
+/// placeholder is hydrated by Windows via the normal FETCH_DATA path and is NOT
+/// auto-dehydrated, so it stays resident ("available offline"). Unpinning
+/// (`CF_PIN_STATE_UNPINNED`) makes the file eligible for reclaim again but does
+/// NOT itself dehydrate it (that is `dehydrate_placeholder` / "Free up space").
+///
+/// - `pinned`: `true` → `CF_PIN_STATE_PINNED`; `false` → `CF_PIN_STATE_UNPINNED`.
+/// - `recurse`: `true` → `CF_SET_PIN_FLAG_RECURSE`, applying the pin to the whole
+///   subtree (used for directory pins so every descendant inherits the state);
+///   `false` → `CF_SET_PIN_FLAG_NONE` (single placeholder only).
+///
+/// Map `ERROR_NOT_A_CLOUD_FILE` (0x80070178) to `Ok(())`: the path is a plain
+/// (non-placeholder) file — there is no pin state to set, which for our purposes
+/// is the desired end state (a fully-local file is already "available offline").
+///
+/// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// (setting pin state mutates the placeholder's reparse data) and always closes
+/// it via `CfCloseHandle` before returning — on every exit path, no leak.
+pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let pin_state = if pinned {
+        CF_PIN_STATE_PINNED
+    } else {
+        CF_PIN_STATE_UNPINNED
+    };
+    let pin_flags = if recurse {
+        CF_SET_PIN_FLAG_RECURSE
+    } else {
+        CF_SET_PIN_FLAG_NONE
+    };
+
+    // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
+    // every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
+
+        let result = CfSetPinState(handle, pin_state, pin_flags, None);
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // 0x80070178 = ERROR_NOT_A_CLOUD_FILE — the path is not a placeholder
+            // (already a plain local file). There is no pin state to set; treat as
+            // the desired end state rather than erroring the caller.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == NOT_A_CLOUD_FILE {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfSetPinState: {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the pin parameters only, NEVER the decrypted path.
+    tracing::debug!(pinned, recurse, "set cloud placeholder pin state");
+    Ok(())
 }
 
 /// True if `path` is a reparse point — i.e. a Cloud Files placeholder this

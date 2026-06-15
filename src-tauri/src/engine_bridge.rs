@@ -983,12 +983,65 @@ impl EngineBridge {
         }
     }
 
-    pub fn set_recursive_pin(&self, file_id: &str, pinned: bool) -> anyhow::Result<PinUpdateOutcome> {
+    /// Apply a pin ("available offline") toggle to `file_id` and its subtree.
+    ///
+    /// `sync_root` is the on-disk root of the vault — needed on Windows to
+    /// resolve each affected DB row to its placeholder path and set the OS-level
+    /// pin state. It is unused on macOS/Linux (the `#[cfg]` below silences the
+    /// warning) but threaded in unconditionally to keep one signature.
+    ///
+    /// Three things happen on a pin change:
+    /// 1. **DB** — `db.set_recursive_pin` flips the `pin_state` column for the
+    ///    whole subtree and returns the ids whose state actually changed.
+    /// 2. **Server** — `enqueue_pin_tree_operation` propagates the pin so OTHER
+    ///    devices learn about it. Always runs (every platform).
+    /// 3. **OS hydration** —
+    ///    - **Windows**: `CfSetPinState` is the OS contract. A pinned placeholder
+    ///      is hydrated by Windows via the normal FETCH_DATA path AND is exempt
+    ///      from auto-dehydration, so it stays resident. We therefore do NOT
+    ///      enqueue our own out-of-band hydrate ops (the old DB-only model did,
+    ///      because Windows was never told about the pin — that loop is dropped on
+    ///      Windows). New children inherit the parent pin via CF_PIN_STATE_INHERIT.
+    ///    - **macOS/Linux**: there is no CF pin primitive, so we keep enqueuing an
+    ///      explicit hydrate op per newly-pinned cloud-only file to materialise it.
+    pub fn set_recursive_pin(
+        &self,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+        file_id: &str,
+        pinned: bool,
+    ) -> anyhow::Result<PinUpdateOutcome> {
         let now = now_secs();
         let changed_item_ids = self.db.set_recursive_pin(file_id, pinned, now)?;
+        // Mutated only on the non-Windows hydrate-enqueue path below; on Windows
+        // the OS (CfSetPinState) drives hydration, so this stays 0.
+        #[cfg_attr(target_os = "windows", allow(unused_mut))]
         let mut hydrate_operations = 0usize;
 
         self.enqueue_pin_tree_operation(file_id, pinned, now)?;
+
+        #[cfg(target_os = "windows")]
+        {
+            // OS-level pin: tell Windows the actual "available offline" state so a
+            // pinned file is kept resident (no auto-dehydration) and an unpinned
+            // one becomes reclaim-eligible again. We pin/unpin only the TOP item
+            // the user toggled, with RECURSE when it is a directory — the
+            // recursive flag stamps existing descendants in one call and
+            // CF_PIN_STATE_INHERIT covers descendants created later — rather than
+            // issuing a per-row CfSetPinState for every changed id.
+            if let Some(top) = self.db.get_file(file_id)? {
+                if let Some(path) = Self::placeholder_path_under(sync_root, &top.path) {
+                    let recurse = top.is_dir();
+                    if let Err(e) = crate::windows_cf::placeholders::set_pin_state(&path, pinned, recurse) {
+                        // Zero-knowledge: never log the path. A pin-state failure
+                        // must not abort the DB+server pin that already succeeded;
+                        // surface it as a log line and continue.
+                        tracing::warn!(file_id = %file_id, pinned, recurse, error = %e, "CfSetPinState failed for pin toggle");
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
         if pinned {
             for changed_id in &changed_item_ids {
                 let Some(entry) = self.db.get_file(changed_id)? else {
@@ -1011,6 +1064,29 @@ impl EngineBridge {
             changed_item_ids,
             hydrate_operations,
         })
+    }
+
+    /// Map a server-relative, '/'-joined DB key (`FileEntry::path`) to its
+    /// on-disk placeholder path under `sync_root`, rejecting empty/traversal
+    /// keys. Mirrors `windows_cf::callbacks::safe_join_under_root` (kept private
+    /// there) so the pin path resolution uses the same containment guard as the
+    /// fetch fallback. Returns `None` for an empty key or any `.`/`..`/empty
+    /// segment, or if the join escapes the root.
+    #[cfg(target_os = "windows")]
+    fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
+        let rel = rel_path.trim_matches('/');
+        if rel.is_empty() {
+            return None;
+        }
+        if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+            return None;
+        }
+        let native_rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let candidate = sync_root.join(&native_rel);
+        if !candidate.starts_with(sync_root) {
+            return None;
+        }
+        Some(candidate)
     }
 
     pub fn record_smart_cache_open(
@@ -2698,8 +2774,14 @@ mod tests {
             256,
         );
 
-        let queued = bridge.set_recursive_pin("folder-a", true).unwrap();
+        // `sync_root` is only used on Windows (to resolve placeholder paths for
+        // CfSetPinState). On the non-Windows test host the hydrate-enqueue path
+        // runs and `sync_root` is unused, so any path is fine here.
+        let queued = bridge.set_recursive_pin(dir.path(), "folder-a", true).unwrap();
         assert_eq!(queued.changed_item_ids.len(), 3);
+        // hydrate_operations is the non-Windows materialise path; on Windows the
+        // OS (CfSetPinState) hydrates pinned files, so this count is 0 there.
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(queued.hydrate_operations, 1);
 
         let due = bridge.db.list_due_operations(now_secs()).unwrap();
@@ -2708,14 +2790,20 @@ mod tests {
                 && op.file_id.as_deref() == Some("folder-a")
                 && op.metadata_json.as_deref().unwrap_or("").contains("\"pinned\":true")
         }));
-        assert!(
-            due.iter()
-                .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-a") })
-        );
-        assert!(
-            !due.iter()
-                .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-local") })
-        );
+        // On Windows the pin path calls CfSetPinState; the OS drives hydration
+        // via FETCH_DATA rather than us enqueuing HydrateFile ops, so no
+        // HydrateFile entries exist in the queue on that platform.
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(
+                due.iter()
+                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-a") })
+            );
+            assert!(
+                !due.iter()
+                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-local") })
+            );
+        }
     }
 
     #[test]

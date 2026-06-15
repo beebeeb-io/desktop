@@ -248,13 +248,24 @@ async fn handle_connection(
                 file_id,
                 base_version_identifier,
             } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
-            IpcRequest::SetRecursivePin { file_id, pinned } => match bridge.set_recursive_pin(&file_id, pinned) {
-                Ok(outcome) => IpcResponse::PinUpdated {
-                    changed_item_ids: outcome.changed_item_ids,
-                    hydrate_operations: outcome.hydrate_operations,
-                },
-                Err(e) => IpcResponse::Error { message: e.to_string() },
-            },
+            IpcRequest::SetRecursivePin { file_id, pinned } => {
+                // `set_recursive_pin` takes `sync_root` for the Windows pin-state
+                // path; this module is `#![cfg(unix)]`, so it is never compiled on
+                // Windows and the parameter is unused here. Resolve the real root
+                // from config so the call is honest; fall back to the engine-internal
+                // dir if unavailable (the value is never dereferenced on unix).
+                let sync_root = crate::config::DesktopConfig::load()
+                    .ok()
+                    .and_then(|cfg| cfg.sync_root)
+                    .unwrap_or_default();
+                match bridge.set_recursive_pin(&sync_root, &file_id, pinned) {
+                    Ok(outcome) => IpcResponse::PinUpdated {
+                        changed_item_ids: outcome.changed_item_ids,
+                        hydrate_operations: outcome.hydrate_operations,
+                    },
+                    Err(e) => IpcResponse::Error { message: e.to_string() },
+                }
+            }
             IpcRequest::RecordOpenedFile {
                 file_id,
                 cache_path,

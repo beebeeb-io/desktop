@@ -2108,6 +2108,18 @@ fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) ->
                 continue;
             }
         }
+        // OS-level unpin BEFORE dehydrating. This file passed the DB pinned-skip
+        // above, so it is MEANT to be reclaimed — but its placeholder may still
+        // carry an OS pin (CfSetPinState) from an earlier "available offline"
+        // toggle or an inherited recursive parent pin that the DB no longer
+        // reflects. `CfDehydratePlaceholder` fails with ERROR_CLOUD_FILE_PINNED on
+        // any OS-pinned placeholder, so we clear the OS pin first (non-recursive —
+        // this is a single file). Best-effort: a failure here is logged (never the
+        // path) and we still attempt the dehydrate, which simply no-ops/errors if
+        // the file was genuinely pinned.
+        if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
+            tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
+        }
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
             Ok(freed) => {
                 bytes_freed = bytes_freed.saturating_add(freed);
@@ -3326,8 +3338,11 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
         [0u8; 32],
     ));
     let bridge = engine_bridge::EngineBridge::new(db, api);
+    // `sync_root` is threaded through so the Windows path can resolve the
+    // affected placeholder(s) and set the OS-level pin state (CfSetPinState);
+    // it is unused on macOS/Linux.
     bridge
-        .set_recursive_pin(&item_id, pinned)
+        .set_recursive_pin(&sync_root, &item_id, pinned)
         .map_err(|e| format!("set recursive pin: {e}"))
 }
 
