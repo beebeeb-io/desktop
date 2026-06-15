@@ -776,8 +776,9 @@ export default function WindowsApp() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: T.fontSans, color: T.ink, background: T.paper, overflow: 'hidden' }}>
-      {/* Keyframes for the skeleton shimmer (scoped, inline). */}
-      <style>{'@keyframes bb-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }'}</style>
+      {/* Keyframes for the skeleton shimmer + the refresh-icon spin (global,
+          inline — so any view can use them without mounting UpdateBanner). */}
+      <style>{'@keyframes bb-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } } @keyframes bb-spin { to { transform: rotate(360deg); } }'}</style>
       <UpdateBanner />
       <div style={{ display: 'grid', gridTemplateColumns: '232px 1fr', flex: 1, overflow: 'hidden' }}>
         {/* Sidebar */}

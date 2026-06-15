@@ -36,11 +36,29 @@
  * Sibling idiom: DevicesView.tsx + InsightsView.tsx + BandwidthView.tsx.
  */
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
 
 const RED = 'oklch(0.5 0.18 25)'
+
+/**
+ * How often the open view silently re-fetches the folder tree.
+ *
+ * The engine's `sync_tick` (runner.rs, `TICK_INTERVAL = 5s`) re-walks the
+ * server tree every ~5s and inserts any brand-new folder into the local
+ * state DB (engine_bridge.rs `sync_tick` case (1): "New to us — insert as
+ * cloud_only"). `list_vault_folders` reads that DB FRESH on every call, so a
+ * folder created during the session lands in state.db within ~5s — the only
+ * thing missing was the view re-asking for it. We poll at 10s (2× the engine
+ * tick) so a new folder shows up within ~10-15s without the view ever needing
+ * to be reopened.
+ *
+ * This poll is a LOCAL SQLite read via IPC — it does NOT hit the API, so it
+ * adds ZERO new 429/rate-limit pressure (the 0789 re-walk throttle lives in
+ * the engine tick, which runs at its own cadence regardless of this view).
+ */
+const POLL_INTERVAL_MS = 10_000
 
 // ── Tree helpers ──────────────────────────────────────────────────────────────
 
@@ -578,6 +596,76 @@ type LoadState =
   | { phase: 'error'; unsupported: boolean; reason: string }
   | { phase: 'ready'; roots: VaultItem[]; original: Set<string> }
 
+// ── Refresh affordance ────────────────────────────────────────────────────────
+
+/**
+ * Small neutral "Refresh" button shown in the header. Re-fetches the folder
+ * tree on demand so a folder created moments ago appears without waiting for
+ * the next silent poll. NEUTRAL styling (refreshing is not an encryption-state
+ * signal — amber is reserved for the lock chip + Apply). Disabled while an edit
+ * is pending (a refresh would discard unsaved toggles) and spins its icon while
+ * a fetch is in flight.
+ */
+function RefreshButton({
+  refreshing,
+  disabled,
+  onClick,
+}: {
+  refreshing: boolean
+  disabled: boolean
+  onClick: () => void
+}) {
+  const off = disabled && !refreshing
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled || refreshing}
+      aria-label="Refresh folder list"
+      title={
+        disabled
+          ? 'Apply or discard your changes before refreshing'
+          : 'Refresh — show folders added since you opened this view'
+      }
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '6px 11px',
+        fontSize: 11.5,
+        fontFamily: T.fontSans,
+        fontWeight: 500,
+        borderRadius: 6,
+        border: `1px solid ${T.line2}`,
+        background: T.paper,
+        color: off ? T.ink4 : T.ink2,
+        cursor: disabled || refreshing ? 'not-allowed' : 'pointer',
+        opacity: off ? 0.6 : 1,
+        whiteSpace: 'nowrap' as const,
+      }}
+    >
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={
+          refreshing
+            ? { animation: 'bb-spin 0.8s linear infinite', transformOrigin: 'center' }
+            : undefined
+        }
+      >
+        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+        <path d="M13.5 2.5 V5 H11" />
+      </svg>
+      {refreshing ? 'Refreshing…' : 'Refresh'}
+    </button>
+  )
+}
+
 // ── Root view ─────────────────────────────────────────────────────────────────
 
 export default function SelectiveSyncView() {
@@ -587,7 +675,18 @@ export default function SelectiveSyncView() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
+  // Latched true while a silent background refresh is in flight, so the header
+  // chip can show "Refreshing…" without disturbing the tree.
+  const [refreshing, setRefreshing] = useState(false)
 
+  // The current dirty/applying state, mirrored into a ref so the interval
+  // callback can read it without re-subscribing the effect every render.
+  const dirtyRef = useRef(false)
+  const applyingRef = useRef(false)
+
+  // Hard reload: resets to the skeleton and re-seeds working + original from the
+  // server tree. Used on first mount and on the Retry path. NOT used by the
+  // silent poll (which must never flash a skeleton or clobber a live edit).
   const load = () => {
     setState({ phase: 'loading' })
     setApplyError(null)
@@ -611,9 +710,60 @@ export default function SelectiveSyncView() {
     }
   }
 
+  // Silent refresh: re-fetch the tree WITHOUT flashing a skeleton. This is what
+  // surfaces a folder created during the session — the engine puts it in
+  // state.db within one sync tick (~5s) and this re-asks for it.
+  //
+  // Edit-safety: if the user has an in-progress edit (dirty) or an Apply is
+  // running, we MUST NOT yank the tree / re-seed `original` out from under them
+  // (that would silently discard their pending toggles or move the Apply
+  // baseline). In that case the refresh is skipped this round and retried on
+  // the next poll once they've applied or reverted. When clean, we fully
+  // re-seed `working` + `original` from the fresh tree so any new folder shows
+  // up with its correct server-default exclusion state.
+  //
+  // Returns a no-op even on error/empty: stale data is kept (never downgrade a
+  // populated tree to an error/empty on a transient poll miss).
+  const refresh = useCallback(async () => {
+    // Don't run a second refresh on top of one already in flight, and never
+    // disturb a live edit or an in-progress Apply.
+    if (refreshing || dirtyRef.current || applyingRef.current) return
+    setRefreshing(true)
+    try {
+      const result = await listVaultFolders()
+      if (!result.ok || !Array.isArray(result.value)) return // keep stale data
+      // Re-check guards: the user may have started editing while we awaited.
+      if (dirtyRef.current || applyingRef.current) return
+      const roots = result.value
+      const original = collectExcludedIds(roots)
+      setState((prev) => {
+        // Only replace a ready tree; never resurrect from loading/error here
+        // (that path belongs to `load`).
+        if (prev.phase !== 'ready') return prev
+        return { phase: 'ready', roots, original }
+      })
+      setWorking(new Set(original))
+      // Auto-expand any NEW top-level root so a freshly-created folder is
+      // visible without the user hunting for a collapsed chevron.
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        for (const r of roots) if (!prev.has(r.id)) next.add(r.id)
+        return next
+      })
+    } finally {
+      setRefreshing(false)
+    }
+  }, [refreshing])
+
   useEffect(() => {
     const cancel = load()
-    return cancel
+    const id = window.setInterval(() => {
+      void refresh()
+    }, POLL_INTERVAL_MS)
+    return () => {
+      cancel?.()
+      window.clearInterval(id)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -663,15 +813,36 @@ export default function SelectiveSyncView() {
   const totals =
     state.phase === 'ready' ? computeTotals(state.roots, working) : { onDisk: 0, onlineOnly: 0 }
 
+  // Mirror dirty/applying into refs the silent poll reads, so a background
+  // refresh never overwrites an in-progress edit or an Apply baseline.
+  useEffect(() => {
+    dirtyRef.current = dirty
+  }, [dirty])
+  useEffect(() => {
+    applyingRef.current = applying
+  }, [applying])
+
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
       <PageHeader
         title="Selective sync"
         subtitle="Choose what to keep on this PC. Folders you switch to online-only stay in your vault but free up local disk — they download again the moment you open them."
         aside={
-          <Chip tone="amber">
-            <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> Falkenstein · Hetzner
-          </Chip>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {state.phase === 'ready' && (
+              <RefreshButton
+                refreshing={refreshing}
+                // A manual refresh while dirty would discard the user's pending
+                // toggles — so it's disabled until they Apply or revert. The
+                // header copy tells them why.
+                disabled={dirty || applying}
+                onClick={() => void refresh()}
+              />
+            )}
+            <Chip tone="amber">
+              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> Falkenstein · Hetzner
+            </Chip>
+          </div>
         }
       />
 
