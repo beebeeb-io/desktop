@@ -149,6 +149,20 @@ fn keychain_error(context: &str, error: impl fmt::Display) -> String {
     format!("{context}: {error}")
 }
 
+/// Drop the cached `/auth/me` profile from `AppState`.
+///
+/// Called on logout (`clear_session`) and lock (`lock_vault`) so the
+/// `account_profile` IPC can never cache-hit a stale (logged-out / locked)
+/// identity. A subsequent login / unlock re-fetches and re-caches. Poisoned
+/// mutex is swallowed — clearing must never fail a logout/lock from the
+/// user's POV. Takes `&AppState` (not `State<'_, _>`) so it's unit-testable
+/// against a bare `AppState::default()`.
+fn clear_cached_profile(state: &AppState) {
+    if let Ok(mut guard) = state.cached_profile.lock() {
+        *guard = None;
+    }
+}
+
 fn persist_session_to_keychain(token: &str, master_key: [u8; 32], email: Option<&str>) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store());
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
@@ -796,6 +810,9 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
             tracing::warn!("session mutex poisoned during clear_session");
         }
     }
+    // Drop the cached account profile so a subsequent `account_profile` IPC
+    // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
+    clear_cached_profile(&state);
     if let Ok(mut guard) = state.engine_state.lock() {
         *guard = "stopped".to_string();
     }
@@ -858,6 +875,9 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
             tracing::warn!("session mutex poisoned during lock_vault");
         }
     }
+    // Drop the cached account profile on lock too, so "locked == no profile"
+    // stays honest; the next `unlock_vault` re-fetches.
+    clear_cached_profile(&state);
     if let Ok(mut guard) = state.engine_state.lock() {
         *guard = "stopped".to_string();
     }
@@ -2237,6 +2257,22 @@ fn show_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Open (or focus) the main Beebeeb app window. This is the new primary
+/// surface on Windows — the full sidebar + content-router shell
+/// (`WindowsApp.tsx`, selected by `?window=main-app&platform=windows`) that
+/// hosts the data views. The tray flyout's "Settings" button and the
+/// onboarding "Open control center" button both route here; Settings remains
+/// reachable from a nav item inside the app.
+///
+/// On non-Windows platforms there is no dedicated main-app window yet, so we
+/// fall back to the existing settings window — keeping a single, predictable
+/// entry point for callers regardless of OS.
+#[tauri::command]
+fn show_main_app_window(app: tauri::AppHandle) -> Result<(), String> {
+    show_main_app_window_impl(&app);
+    Ok(())
+}
+
 // ── IPC commands: Windows tray (WS1) ─────────────────────────────────────────
 
 /// One row in the tray's recent-activity list.
@@ -2790,10 +2826,23 @@ async fn account_update_notification_preferences(
 /// when `None`. Returns an empty breakdown (all three categories present at
 /// zero) when no sync root is configured or the state DB is absent — the UI
 /// renders a stable empty state rather than an error.
+///
+/// Gated on an in-memory session (`Err("vault is locked")` when absent) for
+/// parity with the other data IPCs: this surfaces local vault file paths, so
+/// it must not answer before the user has unlocked.
 #[tauri::command]
 async fn account_storage_breakdown(
+    state: State<'_, AppState>,
     largest_limit: Option<usize>,
 ) -> Result<account_dto::StorageBreakdown, String> {
+    // Auth gate: require an unlocked session, same signal as the others.
+    {
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        if guard.is_none() {
+            return Err("vault is locked".to_string());
+        }
+    }
+
     let limit = largest_limit.unwrap_or(10);
 
     // Resolve the state DB from the configured sync root, mirroring
@@ -3196,6 +3245,8 @@ pub fn run() {
             show_settings,
             // WS1 — Windows UI aliases + tray commands
             show_settings_window,
+            // PKG-SHELL — open the Windows main app window
+            show_main_app_window,
             desktop_config,
             tray_recent_activity,
             tray_pause_sync,
@@ -3267,13 +3318,16 @@ pub fn run() {
                     }
                 });
             } else {
-                // Already configured — show the settings window after startup
-                // settles (same as left-click on the tray). The short delay
-                // mirrors onboarding and avoids racing Tauri's window setup.
+                // Already configured — show the main app window after startup
+                // settles. On Windows this is the full sidebar/content shell
+                // (`main-app`); on macOS/Linux `show_main_app_window_impl`
+                // delegates to the existing settings window, so behaviour there
+                // is unchanged. The short delay mirrors onboarding and avoids
+                // racing Tauri's window setup.
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    show_settings_window_impl(&h);
+                    show_main_app_window_impl(&h);
                 });
             }
 
@@ -3419,7 +3473,11 @@ fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
     manager: &M,
     autostart_enabled: bool,
 ) -> tauri::Result<Menu<tauri::Wry>> {
-    let show_item = MenuItemBuilder::new("Open Settings")
+    // "Open Beebeeb" surfaces the main app window (the full sidebar/content
+    // shell on Windows; the settings window on macOS/Linux). The menu-item id
+    // stays `open_settings` for backwards compatibility with existing event
+    // wiring — only the label and target window changed.
+    let show_item = MenuItemBuilder::new("Open Beebeeb")
         .id("open_settings")
         .build(manager)?;
     let hide_item = MenuItemBuilder::new("Hide").id("tray_hide").build(manager)?;
@@ -3512,7 +3570,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .tooltip("Beebeeb")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "open_settings" => show_settings_window_impl(app),
+            "open_settings" => show_main_app_window_impl(app),
             "tray_hide" => {
                 if let Some(win) = app.get_webview_window("settings") {
                     let _ = win.hide();
@@ -3641,13 +3699,89 @@ fn show_settings_window_impl(app: &tauri::AppHandle) {
     }
 }
 
+/// Internal helper — show/create the main Beebeeb app window. On Windows this
+/// is the `main-app` webview (the full sidebar + content-router shell,
+/// `WindowsApp.tsx`, selected by `?window=main-app&platform=windows`). On
+/// other platforms there is no dedicated main-app shell yet, so we delegate to
+/// `show_settings_window_impl` — callers get a sensible window either way.
+///
+/// Mirrors `show_settings_window_impl`: focus an existing window if present,
+/// otherwise build one. The window is declared `visible: false` in
+/// tauri.conf.json, so the explicit `show()` + `set_focus()` are required.
+fn show_main_app_window_impl(app: &tauri::AppHandle) {
+    #[cfg(not(target_os = "windows"))]
+    {
+        // No dedicated main-app window outside Windows — reuse settings.
+        show_settings_window_impl(app);
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let label = "main-app";
+        let url = "index.html?window=main-app&platform=windows";
+
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.show();
+            let _ = win.set_focus();
+            return;
+        }
+
+        match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
+            .title("Beebeeb")
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(880.0, 560.0)
+            .resizable(true)
+            .center()
+            .build()
+        {
+            Ok(win) => {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to create main app window");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_finder_install_error, finder_install_state_from_config, is_disposable_cache_path,
-        normalize_recovery_phrase_input,
+        AppState, classify_finder_install_error, clear_cached_profile,
+        finder_install_state_from_config, is_disposable_cache_path, normalize_recovery_phrase_input,
     };
+    use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
+
+    #[test]
+    fn clear_cached_profile_drops_stale_identity() {
+        let state = AppState::default();
+        // Seed a cached profile, as login would.
+        {
+            let mut guard = state.cached_profile.lock().unwrap();
+            *guard = Some(AccountProfile {
+                user_id: "u1".into(),
+                email: "old@example.com".into(),
+                email_verified: true,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                frozen_at: None,
+                role: Some("user".into()),
+                totp_enabled: Some(false),
+                is_impersonation: Some(false),
+                admin_user_id: None,
+            });
+        }
+        assert!(state.cached_profile.lock().unwrap().is_some());
+
+        // Logout/lock path clears it so account_profile can't serve a stale hit.
+        clear_cached_profile(&state);
+        assert!(
+            state.cached_profile.lock().unwrap().is_none(),
+            "cached profile must be cleared on lock/logout"
+        );
+    }
 
     #[test]
     fn normalizes_recovery_phrase_in_rust() {

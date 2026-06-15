@@ -6,7 +6,7 @@
  * tray icon. Faithfully ported from HiWindowsTray in design/hifi/hifi-desktop.jsx.
  *
  * Invoke commands used:
- *   sync_status, show_settings_window
+ *   sync_status, show_main_app_window
  *   tray_pause_sync, tray_resume_sync
  *   tray_recent_activity → returns TrayActivity[]
  *   desktop_storage_summary → returns StorageSummary
@@ -213,9 +213,9 @@ export default function WindowsTray() {
     }
   }
 
-  const handleSettings = async () => {
+  const handleOpenApp = async () => {
     setActionError(null)
-    const result = await command<void>('show_settings_window')
+    const result = await command<void>('show_main_app_window')
     if (!result.ok) {
       setActionError(result.reason)
     }
@@ -420,7 +420,7 @@ export default function WindowsTray() {
             {paused ? 'Resume' : 'Pause'}
           </button>
           <button
-            onClick={() => void handleSettings()}
+            onClick={() => void handleOpenApp()}
             style={{
               padding: '3px 8px',
               fontSize: 11,
@@ -435,7 +435,7 @@ export default function WindowsTray() {
             onMouseEnter={(e) => { e.currentTarget.style.background = 'oklch(0.945 0.008 82)' }}
             onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
           >
-            Settings
+            Open Beebeeb
           </button>
         </div>
       </div>

@@ -10,6 +10,9 @@
  *   • ?window=tray                 → Windows 11 tray flyout (WindowsTray.tsx)
  *   • ?window=settings&platform=windows
  *                                  → Fluent-style Windows settings (WindowsSettings.tsx)
+ *   • ?window=main-app&platform=windows
+ *                                  → Windows main app shell (WindowsApp.tsx) —
+ *                                    sidebar + content router hosting the data views
  *
  * Single HTML entry keeps the bundle layout simple — inactive components are
  * tree-shaken. The tray and settings windows are opened by the Rust side via
@@ -26,6 +29,7 @@ import Onboarding from './Onboarding'
 import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
 import WindowsSettings from './WindowsSettings'
+import WindowsApp from './WindowsApp'
 import './design.css'
 
 const container = document.getElementById('root')
@@ -48,6 +52,8 @@ if (which === 'conflict') {
   component = <Onboarding />
 } else if (which === 'settings' && platform === 'windows') {
   component = <WindowsSettings />
+} else if (which === 'main-app' && platform === 'windows') {
+  component = <WindowsApp />
 } else {
   component = <App />
 }

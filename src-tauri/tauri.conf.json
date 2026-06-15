@@ -63,6 +63,20 @@
         "visible": false,
         "center": true,
         "decorations": true
+      },
+      {
+        "label": "main-app",
+        "title": "Beebeeb",
+        "url": "index.html?window=main-app&platform=windows",
+        "width": 1100,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "decorations": true,
+        "minWidth": 880,
+        "minHeight": 560
       }
     ],
     "security": {

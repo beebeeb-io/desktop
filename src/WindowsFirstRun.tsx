@@ -12,12 +12,12 @@
  *   2. Unlock vault     — desktop_unlock_with_recovery_phrase
  *   3. Pick sync folder — pick_sync_root, set_sync_mode (NEW — WS1)
  *   4. Explorer integration — install_windows_shell_integration
- *   ready               — show_settings_window
+ *   ready               — show_main_app_window
  *
  * Invoke commands used:
  *   EXISTING:  desktop_login, desktop_unlock_with_recovery_phrase,
  *              desktop_platform, pick_sync_root, default_sync_root,
- *              list_vault_folders, set_recursive_pin, show_settings_window
+ *              list_vault_folders, set_recursive_pin, show_main_app_window
  *   NEW (WS1): install_windows_shell_integration, windows_shell_integration_state
  *   NEW (WS1): set_sync_mode (arg: mode: 'everything' | 'smart' | 'custom' | 'online_only')
  */
@@ -730,7 +730,10 @@ function ReadyStep() {
   }, [])
 
   const finish = async () => {
-    await command<void>('show_settings_window')
+    // "Open control center" lands in the main app window (the full sidebar +
+    // content shell), not the settings window. Settings is reachable from a
+    // nav item inside the app.
+    await command<void>('show_main_app_window')
     try { await getCurrentWindow().close() } catch { window.close() }
   }
 
@@ -740,7 +743,7 @@ function ReadyStep() {
         All set.
       </h1>
       <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
-        Beebeeb is running on this PC. File Explorer is your file surface — the settings window handles everything else.
+        Beebeeb is running on this PC. File Explorer is your file surface — the Beebeeb app handles everything else.
       </p>
       <div style={{
         display: 'grid',

@@ -172,3 +172,329 @@ export function formatBytes(bytes: number): string {
 export function commandUnavailableLabel(commandName: string): string {
   return `${commandName} is not wired in this build yet.`
 }
+
+// ── Account data layer (PKG-DATA, commit 39f18963) ──────────────────────────
+//
+// Typed wrappers + interfaces for the 15 read-mostly account/billing/devices/
+// activity/notifications IPC commands registered in src-tauri/src/lib.rs.
+// Shapes mirror src-tauri/src/account_dto.rs exactly (which in turn mirrors the
+// server's JSON). Timestamps are RFC3339 strings on the wire — the UI formats
+// them. These power the WindowsApp.tsx data views; today the views are
+// scaffolded placeholders and most do not yet call these, but the wrappers are
+// here so the next packages can bind data without touching the IPC boundary.
+
+/** GET /api/v1/auth/me (cached server-side). */
+export interface AccountProfile {
+  user_id: string
+  email: string
+  email_verified: boolean
+  /** RFC3339. */
+  created_at: string
+  /** RFC3339; non-null only for frozen / pending-deletion accounts. */
+  frozen_at?: string | null
+  /** "user" | "admin" | "superadmin". */
+  role?: string | null
+  totp_enabled?: boolean | null
+  is_impersonation?: boolean | null
+  admin_user_id?: string | null
+}
+
+/** GET /api/v1/billing/subscription — plan + quota + lifecycle. */
+export interface Subscription {
+  plan: string
+  billing_cycle: string
+  status: string
+  seats: number
+  region: string
+  /** RFC3339; null on the free-plan default branch. */
+  created_at?: string | null
+  /** RFC3339; null on the free-plan default branch. */
+  current_period_end?: string | null
+  quota_bytes: number
+  used_bytes: number
+  extra_storage_tb?: number
+  extra_users?: number
+  is_mock?: boolean | null
+  stripe_configured?: boolean | null
+  billing_state?: string | null
+  pending_downgrade_plan?: string | null
+  downgrade_cooldown_until?: string | null
+  storage_grace_deadline?: string | null
+  pause_until?: string | null
+}
+
+/** GET /api/v1/billing/usage — used/quota bytes + percentage (0.0..=1.0). */
+export interface BillingUsage {
+  used_bytes: number
+  quota_bytes: number
+  percentage: number
+}
+
+export interface AccountActivityEvent {
+  id: string
+  /** Audit event name, e.g. "auth.login.success". Serialized as `type`. */
+  type: string
+  description: string
+  category: string
+  outcome: string
+  device?: string | null
+  country_code?: string | null
+  /** RFC3339. */
+  created_at: string
+}
+
+export interface AccountActivitySummary {
+  last_login_at?: string | null
+  last_login_device?: string | null
+  active_sessions: number
+  active_shares: number
+  /** Label string ("Excellent" | "Strong" | …), NOT the numeric score. */
+  security_score: string
+}
+
+/** GET /api/v1/account/activity — recent events + security summary. */
+export interface AccountActivity {
+  events: AccountActivityEvent[]
+  summary: AccountActivitySummary
+}
+
+export interface SecurityFactor {
+  /** e.g. "email_verified" | "two_factor_enabled" | … */
+  key: string
+  satisfied: boolean
+}
+
+/** GET /api/v1/account/security-score — numeric 0..=5 score + factors. */
+export interface SecurityScore {
+  score: number
+  max?: number | null
+  /** "Excellent" | "Strong" | "Good" | "Basic" | "Vulnerable" | "Unknown". */
+  label: string
+  factors: SecurityFactor[]
+}
+
+export interface AccountSession {
+  id: string
+  device_name: string
+  device_kind: string
+  country_code?: string | null
+  /** RFC3339 or null. */
+  last_active_at?: string | null
+  /** RFC3339. */
+  created_at: string
+  is_current: boolean
+}
+
+/** GET /api/v1/account/sessions — active account sessions. */
+export interface AccountSessionList {
+  sessions: AccountSession[]
+}
+
+/** POST /api/v1/account/sessions/revoke-all-others → { revoked }. */
+export interface RevokeAllResult {
+  revoked: number
+}
+
+export interface ClientDevice {
+  id: string
+  hostname: string
+  platform: string
+  bb_version?: string | null
+  /** RFC3339. */
+  last_seen: string
+  /** RFC3339. */
+  created_at: string
+  session_count: number
+}
+
+/** GET /api/v1/clients/devices — registered client devices. */
+export interface ClientDeviceList {
+  devices: ClientDevice[]
+}
+
+export interface ClientSyncSession {
+  id: string
+  name: string
+  session_type: string
+  local_path?: string | null
+  remote_path: string
+  status: string
+  heartbeat_interval_secs?: number | null
+  alert_after_missed?: number | null
+  /** RFC3339. */
+  created_at: string
+  /** RFC3339 or null. */
+  last_heartbeat?: string | null
+  files_synced?: number | null
+  files_total?: number | null
+  bytes_synced?: number | null
+  bytes_total?: number | null
+  heartbeat_status?: string | null
+  current_file?: string | null
+  device_hostname?: string | null
+  device_platform?: string | null
+  device_id?: string | null
+  speed_bps?: number | null
+}
+
+/** GET /api/v1/clients/sessions — per-device sync sessions. */
+export interface ClientSyncSessionList {
+  sessions: ClientSyncSession[]
+}
+
+export interface ActivityFeedEvent {
+  id: string
+  /** Serialized as `type`. */
+  type: string
+  subject?: string | null
+  details?: string | null
+  /** ip_address or device. Serialized as `where`. */
+  where?: string | null
+  /** RFC3339. */
+  created_at: string
+}
+
+/** GET /api/v1/activity — paginated audit-log feed. */
+export interface ActivityFeed {
+  events: ActivityFeedEvent[]
+  total: number
+  page?: number | null
+}
+
+export interface Notification {
+  id: string
+  /** Serialized as `type`. */
+  type: string
+  title: string
+  body?: string | null
+  /** Arbitrary JSON blob (JSONB column); may be null. */
+  data?: unknown
+  read: boolean
+  /** RFC3339. */
+  created_at: string
+}
+
+/** GET /api/v1/notifications — notification list + unread count. */
+export interface NotificationList {
+  notifications: Notification[]
+  unread_count: number
+}
+
+export interface NotificationPreferenceValues {
+  file_updated: boolean
+  share_received: boolean
+  storage_warning: boolean
+  new_device_login: boolean
+  backup_complete: boolean
+}
+
+/** Both GET and PUT /preferences wrap the values under a `preferences` key. */
+export interface NotificationPreferences {
+  preferences: NotificationPreferenceValues
+}
+
+/** Partial update body for PUT /notifications/preferences. */
+export type NotificationPreferencesUpdate = Partial<NotificationPreferenceValues>
+
+/** A coarse content category derived from a file's extension. */
+export type StorageCategory = 'media' | 'documents' | 'other'
+
+export interface StorageCategoryTotal {
+  category: StorageCategory
+  bytes: number
+  file_count: number
+}
+
+export interface LargestFile {
+  file_id: string
+  path: string
+  size_bytes: number
+  category: StorageCategory
+}
+
+/** Local storage breakdown by content type + the N largest files. */
+export interface StorageBreakdown {
+  /** Always all three categories present (zero when empty) for a stable legend. */
+  by_category: StorageCategoryTotal[]
+  /** Largest files, descending by size, capped at the requested limit. */
+  largest_files: LargestFile[]
+  total_files: number
+  total_bytes: number
+}
+
+// ── Wrappers ────────────────────────────────────────────────────────────────
+// Each returns a CommandResult so callers can distinguish "unsupported in this
+// build" from "the server / session failed", matching the existing idiom.
+
+export function accountProfile(): Promise<CommandResult<AccountProfile>> {
+  return command<AccountProfile>('account_profile')
+}
+
+export function accountSubscription(): Promise<CommandResult<Subscription>> {
+  return command<Subscription>('account_subscription')
+}
+
+export function accountUsage(): Promise<CommandResult<BillingUsage>> {
+  return command<BillingUsage>('account_usage')
+}
+
+export function accountActivity(): Promise<CommandResult<AccountActivity>> {
+  return command<AccountActivity>('account_activity')
+}
+
+export function accountSecurityScore(): Promise<CommandResult<SecurityScore>> {
+  return command<SecurityScore>('account_security_score')
+}
+
+export function accountSessionList(): Promise<CommandResult<AccountSessionList>> {
+  return command<AccountSessionList>('account_session_list')
+}
+
+export function accountRevokeSession(sessionId: string): Promise<CommandResult<void>> {
+  return command<void>('account_revoke_session', { sessionId })
+}
+
+export function accountRevokeOtherSessions(): Promise<CommandResult<RevokeAllResult>> {
+  return command<RevokeAllResult>('account_revoke_other_sessions')
+}
+
+export function accountDevices(): Promise<CommandResult<ClientDeviceList>> {
+  return command<ClientDeviceList>('account_devices')
+}
+
+export function accountClientSessions(): Promise<CommandResult<ClientSyncSessionList>> {
+  return command<ClientSyncSessionList>('account_client_sessions')
+}
+
+export function accountActivityFeed(
+  page?: number,
+  limit?: number,
+): Promise<CommandResult<ActivityFeed>> {
+  return command<ActivityFeed>('account_activity_feed', { page, limit })
+}
+
+export function accountNotifications(): Promise<CommandResult<NotificationList>> {
+  return command<NotificationList>('account_notifications')
+}
+
+export function accountNotificationPreferences(): Promise<CommandResult<NotificationPreferences>> {
+  return command<NotificationPreferences>('account_notification_preferences')
+}
+
+export function accountUpdateNotificationPreferences(
+  update: NotificationPreferencesUpdate,
+): Promise<CommandResult<NotificationPreferences>> {
+  return command<NotificationPreferences>('account_update_notification_preferences', { update })
+}
+
+export function accountStorageBreakdown(
+  largestLimit?: number,
+): Promise<CommandResult<StorageBreakdown>> {
+  return command<StorageBreakdown>('account_storage_breakdown', { largestLimit })
+}
+
+/** Open the main Beebeeb app window (Windows). Falls back gracefully if the
+ *  command is not registered in this build. */
+export function showMainAppWindow(): Promise<CommandResult<void>> {
+  return command<void>('show_main_app_window')
+}
