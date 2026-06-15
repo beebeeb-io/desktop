@@ -50,6 +50,7 @@
 
 pub mod callbacks;
 pub mod placeholders;
+pub mod status_ui;
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -581,6 +582,14 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
 
     let id = shell_sync_root_id(sync_root);
     let id_h = HSTRING::from(id.as_str());
+
+    // Tear down the breadcrumb status-flyout registration FIRST (revoke the COM
+    // class object + remove the registry binding under the sync-root key), while
+    // the sync-root key still exists. Best-effort and self-contained; it logs its
+    // own failures and never returns an error, so it cannot block the shell
+    // unregister below. Inverse of `register_status_ui_for_sync_root`.
+    status_ui::unregister_status_ui_source(&id);
+
     StorageProviderSyncRootManager::Unregister(&id_h)
         .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
     tracing::info!(
@@ -589,6 +598,72 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
         "Explorer shell sync root unregistered"
     );
     Ok(())
+}
+
+/// Guard so the dedicated status-UI COM thread is spawned at most once per
+/// process. A re-login re-runs [`connect_root`], but the class object + its STA
+/// apartment must persist for the whole process lifetime, so we never respawn.
+static STATUS_UI_THREAD: OnceLock<()> = OnceLock::new();
+
+/// Stand up the OneDrive-style Explorer breadcrumb **status flyout** for
+/// `sync_root` (clicking "Beebeeb" in the path-bar → synced state + storage bar
+/// + "Free up space"). PURELY ADDITIVE on top of [`register_shell_sync_root`].
+///
+/// Why a dedicated thread: Windows asks our COM `IClassFactory` for the status-UI
+/// source on demand, and `CoRegisterClassObject` keeps the class object alive
+/// only as long as the registering thread's COM apartment lives. The Microsoft
+/// CloudMirror sample does exactly this — registers its status-UI factory on a
+/// dedicated single-threaded-apartment thread that then parks on a wait. A tokio
+/// worker is the wrong home: it is transient and may have its apartment torn
+/// down. So we spawn one long-lived STA thread that initializes COM, registers
+/// the class object + the registry binding, and parks for the process lifetime.
+///
+/// Spawned at most once per process (guarded by [`STATUS_UI_THREAD`]); a re-login
+/// reuses the existing registration. Best-effort: any failure is logged inside
+/// the thread and never propagated — the flyout is a nicety; overlays, the
+/// Status column, the nav-pane entry and hydration are unaffected.
+pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
+    if STATUS_UI_THREAD.get().is_some() {
+        return;
+    }
+    let shell_id = shell_sync_root_id(sync_root);
+    let _ = STATUS_UI_THREAD.set(());
+
+    let spawned = std::thread::Builder::new()
+        .name("beebeeb-status-ui".to_string())
+        .spawn(move || {
+            use windows::Win32::System::Com::{
+                COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+            };
+            // SAFETY: standard COM init for this dedicated thread. Returns an
+            // HRESULT; S_FALSE (already initialized) is non-error. We pair it with
+            // a CoUninitialize only on the (failure) early-exit paths.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if hr.is_err() {
+                tracing::warn!(hr = ?hr, "status-UI thread: CoInitializeEx failed; flyout disabled");
+                return;
+            }
+
+            if let Err(e) = status_ui::register_status_ui_source(&shell_id) {
+                tracing::warn!(error = %e, "status-UI source registration failed; breadcrumb flyout absent (overlays/column/hydration unaffected)");
+                // SAFETY: balance the CoInitializeEx above before exiting — no
+                // point holding an apartment for a failed registration.
+                unsafe { CoUninitialize() };
+                return;
+            }
+
+            tracing::info!("status-UI source registered; parking COM thread for process lifetime");
+            // Park forever: keep the apartment + class object alive. The class
+            // object must live exactly as long as the process; process exit tears
+            // it down. `unregister_status_ui_source` revokes the cookie on
+            // sign-out; this parked thread simply keeps the apartment resident.
+            loop {
+                std::thread::park();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not spawn status-UI thread; breadcrumb flyout disabled");
+    }
 }
 
 /// Connect the Cloud Files callback table for `sync_root_path` so Windows
@@ -737,6 +812,15 @@ pub fn connect_root(sync_root: &std::path::Path) {
     if let Err(e) = register_shell_sync_root(sync_root) {
         tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
     }
+
+    // Stand up the OneDrive-style breadcrumb STATUS FLYOUT (clicking "Beebeeb" in
+    // the Explorer path-bar → synced state + storage bar + "Free up space").
+    // PURELY ADDITIVE: it spawns a dedicated COM thread that registers our
+    // status-UI source factory; it never touches the Win32 registration, the
+    // shell registration above, the callbacks, or hydration. Idempotent across
+    // re-logins (spawns at most once per process). Failures are logged inside the
+    // thread, so this call is infallible from connect_root's perspective.
+    register_status_ui_for_sync_root(sync_root);
 
     // Connect the in-process fetch callback exactly once per process. Without
     // this, Windows shows placeholders but never asks us to hydrate them — and,

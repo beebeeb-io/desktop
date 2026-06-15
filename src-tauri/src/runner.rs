@@ -624,6 +624,9 @@ async fn run(
                 if sync_paused.load(Ordering::Relaxed) {
                     emit_status(&app, "paused", Some(&sync_root), None);
                     set_telemetry_state(&telemetry, "paused");
+                    // Windows breadcrumb flyout: reflect the paused state.
+                    #[cfg(target_os = "windows")]
+                    refresh_status_ui_snapshot(&db, true, false);
                     continue;
                 }
 
@@ -698,6 +701,11 @@ async fn run(
                         // shows files in flight, so a steady-state tick reads as
                         // "watching" while an active transfer reads as "syncing".
                         set_telemetry_state(&telemetry, "idle");
+                        // Windows breadcrumb flyout: in-flight counts ⇒ Syncing,
+                        // conflicts ⇒ Error, else In-Sync. Not paused, no engine
+                        // error on a successful tick.
+                        #[cfg(target_os = "windows")]
+                        refresh_status_ui_snapshot(&db, false, false);
                     }
                     Err(e) => {
                         // Network blips and 401s during token rotation
@@ -706,6 +714,10 @@ async fn run(
                         tracing::warn!(error = %e, "sync tick failed");
                         emit_status(&app, "error", Some(&sync_root), Some(&e.to_string()));
                         set_telemetry_state(&telemetry, "error");
+                        // Windows breadcrumb flyout: surface the tick failure as
+                        // an Error state in the flyout too.
+                        #[cfg(target_os = "windows")]
+                        refresh_status_ui_snapshot(&db, false, true);
                     }
                 }
             }
@@ -805,6 +817,22 @@ fn set_telemetry_state(telemetry: &Arc<Mutex<TelemetryState>>, state: &str) {
     if let Ok(mut guard) = telemetry.lock() {
         guard.engine_state = state.to_string();
     }
+}
+
+/// Refresh the Windows Explorer breadcrumb status-flyout snapshot with the live
+/// sync state, derived from the SAME counts `sync_status` exposes (downloading +
+/// uploading ⇒ syncing; conflict rows ⇒ error). The COM `GetStatusUI` reads only
+/// this cached snapshot (cheap atomics), so it never opens the DB or blocks the
+/// shell. Counting reuses the `db` the loop already holds, so this adds one
+/// indexed count query per tick. No-op on non-Windows.
+#[cfg(target_os = "windows")]
+fn refresh_status_ui_snapshot(db: &StateDb, paused: bool, engine_error: bool) {
+    let count = |status: FileStatus| -> u32 {
+        db.list_by_status(status).ok().map(|v| v.len() as u32).unwrap_or(0)
+    };
+    let syncing = count(FileStatus::Downloading).saturating_add(count(FileStatus::Uploading));
+    let conflicts = count(FileStatus::Conflict);
+    crate::windows_cf::status_ui::set_engine_state(paused, syncing, conflicts, engine_error);
 }
 
 pub(crate) fn file_provider_invalidation_payload(reason: &str, item_ids: Vec<String>) -> serde_json::Value {

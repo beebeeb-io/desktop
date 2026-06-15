@@ -203,7 +203,46 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Foundation_Collections",
     "Security_Cryptography",
+    # ── OneDrive-style Explorer breadcrumb STATUS FLYOUT (windows_cf::status_ui) ──
+    # The flyout that opens when the user clicks "Beebeeb" in the Explorer
+    # path-bar is driven by a cloud-provider-implemented WinRT status UI source
+    # (IStorageProviderStatusUISource[Factory], StorageProviderStatusUI/QuotaUI/
+    # UICommand). To IMPLEMENT (not just call) those WinRT interfaces in Rust we
+    # need the `implement` feature, which gates the generated `*_Impl` traits and
+    # the `#[windows::core::implement]` macro (re-exported from windows-implement).
+    "implement",
+    # We register the status-UI source factory the way the Microsoft CloudMirror
+    # sample does, adapted for an UNPACKAGED Win32 app: a COM IClassFactory handed
+    # to `CoRegisterClassObject(CLSID, …, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)`,
+    # plus a registry binding tying the CLSID to our sync root. These features
+    # expose those APIs:
+    #   - Win32_System_Com (already enabled above): CoRegisterClassObject /
+    #     CoRevokeClassObject / IClassFactory(+_Impl) / CLSCTX_LOCAL_SERVER /
+    #     REGCLS_MULTIPLEUSE.
+    #   - Win32_System_Registry: RegCreateKeyExW / RegSetValueExW / RegCloseKey /
+    #     RegDeleteKeyValueW / RegDeleteTreeW to write the CLSID LocalServer32 key
+    #     and the `StorageProviderStatusUISourceFactory` value under the
+    #     SyncRootManager sync-root key.
+    #   - Win32_Security: in windows-0.58 `RegCreateKeyExW` is itself
+    #     `#[cfg(feature = "Win32_Security")]`-gated because its signature takes an
+    #     `Option<*const SECURITY_ATTRIBUTES>` — without this feature that function
+    #     DOES NOT EXIST in the generated bindings (we always pass None).
+    "Win32_System_Registry",
+    "Win32_Security",
 ] }
+
+# Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`
+# macro used in `windows_cf/status_ui.rs` (the Explorer breadcrumb status flyout).
+# The macro expands to code that references the `windows_core` crate BY NAME
+# (`::windows_core::…` paths in the generated vtables / IUnknown impls), so
+# `windows-core` must be a DIRECT dependency even though the umbrella `windows`
+# crate already re-exports it as `windows::core`. Without this the build fails
+# with `error[E0433]: cannot find 'windows_core' in the crate root` on every
+# `#[implement(...)]` type. Pinned to the SAME version the `windows = "0.58"`
+# crate depends on (windows-0.58.0 → windows-core 0.58.0) — a version mismatch
+# would make the macro-generated `windows_core` types distinct from the ones the
+# `windows` crate's interfaces expect (type-identity errors).
+windows-core = "0.58"
 
 [dev-dependencies]
 tempfile = "3"

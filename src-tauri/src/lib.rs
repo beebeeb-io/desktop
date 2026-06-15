@@ -1941,17 +1941,29 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
         })
         .unwrap_or((0, 0));
 
+    let used_bytes = usage.used_bytes.max(0);
+    let quota_bytes = usage.quota_bytes.max(0);
+
+    // Feed the Windows Explorer breadcrumb status-flyout snapshot with the same
+    // usage/quota numbers the control center shows, so the flyout's storage bar
+    // ("X GB used of Y (Z%)") stays in agreement. Cheap atomic stores; the COM
+    // `GetStatusUI` reads them without a lock. No-op on non-Windows.
+    #[cfg(target_os = "windows")]
+    windows_cf::status_ui::set_quota(used_bytes as u64, quota_bytes as u64);
+
     Ok(DesktopStorageSummary {
-        used_bytes: usage.used_bytes.max(0),
-        quota_bytes: usage.quota_bytes.max(0),
+        used_bytes,
+        quota_bytes,
         cache_bytes,
         pinned_bytes,
     })
 }
 
+// `pub(crate)` so `free_up_space_blocking` (also `pub(crate)`, reused by the
+// Windows shell status-flyout command) can name it as its return type.
 #[derive(Debug, serde::Serialize)]
-struct FreeUpSpaceResult {
-    bytes_freed: u64,
+pub(crate) struct FreeUpSpaceResult {
+    pub(crate) bytes_freed: u64,
 }
 
 /// "Free up space now" — dehydrate every unpinned, fully-local file back to a
@@ -2002,7 +2014,13 @@ fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> {
     roots
 }
 
-fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
+// `pub(crate)` so the Windows Explorer status-flyout command
+// (`windows_cf::status_ui::FreeUpSpaceCommand::Invoke`) can reuse the exact same
+// reclaim path the `free_up_space` IPC uses — one implementation, two callers
+// (the WebView IPC and the shell flyout button). It is a synchronous blocking fn
+// (DB + filesystem work), so the COM `Invoke` can call it directly off the
+// arbitrary thread Windows delivers the command on, without a tokio runtime.
+pub(crate) fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
     let cfg = DesktopConfig::load()?;
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
