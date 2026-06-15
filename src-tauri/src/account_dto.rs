@@ -114,6 +114,34 @@ pub struct BillingUsage {
     pub percentage: f64,
 }
 
+// ── 2b. Data residency / region — GET /api/v1/me/region ───────────────────────
+//
+// Server: routes match the webapp `getUserRegion()` contract. Shapes mirror
+// `@beebeeb/shared` `AvailableRegion` + `UserRegionResponse` EXACTLY so the
+// desktop resolves the effective region's CITY the same way the webapp does.
+// Brand rule: surface the CITY only, NEVER the `provider` — the provider field
+// is captured here solely to match the wire shape, not to be displayed.
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RegionInfo {
+    pub continent: String,
+    pub display_name: String,
+    pub city: String,
+    /// Captured to match the server shape — NEVER shown to users (brand rule:
+    /// name the city, never the provider).
+    pub provider: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserRegionResponse {
+    /// The user's chosen region continent, or null → fall back to the default
+    /// region's continent.
+    #[serde(default)]
+    pub preferred_region: Option<String>,
+    pub regions: Vec<RegionInfo>,
+}
+
 // ── 3. Account activity & security score ──────────────────────────────────────
 //
 // Server: routes/account_activity.rs ~39-138 (activity), ~144-229 (score).
@@ -629,6 +657,48 @@ mod tests {
         assert_eq!(s.quota_bytes, 10737418240);
         // Absent from the free-plan branch → defaults to None (no parse error).
         assert_eq!(s.past_due_since, None);
+    }
+
+    #[test]
+    fn user_region_parses_full_shape() {
+        let json = r#"{
+            "preferred_region": "europe",
+            "regions": [
+                {
+                    "continent": "europe",
+                    "display_name": "Europe",
+                    "city": "Falkenstein",
+                    "provider": "Hetzner",
+                    "is_default": true
+                }
+            ]
+        }"#;
+        let r: UserRegionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.preferred_region.as_deref(), Some("europe"));
+        assert_eq!(r.regions.len(), 1);
+        assert_eq!(r.regions[0].city, "Falkenstein");
+        assert!(r.regions[0].is_default);
+    }
+
+    #[test]
+    fn user_region_null_preferred_parses() {
+        // No preferred region set → preferred_region is null; the caller falls
+        // back to the default region's continent.
+        let json = r#"{
+            "preferred_region": null,
+            "regions": [
+                {
+                    "continent": "europe",
+                    "display_name": "Europe",
+                    "city": "Falkenstein",
+                    "provider": "Hetzner",
+                    "is_default": true
+                }
+            ]
+        }"#;
+        let r: UserRegionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.preferred_region, None);
+        assert_eq!(r.regions[0].continent, "europe");
     }
 
     #[test]

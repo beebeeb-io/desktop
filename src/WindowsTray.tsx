@@ -15,6 +15,7 @@
 import { useEffect, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { command, formatBytes, loadSyncStatus, type StorageSummary, type SyncStatus } from './desktopApi'
+import { useRegionCity } from './windows/useRegion'
 
 export interface TrayActivity {
   id: string
@@ -135,6 +136,7 @@ export default function WindowsTray() {
   const [activities, setActivities] = useState<TrayActivity[]>([])
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const regionCity = useRegionCity()
 
   // Poll sync status
   useEffect(() => {
@@ -398,7 +400,7 @@ export default function WindowsTray() {
           lineHeight: 1,
           fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
         }}>
-          Falkenstein &middot; E2E encrypted
+          {regionCity} · E2E encrypted
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           <button

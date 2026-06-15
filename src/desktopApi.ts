@@ -442,6 +442,88 @@ export interface StorageBreakdown {
   total_bytes: number
 }
 
+// ── Data residency / region — GET /api/v1/me/region ──────────────────────────
+// Mirrors the webapp `@beebeeb/shared` shapes so the desktop resolves the
+// effective region's CITY the same way the webapp does. Brand rule: surface the
+// CITY only, NEVER the `provider` (the field exists only to match the wire shape).
+
+export interface RegionInfo {
+  continent: string
+  display_name: string
+  city: string
+  /** Present to match the server shape — NEVER render this (brand rule). */
+  provider: string
+  is_default: boolean
+}
+
+export interface UserRegionResponse {
+  /** Chosen region continent, or null → fall back to the default region. */
+  preferred_region: string | null
+  regions: RegionInfo[]
+}
+
+/** Live default city — the only acceptable fallback (no provider, ever). */
+const FALLBACK_CITY = 'Falkenstein'
+
+/** city → country, mirrored from the webapp `countryFromCity`. */
+function countryFromCity(city: string): string {
+  const map: Record<string, string> = {
+    falkenstein: 'Germany',
+    helsinki: 'Finland',
+    ede: 'Netherlands',
+  }
+  return map[city.toLowerCase()] ?? ''
+}
+
+/**
+ * Resolve the effective region's CITY from a `/me/region` response.
+ * Effective region = `preferred_region ?? default region's continent`; we then
+ * look up that region's `city`. Falls back to "Falkenstein" (the live default)
+ * when the response is missing/empty. NEVER returns a provider.
+ */
+export function regionCity(resp: UserRegionResponse | null | undefined): string {
+  if (!resp || !resp.regions?.length) return FALLBACK_CITY
+  const effective = resp.preferred_region ?? resp.regions.find(r => r.is_default)?.continent
+  const region = resp.regions.find(r => r.continent === effective) ?? resp.regions.find(r => r.is_default)
+  return region?.city || FALLBACK_CITY
+}
+
+/**
+ * "City, Country" label for the effective region (e.g. "Falkenstein, Germany").
+ * Falls back to just the city when the country is unknown. NEVER a provider.
+ */
+export function regionLabel(resp: UserRegionResponse | null | undefined): string {
+  const city = regionCity(resp)
+  const country = countryFromCity(city)
+  return country ? `${city}, ${country}` : city
+}
+
+/**
+ * Map a raw region code (e.g. "falkenstein") to its display CITY. Used where a
+ * caller already has the code (AccountView's `Subscription.region`) and doesn't
+ * need a fetch. Falls back to "Falkenstein". NEVER returns a provider.
+ */
+export function regionCityFromCode(code: string | null | undefined): string {
+  const map: Record<string, string> = {
+    falkenstein: 'Falkenstein',
+    helsinki: 'Helsinki',
+    ede: 'Ede',
+  }
+  return map[(code ?? '').toLowerCase()] ?? FALLBACK_CITY
+}
+
+// Module-singleton cached fetch: repeated callers in one window share ONE
+// network round-trip. On error the cached promise resolves to null so callers
+// fall back to the default city without retry-storming.
+let regionPromise: Promise<UserRegionResponse | null> | null = null
+
+export function fetchRegion(): Promise<UserRegionResponse | null> {
+  if (!regionPromise) {
+    regionPromise = accountRegion().then(r => (r.ok ? r.value : null)).catch(() => null)
+  }
+  return regionPromise
+}
+
 // ── Wrappers ────────────────────────────────────────────────────────────────
 // Each returns a CommandResult so callers can distinguish "unsupported in this
 // build" from "the server / session failed", matching the existing idiom.
@@ -456,6 +538,10 @@ export function accountSubscription(): Promise<CommandResult<Subscription>> {
 
 export function accountUsage(): Promise<CommandResult<BillingUsage>> {
   return command<BillingUsage>('account_usage')
+}
+
+export function accountRegion(): Promise<CommandResult<UserRegionResponse>> {
+  return command<UserRegionResponse>('account_region')
 }
 
 export function accountActivity(): Promise<CommandResult<AccountActivity>> {

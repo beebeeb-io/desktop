@@ -33,6 +33,7 @@ import {
   DEFAULT_CONFIG,
 } from './desktopApi'
 import UpdateBanner from './UpdateBanner'
+import { useRegionCity } from './windows/useRegion'
 
 // Windows Explorer/Cloud Files integration uses the same shape as macOS Finder
 type ShellIntegrationState = FinderInstallState
@@ -698,6 +699,7 @@ function ExplorerIntegrationPanel() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const regionCity = useRegionCity()
 
   const refresh = async () => {
     const r = await command<ShellIntegrationState>('windows_shell_integration_state')
@@ -745,7 +747,7 @@ function ExplorerIntegrationPanel() {
       </h1>
       <p style={{ margin: '0 0 24px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
         Beebeeb appears in File Explorer as a sync folder. Files are encrypted on this PC before they
-        leave for Falkenstein — Explorer only ever shows you the decrypted view.
+        leave for {regionCity} — Explorer only ever shows you the decrypted view.
       </p>
 
       {error && (
@@ -1012,6 +1014,7 @@ function PanelRouter({ navId }: { navId: NavId }) {
 
 export default function WindowsSettings() {
   const [activeNav, setActiveNav] = useState<NavId>('sync')
+  const regionCity = useRegionCity()
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [config, setConfig] = useState<DesktopConfig>(DEFAULT_CONFIG)
@@ -1246,7 +1249,7 @@ export default function WindowsSettings() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <NavIcon name="shield" size={11} color={T.amberDeep} />
             <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-              Falkenstein · E2E encrypted
+              {regionCity} · E2E encrypted
             </span>
           </div>
         </div>

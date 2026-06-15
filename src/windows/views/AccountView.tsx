@@ -4,7 +4,7 @@
  * Replaces the scaffolded `account` placeholder in WindowsApp.tsx. Two cards:
  *   1. Profile  — email + verified/unverified state, member-since, role, and a
  *                 calm warning row when the account is frozen / pending deletion.
- *   2. Plan     — plan + billing cycle + status, region (Falkenstein · Hetzner),
+ *   2. Plan     — plan + billing cycle + status, region (city only, e.g. Falkenstein),
  *                 quota usage, renewal date, and seats when a multi-seat plan.
  * plus an honest footer: password & billing are managed on the web, opened via
  * the real `openUrl` IPC — no faked in-app mutation surfaces.
@@ -23,6 +23,7 @@ import {
   clearSession,
   formatBytes,
   openUrl,
+  regionCityFromCode,
   type AccountProfile,
   type Subscription,
 } from '../../desktopApi'
@@ -274,7 +275,7 @@ function PlanCard({ sub }: { sub: Subscription }) {
 
       <Row label="Region">
         <NavIcon name="shield" size={12} color={T.ink3} />
-        <span style={{ fontFamily: T.fontMono, fontSize: 11.5, color: T.ink2, letterSpacing: '0.02em' }}>Falkenstein · Hetzner</span>
+        <span style={{ fontFamily: T.fontMono, fontSize: 11.5, color: T.ink2, letterSpacing: '0.02em' }}>{regionCityFromCode(sub.region)}</span>
       </Row>
 
       <Row label="Renews" mono last={!hasSeats}>

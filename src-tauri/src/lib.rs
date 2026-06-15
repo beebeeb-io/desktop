@@ -3419,6 +3419,16 @@ async fn account_usage(state: State<'_, AppState>) -> Result<account_dto::Billin
         .map_err(|e| e.to_string())
 }
 
+/// `GET /api/v1/me/region` — preferred region + available list. The frontend
+/// resolves the effective region's CITY from this (never the provider).
+#[tauri::command]
+async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserRegionResponse, String> {
+    api_client_from_session(&state)?
+        .account_region()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// `GET /api/v1/account/activity` — recent events + security summary.
 #[tauri::command]
 async fn account_activity(state: State<'_, AppState>) -> Result<account_dto::AccountActivity, String> {
@@ -3935,6 +3945,7 @@ pub fn run() {
             account_profile,
             account_subscription,
             account_usage,
+            account_region,
             account_activity,
             account_security_score,
             account_session_list,

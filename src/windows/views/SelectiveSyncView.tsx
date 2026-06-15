@@ -39,6 +39,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { useRegionLabel } from '../useRegion'
 
 const RED = 'oklch(0.5 0.18 25)'
 
@@ -57,6 +58,10 @@ const RED = 'oklch(0.5 0.18 25)'
  * This poll is a LOCAL SQLite read via IPC — it does NOT hit the API, so it
  * adds ZERO new 429/rate-limit pressure (the 0789 re-walk throttle lives in
  * the engine tick, which runs at its own cadence regardless of this view).
+ * Even so we keep it modest (10s, within the ~10-15s target band) — it's still
+ * an IPC round-trip per tick, and there's no value re-reading the local tree
+ * faster than the engine writes to it. Guarded so an in-progress edit/Apply is
+ * never clobbered (see `refresh`).
  */
 const POLL_INTERVAL_MS = 10_000
 
@@ -669,6 +674,7 @@ function RefreshButton({
 // ── Root view ─────────────────────────────────────────────────────────────────
 
 export default function SelectiveSyncView() {
+  const regionLabel = useRegionLabel()
   const [state, setState] = useState<LoadState>({ phase: 'loading' })
   // Working excluded set + which folders are expanded. Re-seeded on every load.
   const [working, setWorking] = useState<Set<string>>(new Set())
@@ -840,7 +846,7 @@ export default function SelectiveSyncView() {
               />
             )}
             <Chip tone="amber">
-              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> Falkenstein · Hetzner
+              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> {regionLabel}
             </Chip>
           </div>
         }

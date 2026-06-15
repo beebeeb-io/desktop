@@ -10,7 +10,7 @@
  *
  * Brand: amber only for the live-encryption signal and primary action; Inter for
  * human text, JetBrains Mono for every machine value (ids, versions, byte sizes,
- * speeds, timestamps); "Falkenstein · Hetzner"; honest voice; no emojis. We do
+ * speeds, timestamps); name the city only ("Falkenstein"), never the storage provider; honest voice; no emojis. We do
  * NOT render a "This device" chip — no IPC gives us a trustworthy local-device
  * signal here, so guessing would be dishonest.
  *

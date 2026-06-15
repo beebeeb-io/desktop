@@ -23,8 +23,8 @@
  * Design tokens + idioms are shared with WindowsSettings.tsx (the `T` map and
  * NavIcon set are intentionally kept parallel so the two Windows windows feel
  * like one product). Brand: amber for encryption state + the active nav icon
- * accent only; Inter for humans, JetBrains Mono for ids/sizes; "Falkenstein ·
- * Hetzner"; honest voice; no emojis.
+ * accent only; Inter for humans, JetBrains Mono for ids/sizes; name the city
+ * only ("Falkenstein"), never the storage provider; honest voice; no emojis.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -53,6 +53,7 @@ import SelectiveSyncView from './windows/views/SelectiveSyncView'
 import DevicesView from './windows/views/DevicesView'
 import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
+import { useRegionLabel } from './windows/useRegion'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
 
@@ -625,6 +626,7 @@ function PlaceholderView({ navId }: { navId: NavId }) {
 // ── Sidebar storage widget ──────────────────────────────────────────────────
 
 function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | null; storage: StorageSummary | null; onUpgrade: () => void }) {
+  const regionLabel = useRegionLabel()
   const usedBytes = usage?.used_bytes ?? storage?.used_bytes ?? null
   const quotaBytes = usage?.quota_bytes ?? storage?.quota_bytes ?? null
   const pct = usage?.percentage != null
@@ -657,7 +659,7 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 12 }}>
         <NavIcon name="shield" size={11} color={T.amberDeep} />
         <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-          Falkenstein · Hetzner
+          {regionLabel}
         </span>
       </div>
     </div>
@@ -688,16 +690,30 @@ export default function WindowsApp() {
 
   const loggedIn = status?.logged_in ?? false
 
-  // Load billing usage once signed in (storage widget + Home). Retries every
-  // 4 s on transient failure — the engine may not have a valid session ready on
-  // the very first `logged_in: true` tick, so a single fire-and-forget call can
-  // permanently strand the widget at the skeleton state.
+  // Load billing usage once signed in (storage widget + Home). On transient
+  // failure we retry with EXPONENTIAL BACKOFF rather than a tight 4s loop — the
+  // engine may not have a valid session ready on the very first
+  // `logged_in: true` tick, so a single fire-and-forget call can strand the
+  // widget at the skeleton state, but a fixed 4s loop hammers the shared billing
+  // endpoint (which 429s under load) for as long as the session stays unready.
+  //
+  // Backoff: 4s → 8s → 16s → … capped at 60s. We STOP entirely once usage loads
+  // (usageLoaded short-circuits the effect) and after a bounded number of
+  // attempts, so a persistently-failing endpoint isn't polled forever. The
+  // local-mirror fallback (desktop_storage_summary) still fills in a partial
+  // signal on the way.
   useEffect(() => {
     if (!loggedIn) return
     // If we already have data, don't re-fetch on every status poll re-render.
     if (usageLoaded.current) return
 
     let cancelled = false
+    let retryTimer: ReturnType<typeof window.setTimeout> | undefined
+    let tries = 0
+
+    const BASE_DELAY_MS = 4000
+    const MAX_DELAY_MS = 60_000
+    const MAX_TRIES = 8 // ~4+8+16+32+60+60+60s of backoff, then give up quietly
 
     const attempt = async () => {
       const r = await accountUsage()
@@ -705,24 +721,24 @@ export default function WindowsApp() {
       if (r.ok) {
         setUsage(r.value)
         usageLoaded.current = true
-        return
+        return // loaded — stop retrying
       }
       // accountUsage() failed — try the local mirror for a partial signal.
       const s = await command<StorageSummary>('desktop_storage_summary')
       if (cancelled) return
       if (s.ok) {
         setStorage(s.value)
-        // storage is a partial fallback; keep retrying accountUsage() so the
-        // progress bar eventually shows accurate billing quota.
+        // storage is a partial fallback; keep retrying accountUsage() (with
+        // backoff) so the progress bar eventually shows accurate billing quota.
       }
-      // Both failed (engine session not ready yet) — schedule a retry so the
-      // widget doesn't stay stuck at the skeleton forever.
-      if (!cancelled) {
-        retryTimer = window.setTimeout(attempt, 4000)
-      }
+      // Both failed (engine session not ready / endpoint rate-limited) —
+      // schedule a backed-off retry so the widget recovers without hammering.
+      tries += 1
+      if (tries >= MAX_TRIES) return // give up quietly rather than loop forever
+      const delay = Math.min(BASE_DELAY_MS * 2 ** (tries - 1), MAX_DELAY_MS)
+      retryTimer = window.setTimeout(attempt, delay)
     }
 
-    let retryTimer: ReturnType<typeof window.setTimeout> | undefined
     void attempt()
 
     return () => {
@@ -838,7 +854,7 @@ export default function WindowsApp() {
             <div style={{ marginTop: 'auto', padding: '14px 12px 10px', borderTop: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 6 }}>
               <NavIcon name="shield" size={11} color={T.amberDeep} />
               <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-                Falkenstein · Hetzner
+                Falkenstein
               </span>
             </div>
           )}

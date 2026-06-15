@@ -669,6 +669,13 @@ impl ApiClient {
         self.get_typed("/api/v1/billing/usage").await
     }
 
+    /// `GET /api/v1/me/region` — the user's preferred region + available list.
+    /// Mirrors the webapp `getUserRegion()` contract so the desktop resolves
+    /// the effective region's CITY the same way (never the provider).
+    pub async fn account_region(&self) -> anyhow::Result<crate::account_dto::UserRegionResponse> {
+        self.get_typed("/api/v1/me/region").await
+    }
+
     /// `GET /api/v1/account/activity` — events + summary.
     pub async fn account_activity(&self) -> anyhow::Result<crate::account_dto::AccountActivity> {
         self.get_typed("/api/v1/account/activity").await
