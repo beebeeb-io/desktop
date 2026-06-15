@@ -780,23 +780,27 @@ export default function WindowsFirstRun() {
   // Watch for sign-out: if the backend clears the session while we are on
   // the "ready" screen, reset the wizard back to step 1 so the user sees
   // the sign-in form rather than a stale "All set." screen.
+  // Only update loggedIn on a NON-NULL status — a null result means the IPC
+  // errored / Tauri wasn't ready / timed out, which must never be mistaken
+  // for a logout (a transient null would otherwise trip the reset).
   useEffect(() => {
     let cancelled = false
     const checkSession = async () => {
       const status = await loadSyncStatus()
-      if (cancelled) return
-      const nowLoggedIn = status?.logged_in ?? false
-      setLoggedIn(nowLoggedIn)
+      if (cancelled || !status) return
+      setLoggedIn(status.logged_in)
     }
     void checkSession()
     const id = window.setInterval(checkSession, 3000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [])
 
-  // When the session is cleared (loggedIn transitions to false) and we are
-  // past the sign-in step, snap back to step 1.
+  // The only stale-view scenario is a lingering "All set." screen after a
+  // sign-out, so reset to step 1 ONLY from the final 'ready' step. Resetting
+  // from unlock/sync-mode/explorer would discard a normally-signed-in user's
+  // mid-onboarding progress on a transient glitch.
   useEffect(() => {
-    if (!loggedIn && step !== 'signin') {
+    if (!loggedIn && step === 'ready') {
       setStep('signin')
     }
   }, [loggedIn, step])

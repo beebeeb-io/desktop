@@ -44,7 +44,7 @@ export default function Account() {
     command<string | null>('account_email').then((result) => {
       if (result.ok && result.value) setEmail(result.value)
     })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on the derived loggedInKey, not the full status object; re-fetch should fire only when the auth-state category (out/locked/unlocked) changes, not on every status poll tick
   }, [loggedInKey])
 
   const runAction = async (name: string, args?: Record<string, unknown>) => {
