@@ -179,16 +179,12 @@ export async function openUrl(url: string): Promise<CommandResult<void>> {
 }
 
 export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  const digits = value >= 10 || unit === 0 ? 0 : 1
-  return `${value.toFixed(digits)} ${units[unit]}`
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return '—'
+  if (bytes < 1_000) return `${bytes} B`
+  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(0)} KB`
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(0)} MB`
+  if (bytes < 1_000_000_000_000) return `${(bytes / 1_000_000_000).toFixed(0)} GB`
+  return `${(bytes / 1_000_000_000_000).toFixed(1)} TB`
 }
 
 export function commandUnavailableLabel(commandName: string): string {
@@ -549,6 +545,17 @@ export function desktopLogin(
  */
 export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
   return command<void>('desktop_login_2fa', { code })
+}
+
+/**
+ * Disconnect this device from the account: clears the local session token and
+ * wipes any cached credentials from the keychain. The files in the sync root
+ * stay on disk; the vault stays intact in the cloud. After this call the root
+ * `sync_status` poll will return `logged_in: false` and the SignedOutGate will
+ * take over.
+ */
+export function clearSession(): Promise<CommandResult<void>> {
+  return command<void>('clear_session')
 }
 
 // ── Selective sync (wave-2) ──────────────────────────────────────────────────

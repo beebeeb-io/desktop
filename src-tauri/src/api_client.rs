@@ -25,6 +25,80 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use urlencoding::encode;
 
+// ── 429 backoff/retry tuning (account-data GETs) ───────────────────────────────
+//
+// The account-data endpoints (auth/me, billing/*, account/*, clients/*) can 429
+// under load. The client must ride out a transient 429 rather than surfacing a
+// "Couldn't load" to the view, but must stay BOUNDED — it is not a hot loop and
+// must never hang a view waiting on a hammered endpoint.
+
+/// Extra attempts after the first 429 (so up to 1 + this total requests).
+const MAX_429_RETRIES: u32 = 3;
+/// Hard cap on any SINGLE backoff wait, regardless of what the server asks for.
+/// Protects against an absurd `Retry-After`/`x-ratelimit-reset` value pinning a
+/// view. ~5s keeps the UI responsive while still letting a short window clear.
+const RETRY_WAIT_CAP_SECS: u64 = 5;
+/// Cap on the CUMULATIVE time spent sleeping across all retries for one call.
+const RETRY_TOTAL_BUDGET_SECS: u64 = 8;
+/// Backoff used when the server gives no usable hint (no Retry-After / reset).
+const RETRY_DEFAULT_WAIT_SECS: u64 = 1;
+
+/// Current UNIX time in seconds (for interpreting `x-ratelimit-reset`, which is
+/// an absolute epoch). Falls back to 0 on the (impossible) pre-epoch clock so
+/// the reset delta just reads as "0s" rather than panicking.
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse a header value as whole seconds (`u64`). Tolerant of surrounding
+/// whitespace; returns `None` if the header is absent or non-numeric (e.g. an
+/// HTTP-date `Retry-After`, which we don't try to parse — the default wait
+/// covers that case).
+fn header_secs(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// Pure backoff decision for a 429 response. Returns `Some(wait_secs)` to retry
+/// after sleeping `wait_secs`, or `None` to give up (surface the error).
+///
+/// - `attempt` is the number of retries ALREADY made (0 on the first 429).
+/// - `spent` is the cumulative seconds already slept for this call.
+/// - `retry_after` / `reset_in` are the server's hints (seconds), if any.
+///
+/// The chosen wait is `max(retry_after, reset_in)` (the server may send either),
+/// defaulting to `RETRY_DEFAULT_WAIT_SECS`, then clamped to `RETRY_WAIT_CAP_SECS`
+/// and further trimmed so total sleep never exceeds `RETRY_TOTAL_BUDGET_SECS`.
+/// We stop once `attempt` reaches `MAX_429_RETRIES` or the budget is exhausted.
+fn retry_decision(
+    attempt: u32,
+    spent: u64,
+    retry_after: Option<u64>,
+    reset_in: Option<u64>,
+) -> Option<u64> {
+    if attempt >= MAX_429_RETRIES || spent >= RETRY_TOTAL_BUDGET_SECS {
+        return None;
+    }
+    // Take the larger of the two server hints; fall back to the default.
+    let hint = match (retry_after, reset_in) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => RETRY_DEFAULT_WAIT_SECS,
+    };
+    // Per-attempt cap.
+    let wait = hint.min(RETRY_WAIT_CAP_SECS);
+    // Don't blow the cumulative budget: trim the wait to what's left.
+    let remaining = RETRY_TOTAL_BUDGET_SECS.saturating_sub(spent);
+    let wait = wait.min(remaining);
+    Some(wait)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListFilesScope<'a> {
     pub parent_id: Option<&'a str>,
@@ -508,49 +582,64 @@ impl ApiClient {
     // These power the desktop's data-backed views. They are plain
     // `GET`/`DELETE`/`POST` calls returning typed DTOs from `account_dto`.
     // Unlike the sync-engine binary paths above, they go through
-    // `get_typed` / `send_typed`, which:
-    //   * retry once on HTTP 429 (rate limit) after honouring `Retry-After`,
-    //     mirroring the web `request()` client's backoff (capped, single
-    //     retry — the daemon is not a hot loop),
+    // `get_typed` / `send_with_retry`, which:
+    //   * retry on HTTP 429 (rate limit) — up to `MAX_429_RETRIES` extra
+    //     attempts — honouring `Retry-After` / `x-ratelimit-reset` for the
+    //     per-attempt wait (capped at `RETRY_WAIT_CAP_SECS`) and bounding the
+    //     CUMULATIVE wait at `RETRY_TOTAL_BUDGET_SECS` so a hammered endpoint
+    //     can't stall a view indefinitely. This makes a transient 429 (the prod
+    //     account-data endpoints currently 429 under load) retry gracefully
+    //     instead of surfacing "Couldn't load" to the view.
     //   * surface a clean `<status>: <body-snippet>` error on any other
     //     non-2xx instead of reqwest's opaque default.
 
-    /// Internal: GET a JSON endpoint and deserialize it, with a single 429
-    /// backoff. `path` is the API path (leading slash); auth is attached.
+    /// Internal: GET a JSON endpoint and deserialize it, with bounded 429
+    /// backoff + retry. `path` is the API path (leading slash); auth is attached.
     async fn get_typed<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
         let url = self.url(path);
         let resp = self.send_with_retry(|| self.client.get(&url)).await?;
         Ok(resp.json::<T>().await?)
     }
 
-    /// Internal: issue an arbitrary request (built by `build`) with a single
-    /// 429 backoff, returning a 2xx response or a descriptive error.
+    /// Internal: issue an arbitrary request (built by `build`) with bounded 429
+    /// backoff + retry, returning a 2xx response or a descriptive error.
+    ///
+    /// On a 429 we read the server's hint (`Retry-After` seconds or
+    /// `x-ratelimit-reset` epoch-seconds), clamp it to a sane per-attempt cap,
+    /// sleep, and retry — up to `MAX_429_RETRIES` extra attempts and a total
+    /// sleep budget of `RETRY_TOTAL_BUDGET_SECS`. The final 429 (or a non-429
+    /// non-2xx at any point) is surfaced via `check_status`.
     async fn send_with_retry(
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> anyhow::Result<reqwest::Response> {
-        // First attempt.
-        let resp = build()
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
-        if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Self::check_status(resp).await;
+        let mut spent: u64 = 0;
+        let mut attempt: u32 = 0;
+        loop {
+            let resp = build()
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send()
+                .await?;
+            if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Self::check_status(resp).await;
+            }
+            // 429: decide whether (and how long) to wait before retrying.
+            let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
+            let reset_in = header_secs(resp.headers(), "x-ratelimit-reset")
+                .map(|epoch| epoch.saturating_sub(now_unix_secs()));
+            match retry_decision(attempt, spent, retry_after, reset_in) {
+                Some(wait) => {
+                    if wait > 0 {
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+                    }
+                    spent = spent.saturating_add(wait);
+                    attempt += 1;
+                    // Loop back and retry.
+                }
+                // Budget/attempt exhausted — surface the 429 as a clean error.
+                None => return Self::check_status(resp).await,
+            }
         }
-        // 429 — honour Retry-After (seconds), capped at 10s, then retry once.
-        let wait = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(1)
-            .min(10);
-        tokio::time::sleep(Duration::from_secs(wait)).await;
-        let resp = build()
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
-        Self::check_status(resp).await
     }
 
     /// Map a non-2xx response to a descriptive error (status + a short body
@@ -862,6 +951,69 @@ mod tests {
         let s: CreatedSession = serde_json::from_str(json).unwrap();
         assert_eq!(s.id, "cs1");
         assert_eq!(s.heartbeat_interval_secs, Some(20));
+    }
+
+    // ── 429 backoff/retry decision (pure helper) ───────────────────────────────
+
+    #[test]
+    fn retry_decision_first_429_uses_default_when_no_hint() {
+        // First 429 (attempt 0), nothing spent, no server hint → default wait.
+        assert_eq!(retry_decision(0, 0, None, None), Some(RETRY_DEFAULT_WAIT_SECS));
+    }
+
+    #[test]
+    fn retry_decision_honours_retry_after_capped() {
+        // A small Retry-After is used verbatim …
+        assert_eq!(retry_decision(0, 0, Some(2), None), Some(2));
+        // … but an absurd one is clamped to the per-attempt cap.
+        assert_eq!(retry_decision(0, 0, Some(120), None), Some(RETRY_WAIT_CAP_SECS));
+    }
+
+    #[test]
+    fn retry_decision_uses_reset_when_retry_after_absent() {
+        // `x-ratelimit-reset` delta (seconds-until-reset) drives the wait.
+        assert_eq!(retry_decision(0, 0, None, Some(3)), Some(3));
+    }
+
+    #[test]
+    fn retry_decision_takes_larger_of_two_hints() {
+        // When BOTH hints are present we wait the longer of the two.
+        assert_eq!(retry_decision(0, 0, Some(2), Some(4)), Some(4));
+        assert_eq!(retry_decision(0, 0, Some(4), Some(2)), Some(4));
+    }
+
+    #[test]
+    fn retry_decision_stops_after_max_attempts() {
+        // Once we've already retried MAX_429_RETRIES times, give up.
+        assert_eq!(retry_decision(MAX_429_RETRIES, 0, Some(1), None), None);
+    }
+
+    #[test]
+    fn retry_decision_stops_when_budget_exhausted() {
+        // Spent at/over the total budget → no more sleeping.
+        assert_eq!(retry_decision(1, RETRY_TOTAL_BUDGET_SECS, Some(1), None), None);
+    }
+
+    #[test]
+    fn retry_decision_trims_wait_to_remaining_budget() {
+        // Cap says 5s, but only 2s of budget remain → wait is trimmed to 2s so
+        // cumulative sleep never exceeds RETRY_TOTAL_BUDGET_SECS.
+        let spent = RETRY_TOTAL_BUDGET_SECS - 2;
+        assert_eq!(retry_decision(1, spent, Some(5), None), Some(2));
+    }
+
+    #[test]
+    fn header_secs_parses_numeric_and_rejects_dates() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "  7 ".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "1718000000".parse().unwrap());
+        headers.insert("x-http-date", "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap());
+        assert_eq!(header_secs(&headers, "retry-after"), Some(7));
+        assert_eq!(header_secs(&headers, "x-ratelimit-reset"), Some(1718000000));
+        // Non-numeric (HTTP-date) header → None (default wait covers it).
+        assert_eq!(header_secs(&headers, "x-http-date"), None);
+        // Absent header → None.
+        assert_eq!(header_secs(&headers, "nope"), None);
     }
 
     #[test]

@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react'
 import {
   accountProfile,
   accountSubscription,
+  clearSession,
   formatBytes,
   openUrl,
   type AccountProfile,
@@ -291,6 +292,185 @@ function PlanCard({ sub }: { sub: Subscription }) {
   )
 }
 
+// ── Disconnect section ──────────────────────────────────────────────────────
+//
+// Inline confirm step — no window.confirm(). Three states:
+//   idle       → shows the "Disconnect" button
+//   confirming → shows the copy + Confirm / Cancel pair
+//   busy       → shows the spinner copy while the IPC call is in flight
+//   error      → shows the error reason, lets the user retry or cancel
+
+type DisconnectPhase = 'idle' | 'confirming' | 'busy' | 'error'
+
+function DisconnectSection() {
+  const [phase, setPhase] = useState<DisconnectPhase>('idle')
+  const [errorMsg, setErrorMsg] = useState<string>('')
+
+  const handleConfirm = async () => {
+    setPhase('busy')
+    const result = await clearSession()
+    if (!result.ok) {
+      setErrorMsg(result.reason)
+      setPhase('error')
+    }
+    // On success: the root sync_status poll will detect logged_in: false and
+    // unmount this whole view — no explicit navigation needed here.
+  }
+
+  const reset = () => {
+    setErrorMsg('')
+    setPhase('idle')
+  }
+
+  return (
+    <div style={{
+      borderRadius: 10,
+      border: `1px solid ${T.line}`,
+      background: T.paper,
+      overflow: 'hidden',
+    }}>
+      {/* Header row */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '14px 18px',
+        borderBottom: phase !== 'idle' ? `1px solid ${T.line}` : 'none',
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 2 }}>Disconnect this device</div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
+            Signs out this PC. Your files stay safe in your vault.
+          </div>
+        </div>
+        {phase === 'idle' && (
+          <button
+            onClick={() => setPhase('confirming')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              padding: '7px 14px',
+              fontSize: 12,
+              fontFamily: T.fontSans,
+              fontWeight: 500,
+              borderRadius: 6,
+              border: `1px solid ${T.line2}`,
+              background: T.paper2,
+              color: T.ink,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap' as const,
+              flexShrink: 0,
+            }}
+          >
+            Disconnect
+          </button>
+        )}
+      </div>
+
+      {/* Confirm step */}
+      {phase === 'confirming' && (
+        <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ fontSize: 12, color: T.ink2, lineHeight: 1.6 }}>
+            <strong style={{ color: T.ink }}>Disconnect this account from this PC</strong> — your files stay safe in your vault. Sync will stop and you'll need to sign in again to resume.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => void handleConfirm()}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '7px 14px',
+                fontSize: 12,
+                fontFamily: T.fontSans,
+                fontWeight: 500,
+                borderRadius: 6,
+                border: `1px solid ${DANGER}`,
+                background: 'oklch(0.97 0.03 25)',
+                color: DANGER,
+                cursor: 'pointer',
+              }}
+            >
+              Disconnect
+            </button>
+            <button
+              onClick={reset}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '7px 14px',
+                fontSize: 12,
+                fontFamily: T.fontSans,
+                fontWeight: 500,
+                borderRadius: 6,
+                border: `1px solid ${T.line2}`,
+                background: T.paper,
+                color: T.ink2,
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Busy step */}
+      {phase === 'busy' && (
+        <div style={{ padding: '14px 18px', fontSize: 12, color: T.ink3 }}>
+          Disconnecting…
+        </div>
+      )}
+
+      {/* Error step */}
+      {phase === 'error' && (
+        <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 11.5, fontFamily: T.fontMono, color: DANGER, lineHeight: 1.6, wordBreak: 'break-word' as const }}>
+            {errorMsg}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => void handleConfirm()}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '7px 14px',
+                fontSize: 12,
+                fontFamily: T.fontSans,
+                fontWeight: 500,
+                borderRadius: 6,
+                border: `1px solid ${DANGER}`,
+                background: 'oklch(0.97 0.03 25)',
+                color: DANGER,
+                cursor: 'pointer',
+              }}
+            >
+              Retry
+            </button>
+            <button
+              onClick={reset}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '7px 14px',
+                fontSize: 12,
+                fontFamily: T.fontSans,
+                fontWeight: 500,
+                borderRadius: 6,
+                border: `1px solid ${T.line2}`,
+                background: T.paper,
+                color: T.ink2,
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Footer() {
   return (
     <div style={{
@@ -409,6 +589,7 @@ export default function AccountView() {
           : state.subError
             ? <PlanCardError reason={state.subError} />
             : <PlanUnavailable />}
+        <DisconnectSection />
         <Footer />
       </div>
     )
