@@ -95,6 +95,26 @@ impl fmt::Debug for Session {
     }
 }
 
+/// A login that proved the password (OPAQUE) but still needs a second factor.
+///
+/// Held in [`AppState::pending_2fa`] between `desktop_login` (which receives the
+/// server's `requires_2fa` + `partial_token`) and `desktop_login_2fa` (which
+/// carries the partial token plus the user's TOTP code to `/auth/2fa/verify` to
+/// mint the real session). The `partial_token` is a server-issued, short-lived
+/// (≈5-minute) partial session token — it is NOT key material and is validated
+/// server-side, so it is never logged. `email` is the lowercased address from
+/// `desktop_login`, reused for the same post-login setup the success path runs.
+///
+/// `ZeroizeOnDrop` wipes the partial token (a live, short-lived server
+/// credential) from freed heap whenever `pending_2fa` is replaced or cleared —
+/// mirroring how `Session` zeroizes its token. Both `String` fields implement
+/// `Zeroize` in `zeroize` 1.x, so the derive applies without `#[zeroize(skip)]`.
+#[derive(zeroize::ZeroizeOnDrop)]
+struct Pending2fa {
+    partial_token: String,
+    email: String,
+}
+
 /// Tauri-managed shared state. Held behind a `Mutex` because the web
 /// thread (IPC handlers) and the future sync-engine task both need
 /// access. Cheap to lock — sessions change rarely.
@@ -102,6 +122,11 @@ pub struct AppState {
     pub session: Mutex<Option<Session>>,
     pub auth_present: Mutex<bool>,
     pub auth_email: Mutex<Option<String>>,
+    /// A password-verified login awaiting its TOTP second factor. Set by
+    /// `desktop_login` when the OPAQUE finish returns `requires_2fa: true`;
+    /// consumed (and cleared on success) by `desktop_login_2fa`. `None`
+    /// whenever no 2FA challenge is in flight.
+    pending_2fa: Mutex<Option<Pending2fa>>,
     /// Active engine runner, if any. `set_session` spawns one when a
     /// sync_root is also configured; `clear_session` aborts it.
     pub engine: tokio::sync::Mutex<Option<EngineRunner>>,
@@ -135,6 +160,7 @@ impl Default for AppState {
             session: Mutex::new(None),
             auth_present: Mutex::new(false),
             auth_email: Mutex::new(None),
+            pending_2fa: Mutex::new(None),
             engine: tokio::sync::Mutex::new(None),
             // Default to "stopped" — once the runner spawns and emits
             // its first event, the listener overwrites this.
@@ -461,18 +487,39 @@ fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Result of an OPAQUE sign-in attempt handed back to the frontend.
+///
+/// `requires_2fa == false` means the session is fully installed and onboarding
+/// can proceed to the recovery-phrase step. `requires_2fa == true` means the
+/// password was accepted but a TOTP code is still needed: `desktop_login`
+/// stashed a [`Pending2fa`] in `AppState`, and the frontend must collect the
+/// 6-digit code and call `desktop_login_2fa` to complete sign-in.
+#[derive(serde::Serialize)]
+struct LoginOutcome {
+    requires_2fa: bool,
+}
+
 /// Authenticate with the current OPAQUE login endpoints.
 ///
 /// This intentionally mirrors web and iOS: sign-in proves account access with
 /// email/password only. If this Mac does not already have the vault key in
 /// Keychain, onboarding moves to the separate recovery-phrase unlock step.
 ///
-/// Returns `Err` on HTTP errors, network failures, OPAQUE failures, or 2FA
-/// requirements.
+/// When the account has 2FA enabled, the OPAQUE finish returns
+/// `requires_2fa: true` plus a short-lived `partial_token`. Rather than
+/// erroring, we stash that token (with the email) in `AppState::pending_2fa`
+/// and return `LoginOutcome { requires_2fa: true }`; the frontend then calls
+/// `desktop_login_2fa` with the user's TOTP code to mint the real session.
+///
+/// Returns `Err` on HTTP errors, network failures, or OPAQUE failures.
 ///
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
-async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<(), String> {
+async fn desktop_login(
+    state: State<'_, AppState>,
+    email: String,
+    password: String,
+) -> Result<LoginOutcome, String> {
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -562,7 +609,27 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
+        // Password proven, but the account has 2FA. Capture the short-lived
+        // partial session token (+ email) so `desktop_login_2fa` can complete
+        // the sign-in once the user enters their TOTP code. The partial token is
+        // server-validated and short-lived — never log it.
+        let partial_token = finish_body
+            .get("partial_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No partial_token in login finish response".to_string())?
+            .to_string();
+        {
+            let mut guard = state
+                .pending_2fa
+                .lock()
+                .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+            *guard = Some(Pending2fa {
+                partial_token,
+                email: email.clone(),
+            });
+        }
+        tracing::info!("desktop login requires 2FA; awaiting TOTP code");
+        return Ok(LoginOutcome { requires_2fa: true });
     }
     let session_token = finish_body
         .get("session_token")
@@ -571,10 +638,6 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         .to_string();
 
     let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    if profile.totp_enabled.unwrap_or(false) {
-        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-        return Err("Two-factor authentication is required. Please sign in at app.beebeeb.io to complete 2FA before using desktop sync.".to_string());
-    }
     // Cache the profile we just fetched so the `account_profile` IPC can serve
     // the Account page immediately without re-hitting `/auth/me`.
     if let Ok(mut guard) = state.cached_profile.lock() {
@@ -589,6 +652,94 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
     set_auth_present(&state, true);
     set_auth_email(&state, Some(email.clone()));
     tracing::info!("desktop account session installed");
+
+    Ok(LoginOutcome { requires_2fa: false })
+}
+
+/// Complete a 2FA-gated sign-in: trade the held partial token + the user's TOTP
+/// code for a real session, then run the same post-login setup as the no-2FA
+/// path in `desktop_login`.
+///
+/// Requires a prior `desktop_login` call that returned
+/// `requires_2fa: true` (which stashed a [`Pending2fa`] in `AppState`). On an
+/// invalid/expired code the server replies 401 → we surface a clear, retryable
+/// error and DELIBERATELY keep the pending state so the user can retry within
+/// the partial token's ~5-minute window. On success we clear the pending state.
+///
+/// Mirrors the web client's `verify2fa(partialToken, code)`:
+/// `POST /api/v1/auth/2fa/verify` with body `{ partial_token, code }` →
+/// `{ user_id, session_token }`. The TOTP code is never logged.
+#[tauri::command]
+async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(), String> {
+    let base_url = runner::api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+
+    // Read (don't yet consume) the pending challenge: we only clear it on
+    // success so an invalid code stays retryable within the 5-minute window.
+    let (partial_token, email) = {
+        let guard = state
+            .pending_2fa
+            .lock()
+            .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+        let pending = guard
+            .as_ref()
+            .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
+        (pending.partial_token.clone(), pending.email.clone())
+    };
+
+    let code = code.trim().to_string();
+    if code.is_empty() {
+        return Err("Enter your authentication code.".to_string());
+    }
+
+    let verify_resp = client
+        .post(format!("{base_url}/api/v1/auth/2fa/verify"))
+        .json(&serde_json::json!({ "partial_token": partial_token, "code": code }))
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    if verify_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        // Invalid/expired code. Keep `pending_2fa` so the user can retry while
+        // the partial token is still valid.
+        return Err("Invalid authentication code".to_string());
+    }
+    if !verify_resp.status().is_success() {
+        let status = verify_resp.status();
+        let body = verify_resp.text().await.unwrap_or_default();
+        return Err(format!("Two-factor verification failed ({status}): {body}"));
+    }
+    let verify_body: serde_json::Value = verify_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse 2FA verify response: {e}"))?;
+    let session_token = verify_body
+        .get("session_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
+        .to_string();
+
+    // Same post-finish setup as `desktop_login`'s no-2FA success path.
+    let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+    if let Ok(mut guard) = state.cached_profile.lock() {
+        *guard = Some(profile);
+    }
+
+    if let Err(e) = persist_session_token_to_keychain(&session_token, Some(&email)) {
+        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+        return Err(e);
+    }
+
+    set_auth_present(&state, true);
+    set_auth_email(&state, Some(email));
+    // Challenge satisfied — drop the pending state so a stale partial token
+    // can't be reused.
+    if let Ok(mut guard) = state.pending_2fa.lock() {
+        *guard = None;
+    }
+    tracing::info!("desktop account session installed after 2FA");
 
     Ok(())
 }
@@ -813,6 +964,11 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     // Drop the cached account profile so a subsequent `account_profile` IPC
     // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
     clear_cached_profile(&state);
+    // Sign out = clean slate: drop any in-flight 2FA challenge so an abandoned
+    // partial token can't linger (and is zeroized) past a logout.
+    if let Ok(mut guard) = state.pending_2fa.lock() {
+        *guard = None;
+    }
     if let Ok(mut guard) = state.engine_state.lock() {
         *guard = "stopped".to_string();
     }
@@ -878,6 +1034,11 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     // Drop the cached account profile on lock too, so "locked == no profile"
     // stays honest; the next `unlock_vault` re-fetches.
     clear_cached_profile(&state);
+    // Lock = clean slate: drop any in-flight 2FA challenge so an abandoned
+    // partial token can't linger (and is zeroized) past a lock.
+    if let Ok(mut guard) = state.pending_2fa.lock() {
+        *guard = None;
+    }
     if let Ok(mut guard) = state.engine_state.lock() {
         *guard = "stopped".to_string();
     }
@@ -3733,6 +3894,8 @@ pub fn run() {
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)
             desktop_login,
+            // 2FA second-factor completion for OPAQUE sign-in
+            desktop_login_2fa,
             // Browser-based device-code login handoff (Windows primary path)
             browser_login::start_browser_login,
             open_onboarding_window,
