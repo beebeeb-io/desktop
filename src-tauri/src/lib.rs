@@ -89,7 +89,7 @@ impl fmt::Debug for Session {
         f.debug_struct("Session")
             .field("token", &"<redacted>")
             .field("master_key", &"<redacted>")
-            .field("email", &self.email)
+            .field("email", &self.email.as_deref().map(|_| "<set>").unwrap_or("<unset>"))
             .finish()
     }
 }
@@ -560,7 +560,7 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
 
     set_auth_present(&state, true);
     set_auth_email(&state, Some(email.clone()));
-    tracing::info!(email = %email, "desktop account session installed");
+    tracing::info!("desktop account session installed");
 
     Ok(())
 }
