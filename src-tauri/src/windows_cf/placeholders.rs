@@ -32,7 +32,8 @@
 
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+    GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
 };
 use windows::core::PCWSTR;
 
@@ -55,12 +56,17 @@ use windows::core::PCWSTR;
 ///   a Windows `FILETIME` tick count and written to the placeholder's
 ///   `LastWriteTime` / `ChangeTime` / `CreationTime` so Explorer shows a
 ///   real modified date instead of a blank/epoch one.
+/// - `is_dir`: when `true`, mint a **directory** placeholder
+///   (`FILE_ATTRIBUTE_DIRECTORY`) that is a real, openable folder in
+///   Explorer — children land inside it on disk. When `false`, mint a file
+///   placeholder (`FILE_ATTRIBUTE_NORMAL`) whose bytes are hydrated on open.
 pub fn create_placeholder(
     parent_dir: &std::path::Path,
     file_id: &str,
     name: &str,
     size_bytes: i64,
     modified_at: i64,
+    is_dir: bool,
 ) -> anyhow::Result<()> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
@@ -77,6 +83,34 @@ pub fn create_placeholder(
     // FILE_BASIC_INFO stores as an i64.
     let modified_ticks = unix_to_filetime(modified_at);
 
+    // Directory vs file placeholder.
+    //  - DIRECTORY: a real, openable folder. Its children are the on-disk
+    //    placeholders we seed inside it; a directory has no data stream so
+    //    `FileSize` is 0.
+    //  - FILE (NORMAL): a hydrate-on-open stub carrying the plaintext size.
+    let file_attributes = if is_dir {
+        FILE_ATTRIBUTE_DIRECTORY.0
+    } else {
+        FILE_ATTRIBUTE_NORMAL.0
+    };
+    let file_size = if is_dir { 0 } else { size_bytes };
+
+    // Placeholder-create flags:
+    //  - MARK_IN_SYNC: this placeholder reflects the latest server state.
+    //    Without it Windows treats a new placeholder as locally-modified
+    //    relative to the cloud and starts a spurious upload conflict.
+    //  - DISABLE_ON_DEMAND_POPULATION (directories only): the per-directory
+    //    analog of the root's CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT
+    //    + CF_POPULATION_POLICY_ALWAYS_FULL. It tells Windows this directory is
+    //    ALREADY fully enumerated by its on-disk children, so Explorer must NOT
+    //    block on a FETCH_PLACEHOLDERS callback (which this in-process provider
+    //    never registers — see mod.rs). This is what keeps nested folders from
+    //    reintroducing the enumeration hang while staying in the eager model.
+    let mut create_flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+    if is_dir {
+        create_flags |= CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION;
+    }
+
     // SAFETY: `entry`, `parent_wide`, `name_wide`, `identity` all live
     // on this stack frame for the duration of the FFI call. The
     // `CfCreatePlaceholders` API copies what it needs before returning
@@ -86,11 +120,13 @@ pub fn create_placeholder(
             RelativeFileName: PCWSTR(name_wide.as_ptr()),
             FsMetadata: CF_FS_METADATA {
                 BasicInfo: FILE_BASIC_INFO {
-                    // 0x20 = FILE_ATTRIBUTE_NORMAL. Anything other
-                    // than 0 is required, otherwise Cloud Files
-                    // refuses the placeholder. We don't carry over
-                    // hidden/system bits; we have no use for them.
-                    FileAttributes: 0x20,
+                    // FILE_ATTRIBUTE_DIRECTORY (0x10) for folders, else
+                    // FILE_ATTRIBUTE_NORMAL (0x80). A non-zero attribute is
+                    // required or Cloud Files refuses the placeholder. (The
+                    // previous file path hardcoded 0x20 / ARCHIVE, which also
+                    // worked; NORMAL is the semantically-correct file attr.) We
+                    // don't carry over hidden/system bits; we have no use for them.
+                    FileAttributes: file_attributes,
                     // Real timestamps so Explorer's Date Modified column
                     // is populated. We only have a single modified time
                     // from the server, so we mirror it across
@@ -101,15 +137,11 @@ pub fn create_placeholder(
                     ChangeTime: modified_ticks,
                     ..Default::default()
                 },
-                FileSize: size_bytes,
+                FileSize: file_size,
             },
             FileIdentity: identity.as_ptr() as *const _,
             FileIdentityLength: identity.len() as u32,
-            // MARK_IN_SYNC = "this placeholder reflects the latest
-            // server state." Without this Windows treats every new
-            // placeholder as locally modified relative to the cloud,
-            // which kicks off a spurious upload conflict.
-            Flags: CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC,
+            Flags: create_flags,
             // Result is filled in by Windows on return. Initialised to
             // S_OK so a no-op (already exists) reads sensibly.
             Result: windows::core::HRESULT(0),
@@ -136,10 +168,10 @@ pub fn create_placeholder(
         }
     }
 
-    // Zero-knowledge: log the file_id only. The decrypted plaintext filename
-    // (and the parent path, which can carry decrypted folder names) must never
-    // reach the logs.
-    tracing::debug!(file_id = %file_id, "cloud placeholder created");
+    // Zero-knowledge: log the file_id + kind only. The decrypted plaintext
+    // filename (and the parent path, which can carry decrypted folder names)
+    // must never reach the logs.
+    tracing::debug!(file_id = %file_id, is_dir, "cloud placeholder created");
     Ok(())
 }
 

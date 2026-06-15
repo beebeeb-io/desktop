@@ -598,6 +598,8 @@ mod tests {
             modified_at: 1,
             content_hash: None,
             remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
         })
         .unwrap();
         let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();

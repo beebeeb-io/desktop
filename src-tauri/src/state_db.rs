@@ -100,14 +100,14 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             ItemKind::File => "file",
             ItemKind::Folder => "folder",
         }
     }
 
-    fn from_str(s: &str) -> Self {
+    pub fn from_str(s: &str) -> Self {
         match s {
             "folder" => ItemKind::Folder,
             _ => ItemKind::File,
@@ -214,6 +214,32 @@ pub struct FileEntry {
     /// successful sync re-anchors them, which is the safe direction
     /// (over-detect rather than miss a real conflict).
     pub remote_updated_at: i64,
+    /// Server UUID of this row's parent folder, or `None` at the vault
+    /// root. **Read-only on `FileEntry`**: it is populated from the
+    /// `files.parent_id` column by the SELECT mappers below, but
+    /// [`StateDb::upsert_file`] does NOT write it — the parent linkage
+    /// (and `item_kind`) is owned by [`StateDb::set_file_contract_state`]
+    /// via [`FileContractState`], which every metadata sweep calls right
+    /// after `upsert_file`. Exposing it here lets
+    /// [`crate::windows_cf::populate_placeholders`] order parents-before-
+    /// children and place nested placeholders without an N+1 contract fetch.
+    pub parent_id: Option<String>,
+    /// Whether this row is a folder or a file. **Read-only on `FileEntry`**
+    /// for the same reason as [`Self::parent_id`]: read from the
+    /// `files.item_kind` column, written only via
+    /// [`StateDb::set_file_contract_state`]. The Windows Cloud Files layer
+    /// uses it to mint a DIRECTORY placeholder (vs a file placeholder) so
+    /// folders are real, openable directories in Explorer.
+    pub item_kind: ItemKind,
+}
+
+impl FileEntry {
+    /// True if this row is a folder. Used by the Windows Cloud Files
+    /// placeholder seeder to decide between a directory and a file
+    /// placeholder.
+    pub fn is_dir(&self) -> bool {
+        self.item_kind == ItemKind::Folder
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -448,7 +474,8 @@ impl StateDb {
     pub fn get_file(&self, file_id: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind
              FROM files WHERE file_id = ?1",
         )?;
         let mut rows = stmt.query(params![file_id])?;
@@ -461,6 +488,8 @@ impl StateDb {
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
                 remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
             }))
         } else {
             Ok(None)
@@ -500,7 +529,8 @@ impl StateDb {
     fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind
              FROM files WHERE path = ?1",
         )?;
         let mut rows = stmt.query(params![path])?;
@@ -513,6 +543,8 @@ impl StateDb {
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
                 remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
             }))
         } else {
             Ok(None)
@@ -543,7 +575,8 @@ impl StateDb {
     pub fn list_by_status(&self, status: FileStatus) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind
              FROM files WHERE status = ?1",
         )?;
         let rows = stmt.query_map(params![status.as_str()], |row| {
@@ -555,6 +588,8 @@ impl StateDb {
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
                 remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
             })
         })?;
         rows.collect()
@@ -565,7 +600,8 @@ impl StateDb {
     pub fn list_files(&self) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind
              FROM files ORDER BY path ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -577,6 +613,8 @@ impl StateDb {
                 modified_at: row.get(4)?,
                 content_hash: row.get(5)?,
                 remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
             })
         })?;
         rows.collect()
@@ -1270,6 +1308,8 @@ mod tests {
             modified_at: 1700000000,
             content_hash: None,
             remote_updated_at: 1700000000,
+            parent_id: None,
+            item_kind: ItemKind::File,
         };
         db.upsert_file(&entry).unwrap();
         let got = db.get_file("abc123").unwrap().unwrap();
@@ -1293,6 +1333,8 @@ mod tests {
             modified_at: 0,
             content_hash: None,
             remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
         })
         .unwrap();
         assert_eq!(
@@ -1315,6 +1357,8 @@ mod tests {
             modified_at: 0,
             content_hash: None,
             remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
         })
         .unwrap();
         assert_eq!(
@@ -1344,6 +1388,8 @@ mod tests {
             modified_at: 0,
             content_hash: None,
             remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
         };
         db.upsert_file(&e).unwrap();
         let conflicts = db.list_by_status(FileStatus::Conflict).unwrap();
@@ -1436,6 +1482,8 @@ mod tests {
             modified_at: 10,
             content_hash: Some("remote-hash".into()),
             remote_updated_at: 11,
+            parent_id: None,
+            item_kind: ItemKind::File,
         })
         .unwrap();
 
@@ -1733,6 +1781,8 @@ mod tests {
             modified_at: 0,
             content_hash: None,
             remote_updated_at: 0,
+            parent_id: parent_id.map(str::to_string),
+            item_kind: ItemKind::File,
         })
         .unwrap();
         let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();

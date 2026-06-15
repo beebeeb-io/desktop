@@ -29,6 +29,7 @@
 //! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
 //! was a stub returning `anyhow::Err`.
 
+use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -530,6 +531,10 @@ impl EngineBridge {
             modified_at: now,
             content_hash: None,
             remote_updated_at: now,
+            // parent_id/item_kind are not written by upsert_file — the
+            // contract update below owns them. These are inert defaults.
+            parent_id: op.parent_id.clone(),
+            item_kind: ItemKind::File,
         });
         entry.file_id = server_file_id.to_string();
         if let Some(target_path) = op.target_path.as_ref() {
@@ -598,6 +603,10 @@ impl EngineBridge {
                 modified_at: root.approved_at.unwrap_or(now),
                 content_hash: None,
                 remote_updated_at: root.approved_at.unwrap_or(0),
+                // upsert_file does not persist these; the contract update
+                // just below sets the authoritative parent_id/item_kind.
+                parent_id: None,
+                item_kind: if root.is_folder { ItemKind::Folder } else { ItemKind::File },
             })?;
 
             let mut contract = self
@@ -690,6 +699,9 @@ impl EngineBridge {
                     modified_at: now_secs(),
                     content_hash: None,
                     remote_updated_at: 0,
+                    // Not persisted by upsert_file; contract owns these.
+                    parent_id: None,
+                    item_kind: ItemKind::File,
                 })?;
                 let mut payload = serde_json::json!({
                     "operation": "create_file",
@@ -1748,6 +1760,11 @@ fn apply_metadata_file_row(
     permission_bits: i64,
     now: i64,
     master_key: &[u8; 32],
+    // Server-relative path of the PARENT directory ("" at the vault root).
+    // The decrypted leaf name is composed under it so nested files/folders
+    // get a full `<parent>/<leaf>` path that round-trips with the upload
+    // watcher's `relative_db_path` (also '/'-joined, no leading slash).
+    parent_rel_path: &str,
 ) -> anyhow::Result<Option<FileEntry>> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
@@ -1757,22 +1774,20 @@ fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let path = resolve_relative_path(f, file_id, master_key);
+    let leaf = resolve_relative_path(f, file_id, master_key);
+    // Compose the nested path. An empty leaf means the name didn't decrypt;
+    // keep it empty so the placeholder seeder skips the row (and retries next
+    // tick) rather than seeding a bare parent dir. A leaf that already carries
+    // a leading slash (legacy plaintext-`path` fallback) is normalised.
+    let path = if parent_rel_path.is_empty() || leaf.is_empty() {
+        leaf
+    } else {
+        format!("{}/{}", parent_rel_path.trim_end_matches('/'), leaf.trim_start_matches('/'))
+    };
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
         .unwrap_or(FileStatus::CloudOnly);
-
-    let entry = FileEntry {
-        file_id: file_id.to_string(),
-        path,
-        status,
-        size_bytes: size,
-        modified_at: remote_updated,
-        content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
-        remote_updated_at: remote_updated,
-    };
-    db.upsert_file(&entry)?;
 
     let item_kind = if f["is_folder"].as_bool().unwrap_or(false)
         || f["kind"].as_str() == Some("folder")
@@ -1782,6 +1797,26 @@ fn apply_metadata_file_row(
     } else {
         ItemKind::File
     };
+    let server_parent_id = f["parent_id"].as_str().map(str::to_string);
+
+    let entry = FileEntry {
+        file_id: file_id.to_string(),
+        path,
+        status,
+        size_bytes: size,
+        modified_at: remote_updated,
+        content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
+        remote_updated_at: remote_updated,
+        // NOTE: parent_id/item_kind are NOT persisted by upsert_file — the
+        // `set_file_contract_state` call at the end of this fn writes the
+        // authoritative `files.parent_id` / `files.item_kind` columns. These
+        // struct fields exist so the in-memory `FileEntry` returned to callers
+        // (notably the windows_cf placeholder seeder reading via list_by_status)
+        // carries the correct folder/parent classification.
+        parent_id: server_parent_id.clone(),
+        item_kind: item_kind.clone(),
+    };
+    db.upsert_file(&entry)?;
     let mut contract = db
         .get_file_contract_state(file_id)?
         .unwrap_or_else(|| FileContractState {
@@ -1804,7 +1839,7 @@ fn apply_metadata_file_row(
             last_sync_at: now,
         });
     contract.namespace = namespace;
-    contract.parent_id = f["parent_id"].as_str().map(str::to_string);
+    contract.parent_id = server_parent_id;
     contract.shared_root_id = shared_root_id;
     contract.share_id = share_id;
     contract.permission_bits = permission_bits;
@@ -1870,129 +1905,179 @@ pub struct ConflictDetected {
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
 pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDetected>> {
-    let files = bridge.api().list_files(None).await?;
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
 
-    for f in &files {
-        let file_id = f["id"].as_str().unwrap_or_default();
-        if file_id.is_empty() {
-            continue;
-        }
-        let size = f["size_bytes"].as_i64().unwrap_or(0);
-        let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-        match bridge.db().get_file(file_id)? {
-            None => {
-                // (1) New file — insert as cloud_only. base = remote
-                // (next-tick conflicts compare against this).
-                apply_metadata_file_row(
-                    bridge.db(),
-                    f,
-                    Namespace::MyFiles,
-                    None,
-                    None,
-                    PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
-                    now_secs,
-                    bridge.api().master_key(),
-                )?;
-            }
-            Some(entry) if entry.status == FileStatus::Local => {
-                // (2) Local copy + remote moved? Nothing to check if
-                // the timestamps haven't drifted past base.
-                if remote_updated <= entry.remote_updated_at {
-                    continue;
-                }
+    // Breadth-first recursive enumeration. The server's `GET /api/v1/files`
+    // is one level deep (`list_files(Some(parent))` returns a folder's direct
+    // children), so we walk the tree ourselves: process the root, then for
+    // every FOLDER row push a frame that lists its children, threading the
+    // folder's resolved relative path so its children get NESTED paths
+    // (`<parent>/<child>`). A BFS queue (not recursion) keeps the stack flat
+    // for deep vaults.
+    //
+    // Guards:
+    //  - `seen` (server file_ids) breaks any parent_id cycle the server might
+    //    return and de-dups a folder that appears under two listings.
+    //  - `MAX_DEPTH` caps traversal so a pathological/looping tree can't spin
+    //    forever; the cap is generous (real vaults are far shallower).
+    const MAX_DEPTH: usize = 64;
 
-                // Synthesise version triplet. We don't have the
-                // server's content hash on file metadata, so we hash
-                // by `size-mtime` as an opaque-but-stable surrogate.
-                // Treating the surrogate's equality as "same version"
-                // is conservative — a file edited to the same
-                // size+mtime won't be flagged, but those collisions
-                // are vanishingly rare in practice.
-                let local = VersionInfo {
-                    hash: entry.content_hash.clone().unwrap_or_default(),
-                    modified_at: entry.modified_at as u64,
-                };
-                let remote = VersionInfo {
-                    hash: format!("{size}-{remote_updated}"),
-                    modified_at: remote_updated as u64,
-                };
-                let base = VersionInfo {
-                    hash: entry.content_hash.clone().unwrap_or_default(),
-                    modified_at: entry.remote_updated_at as u64,
-                };
-                // Local matches base → only remote changed. Quietly
-                // re-anchor and let a future hydrate replace bytes
-                // when the user opens it.
-                if !is_conflict(&local, &remote, &base) {
-                    let mut updated = entry.clone();
-                    updated.remote_updated_at = remote_updated;
-                    updated.size_bytes = size;
-                    updated.modified_at = remote_updated;
-                    bridge.db().upsert_file(&updated)?;
-                    apply_metadata_file_row(
-                        bridge.db(),
-                        f,
-                        Namespace::MyFiles,
-                        None,
-                        None,
-                        PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
-                        now_secs,
-                        bridge.api().master_key(),
-                    )?;
-                    continue;
-                }
+    // (rel_path_of_parent, folder_id_to_list, depth). depth 0 = vault root.
+    let mut queue: VecDeque<(String, Option<String>, usize)> = VecDeque::new();
+    queue.push_back((String::new(), None, 0));
+    let mut seen: HashSet<String> = HashSet::new();
 
-                // True conflict. Flip status, anchor `modified_at` to
-                // "now" so Task 13's auto-resolution clock starts
-                // from detection rather than from whatever the row
-                // happened to carry before.
-                let mut updated = entry.clone();
-                updated.status = FileStatus::Conflict;
-                updated.modified_at = now_secs;
-                bridge.db().upsert_file(&updated)?;
+    while let Some((parent_rel_path, parent_id, depth)) = queue.pop_front() {
+        let files = bridge.api().list_files(parent_id.as_deref()).await?;
 
-                let file_name = std::path::Path::new(&entry.path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&entry.path)
-                    .to_string();
-                let is_text = is_text_file(&file_name);
-                tracing::warn!(
-                    file_id = %entry.file_id,
-                    name = %file_name,
-                    "conflict detected on tick — both sides moved past base"
-                );
-                conflicts.push(ConflictDetected {
-                    file_id: entry.file_id.clone(),
-                    file_name,
-                    is_text,
-                });
-            }
-            Some(entry) => {
-                // (3) Pending download/upload/conflict/error — let
-                // the dedicated path own its transitions.
-                if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
-                    apply_metadata_file_row(
-                        bridge.db(),
-                        f,
-                        Namespace::MyFiles,
-                        None,
-                        None,
-                        PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
-                        now_secs,
-                        bridge.api().master_key(),
-                    )?;
-                }
+        for f in &files {
+            let file_id = f["id"].as_str().unwrap_or_default();
+            if file_id.is_empty() {
                 continue;
+            }
+            // Cycle / duplicate guard: never process the same server id twice
+            // in one tick.
+            if !seen.insert(file_id.to_string()) {
+                continue;
+            }
+
+            let resolved = process_metadata_row(bridge, f, &parent_rel_path, now_secs, &mut conflicts)?;
+
+            // Recurse into folders: list their children on a later frame,
+            // carrying this folder's full relative path as the new parent.
+            if let Some((rel_path, ItemKind::Folder)) = resolved {
+                if depth + 1 <= MAX_DEPTH && !rel_path.is_empty() {
+                    queue.push_back((rel_path, Some(file_id.to_string()), depth + 1));
+                } else if depth + 1 > MAX_DEPTH {
+                    tracing::warn!(
+                        file_id = %file_id,
+                        depth,
+                        "sync_tick: max recursion depth reached, not descending further"
+                    );
+                }
             }
         }
     }
     Ok(conflicts)
+}
+
+/// Apply one server metadata row during [`sync_tick`]'s recursive walk,
+/// running the same three-way decision the flat sweep used (new → cloud_only;
+/// local + remote-moved → conflict check; otherwise refresh metadata). On
+/// success returns `Some((resolved_rel_path, item_kind))` so the BFS can
+/// recurse into folders using the row's full nested path; returns `None` only
+/// when the row is unusable (empty id / undecryptable name).
+fn process_metadata_row(
+    bridge: &EngineBridge,
+    f: &serde_json::Value,
+    parent_rel_path: &str,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<Option<(String, ItemKind)>> {
+    let file_id = f["id"].as_str().unwrap_or_default();
+    if file_id.is_empty() {
+        return Ok(None);
+    }
+    let size = f["size_bytes"].as_i64().unwrap_or(0);
+    let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+
+    // Helper to refresh metadata + return the resolved path/kind. The single
+    // place that writes the row's nested path and folder/file classification.
+    let apply = |bridge: &EngineBridge| -> anyhow::Result<Option<(String, ItemKind)>> {
+        let entry = apply_metadata_file_row(
+            bridge.db(),
+            f,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            now_secs,
+            bridge.api().master_key(),
+            parent_rel_path,
+        )?;
+        Ok(entry.map(|e| (e.path, e.item_kind)))
+    };
+
+    match bridge.db().get_file(file_id)? {
+        None => {
+            // (1) New to us — insert as cloud_only. base = remote.
+            apply(bridge)
+        }
+        Some(entry) if entry.status == FileStatus::Local => {
+            // (2) Local copy + remote moved? Nothing to check if the
+            // timestamps haven't drifted past base. Still report the row's
+            // path/kind so a folder we already have locally is still descended.
+            if remote_updated <= entry.remote_updated_at {
+                return Ok(Some((entry.path, entry.item_kind)));
+            }
+
+            // Synthesise version triplet (no server content hash on metadata;
+            // `size-mtime` is an opaque-but-stable surrogate — conservative,
+            // a same-size+mtime edit won't flag, but those collisions are rare).
+            let local = VersionInfo {
+                hash: entry.content_hash.clone().unwrap_or_default(),
+                modified_at: entry.modified_at as u64,
+            };
+            let remote = VersionInfo {
+                hash: format!("{size}-{remote_updated}"),
+                modified_at: remote_updated as u64,
+            };
+            let base = VersionInfo {
+                hash: entry.content_hash.clone().unwrap_or_default(),
+                modified_at: entry.remote_updated_at as u64,
+            };
+            // Local matches base → only remote changed. Quietly re-anchor and
+            // let a future hydrate replace bytes when the user opens it.
+            if !is_conflict(&local, &remote, &base) {
+                let mut updated = entry.clone();
+                updated.remote_updated_at = remote_updated;
+                updated.size_bytes = size;
+                updated.modified_at = remote_updated;
+                bridge.db().upsert_file(&updated)?;
+                return apply(bridge);
+            }
+
+            // True conflict. Flip status, anchor `modified_at` to "now" so the
+            // auto-resolution clock starts from detection.
+            let mut updated = entry.clone();
+            updated.status = FileStatus::Conflict;
+            updated.modified_at = now_secs;
+            bridge.db().upsert_file(&updated)?;
+
+            let file_name = std::path::Path::new(&entry.path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&entry.path)
+                .to_string();
+            let is_text = is_text_file(&file_name);
+            tracing::warn!(
+                file_id = %entry.file_id,
+                name = %file_name,
+                "conflict detected on tick — both sides moved past base"
+            );
+            conflicts.push(ConflictDetected {
+                file_id: entry.file_id.clone(),
+                file_name,
+                is_text,
+            });
+            // A conflicted folder is unusual, but still report its path/kind so
+            // enumeration of its (independent) children continues.
+            Ok(Some((entry.path, entry.item_kind)))
+        }
+        Some(entry) => {
+            // (3) Pending download/upload/conflict/error — let the dedicated
+            // path own its transitions, but still refresh cloud_only/downloading
+            // metadata (and always report path/kind so folders are descended).
+            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
+                return apply(bridge);
+            }
+            Ok(Some((entry.path, entry.item_kind)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2491,6 +2576,7 @@ mod tests {
             PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
             2000,
             &[0u8; 32],
+            "",
         )
         .unwrap()
         .unwrap();
@@ -2547,6 +2633,7 @@ mod tests {
             PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
             6000,
             &master_key,
+            "",
         )
         .unwrap()
         .unwrap();
@@ -2583,6 +2670,7 @@ mod tests {
             PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
             1,
             &[9u8; 32],
+            "",
         )
         .unwrap()
         .unwrap();
@@ -2590,6 +2678,102 @@ mod tests {
         // No plaintext field present → empty path (caller skips seeding),
         // but the row still upserts so the rest of the sweep proceeds.
         assert_eq!(entry.path, "");
+    }
+
+    #[test]
+    fn test_metadata_file_row_composes_nested_path_under_parent() {
+        // NESTED enumeration: a child discovered under a folder must be stored
+        // at `<parent_rel_path>/<decrypted_leaf>` (slash-joined, no leading
+        // slash) so the path round-trips with the upload watcher's
+        // `relative_db_path` and the windows_cf placeholder seeder.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let master_key = [3u8; 32];
+        let file_id = "aaaaaaaa-0000-4000-8000-000000000003";
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name_encrypted =
+            beebeeb_core::encrypt::encrypt_name(&mk, file_id, "notes.txt", Some("text/plain")).unwrap();
+
+        let metadata = serde_json::json!({
+            "id": file_id,
+            "name_encrypted": name_encrypted,
+            "size_bytes": 12,
+            "updated_at": 42,
+            "is_folder": false,
+            "parent_id": "folder-docs",
+        });
+
+        // Parent folder resolved to "docs" earlier in the BFS walk.
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            100,
+            &master_key,
+            "docs",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(entry.path, "docs/notes.txt");
+        assert_eq!(entry.item_kind, ItemKind::File);
+        assert_eq!(entry.parent_id.as_deref(), Some("folder-docs"));
+        // The stored row (what list_by_status / the seeder reads) agrees, and
+        // the contract carries the authoritative parent_id + item_kind.
+        let stored = db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(stored.path, "docs/notes.txt");
+        assert_eq!(stored.item_kind, ItemKind::File);
+        assert_eq!(stored.parent_id.as_deref(), Some("folder-docs"));
+        let contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        assert_eq!(contract.parent_id.as_deref(), Some("folder-docs"));
+        assert_eq!(contract.item_kind, ItemKind::File);
+    }
+
+    #[test]
+    fn test_metadata_file_row_classifies_folder_rows() {
+        // A row the server marks as a folder must surface item_kind == Folder
+        // both on the returned FileEntry and the stored row, so the BFS walk
+        // descends into it and the placeholder seeder mints a DIRECTORY.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let master_key = [5u8; 32];
+        let file_id = "bbbbbbbb-0000-4000-8000-000000000004";
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&mk, file_id, "Photos", None).unwrap();
+
+        let metadata = serde_json::json!({
+            "id": file_id,
+            "name_encrypted": name_encrypted,
+            "size_bytes": 0,
+            "updated_at": 7,
+            "is_folder": true,
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            100,
+            &master_key,
+            "",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(entry.path, "Photos");
+        assert_eq!(entry.item_kind, ItemKind::Folder);
+        assert!(entry.is_dir());
+        let stored = db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(stored.item_kind, ItemKind::Folder);
+        assert!(stored.is_dir());
     }
 
     #[tokio::test]
@@ -2898,6 +3082,8 @@ mod tests {
                 modified_at: 100,
                 content_hash: Some("local".into()),
                 remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
             })
             .unwrap();
         bridge
@@ -3031,6 +3217,8 @@ mod tests {
                 modified_at: 0,
                 content_hash: None,
                 remote_updated_at: 0,
+                parent_id: parent_id.map(str::to_string),
+                item_kind: ItemKind::File,
             })
             .unwrap();
         let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();

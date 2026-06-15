@@ -442,13 +442,29 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
 /// path and ensure it exists first, so nested cloud files land in the right
 /// Explorer subfolder.
 fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> usize {
-    let entries = match bridge.db().list_by_status(crate::state_db::FileStatus::CloudOnly) {
+    let mut entries = match bridge.db().list_by_status(crate::state_db::FileStatus::CloudOnly) {
         Ok(entries) => entries,
         Err(e) => {
             tracing::warn!(error = %e, "could not list cloud-only files for placeholder seeding");
             return 0;
         }
     };
+
+    // PARENTS-BEFORE-CHILDREN. A nested file's placeholder must land INSIDE its
+    // parent directory's placeholder, and a directory placeholder must exist
+    // before anything is created under it. Sorting by path depth (number of
+    // '/'-separated segments, ascending) guarantees every ancestor directory
+    // row is processed before its descendants. Folders and files at the same
+    // depth are independent, so their relative order is irrelevant.
+    //
+    // Why this matters with directory placeholders: a folder row is minted as a
+    // real CF directory placeholder (DISABLE_ON_DEMAND_POPULATION) so Explorer
+    // treats it as fully enumerated by its on-disk children. If we instead
+    // processed a child first, `ensure_directory` would `mkdir` a PLAIN OS
+    // directory at the parent path, and the later folder-row `create_placeholder`
+    // would no-op on ERROR_ALREADY_EXISTS — leaving a plain dir where a CF
+    // directory placeholder was wanted. Depth-ordering avoids that race.
+    entries.sort_by_key(|e| e.path.trim_matches('/').split('/').count());
 
     let mut created = 0usize;
     for entry in entries {
@@ -470,6 +486,11 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             }
         };
 
+        // Ensure the immediate parent directory exists on disk. For a nested
+        // row, depth-ordering means the parent FOLDER row was already minted as
+        // a CF directory placeholder above, so this is a no-op for it; this call
+        // only materialises the sync root itself (depth-1 rows) or backfills any
+        // intermediate dir the server didn't surface as its own row.
         if let Err(e) = crate::config::ensure_directory(&parent_dir) {
             // Zero-knowledge: the parent dir is built from the decrypted
             // relative path, so it can carry plaintext folder names — log the
@@ -478,8 +499,14 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             continue;
         }
 
-        match placeholders::create_placeholder(&parent_dir, &entry.file_id, &name, entry.size_bytes, entry.modified_at)
-        {
+        match placeholders::create_placeholder(
+            &parent_dir,
+            &entry.file_id,
+            &name,
+            entry.size_bytes,
+            entry.modified_at,
+            entry.is_dir(),
+        ) {
             Ok(()) => created += 1,
             Err(e) => {
                 // Zero-knowledge: log the file_id only — never the decrypted
