@@ -260,6 +260,82 @@ pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> 
     Ok(())
 }
 
+/// Convert a brand-new plain local file at `path` into a Cloud Files
+/// placeholder WITHOUT marking it in-sync, called the moment we decide to upload
+/// it (task 0780) and BEFORE the upload completes.
+///
+/// Why convert pre-upload at all: a plain file the user just dropped into a
+/// CF-connected root is NOT a placeholder, so it has no Cloud Files identity and
+/// the CF filter has no reason to leave it alone while we read its bytes for the
+/// encrypted upload. Converting it to a placeholder hands it to the filter under
+/// our control, so it is not reclaimed/dehydrated mid-upload.
+///
+/// Why NOT `MARK_IN_SYNC` here (unlike [`convert_to_in_sync_placeholder`]): the
+/// file is NOT yet on the server — the upload is only just being queued. Marking
+/// it in-sync now would be a lie (and could let "Free up space" dehydrate bytes
+/// that were never uploaded). We pass `CF_CONVERT_FLAG_NONE`: the file becomes a
+/// placeholder that keeps its bytes on disk and is understood to be locally
+/// ahead of the cloud. Once the real `file_id` lands,
+/// [`super::super::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]
+/// → [`convert_to_in_sync_placeholder`] re-stamps it in-sync with the server id.
+///
+/// We use a throwaway identity here (the local op uuid would do, but we have no
+/// server id yet) — pass `local_id`, which `finalize` overwrites with the real
+/// server `file_id` on the in-sync re-stamp. The identity is opaque to Windows.
+///
+/// Best-effort + idempotent: a file that is already a placeholder returns the
+/// "already a cloud file" HRESULT, which we map to `Ok(())`. A failure here
+/// leaves a working plain file that still uploads — the convert is an
+/// anti-reclaim guard, not a correctness requirement — so the caller only logs.
+///
+/// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// (conversion rewrites reparse data) and always closes it before returning.
+pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let identity: Vec<u8> = local_id.as_bytes().to_vec();
+
+    // SAFETY: `path_wide` / `identity` live for the whole call; the handle is
+    // closed on every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
+
+        // NONE: become a placeholder, keep bytes on disk, do NOT claim in-sync.
+        let result = CfConvertToPlaceholder(
+            handle,
+            Some(identity.as_ptr() as *const core::ffi::c_void),
+            identity.len() as u32,
+            CF_CONVERT_FLAG_NONE,
+            None,
+            None,
+        );
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // Already a placeholder / already a cloud file → desired end state.
+            const ALREADY_A_PLACEHOLDER: windows::core::HRESULT =
+                windows::core::HRESULT(0x8007017Cu32 as i32);
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == ALREADY_A_PLACEHOLDER || e.code() == NOT_A_CLOUD_FILE {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfConvertToPlaceholder (unsynced): {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the local id only, never the decrypted path/filename.
+    tracing::debug!(local_id = %local_id, "converted new local file to unsynced placeholder (pre-upload)");
+    Ok(())
+}
+
 /// Dehydrate a Cloud Files placeholder at `path`, freeing the on-disk bytes
 /// that live INSIDE the placeholder while keeping it visible in Explorer as a
 /// cloud-only file. Returns the number of bytes actually reclaimed from disk.

@@ -231,6 +231,159 @@ pub unsafe extern "system" fn fetch_data_callback(
     }
 }
 
+// ── Upload triggers — Cloud Files NOTIFY callbacks (task 0780) ───────────────
+//
+// These three `NOTIFY_*_COMPLETION` callbacks are the Windows UPLOAD path. They
+// fire AFTER the corresponding local operation completes on a CfConnectSyncRoot'd
+// root (where a `notify`/ReadDirectoryChanges watcher is starved by the CF
+// filter and never fires). Each one extracts the path(s) from `CF_CALLBACK_INFO`
+// (and, for rename, the params arm), then pushes a `crate::watcher::NotifyEvent`
+// into the upload driver's debounce loop. ALL feedback-loop filtering +
+// parent_id resolution + the actual `queue_finder_*` enqueue happen there, in
+// the one shared `EngineBridge::classify_local_path` — these callbacks only
+// translate the CF shape into a channel message and return fast.
+//
+// We do NOT `block_on` here: unlike `fetch_data_callback` (which must deliver
+// bytes synchronously or Explorer hangs), a NOTIFY completion has no transfer to
+// satisfy — dropping the work onto the async debounce loop keeps the
+// filter-driver worker thread free and lets us debounce chatty close bursts.
+
+/// `NOTIFY_FILE_CLOSE_COMPLETION` — fires after a handle that may have written a
+/// new/modified file in the sync root closes. The create/modify upload trigger.
+///
+/// We skip closes flagged `CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED` (the file
+/// was deleted, not written — the DELETE_COMPLETION callback handles that), then
+/// push the absolute path as a debounced `CloseCompletion` event. The pre-upload
+/// `CfConvertToPlaceholder` (no MARK_IN_SYNC) and the `queue_finder_create`
+/// happen in the debounce loop's `handle_settled_path`, immediately before
+/// queueing — so a path that gets filtered out is never converted.
+///
+/// SAFETY: `callback_info`/`callback_parameters` are valid for the duration of
+/// this call per the Cloud Files contract. We copy the path out before
+/// returning; nothing borrowed from Windows is retained.
+pub unsafe extern "system" fn notify_file_close_completion_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+
+    // The close-completion params arm carries a `Flags` field; a DELETED close
+    // is not a write we should upload. Defensive null-check on params.
+    if !callback_parameters.is_null() {
+        let params = unsafe { &*callback_parameters };
+        let close = unsafe { params.Anonymous.CloseCompletion };
+        if (close.Flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED)
+            != CF_CALLBACK_CLOSE_COMPLETION_FLAG_NONE
+        {
+            // Deleted on close — leave it to the delete-completion callback.
+            return;
+        }
+    }
+
+    let Some(path) = notify_full_path(info) else {
+        return;
+    };
+    push_notify_event(crate::watcher::NotifyEvent::CloseCompletion(path));
+}
+
+/// `NOTIFY_DELETE_COMPLETION` — fires after a local delete completes. Pushes a
+/// `Delete` event; the debounce loop resolves the path to a known server file
+/// and enqueues the trash op (no-op if the path is untracked / engine-internal).
+///
+/// SAFETY: as [`notify_file_close_completion_callback`].
+pub unsafe extern "system" fn notify_delete_completion_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    _callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let Some(path) = notify_full_path(info) else {
+        return;
+    };
+    push_notify_event(crate::watcher::NotifyEvent::Delete(path));
+}
+
+/// `NOTIFY_RENAME_COMPLETION` — fires after a local rename/move completes. The
+/// OLD (source) path is in the params arm's `SourcePath`; the NEW (target) path
+/// is `CF_CALLBACK_INFO.NormalizedPath`. Pushes a `Rename { source, target }`
+/// event; the debounce loop resolves the source to a known server file and
+/// enqueues a move (changed parent) or rename (name-only) via `queue_finder_modify`.
+///
+/// SAFETY: as above. `SourcePath` is a NUL-terminated PCWSTR valid for the
+/// duration of the call; we copy it into an owned path before returning.
+pub unsafe extern "system" fn notify_rename_completion_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() || callback_parameters.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let params = unsafe { &*callback_parameters };
+
+    // NEW path: NormalizedPath (volume-relative) joined with the volume DOS name.
+    let Some(target) = notify_full_path(info) else {
+        return;
+    };
+
+    // OLD path: the rename-completion arm's SourcePath. Like NormalizedPath it is
+    // VOLUME-RELATIVE (no drive letter), so prefix the same VolumeDosName to make
+    // it openable / strippable against the sync root.
+    let rename = unsafe { params.Anonymous.RenameCompletion };
+    let Some(source) = volume_relative_to_full(info, rename.SourcePath.0) else {
+        return;
+    };
+
+    push_notify_event(crate::watcher::NotifyEvent::Rename { source, target });
+}
+
+/// Join `CF_CALLBACK_INFO.NormalizedPath` with the volume DOS name into an
+/// absolute [`PathBuf`] (e.g. `C:\Users\...\file`). Mirrors [`normalized_path`]
+/// but yields a `PathBuf` (for the upload driver) instead of a NUL-terminated
+/// wide string (for `CfOpenFileWithOplock`). Returns `None` if the relative path
+/// is missing/empty.
+fn notify_full_path(info: &CF_CALLBACK_INFO) -> Option<std::path::PathBuf> {
+    volume_relative_to_full(info, info.NormalizedPath.0)
+}
+
+/// Join an arbitrary VOLUME-RELATIVE wide path (`\Users\...\file`, no drive)
+/// with `info.VolumeDosName` (`C:`) into an absolute [`PathBuf`]. Shared by
+/// [`notify_full_path`] and the rename source-path decode. Returns `None` for a
+/// null/empty relative path.
+fn volume_relative_to_full(info: &CF_CALLBACK_INFO, rel_ptr: *const u16) -> Option<std::path::PathBuf> {
+    let rel = wide_to_vec(rel_ptr)?;
+    if rel.is_empty() {
+        return None;
+    }
+    let vol = wide_to_vec(info.VolumeDosName.0).unwrap_or_default();
+    let mut full: Vec<u16> = Vec::with_capacity(vol.len() + rel.len());
+    full.extend_from_slice(&vol);
+    full.extend_from_slice(&rel);
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&full)))
+}
+
+/// Push a NOTIFY event into the upload driver's debounce loop. No-op (with a
+/// debug log) if `watcher::spawn` hasn't registered a sender yet, or if the
+/// receiver was torn down (logout/shutdown) — a dropped event is reconciled by
+/// the next `sync_tick`. Never blocks the filter-driver thread.
+fn push_notify_event(event: crate::watcher::NotifyEvent) {
+    match super::notify_sender() {
+        Some(tx) => {
+            if tx.send(event).is_err() {
+                tracing::debug!("NOTIFY event dropped: upload driver receiver is gone");
+            }
+        }
+        None => {
+            tracing::debug!("NOTIFY event dropped: no upload driver sender registered yet");
+        }
+    }
+}
+
 /// Stream `[offset, offset+length)` of `plaintext` back into the
 /// placeholder via `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)`,
 /// chunked so each non-final transfer is page-aligned. Satisfies the

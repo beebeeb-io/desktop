@@ -112,6 +112,36 @@ pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3
 /// process lifetime.
 static CONNECTED: OnceLock<()> = OnceLock::new();
 
+/// Sender into the upload driver's debounce loop (`crate::watcher`). The
+/// `extern "system"` NOTIFY callbacks can't capture state, so they reach the
+/// live channel through this OnceLock. Set by [`set_notify_sender`] from
+/// `watcher::spawn`; read by [`notify_sender`] in the callback module.
+///
+/// `OnceLock` (set-once) is correct here: on a re-login the runner respawns
+/// inside the same process and `watcher::spawn` runs again, but the channel is
+/// re-created — so we store the FIRST sender and the callbacks always push into
+/// whatever debounce loop is currently draining it. A dropped receiver (handle
+/// torn down) just means `send` errors, which the callbacks swallow.
+static NOTIFY_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>> = OnceLock::new();
+
+/// Register the upload driver's event sender so the Cloud Files NOTIFY
+/// callbacks ([`callbacks::notify_file_close_completion_callback`] and friends)
+/// can push create/modify/delete/rename events into the debounce loop. Called
+/// once from `watcher::spawn`. Idempotent — a second call after a respawn is a
+/// no-op (the existing sender stays), and the callbacks push into the live
+/// channel either way.
+pub fn set_notify_sender(tx: tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>) {
+    let _ = NOTIFY_TX.set(tx);
+}
+
+/// Internal accessor for the callback module: the live NOTIFY-event sender, or
+/// `None` if `watcher::spawn` hasn't registered one yet (e.g. a NOTIFY callback
+/// raced engine startup). The callback drops the event in that case — a missed
+/// startup event is reconciled by the next `sync_tick`.
+pub(crate) fn notify_sender() -> Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>> {
+    NOTIFY_TX.get().cloned()
+}
+
 /// Stash the engine bridge so [`callbacks::fetch_data_callback`] can
 /// reach it when Windows demands hydration. Idempotent — once set the
 /// pointer doesn't change for the lifetime of the process; on
@@ -256,13 +286,31 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
 /// error from `CfConnectSyncRoot` on failure (e.g. already connected).
 ///
 /// The callback table is a static array terminated by a
-/// `CF_CALLBACK_TYPE_NONE` sentinel, per the Cloud Files contract. We only
-/// register `FETCH_DATA` — the bytes-on-open hook — which is all we need:
-/// directory *enumeration* is served from the eagerly pre-created on-disk
-/// placeholders (the root is registered `CF_POPULATION_POLICY_ALWAYS_FULL` +
-/// `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
-/// placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
-/// Only the file *bytes* are fetched lazily, which is `FETCH_DATA`.
+/// `CF_CALLBACK_TYPE_NONE` sentinel, per the Cloud Files contract. We register:
+///
+/// - `FETCH_DATA` — the bytes-on-open (download) hook. Directory *enumeration*
+///   is served from the eagerly pre-created on-disk placeholders (the root is
+///   registered `CF_POPULATION_POLICY_ALWAYS_FULL` +
+///   `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
+///   placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
+/// - `NOTIFY_FILE_CLOSE_COMPLETION` — the **UPLOAD** trigger (task 0780). Fires
+///   AFTER a handle that wrote a new/modified file in the connected root closes.
+///   Unlike a `notify`/ReadDirectoryChanges watcher (which the CF filter starves
+///   on a connected root), this DOES fire, so it is the create/modify hook for
+///   local uploads.
+/// - `NOTIFY_DELETE_COMPLETION` — fires after a local delete; propagates a
+///   server trash for a known file.
+/// - `NOTIFY_RENAME_COMPLETION` — fires after a local rename/move; propagates a
+///   server move/rename. Its params arm carries the OLD path (`SourcePath`); the
+///   NEW path is `CF_CALLBACK_INFO.NormalizedPath`.
+///
+/// No special connect flag is needed for NOTIFY delivery: the
+/// `NOTIFY_*_COMPLETION` callbacks are delivered to any registered handler
+/// post-operation. `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO` (kept) only asks
+/// Windows to populate `CF_CALLBACK_INFO.ProcessInfo`; it does not gate notify
+/// delivery. [LEAD native build: confirm the three NOTIFY callbacks actually
+/// fire on a real CfConnectSyncRoot'd root — the bindings + table shape are
+/// verified against windows-0.58, but only a native run proves delivery.]
 fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
     let path_wide: Vec<u16> = sync_root_path
         .to_string_lossy()
@@ -271,13 +319,29 @@ fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
         .collect();
 
     // The table must outlive the call; it lives on this stack frame and
-    // `CfConnectSyncRoot` copies what it needs before returning.
+    // `CfConnectSyncRoot` copies what it needs before returning. The
+    // CF_CALLBACK_TYPE_NONE sentinel MUST stay last.
     let table = [
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_FETCH_DATA,
             Callback: Some(callbacks::fetch_data_callback),
         },
-        // Sentinel terminator — required by the API.
+        // Upload trigger: a handle that wrote a new/modified file has closed.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
+            Callback: Some(callbacks::notify_file_close_completion_callback),
+        },
+        // Delete trigger: a local delete completed.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_DELETE_COMPLETION,
+            Callback: Some(callbacks::notify_delete_completion_callback),
+        },
+        // Rename/move trigger: a local rename completed.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_RENAME_COMPLETION,
+            Callback: Some(callbacks::notify_rename_completion_callback),
+        },
+        // Sentinel terminator — required by the API; MUST be last.
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_NONE,
             Callback: None,
@@ -285,7 +349,7 @@ fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
     ];
 
     // SAFETY: `path_wide` and `table` are kept alive on this stack frame for
-    // the duration of the call. The callback function pointer has static
+    // the duration of the call. The callback function pointers have static
     // lifetime. We ignore the returned connection key: hydration only needs
     // the connection key passed back inside `CF_CALLBACK_INFO`, and we keep
     // the root connected for the whole process lifetime.

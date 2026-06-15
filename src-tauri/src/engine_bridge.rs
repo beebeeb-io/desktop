@@ -825,6 +825,128 @@ impl EngineBridge {
         )
     }
 
+    /// Single, parent-aware classifier shared by every local-write trigger
+    /// (the retired `notify` watcher *and* the Windows Cloud Files NOTIFY
+    /// callbacks). Given an absolute on-disk `path` under `sync_root`, it
+    /// decides whether `path` is a *genuinely-new* user file that should be
+    /// uploaded, and if so returns a ready-to-queue [`FinderWriteTarget`] with
+    /// `parent_id` resolved from the path's parent directory.
+    ///
+    /// It runs the three feedback-loop filters, in order, so a download / a
+    /// hydration / an engine-internal write is NEVER mistaken for a new upload:
+    ///
+    /// 1. **Engine-internal paths + OS junk** — anything under `<root>/.beebeeb/`,
+    ///    the `<root>/.beebeeb-sync.lock`, any `.beebeeb` path component, and the
+    ///    ignored-name set ([`is_ignored_finder_name`]: `.tmp`, `~$…`, `.DS_Store`,
+    ///    …). These are writes the engine itself (or the OS) makes constantly.
+    /// 2. **Cloud Files placeholders** (Windows only) — a reparse point under the
+    ///    sync root is something WE minted (placeholder seed or post-upload
+    ///    convert). Hydration fills a placeholder's data stream WITHOUT clearing
+    ///    its reparse-point attribute, so a hydration-write still trips this guard
+    ///    and never re-uploads. Checked via
+    ///    [`crate::windows_cf::placeholders::is_cloud_placeholder`].
+    /// 3. **Already a known server file** (authoritative) — look the path up in
+    ///    the state DB. A row means the file already lives on the server
+    ///    (cloud-only / downloading / local / uploading), so a write to it is a
+    ///    hydration or a re-download, NOT a new creation. Only a path with NO DB
+    ///    row survives.
+    ///
+    /// `parent_id` resolution (nested uploads): for a survivor at
+    /// `<parent_dir>/<name>`, the parent directory's server folder id is looked
+    /// up by its server-relative path. A root-level file resolves to `None`; a
+    /// nested file resolves to `Some(<parent folder file_id>)` so the upload
+    /// lands in the right server folder. If the parent directory has no DB row
+    /// yet (its folder placeholder hasn't reconciled), `parent_id` falls back to
+    /// `None` rather than guessing — the file uploads to the root and a later
+    /// tick can reconcile, which is strictly safer than attaching it to the
+    /// wrong parent.
+    ///
+    /// Returns `None` when `path` is not a regular file, is filtered out, or the
+    /// DB lookup fails (fail-closed: a lookup error skips the upload rather than
+    /// risk a spurious one). Cross-platform so it type-checks everywhere; only
+    /// the Windows triggers call it.
+    pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
+        // The file may have been deleted/renamed during a debounce window — if
+        // it is no longer a regular file there is nothing to upload.
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_file() => {}
+            _ => return None,
+        }
+
+        // Filter 1 — engine-internal paths + OS junk.
+        if path_is_engine_internal(sync_root, path) {
+            return None;
+        }
+        let file_name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        if is_ignored_finder_name(&file_name) {
+            return None;
+        }
+
+        // Filter 2 — Cloud Files placeholders are engine-owned (Windows only). A
+        // reparse point under the sync root is a placeholder we minted or
+        // converted; the hydration write that fills it does NOT turn it back into
+        // a plain file, so we must never treat a placeholder write as a new
+        // upload.
+        #[cfg(target_os = "windows")]
+        if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
+            return None;
+        }
+
+        // Filter 3 (authoritative) — already a known server file?
+        let rel = relative_db_path(sync_root, path)?;
+        match self.db.get_file_by_path(&rel) {
+            Ok(Some(_existing)) => {
+                tracing::trace!("classify_local_path: skipping write to already-tracked server file");
+                return None;
+            }
+            Ok(None) => { /* genuinely new — fall through */ }
+            Err(e) => {
+                tracing::warn!(error = %e, "classify_local_path: state DB lookup failed; skipping to be safe");
+                return None;
+            }
+        }
+
+        // parent_id resolution: a survivor at `<parent_dir>/<name>`. If the parent
+        // directory maps to a known server FOLDER row, attach the new file to it;
+        // otherwise upload at the root (None). We never attach to a row that isn't
+        // a folder.
+        let parent_id = self.resolve_parent_id_for(sync_root, path);
+
+        Some(FinderWriteTarget {
+            file_id: None,
+            parent_id,
+            filename: file_name.clone(),
+            kind: FinderWriteItemKind::File,
+            contents_path: Some(path.to_string_lossy().into_owned()),
+            content_type: beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string),
+            base_version_identifier: None,
+        })
+    }
+
+    /// Resolve the server folder id of `path`'s immediate parent directory, for
+    /// nested uploads. Returns `None` for a root-level file (parent == sync root)
+    /// or when the parent directory has no known server FOLDER row yet. The
+    /// parent's server-relative key is built in the same '/'-joined shape the
+    /// state DB stores, then looked up via [`StateDb::get_file_by_path`]; a hit
+    /// that is a folder yields its `file_id`.
+    ///
+    /// `pub(crate)` so the upload driver's rename handler can resolve the NEW
+    /// parent of a moved file through the exact same logic.
+    pub(crate) fn resolve_parent_id_for(&self, sync_root: &Path, path: &Path) -> Option<String> {
+        let parent_dir = path.parent()?;
+        // Root-level file: parent IS the sync root → no server parent.
+        if parent_dir == sync_root {
+            return None;
+        }
+        let parent_rel = relative_db_path(sync_root, parent_dir)?;
+        match self.db.get_file_by_path(&parent_rel) {
+            Ok(Some(entry)) if entry.is_dir() => Some(entry.file_id),
+            // No row, or a row that is somehow a file (shouldn't happen for a
+            // directory path) → upload at the root rather than mis-parent.
+            _ => None,
+        }
+    }
+
     pub fn set_recursive_pin(&self, file_id: &str, pinned: bool) -> anyhow::Result<PinUpdateOutcome> {
         let now = now_secs();
         let changed_item_ids = self.db.set_recursive_pin(file_id, pinned, now)?;
@@ -1263,6 +1385,51 @@ impl EngineBridge {
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
         Ok(conflict_name)
     }
+}
+
+/// Name of the per-sync-root state directory (mirrors `runner::STATE_DIR`).
+const SYNC_STATE_DIR: &str = ".beebeeb";
+/// Name of the cross-process lock file the engine writes at the sync root.
+const SYNC_LOCK_FILE: &str = ".beebeeb-sync.lock";
+
+/// True if `path` is something the engine itself writes (so it must never be
+/// fed back as a user upload): the `<sync_root>/.beebeeb-sync.lock`, anything
+/// inside `<sync_root>/.beebeeb/`, or any path component named `.beebeeb`
+/// (defense in depth for a nested-root layout).
+///
+/// Shared by [`EngineBridge::classify_local_path`] (filter 1) so the retired
+/// `notify` path and the Windows Cloud Files NOTIFY callbacks run ONE identical
+/// engine-internal check.
+pub(crate) fn path_is_engine_internal(sync_root: &Path, path: &Path) -> bool {
+    let state_dir = sync_root.join(SYNC_STATE_DIR);
+    let lock = sync_root.join(SYNC_LOCK_FILE);
+    if path == lock || path.starts_with(&state_dir) {
+        return true;
+    }
+    path.components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some(SYNC_STATE_DIR)))
+}
+
+/// Map an absolute on-disk path under `sync_root` to the server-relative,
+/// '/'-separated, leading-slash-free key the state DB stores in `files.path`
+/// (the same shape [`crate::state_db::StateDb::get_file_by_path`] expects, and
+/// the same the nested-enumeration sweep writes). Returns `None` if `path` is
+/// not under `sync_root` or resolves to the empty (root) key.
+///
+/// Shared by [`EngineBridge::classify_local_path`] and
+/// [`EngineBridge::resolve_parent_id_for`] so the DB lookup key is computed in
+/// exactly one place.
+pub(crate) fn relative_db_path(sync_root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(sync_root).ok()?;
+    let mut out = String::new();
+    for (i, comp) in rel.components().enumerate() {
+        let part = comp.as_os_str().to_str()?;
+        if i > 0 {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub fn is_ignored_finder_name(name: &str) -> bool {
@@ -1932,7 +2099,23 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
     let mut seen: HashSet<String> = HashSet::new();
 
     while let Some((parent_rel_path, parent_id, depth)) = queue.pop_front() {
-        let files = bridge.api().list_files(parent_id.as_deref()).await?;
+        // N1: a single flaky folder listing must NOT abort the whole tick (which
+        // would skip every remaining sibling subtree and stall their sync until a
+        // later tick happens to succeed end-to-end). Warn + skip THIS frame and
+        // keep walking the rest of the tree; the failed folder is retried next
+        // tick. (Auth/quota-class failures still surface their own pause via the
+        // operation loop; this guard is about transient per-folder list errors.)
+        let files = match bridge.api().list_files(parent_id.as_deref()).await {
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    depth,
+                    "sync_tick: failed to list a folder's children; skipping this subtree, continuing the rest of the tree"
+                );
+                continue;
+            }
+        };
 
         for f in &files {
             let file_id = f["id"].as_str().unwrap_or_default();
@@ -2102,6 +2285,34 @@ mod tests {
     fn test_invalid_transition_rejected() {
         let mut sm = FileSM::new(FileStatus::CloudOnly);
         assert!(sm.transition(FileEvent::UploadStart).is_err());
+    }
+
+    // ── Shared upload-trigger helpers (task 0780) ────────────────────────────
+    // Relocated from the retired `watcher`-local copies so the one shared
+    // engine-internal + relative-path logic stays covered.
+
+    #[test]
+    fn engine_internal_filters_state_dir_and_lock() {
+        let root = std::path::PathBuf::from("/sync");
+        assert!(path_is_engine_internal(&root, &root.join(".beebeeb").join("state.db")));
+        assert!(path_is_engine_internal(&root, &root.join(".beebeeb-sync.lock")));
+        assert!(path_is_engine_internal(&root, &root.join("sub").join(".beebeeb").join("x")));
+        assert!(!path_is_engine_internal(&root, &root.join("photo.jpg")));
+        assert!(!path_is_engine_internal(&root, &root.join("docs").join("a.txt")));
+    }
+
+    #[test]
+    fn relative_db_path_is_slash_joined_without_leading_slash() {
+        let root = std::path::PathBuf::from("/sync");
+        assert_eq!(relative_db_path(&root, &root.join("a.txt")).as_deref(), Some("a.txt"));
+        assert_eq!(
+            relative_db_path(&root, &root.join("docs").join("b.md")).as_deref(),
+            Some("docs/b.md")
+        );
+        assert_eq!(
+            relative_db_path(&root, &std::path::PathBuf::from("/other/c.txt")),
+            None
+        );
     }
 
     #[test]
