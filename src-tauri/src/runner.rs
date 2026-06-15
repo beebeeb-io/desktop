@@ -219,16 +219,22 @@ async fn run(
     // Task 0780 — the UPLOAD trigger. On Windows the desktop binary IS the
     // Cloud Files provider and there is no extension/IPC socket to fire
     // `QueueFinderCreate` when the user drops a file in the sync root, so a
-    // local create previously never uploaded. Start a filesystem watcher that
-    // detects genuinely-new user files (filtering out engine-written
-    // placeholders, hydration writes, and `.beebeeb/` internals) and feeds them
-    // into the existing encrypted upload path. macOS/Linux already get this via
-    // their OS extension over `ipc_socket`, so the watcher is Windows-only here.
+    // local create previously never uploaded. The CF NOTIFY callbacks fire only
+    // for I/O on EXISTING placeholders, NOT for a brand-new plain file a foreign
+    // process drops in — so the create trigger is a periodic enumeration scan
+    // that reads the disk directly (which always works). `watcher::spawn` starts
+    // BOTH the CF NOTIFY dispatch loop (modify of existing placeholders +
+    // delete/rename) AND the enumeration scan loop (the create trigger); both
+    // funnel new files through the shared `classify_local_path` gate that filters
+    // out engine-written placeholders, hydration writes, and `.beebeeb/`
+    // internals, then into the existing encrypted upload path. macOS/Linux get
+    // creates via their OS extension over `ipc_socket`, so the watcher is
+    // Windows-only here.
     //
     // The handle is held for the lifetime of the loop; dropping it on
-    // logout/shutdown stops the watch thread + its debounce task, so the cloned
-    // EngineBridge (holding the session master key) is released with the rest of
-    // the engine.
+    // logout/shutdown stops BOTH the debounce task and the scan task, so the
+    // cloned EngineBridge (holding the session master key) is released with the
+    // rest of the engine.
     #[cfg(target_os = "windows")]
     let _upload_watcher = crate::watcher::spawn(bridge.clone(), sync_root.clone());
 
