@@ -35,6 +35,8 @@ import { listen } from '@tauri-apps/api/event'
 import {
   command,
   commandUnavailableLabel,
+  desktopLogin,
+  desktopLogin2fa,
   loadSyncStatus,
   type DesktopPlatform,
   type FinderInstallState,
@@ -290,50 +292,78 @@ function LeftRail({ currentStep }: { currentStep: Step }) {
  * key back. On success the Rust side has already persisted the session AND the
  * master key (the handoff returns both), so the vault is unlocked — `onDone`
  * receives `vaultUnlocked: true` so the wizard can skip the recovery-phrase step.
+ *
+ * Also handles the email+password path (including 2FA/TOTP) as an alternative
+ * to the browser handoff. When `desktop_login` returns `requires_2fa: true` the
+ * component advances to a TOTP sub-step; `desktop_login_2fa` completes it.
  */
 function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => void }) {
-  type Phase = 'idle' | 'connecting' | 'waiting' | 'authorized' | 'error'
-  const [phase, setPhase] = useState<Phase>('idle')
+  // ── Browser-flow state ──────────────────────────────────────────────────
+  type BrowserPhase = 'idle' | 'connecting' | 'waiting' | 'authorized' | 'error'
+  const [browserPhase, setBrowserPhase] = useState<BrowserPhase>('idle')
   const [userCode, setUserCode] = useState<string | null>(null)
   const [verificationUri, setVerificationUri] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const doneRef = useRef(false)
+  const browserDoneRef = useRef(false)
 
-  const busy = phase === 'connecting' || phase === 'waiting' || phase === 'authorized'
+  const browserBusy =
+    browserPhase === 'connecting' ||
+    browserPhase === 'waiting' ||
+    browserPhase === 'authorized'
 
-  const start = useCallback(async () => {
-    setError(null)
+  // ── Email/password + TOTP state ─────────────────────────────────────────
+  // 'browser'   — showing the browser-handoff form (default)
+  // 'password'  — email + password form
+  // 'totp'      — 6-digit TOTP code entry (reached after password succeeds with requires_2fa)
+  type SignInMode = 'browser' | 'password' | 'totp'
+  const [mode, setMode] = useState<SignInMode>('browser')
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [pwBusy, setPwBusy] = useState(false)
+  const [pwError, setPwError] = useState<string | null>(null)
+
+  const [totpCode, setTotpCode] = useState('')
+  const [totpBusy, setTotpBusy] = useState(false)
+  const [totpError, setTotpError] = useState<string | null>(null)
+  const totpInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Shared error for browser flow
+  const [browserError, setBrowserError] = useState<string | null>(null)
+
+  // ── Browser-flow handler ────────────────────────────────────────────────
+  const startBrowserLogin = useCallback(async () => {
+    setBrowserError(null)
     setUserCode(null)
     setVerificationUri(null)
-    setPhase('connecting')
-    doneRef.current = false
+    setBrowserPhase('connecting')
+    browserDoneRef.current = false
 
     // Subscribe to handoff progress before invoking so we never miss an event.
     const unlisten = await listen<BrowserLoginEvent>('browser-login', (event) => {
       const p = event.payload
       switch (p.phase) {
         case 'connecting':
-          setPhase('connecting')
+          setBrowserPhase('connecting')
           break
         case 'waiting':
-          setPhase('waiting')
+          setBrowserPhase('waiting')
           if (p.user_code) setUserCode(p.user_code)
           if (p.verification_uri) setVerificationUri(p.verification_uri)
           break
         case 'authorized':
-          setPhase('authorized')
+          setBrowserPhase('authorized')
           break
         case 'done':
-          // Advance exactly once — guard with doneRef so a late command
+          // Advance exactly once — guard with browserDoneRef so a late command
           // resolve can't double-fire onDone if the event arrived first.
-          if (!doneRef.current) {
-            doneRef.current = true
+          if (!browserDoneRef.current) {
+            browserDoneRef.current = true
             onDone({ vaultUnlocked: true })
           }
           break
         case 'error':
-          setPhase('error')
-          setError(p.message ?? 'Sign-in failed. Please try again.')
+          setBrowserPhase('error')
+          setBrowserError(p.message ?? 'Sign-in failed. Please try again.')
           break
       }
     })
@@ -342,15 +372,15 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
     unlisten()
 
     // If the 'done' event already fired (and advanced the wizard) before or
-    // during the await, doneRef is true — nothing left to do here.
-    if (doneRef.current) return
+    // during the await, browserDoneRef is true — nothing left to do here.
+    if (browserDoneRef.current) return
 
     if (result.ok) {
       // Command resolved OK but the 'done' event was either missed (arrived
       // after unlisten) or not yet emitted. Advance now — this is the same
       // success path: handoff persisted the session AND the master key, so the
       // vault is already unlocked — no recovery phrase needed on this path.
-      doneRef.current = true
+      browserDoneRef.current = true
       onDone({ vaultUnlocked: true })
       return
     }
@@ -364,10 +394,246 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
     const message = result.unsupported
       ? commandUnavailableLabel('start_browser_login')
       : result.reason
-    setPhase('error')
-    setError(message)
+    setBrowserPhase('error')
+    setBrowserError(message)
   }, [onDone])
 
+  // ── Email + password submit ─────────────────────────────────────────────
+  const submitPassword = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault()
+      if (!email.trim() || !password) return
+      setPwBusy(true)
+      setPwError(null)
+      const result = await desktopLogin(email.trim(), password)
+      setPwBusy(false)
+      if (!result.ok) {
+        setPwError(
+          result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason,
+        )
+        return
+      }
+      if (result.value.requires_2fa) {
+        // Advance to the TOTP sub-step; do NOT call onDone yet.
+        setMode('totp')
+        setTotpCode('')
+        setTotpError(null)
+        // Autofocus the TOTP input on the next paint.
+        requestAnimationFrame(() => totpInputRef.current?.focus())
+        return
+      }
+      // No 2FA — login is complete. The password path doesn't return the master
+      // key (unlike the browser handoff), so vaultUnlocked is false — the user
+      // will proceed to the recovery-phrase unlock step.
+      onDone({ vaultUnlocked: false })
+    },
+    [email, password, onDone],
+  )
+
+  // ── TOTP submit ─────────────────────────────────────────────────────────
+  const submitTotp = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault()
+      const code = totpCode.trim()
+      if (code.length !== 6) return
+      setTotpBusy(true)
+      setTotpError(null)
+      const result = await desktopLogin2fa(code)
+      setTotpBusy(false)
+      if (!result.ok) {
+        // Wrong code is retryable — clear the field and keep them on this step.
+        setTotpCode('')
+        setTotpError(
+          result.unsupported ? commandUnavailableLabel('desktop_login_2fa') : result.reason,
+        )
+        requestAnimationFrame(() => totpInputRef.current?.focus())
+        return
+      }
+      // 2FA complete — session installed by the Rust side. Same as password path:
+      // vault key was not handed back, so the recovery-phrase step is next.
+      onDone({ vaultUnlocked: false })
+    },
+    [totpCode, onDone],
+  )
+
+  // ── TOTP sub-step UI ────────────────────────────────────────────────────
+  if (mode === 'totp') {
+    return (
+      <div>
+        <div style={{
+          fontSize: 11,
+          fontFamily: T.fontMono,
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.07em',
+          color: T.ink3,
+          marginBottom: 4,
+        }}>
+          Step 1 of 4
+        </div>
+        <h1 style={{ margin: '4px 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+          Two-factor authentication
+        </h1>
+        <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+          Enter the 6-digit code from your authenticator app.
+        </p>
+        {totpError && <Notice kind="error">{totpError}</Notice>}
+        <form onSubmit={submitTotp}>
+          <div style={{ marginBottom: 6, fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3 }}>
+            Authenticator code
+          </div>
+          <input
+            ref={totpInputRef}
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            placeholder="000000"
+            disabled={totpBusy}
+            value={totpCode}
+            onChange={(e) => {
+              // Strip non-digits, enforce max 6 characters.
+              setTotpCode(e.currentTarget.value.replace(/\D/g, '').slice(0, 6))
+            }}
+            style={{
+              display: 'block',
+              width: '100%',
+              padding: '10px 12px',
+              fontSize: 24,
+              fontFamily: T.fontMono,
+              fontWeight: 600,
+              letterSpacing: '0.25em',
+              color: T.ink,
+              background: T.paper,
+              border: `1.5px solid ${totpError ? 'oklch(0.72 0.18 25)' : T.line2}`,
+              borderRadius: 8,
+              outline: 'none',
+              boxSizing: 'border-box' as const,
+              marginBottom: 16,
+              transition: 'border-color 120ms',
+            }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Btn
+              variant="ghost"
+              disabled={totpBusy}
+              onClick={() => {
+                setMode('password')
+                setTotpCode('')
+                setTotpError(null)
+              }}
+            >
+              ← Back
+            </Btn>
+            <Btn
+              type="submit"
+              variant="primary"
+              disabled={totpBusy || totpCode.trim().length !== 6}
+            >
+              {totpBusy ? 'Verifying…' : 'Verify →'}
+            </Btn>
+          </div>
+        </form>
+      </div>
+    )
+  }
+
+  // ── Email + password sub-step UI ─────────────────────────────────────────
+  if (mode === 'password') {
+    return (
+      <div>
+        <div style={{
+          fontSize: 11,
+          fontFamily: T.fontMono,
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.07em',
+          color: T.ink3,
+          marginBottom: 4,
+        }}>
+          Step 1 of 4
+        </div>
+        <h1 style={{ margin: '4px 0 6px', fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: T.ink, lineHeight: 1.2 }}>
+          Sign in to Beebeeb
+        </h1>
+        <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
+          Enter your email and password.
+        </p>
+        {pwError && <Notice kind="error">{pwError}</Notice>}
+        <form onSubmit={submitPassword}>
+          <label style={{ display: 'block', marginBottom: 14 }}>
+            <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 5 }}>
+              Email
+            </div>
+            <input
+              type="email"
+              autoComplete="email"
+              disabled={pwBusy}
+              value={email}
+              onChange={(e) => setEmail(e.currentTarget.value)}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '8px 10px',
+                fontSize: 13,
+                fontFamily: T.fontSans,
+                color: T.ink,
+                background: T.paper,
+                border: `1px solid ${T.line2}`,
+                borderRadius: 6,
+                outline: 'none',
+                boxSizing: 'border-box' as const,
+              }}
+            />
+          </label>
+          <label style={{ display: 'block', marginBottom: 18 }}>
+            <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 5 }}>
+              Password
+            </div>
+            <input
+              type="password"
+              autoComplete="current-password"
+              disabled={pwBusy}
+              value={password}
+              onChange={(e) => setPassword(e.currentTarget.value)}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '8px 10px',
+                fontSize: 13,
+                fontFamily: T.fontSans,
+                color: T.ink,
+                background: T.paper,
+                border: `1px solid ${T.line2}`,
+                borderRadius: 6,
+                outline: 'none',
+                boxSizing: 'border-box' as const,
+              }}
+            />
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Btn
+              variant="ghost"
+              disabled={pwBusy}
+              onClick={() => {
+                setMode('browser')
+                setPwError(null)
+              }}
+            >
+              ← Back
+            </Btn>
+            <Btn
+              type="submit"
+              variant="primary"
+              disabled={pwBusy || !email.trim() || !password}
+            >
+              {pwBusy ? 'Signing in…' : 'Sign in →'}
+            </Btn>
+          </div>
+        </form>
+      </div>
+    )
+  }
+
+  // ── Browser-handoff UI (default mode) ───────────────────────────────────
   return (
     <div>
       <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>
@@ -381,9 +647,9 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
         the code below, and your access &amp; refresh credentials are handed back
         encrypted — end-to-end, never touching this app in the clear.
       </p>
-      {error && <Notice kind="error">{error}</Notice>}
+      {browserError && <Notice kind="error">{browserError}</Notice>}
 
-      {phase === 'waiting' || phase === 'authorized' ? (
+      {browserPhase === 'waiting' || browserPhase === 'authorized' ? (
         <div style={{
           padding: '16px 18px',
           background: T.amberBg,
@@ -392,10 +658,10 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
           marginBottom: 18,
         }}>
           <div style={{ fontSize: 11, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.amberDeep, marginBottom: 8 }}>
-            {phase === 'authorized' ? 'Authorized — finishing…' : 'We opened your browser'}
+            {browserPhase === 'authorized' ? 'Authorized — finishing…' : 'We opened your browser'}
           </div>
           <p style={{ margin: '0 0 12px', fontSize: 12, color: T.ink2, lineHeight: 1.6 }}>
-            {phase === 'authorized'
+            {browserPhase === 'authorized'
               ? 'Decrypting your credentials and starting sync…'
               : 'Confirm the sign-in in the browser tab we just opened. Check that the code there matches:'}
           </p>
@@ -411,7 +677,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
               {userCode}
             </div>
           )}
-          {verificationUri && phase === 'waiting' && (
+          {verificationUri && browserPhase === 'waiting' && (
             <p style={{ margin: 0, fontSize: 11, color: T.ink3, lineHeight: 1.5, wordBreak: 'break-all' as const }}>
               Browser didn&apos;t open? Visit{' '}
               <span style={{ fontFamily: T.fontMono, color: T.amberDeep }}>{verificationUri}</span>
@@ -421,13 +687,20 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
         </div>
       ) : null}
 
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-        <Btn variant="primary" disabled={busy} onClick={() => void start()}>
-          {phase === 'connecting' && 'Connecting…'}
-          {phase === 'waiting' && 'Waiting for browser…'}
-          {phase === 'authorized' && 'Finishing…'}
-          {(phase === 'idle' || phase === 'error') && (phase === 'error' ? 'Try again' : 'Sign in with browser →')}
-        </Btn>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+        {!browserBusy && (
+          <Btn variant="ghost" onClick={() => setMode('password')}>
+            Sign in with email →
+          </Btn>
+        )}
+        <div style={{ marginLeft: 'auto' }}>
+          <Btn variant="primary" disabled={browserBusy} onClick={() => void startBrowserLogin()}>
+            {browserPhase === 'connecting' && 'Connecting…'}
+            {browserPhase === 'waiting' && 'Waiting for browser…'}
+            {browserPhase === 'authorized' && 'Finishing…'}
+            {(browserPhase === 'idle' || browserPhase === 'error') && (browserPhase === 'error' ? 'Try again' : 'Sign in with browser →')}
+          </Btn>
+        </div>
       </div>
     </div>
   )

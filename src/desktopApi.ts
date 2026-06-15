@@ -523,6 +523,34 @@ export function showMainAppWindow(): Promise<CommandResult<void>> {
   return command<void>('show_main_app_window')
 }
 
+// ── 2FA / TOTP login (desktop credential path) ─────────────────────────────
+
+/** Shape returned by the `desktop_login` Tauri command. */
+export interface DesktopLoginResult {
+  requires_2fa: boolean
+}
+
+/**
+ * Authenticate with email + password. Returns `{ requires_2fa: true }` when
+ * the account has TOTP enabled — the caller must then invoke
+ * `desktopLogin2fa` with the 6-digit code to complete the session.
+ */
+export function desktopLogin(
+  email: string,
+  password: string,
+): Promise<CommandResult<DesktopLoginResult>> {
+  return command<DesktopLoginResult>('desktop_login', { email, password })
+}
+
+/**
+ * Complete a 2FA-gated login. Call only after `desktopLogin` returned
+ * `{ requires_2fa: true }`. The partial token is held server-side for ~5 min.
+ * Rejects with "Invalid authentication code" on a wrong code (retryable).
+ */
+export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
+  return command<void>('desktop_login_2fa', { code })
+}
+
 // ── Selective sync (wave-2) ──────────────────────────────────────────────────
 //
 // The folder tree + the user's online-only (excluded) set. `list_vault_folders`
