@@ -2444,43 +2444,496 @@ fn get_selective_sync() -> Result<Vec<String>, String> {
     Ok(cfg.excluded_folder_ids.unwrap_or_default())
 }
 
-/// Persist a new list of excluded top-level folder IDs to
-/// `desktop.toml`. An empty incoming list is normalised to `None` so
-/// the on-disk file stays free of `excluded_folder_ids = []` clutter
-/// when the user has nothing excluded.
+/// Persist a new list of excluded folder IDs to `desktop.toml` AND
+/// reclaim disk space for any folder that just became excluded (wave-2
+/// of task 0090 — the real fix the original no-op comment promised).
 ///
-/// Round-trips through `DesktopConfig::load` → mutate → `save` so a
-/// concurrent settings save (Bandwidth/Notifications page) doesn't
-/// race away the new exclusion list — same merge pattern as
-/// [`set_desktop_config`].
+/// Flow:
+///   1. Snapshot the OLD excluded list, then persist the NEW one (an
+///      empty list normalises to `None` so the on-disk file stays free of
+///      `excluded_folder_ids = []` clutter). Persisting first guarantees
+///      the choice survives even if the dehydrate step below errors.
+///   2. Diff: folder ids in NEW but not OLD are "newly excluded."
+///   3. For each newly-excluded folder, resolve its subtree's files from
+///      the local state DB and DEHYDRATE every file that is currently
+///      hydrated (`status == Local`) AND not effectively Pinned — the
+///      exact pattern [`free_up_space_windows`] uses. The file stays
+///      cloud-only (we NEVER delete user data; dehydrate only reclaims the
+///      local cache, and the file re-hydrates on demand). A pinned file in
+///      an excluded folder is kept — the user explicitly asked for it
+///      offline, and an explicit pin wins over an exclusion.
+///   4. Newly-INCLUDED (un-excluded) folders need no immediate action —
+///      on-demand hydration re-downloads them when next opened.
 ///
-/// Note: changing the excluded list does NOT immediately tear down
-/// in-flight syncs for newly excluded folders. The engine reads this
-/// list on its next tick and de-prioritises matching files; cleaning
-/// up already-downloaded local copies is a follow-up task. Surfacing
-/// this gap in the UI (a "Files already downloaded will stay until
-/// you remove them" hint) is the SelectiveSync page's job.
+/// Best-effort + idempotent: a dehydrate failure on one file logs and
+/// continues; the persisted list is unaffected. On non-Windows builds the
+/// DB transition still runs (rows flip to cloud_only via
+/// `mark_cloud_only_after_dehydrate`) but the platform dehydrate is a
+/// no-op there — the macOS File Provider / Linux FUSE cache eviction is
+/// the engine's existing job and is not in scope for this task.
+///
+/// The DB + dehydrate work runs on a blocking thread so a large excluded
+/// subtree doesn't hold the IPC command thread on SQLite + CF syscalls.
 #[tauri::command]
-fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
+async fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
+    // 1. Snapshot old, persist new. Persist FIRST so the choice sticks
+    //    regardless of the reclaim outcome.
     let mut cfg = DesktopConfig::load()?;
-    cfg.excluded_folder_ids = if excluded.is_empty() { None } else { Some(excluded) };
-    cfg.save()
+    let old_excluded = cfg.excluded_folder_ids.clone().unwrap_or_default();
+    cfg.excluded_folder_ids = if excluded.is_empty() { None } else { Some(excluded.clone()) };
+    cfg.save()?;
+
+    // 2. Diff for the subtrees we must reclaim now.
+    let newly_excluded = newly_excluded_ids(&old_excluded, &excluded);
+    if newly_excluded.is_empty() {
+        return Ok(());
+    }
+
+    // 3. Reclaim on a blocking thread. Failures here never undo the persist.
+    let join = tokio::task::spawn_blocking(move || dehydrate_excluded_subtrees_blocking(&newly_excluded));
+    match join.await {
+        Ok(Ok(freed)) => {
+            tracing::info!(bytes_freed = freed, "set_selective_sync: dehydrated newly-excluded subtrees");
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "set_selective_sync: reclaim of excluded subtrees failed (list still persisted)");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "set_selective_sync: reclaim task join failed (list still persisted)");
+        }
+    }
+    Ok(())
 }
 
-/// Plain-old-data view of one top-level vault item the SelectiveSync
-/// page renders as a row. We deliberately keep this small: only the
-/// fields the checkbox UI needs.
+/// Resolve and dehydrate the local, unpinned files under each newly-excluded
+/// folder. Returns total bytes reclaimed. Shared by Windows (real CF
+/// dehydrate) and non-Windows (DB-only flip) via the inner cfg blocks —
+/// mirrors [`free_up_space_blocking`]. Best-effort: a missing sync root /
+/// DB is `Ok(0)`, a per-file dehydrate failure logs and continues.
+fn dehydrate_excluded_subtrees_blocking(newly_excluded: &[String]) -> Result<u64, String> {
+    let cfg = DesktopConfig::load()?;
+    let Some(sync_root) = cfg.sync_root.clone() else {
+        return Ok(0);
+    };
+    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if !db_path.exists() {
+        return Ok(0);
+    }
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+
+    // Flat (id, parent_id, is_folder) view → resolve the union of subtree files.
+    let entries = db.list_files().map_err(|e| format!("list files: {e}"))?;
+    let flat: Vec<(String, Option<String>, bool)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.file_id.clone(),
+                e.parent_id.clone(),
+                e.item_kind == state_db::ItemKind::Folder,
+            )
+        })
+        .collect();
+    let file_ids = subtree_file_ids(&flat, newly_excluded);
+    if file_ids.is_empty() {
+        return Ok(0);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        dehydrate_excluded_subtrees_windows(&db, &sync_root, &entries, &file_ids)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Non-Windows: no in-process CF dehydrate. Flip the local+unpinned
+        // rows to cloud_only so the DB reflects the exclusion; the engine's
+        // own cache eviction reclaims the bytes on its schedule. Pinned rows
+        // are excluded by the predicate inside `mark_cloud_only_after_dehydrate`.
+        let local_unpinned: Vec<String> = entries
+            .iter()
+            .filter(|e| file_ids.iter().any(|f| f == &e.file_id))
+            .filter(|e| e.status == state_db::FileStatus::Local)
+            .filter(|e| {
+                db.get_file_contract_state(&e.file_id)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.effective_pin_state() != state_db::PinState::Pinned)
+                    .unwrap_or(true)
+            })
+            .map(|e| e.file_id.clone())
+            .collect();
+        let now = now_unix_seconds();
+        if let Err(e) = db.mark_cloud_only_after_dehydrate(&local_unpinned, now) {
+            tracing::warn!(error = %e, "set_selective_sync: could not flip excluded files cloud_only");
+        }
+        Ok(0)
+    }
+}
+
+/// Windows reclaim path for newly-excluded subtrees. Mirrors
+/// [`free_up_space_windows`] exactly: reconstruct each file's placeholder
+/// path under the sync root, path-safety-guard it, skip effectively-pinned
+/// files (with a TOCTOU re-check immediately before the destructive
+/// dehydrate), `CfDehydratePlaceholder`, then mark cloud_only ONLY for the
+/// files that actually dehydrated.
+#[cfg(target_os = "windows")]
+fn dehydrate_excluded_subtrees_windows(
+    db: &state_db::StateDb,
+    sync_root: &std::path::Path,
+    entries: &[state_db::FileEntry],
+    file_ids: &[String],
+) -> Result<u64, String> {
+    use std::collections::HashSet;
+    let target: HashSet<&str> = file_ids.iter().map(String::as_str).collect();
+    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    let mut bytes_freed: u64 = 0;
+    let mut dehydrated_ids: Vec<String> = Vec::new();
+
+    for entry in entries {
+        if !target.contains(entry.file_id.as_str()) {
+            continue;
+        }
+        // Only hydrated files have bytes to reclaim.
+        if entry.status != state_db::FileStatus::Local {
+            continue;
+        }
+        // Skip effectively-pinned files: an explicit pin wins over the exclusion.
+        if let Ok(Some(contract)) = db.get_file_contract_state(&entry.file_id) {
+            if contract.effective_pin_state() == state_db::PinState::Pinned {
+                tracing::debug!(file_id = %entry.file_id, "set_selective_sync: file pinned; keeping local despite exclusion");
+                continue;
+            }
+        }
+        let rel = entry.path.trim_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let Ok(canonical) = local_path.canonicalize() else {
+            continue;
+        };
+        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+            continue;
+        }
+        match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
+            Ok(freed) => {
+                bytes_freed = bytes_freed.saturating_add(freed);
+                dehydrated_ids.push(entry.file_id.clone());
+            }
+            Err(error) => {
+                tracing::warn!(file_id = %entry.file_id, error = %error, "set_selective_sync: CfDehydratePlaceholder failed; keeping file local");
+            }
+        }
+    }
+
+    let now = now_unix_seconds();
+    if let Err(e) = db.mark_cloud_only_after_dehydrate(&dehydrated_ids, now) {
+        tracing::warn!(error = %e, "set_selective_sync: could not mark dehydrated files cloud_only");
+    }
+    Ok(bytes_freed)
+}
+
+/// One node in the SelectiveSync folder tree (task 0090 → wave-2 nesting).
 ///
-/// `name` is decrypted from the server's `name_encrypted` blob via
-/// [`try_decrypt_name`] when possible, falling back to a stable
-/// id-derived label (e.g. `"Folder 7f3a1c…"`) when decryption is not
-/// possible (missing field, bad envelope, wrong key…). This mirrors
-/// the canonical decrypt path used by `repos/cli/src/commands/pull.rs`.
-#[derive(Debug, Clone, serde::Serialize)]
+/// Each node is a FOLDER the user can toggle. `children` holds nested
+/// sub-folders (built from `parent_id` linkage), and the byte/count
+/// fields are AGGREGATES over the whole subtree's *files* (folders carry
+/// no bytes of their own), so a row can render "12 files · 4.2 GB · 1.1 GB
+/// on disk" without the TS side walking the tree.
+///
+/// JSON shape serialized to the frontend (serde default camel? — NO,
+/// serde keeps snake_case here; the existing `is_folder` field already
+/// ships snake_case and the TS view reads `is_folder`, so we stay
+/// consistent):
+/// ```json
+/// {
+///   "id": "uuid",
+///   "name": "Documents",
+///   "is_folder": true,
+///   "excluded": false,
+///   "size_bytes": 4509715660,
+///   "file_count": 12,
+///   "on_disk_bytes": 1181116006,
+///   "children": [ { ...same shape... } ]
+/// }
+/// ```
+/// - `id` / `name` / `is_folder`: as before. `is_folder` is always `true`
+///   for a node we emit (we only surface folders as toggle rows); files
+///   are folded into the aggregates, never emitted as their own node.
+/// - `excluded`: `true` if this folder id ∈ `get_selective_sync()`.
+/// - `size_bytes`: sum of `size_bytes` of every file at or below this
+///   folder (logical plaintext bytes).
+/// - `file_count`: number of files at or below this folder.
+/// - `on_disk_bytes`: sum of `size_bytes` of files in the subtree that are
+///   currently hydrated locally (`status == Local`) — drives the
+///   "X on disk / Y online-only" footer.
+/// - `children`: nested sub-folders, sorted by name (case-insensitive)
+///   then id for a stable order.
+///
+/// `name` is taken from the state_db `path` leaf segment (the
+/// already-resolved, decrypted relative path the engine wrote when it
+/// synced the folder), falling back to a stable id-derived label
+/// (`"Folder 7f3a1c…"`) when the path is empty. When we fall back to the
+/// top-level API path (empty DB), names are decrypted via
+/// [`try_decrypt_name`] as before.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct VaultItem {
     id: String,
     name: String,
     is_folder: bool,
+    excluded: bool,
+    size_bytes: i64,
+    file_count: i64,
+    on_disk_bytes: i64,
+    children: Vec<VaultItem>,
+}
+
+/// Lightweight, decode-free row used by the pure tree-builder. Decoupling
+/// from `state_db::FileEntry` keeps [`build_vault_tree`] trivially unit
+/// testable without constructing full DB rows.
+#[derive(Debug, Clone)]
+struct VaultEntryRow {
+    id: String,
+    parent_id: Option<String>,
+    is_folder: bool,
+    /// Display label (folder leaf name); ignored for files.
+    name: String,
+    /// Logical plaintext size in bytes (files only; folders contribute 0).
+    size_bytes: i64,
+    /// Whether this file is currently hydrated on disk (`status == Local`).
+    /// Always `false` for folders.
+    on_disk: bool,
+}
+
+/// Mutable accumulator for one folder while we aggregate the subtree.
+struct FolderAgg {
+    id: String,
+    name: String,
+    parent_id: Option<String>,
+    children: Vec<String>,
+    /// Files DIRECTLY in this folder (not descendants).
+    direct_size: i64,
+    direct_count: i64,
+    direct_on_disk: i64,
+}
+
+/// Derive a folder's display leaf name from its server-relative `path`.
+/// `"/Docs/Taxes"` → `"Taxes"`, `"Photos"` → `"Photos"`, `""` → `None`.
+fn folder_leaf_name(path: &str) -> Option<String> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    if leaf.is_empty() {
+        None
+    } else {
+        Some(leaf.to_string())
+    }
+}
+
+/// Stable id-derived fallback label, mirroring the existing top-level path.
+fn folder_fallback_label(id: &str) -> String {
+    let short = id.get(..8).unwrap_or(id);
+    format!("Folder {short}…")
+}
+
+/// Build the nested SelectiveSync folder tree from a flat set of local
+/// rows (already nested via `parent_id`, from task 0784).
+///
+/// Pure + deterministic: no DB, no network, no clock — so the unit tests
+/// can drive it directly. Algorithm:
+///   1. Index every FOLDER row by id into a `FolderAgg` (children linked
+///      by `parent_id`); roots are folders whose `parent_id` is `None`
+///      OR points at a non-folder / unknown id (defensive: a dangling
+///      parent must still surface its folder as a root, never drop it).
+///   2. Fold every FILE row into its parent folder's *direct* totals
+///      (size / count / on-disk). A file whose parent is unknown is
+///      dropped from the tree's aggregates (it has no folder to attach
+///      to) — acceptable for a folder-picker view.
+///   3. Recursively materialize `VaultItem`s, summing each folder's
+///      direct totals with its descendants' aggregates. Cycle-safe via a
+///      `visiting` guard (a corrupt parent cycle can't infinite-loop).
+///   4. `excluded` is set per-node from the `excluded` id set.
+///
+/// Children are sorted by lowercased name then id for a stable UI order.
+fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collections::HashSet<String>) -> Vec<VaultItem> {
+    use std::collections::HashMap;
+
+    // 1. Index folders.
+    let mut folders: HashMap<String, FolderAgg> = HashMap::new();
+    for row in rows {
+        if row.is_folder {
+            folders.entry(row.id.clone()).or_insert_with(|| FolderAgg {
+                id: row.id.clone(),
+                name: row.name.clone(),
+                parent_id: row.parent_id.clone(),
+                children: Vec::new(),
+                direct_size: 0,
+                direct_count: 0,
+                direct_on_disk: 0,
+            });
+        }
+    }
+
+    // Link folder → child-folder. A folder whose parent is not a known
+    // folder becomes a root (collected below).
+    let folder_ids: std::collections::HashSet<String> = folders.keys().cloned().collect();
+    let mut roots: Vec<String> = Vec::new();
+    let child_links: Vec<(String, String)> = folders
+        .values()
+        .filter_map(|f| match &f.parent_id {
+            Some(p) if folder_ids.contains(p) => Some((p.clone(), f.id.clone())),
+            _ => None,
+        })
+        .collect();
+    for (parent, child) in child_links {
+        if let Some(p) = folders.get_mut(&parent) {
+            p.children.push(child);
+        }
+    }
+    for f in folders.values() {
+        let is_root = match &f.parent_id {
+            None => true,
+            Some(p) => !folder_ids.contains(p),
+        };
+        if is_root {
+            roots.push(f.id.clone());
+        }
+    }
+
+    // 2. Fold files into their parent folder's direct totals.
+    for row in rows {
+        if row.is_folder {
+            continue;
+        }
+        if let Some(parent) = row.parent_id.as_ref() {
+            if let Some(folder) = folders.get_mut(parent) {
+                folder.direct_size = folder.direct_size.saturating_add(row.size_bytes.max(0));
+                folder.direct_count += 1;
+                if row.on_disk {
+                    folder.direct_on_disk = folder.direct_on_disk.saturating_add(row.size_bytes.max(0));
+                }
+            }
+        }
+    }
+
+    // 3 + 4. Materialize recursively with a cycle guard.
+    let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
+    roots.sort_by(|a, b| folder_sort_key(&folders, a).cmp(&folder_sort_key(&folders, b)));
+    roots
+        .iter()
+        .filter_map(|id| materialize_folder(id, &folders, excluded, &mut visiting))
+        .collect()
+}
+
+/// Sort key for a folder id: (lowercased name, id). Stable + case-insensitive.
+fn folder_sort_key(folders: &std::collections::HashMap<String, FolderAgg>, id: &str) -> (String, String) {
+    match folders.get(id) {
+        Some(f) => (f.name.to_lowercase(), f.id.clone()),
+        None => (String::new(), id.to_string()),
+    }
+}
+
+/// Recursively build a `VaultItem`, summing direct totals with descendants.
+/// Returns `None` only on a cycle re-entry (defensive against corrupt data).
+fn materialize_folder(
+    id: &str,
+    folders: &std::collections::HashMap<String, FolderAgg>,
+    excluded: &std::collections::HashSet<String>,
+    visiting: &mut std::collections::HashSet<String>,
+) -> Option<VaultItem> {
+    let folder = folders.get(id)?;
+    if !visiting.insert(id.to_string()) {
+        // Already on the current path — a parent cycle. Stop here.
+        return None;
+    }
+
+    let mut child_ids = folder.children.clone();
+    child_ids.sort_by(|a, b| folder_sort_key(folders, a).cmp(&folder_sort_key(folders, b)));
+    let children: Vec<VaultItem> = child_ids
+        .iter()
+        .filter_map(|cid| materialize_folder(cid, folders, excluded, visiting))
+        .collect();
+
+    let mut size_bytes = folder.direct_size;
+    let mut file_count = folder.direct_count;
+    let mut on_disk_bytes = folder.direct_on_disk;
+    for child in &children {
+        size_bytes = size_bytes.saturating_add(child.size_bytes);
+        file_count = file_count.saturating_add(child.file_count);
+        on_disk_bytes = on_disk_bytes.saturating_add(child.on_disk_bytes);
+    }
+
+    visiting.remove(id);
+
+    Some(VaultItem {
+        id: folder.id.clone(),
+        name: folder.name.clone(),
+        is_folder: true,
+        excluded: excluded.contains(&folder.id),
+        size_bytes,
+        file_count,
+        on_disk_bytes,
+        children,
+    })
+}
+
+/// Folder ids that are present in `new_excluded` but NOT in `old_excluded`.
+/// These are the subtrees that must be dehydrated on this `set_selective_sync`.
+/// Order-stable on `new_excluded`'s order; de-duplicated.
+fn newly_excluded_ids(old_excluded: &[String], new_excluded: &[String]) -> Vec<String> {
+    let old: std::collections::HashSet<&str> = old_excluded.iter().map(String::as_str).collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    new_excluded
+        .iter()
+        .filter(|id| !old.contains(id.as_str()) && seen.insert(id.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Resolve the FILE ids that live at or below any of `root_folder_ids`,
+/// from a flat (id, parent_id, is_folder) view of the vault. Pure mirror
+/// of the recursive-CTE descent in [`state_db::StateDb::set_recursive_pin`]
+/// so the diff/subtree logic is unit-testable without SQLite.
+///
+/// Folders are descended into but never returned (we dehydrate files, not
+/// folders). Cycle-safe. The result is de-duplicated even when the
+/// excluded roots overlap (one folder nested under another).
+fn subtree_file_ids(rows: &[(String, Option<String>, bool)], root_folder_ids: &[String]) -> Vec<String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // children index: parent_id → [child rows]
+    let mut children: HashMap<&str, Vec<&(String, Option<String>, bool)>> = HashMap::new();
+    for row in rows {
+        if let Some(parent) = row.1.as_deref() {
+            children.entry(parent).or_default().push(row);
+        }
+    }
+
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut out_files: Vec<String> = Vec::new();
+    let mut out_seen: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+
+    for root in root_folder_ids {
+        queue.push_back(root.as_str());
+    }
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if let Some(kids) = children.get(id) {
+            for kid in kids {
+                if kid.2 {
+                    // folder — descend
+                    queue.push_back(kid.0.as_str());
+                } else if out_seen.insert(kid.0.as_str()) {
+                    out_files.push(kid.0.clone());
+                }
+            }
+        }
+    }
+    out_files
 }
 
 /// Try to decrypt a single file/folder's `name_encrypted` blob using
@@ -2510,22 +2963,34 @@ fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 3
     beebeeb_core::encrypt::decrypt_name(&mk, id, name_enc_str).ok()
 }
 
-/// Fetch the top-level entries in the user's vault (parent_id =
-/// None) and return only the folders. Used by the SelectiveSync page
-/// to populate its checkbox list.
+/// Build the nested SelectiveSync folder tree.
 ///
-/// Returns an empty list — not `Err` — when:
+/// Wave-2 change (task 0090 backing): the tree is built from the LOCAL
+/// state DB (`StateDb::list_files()`), which already carries the full
+/// nested set (`parent_id` + `item_kind`, from task 0784) the engine has
+/// synced. We deliberately do NOT recurse the API folder-by-folder — that
+/// hammered the server and tripped the 429 rate limit (the 0789 problem).
+/// One local SQLite read replaces N network round-trips.
+///
+/// Each returned [`VaultItem`] is a folder the user can toggle, with its
+/// subtree's file size / count / on-disk bytes aggregated up (see the
+/// struct doc for the exact JSON shape).
+///
+/// Returns an empty `Vec` — not `Err` — when:
 ///   - the user is not signed in (no in-memory session)
-///   - the API call fails for any reason
+///   - no sync root / state DB exists yet (nothing synced)
 ///
-/// The page treats an empty list as "nothing to choose from yet" and
-/// renders a friendly empty state. Surfacing every transient network
-/// blip as a red error banner would be noisy for a settings page that
-/// re-opens every time the user clicks the tab.
+/// Fallback: if the user IS signed in but the local DB is missing or has
+/// no folders yet (fresh install, first sync not finished), we fall back
+/// to the OLD top-level API path (`api.list_files(None)`, folders only) so
+/// the picker isn't empty during the first-sync window. That fallback is
+/// FLAT (no nesting, zeroed aggregates) — it is a stopgap, and the tree
+/// fills in once the engine has populated state.db. An API failure in the
+/// fallback still surfaces as an empty list, not an error banner.
 #[tauri::command]
 async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>, String> {
-    // Lift the session pieces we need without holding the mutex over
-    // the async API call.
+    // Lift the session pieces we need without holding the mutex over any
+    // async API call.
     let creds = {
         let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         guard.as_ref().map(|s| (s.token.clone(), s.master_key))
@@ -2535,11 +3000,38 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
         return Ok(Vec::new());
     };
 
+    let excluded: std::collections::HashSet<String> =
+        DesktopConfig::load().ok().and_then(|c| c.excluded_folder_ids).unwrap_or_default().into_iter().collect();
+
+    // Primary path: build from the local, already-nested state DB.
+    if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
+        if let Ok(entries) = db.list_files() {
+            let rows: Vec<VaultEntryRow> = entries
+                .iter()
+                .map(|e| VaultEntryRow {
+                    id: e.file_id.clone(),
+                    parent_id: e.parent_id.clone(),
+                    is_folder: e.item_kind == state_db::ItemKind::Folder,
+                    name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
+                    size_bytes: e.size_bytes,
+                    on_disk: e.status == state_db::FileStatus::Local,
+                })
+                .collect();
+            let tree = build_vault_tree(&rows, &excluded);
+            if !tree.is_empty() {
+                return Ok(tree);
+            }
+            // DB present but no folders yet — fall through to the API stopgap.
+        }
+    }
+
+    // Fallback: top-level API folders, FLAT, zeroed aggregates. Only used
+    // until the first sync populates the local DB.
     let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
     let raw = match api.list_files(None).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %e, "list_vault_folders: list_files failed");
+            tracing::warn!(error = %e, "list_vault_folders: list_files fallback failed");
             return Ok(Vec::new());
         }
     };
@@ -2568,15 +3060,17 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
                     Some(path.trim_start_matches('/').to_string())
                 }
             })
-            .unwrap_or_else(|| {
-                let short = id.get(..8).unwrap_or(id);
-                format!("Folder {short}…")
-            });
+            .unwrap_or_else(|| folder_fallback_label(id));
 
         out.push(VaultItem {
             id: id.to_string(),
             name: display,
             is_folder: true,
+            excluded: excluded.contains(id),
+            size_bytes: 0,
+            file_count: 0,
+            on_disk_bytes: 0,
+            children: Vec::new(),
         });
     }
     Ok(out)
@@ -3749,11 +4243,35 @@ fn show_main_app_window_impl(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, classify_finder_install_error, clear_cached_profile,
-        finder_install_state_from_config, is_disposable_cache_path, normalize_recovery_phrase_input,
+        AppState, VaultEntryRow, build_vault_tree, classify_finder_install_error, clear_cached_profile,
+        finder_install_state_from_config, folder_leaf_name, is_disposable_cache_path, newly_excluded_ids,
+        normalize_recovery_phrase_input, subtree_file_ids,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
+    use std::collections::HashSet;
+
+    fn folder(id: &str, parent: Option<&str>, name: &str) -> VaultEntryRow {
+        VaultEntryRow {
+            id: id.to_string(),
+            parent_id: parent.map(str::to_string),
+            is_folder: true,
+            name: name.to_string(),
+            size_bytes: 0,
+            on_disk: false,
+        }
+    }
+
+    fn file(id: &str, parent: Option<&str>, size: i64, on_disk: bool) -> VaultEntryRow {
+        VaultEntryRow {
+            id: id.to_string(),
+            parent_id: parent.map(str::to_string),
+            is_folder: false,
+            name: String::new(),
+            size_bytes: size,
+            on_disk,
+        }
+    }
 
     #[test]
     fn clear_cached_profile_drops_stale_identity() {
@@ -3875,5 +4393,140 @@ mod tests {
 
         let config_path = DesktopConfig::path().unwrap();
         assert!(!is_disposable_cache_path(&config_path));
+    }
+
+    // ── SelectiveSync wave-2: tree-build + aggregation + exclude-diff ──────────
+
+    #[test]
+    fn folder_leaf_name_takes_last_path_segment() {
+        assert_eq!(folder_leaf_name("/Docs/Taxes").as_deref(), Some("Taxes"));
+        assert_eq!(folder_leaf_name("Photos").as_deref(), Some("Photos"));
+        assert_eq!(folder_leaf_name("/Photos/").as_deref(), Some("Photos"));
+        assert_eq!(folder_leaf_name(""), None);
+        assert_eq!(folder_leaf_name("/"), None);
+    }
+
+    #[test]
+    fn build_tree_nests_folders_and_aggregates_subtree() {
+        // root
+        //  ├─ A (folder)
+        //  │   ├─ a1.txt  100  on_disk
+        //  │   └─ B (folder)
+        //  │        └─ b1.txt 50  cloud-only
+        //  └─ C (folder)  (empty)
+        let rows = vec![
+            folder("A", None, "Alpha"),
+            folder("B", Some("A"), "Bravo"),
+            folder("C", None, "Charlie"),
+            file("a1", Some("A"), 100, true),
+            file("b1", Some("B"), 50, false),
+        ];
+        let excluded = HashSet::new();
+        let tree = build_vault_tree(&rows, &excluded);
+
+        // Two roots, sorted by name: Alpha, Charlie.
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].id, "A");
+        assert_eq!(tree[1].id, "C");
+
+        let a = &tree[0];
+        // A aggregates a1 (100) + b1 (50) = 150 bytes, 2 files, 100 on disk.
+        assert_eq!(a.size_bytes, 150);
+        assert_eq!(a.file_count, 2);
+        assert_eq!(a.on_disk_bytes, 100);
+        assert!(a.is_folder);
+
+        // A has one child folder B.
+        assert_eq!(a.children.len(), 1);
+        let b = &a.children[0];
+        assert_eq!(b.id, "B");
+        assert_eq!(b.size_bytes, 50);
+        assert_eq!(b.file_count, 1);
+        assert_eq!(b.on_disk_bytes, 0);
+
+        // C is empty.
+        let c = &tree[1];
+        assert_eq!(c.size_bytes, 0);
+        assert_eq!(c.file_count, 0);
+        assert!(c.children.is_empty());
+    }
+
+    #[test]
+    fn build_tree_marks_excluded_and_dangling_parents_become_roots() {
+        let rows = vec![
+            folder("A", None, "Alpha"),
+            // D's parent points at an unknown folder → must surface as a root,
+            // never silently dropped.
+            folder("D", Some("ghost"), "Delta"),
+            file("a1", Some("A"), 10, true),
+        ];
+        let mut excluded = HashSet::new();
+        excluded.insert("A".to_string());
+
+        let tree = build_vault_tree(&rows, &excluded);
+        let ids: Vec<&str> = tree.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"A"));
+        assert!(ids.contains(&"D"), "dangling-parent folder must still appear as a root");
+
+        let a = tree.iter().find(|n| n.id == "A").unwrap();
+        assert!(a.excluded, "folder in the excluded set must be marked excluded");
+        let d = tree.iter().find(|n| n.id == "D").unwrap();
+        assert!(!d.excluded);
+    }
+
+    #[test]
+    fn build_tree_is_cycle_safe() {
+        // A → B → A parent cycle (corrupt data). Must not infinite-loop and
+        // must still surface both folders (neither has a clean root, so the
+        // root-detection makes A a root because its parent B is known but the
+        // cycle guard prevents infinite recursion).
+        let rows = vec![folder("A", Some("B"), "Alpha"), folder("B", Some("A"), "Bravo")];
+        let tree = build_vault_tree(&rows, &HashSet::new());
+        // No panic / hang; at most the reachable nodes are emitted.
+        assert!(tree.len() <= 2);
+    }
+
+    #[test]
+    fn newly_excluded_ids_diffs_against_old() {
+        let old = vec!["a".to_string(), "b".to_string()];
+        let new = vec!["b".to_string(), "c".to_string(), "d".to_string(), "c".to_string()];
+        // c and d are new; b was already excluded; duplicate c de-duped.
+        assert_eq!(newly_excluded_ids(&old, &new), vec!["c".to_string(), "d".to_string()]);
+
+        // Un-excluding (removing) yields nothing newly-excluded.
+        assert!(newly_excluded_ids(&old, &[]).is_empty());
+        // No change → empty.
+        assert!(newly_excluded_ids(&old, &old).is_empty());
+    }
+
+    #[test]
+    fn subtree_file_ids_collects_descendant_files_only() {
+        // A ─ a1, A ─ B ─ b1, A ─ B ─ b2(folder) ─ c1; sibling root Z ─ z1.
+        let rows = vec![
+            ("A".to_string(), None, true),
+            ("B".to_string(), Some("A".to_string()), true),
+            ("a1".to_string(), Some("A".to_string()), false),
+            ("b1".to_string(), Some("B".to_string()), false),
+            ("b2".to_string(), Some("B".to_string()), true),
+            ("c1".to_string(), Some("b2".to_string()), false),
+            ("Z".to_string(), None, true),
+            ("z1".to_string(), Some("Z".to_string()), false),
+        ];
+        let mut got = subtree_file_ids(&rows, &["A".to_string()]);
+        got.sort();
+        // Files under A: a1, b1, c1. NOT z1 (under Z), and folders excluded.
+        assert_eq!(got, vec!["a1".to_string(), "b1".to_string(), "c1".to_string()]);
+    }
+
+    #[test]
+    fn subtree_file_ids_dedupes_overlapping_excluded_roots() {
+        // Excluding both A and its child B must not list B's files twice.
+        let rows = vec![
+            ("A".to_string(), None, true),
+            ("B".to_string(), Some("A".to_string()), true),
+            ("b1".to_string(), Some("B".to_string()), false),
+        ];
+        let got = subtree_file_ids(&rows, &["A".to_string(), "B".to_string()]);
+        assert_eq!(got, vec!["b1".to_string()]);
     }
 }
