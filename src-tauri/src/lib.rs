@@ -2970,7 +2970,7 @@ fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collections::HashSet
         if let Some(parent) = row.parent_id.as_ref() {
             if let Some(folder) = folders.get_mut(parent) {
                 folder.direct_size = folder.direct_size.saturating_add(row.size_bytes.max(0));
-                folder.direct_count += 1;
+                folder.direct_count = folder.direct_count.saturating_add(1);
                 if row.on_disk {
                     folder.direct_on_disk = folder.direct_on_disk.saturating_add(row.size_bytes.max(0));
                 }
@@ -4639,10 +4639,12 @@ mod tests {
 
     #[test]
     fn build_tree_is_cycle_safe() {
-        // A → B → A parent cycle (corrupt data). Must not infinite-loop and
-        // must still surface both folders (neither has a clean root, so the
-        // root-detection makes A a root because its parent B is known but the
-        // cycle guard prevents infinite recursion).
+        // A → B → A parent cycle (corrupt data). With edges A→B and B→A,
+        // BOTH nodes have a known parent inside the folder set, so neither
+        // qualifies as a root. The builder produces an empty tree (roots = [])
+        // rather than infinite-looping. The assertion verifies termination —
+        // tree.len() is 0 in practice; the ≤ 2 upper bound accommodates any
+        // future builder change that surfaces cycle members as roots.
         let rows = vec![folder("A", Some("B"), "Alpha"), folder("B", Some("A"), "Bravo")];
         let tree = build_vault_tree(&rows, &HashSet::new());
         // No panic / hang; at most the reachable nodes are emitted.
