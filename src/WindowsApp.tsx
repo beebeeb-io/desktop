@@ -43,6 +43,7 @@ import UpdateBanner from './UpdateBanner'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card } from './windows/ui'
 import AccountView from './windows/views/AccountView'
 import InsightsView from './windows/views/InsightsView'
+import BandwidthView from './windows/views/BandwidthView'
 import DevicesView from './windows/views/DevicesView'
 import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
@@ -496,6 +497,8 @@ export default function WindowsApp() {
         return <SecurityView />
       case 'activity':
         return <ActivityView />
+      case 'bandwidth':
+        return <BandwidthView />
       default:
         return <PlaceholderView navId={activeNav} />
     }
