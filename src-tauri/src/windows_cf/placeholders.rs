@@ -31,7 +31,9 @@
 #![cfg(target_os = "windows")]
 
 use windows::Win32::Storage::CloudFilters::*;
-use windows::Win32::Storage::FileSystem::{FILE_BASIC_INFO, GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+};
 use windows::core::PCWSTR;
 
 /// Create a single cloud-only placeholder under `parent_dir`. The file
