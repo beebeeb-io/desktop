@@ -81,6 +81,22 @@ function shortPlatform(platform: string | null | undefined): string {
   return platform.trim()
 }
 
+// ── Active-session predicate (single source of truth) ────────────────────────
+
+/**
+ * A session counts as "active" when the sync engine is either watching the
+ * filesystem for changes OR actively transferring bytes.  Paused, idle, error,
+ * and stopped sessions are NOT active.
+ *
+ * This predicate is used by BOTH the per-row StatusBadge (for the green/amber
+ * visual indicator) and the ThroughputHeader aggregate counts, so the two can
+ * never disagree about what "active" means.
+ */
+function isActiveSession(status: string | null | undefined): boolean {
+  const s = (status ?? '').trim().toLowerCase()
+  return s === 'watching' || s === 'syncing'
+}
+
 // ── Status badge ─────────────────────────────────────────────────────────────
 
 type Tone = 'green' | 'amber' | 'neutral' | 'red'
@@ -325,14 +341,15 @@ function SessionCard({ session, last }: { session: ClientSyncSession; last: bool
 // ── Aggregate throughput header ───────────────────────────────────────────────
 
 function ThroughputHeader({ sessions }: { sessions: ClientSyncSession[] }) {
-  const activeSessions = sessions.filter(
-    (s) => s.status?.toLowerCase() === 'syncing',
-  )
+  // Use the shared predicate so the header count always matches what the rows show.
+  const activeSessions = sessions.filter((s) => isActiveSession(s.status))
   const totalSpeedBps = activeSessions.reduce(
     (sum, s) => sum + (typeof s.speed_bps === 'number' && s.speed_bps > 0 ? s.speed_bps : 0),
     0,
   )
   const hasThroughput = totalSpeedBps > 0
+  // Amber "Syncing" chip only when at least one session is actively transferring bytes.
+  const anySyncing = activeSessions.some((s) => s.status?.trim().toLowerCase() === 'syncing')
 
   return (
     <div
@@ -401,7 +418,7 @@ function ThroughputHeader({ sessions }: { sessions: ClientSyncSession[] }) {
         </div>
       </div>
 
-      {activeSessions.length > 0 && (
+      {anySyncing && (
         <Chip tone="amber">
           <span
             style={{
