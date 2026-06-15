@@ -1076,6 +1076,70 @@ impl StateDb {
         rows.collect()
     }
 
+    /// Unpinned, locally-present files eligible for Windows Cloud Files
+    /// dehydration (task 0781). Returns `(file_id, server_relative_path,
+    /// size_bytes)` for every row in `local` status that is NOT effectively
+    /// pinned.
+    ///
+    /// Unlike [`Self::disposable_unpinned_cache_paths`], this does NOT key on
+    /// `cache_path`: on Windows CF the hydrated bytes live INSIDE the
+    /// placeholder in the sync root, and `cache_path` actually records the
+    /// transient `%TEMP%` decrypt path the fetch callback already deleted — so
+    /// it can never be the dehydration target. The caller reconstructs the real
+    /// on-disk placeholder path from `path` joined onto the sync root (exactly
+    /// as `windows_cf::populate_placeholders` does) and dehydrates THAT.
+    pub fn unpinned_local_files_for_dehydration(&self) -> Result<Vec<(String, String, i64)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "
+            SELECT file_id, path, size_bytes
+            FROM files
+            WHERE status = 'local'
+              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
+            ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Flip specific files to `cloud_only` after a successful Windows
+    /// dehydration (task 0781), keyed by `file_id`. Mirrors
+    /// [`Self::clear_cache_metadata_for_paths`] but for the Windows path where
+    /// the dehydration target is the placeholder (addressed by `file_id` +
+    /// reconstructed path), not the stale `cache_path`. Pinned files are
+    /// excluded by the predicate so a caller bug can never dehydrate-then-mark
+    /// a pinned file.
+    pub fn mark_cloud_only_after_dehydrate(&self, file_ids: &[String], now: i64) -> Result<usize> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut updated = 0usize;
+        for file_id in file_ids {
+            updated += tx.execute(
+                "UPDATE files
+                 SET cache_path = NULL,
+                     cache_bytes = 0,
+                     status = 'cloud_only',
+                     modified_at = ?2
+                 WHERE file_id = ?1
+                   AND status = 'local'
+                   AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))",
+                params![file_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     pub fn clear_cache_metadata_for_paths(&self, cache_paths: &[String], now: i64) -> Result<usize> {
         if cache_paths.is_empty() {
             return Ok(0);

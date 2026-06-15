@@ -216,6 +216,22 @@ async fn run(
     #[cfg(target_os = "windows")]
     crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);
 
+    // Task 0780 — the UPLOAD trigger. On Windows the desktop binary IS the
+    // Cloud Files provider and there is no extension/IPC socket to fire
+    // `QueueFinderCreate` when the user drops a file in the sync root, so a
+    // local create previously never uploaded. Start a filesystem watcher that
+    // detects genuinely-new user files (filtering out engine-written
+    // placeholders, hydration writes, and `.beebeeb/` internals) and feeds them
+    // into the existing encrypted upload path. macOS/Linux already get this via
+    // their OS extension over `ipc_socket`, so the watcher is Windows-only here.
+    //
+    // The handle is held for the lifetime of the loop; dropping it on
+    // logout/shutdown stops the watch thread + its debounce task, so the cloned
+    // EngineBridge (holding the session master key) is released with the rest of
+    // the engine.
+    #[cfg(target_os = "windows")]
+    let _upload_watcher = crate::watcher::spawn(bridge.clone(), sync_root.clone());
+
     emit_status(&app, "running", Some(&sync_root), None);
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);

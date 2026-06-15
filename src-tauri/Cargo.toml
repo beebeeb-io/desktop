@@ -62,6 +62,16 @@ urlencoding = "2"
 # The web client passes salt as standard base64; desktop_login decodes it
 # before feeding it to beebeeb_core::kdf::derive_master_key.
 base64 = "0.22"
+# Filesystem watcher for the sync-root upload trigger (task 0780). On
+# Windows this drives the cross-platform recommended watcher
+# (ReadDirectoryChanges) so a file dropped in the sync root is detected and
+# fed into the existing encrypted upload path — the Windows equivalent of
+# the macOS/Linux IPC `QueueFinderCreate` flow. `notify` is the de-facto
+# cross-platform Rust file-watching crate; we use the recommended-watcher
+# (`RecommendedWatcher` + `notify::recommended_watcher`) and debounce
+# ourselves in `watcher.rs`. Pinned to "8" to match `beebeeb-sync`'s
+# `notify = "8"` so there is a SINGLE notify version in the dependency tree.
+notify = "8"
 
 # ── Browser-based device-code login handoff (browser_login.rs) ───────────────
 # The crypto + WS deps below mirror repos/cli/Cargo.toml exactly so the
@@ -151,6 +161,17 @@ windows = { version = "0.58", features = [
     # OpenProcess / GetExitCodeProcess for the .beebeeb-sync.lock liveness
     # probe (lockfile.rs) — the Windows equivalent of libc::kill(pid, 0).
     "Win32_System_Threading",
+    # `OVERLAPPED` lives in `Win32::System::IO`. In windows 0.58 the
+    # `CfConvertToPlaceholder` and `CfDehydratePlaceholder` bindings are
+    # themselves `#[cfg(feature = "Win32_System_IO")]`-gated because their
+    # signatures take an `Option<*mut OVERLAPPED>` — so without this feature
+    # those two functions DO NOT EXIST in the generated bindings. We need
+    # `CfConvertToPlaceholder` to flip a freshly-uploaded local file into an
+    # in-sync placeholder (task 0780) and `CfDehydratePlaceholder` to reclaim
+    # bytes from inside a placeholder on "Free up space" (task 0781). We only
+    # ever pass `None` for the overlapped arg (synchronous calls), but the
+    # type must still resolve for the function to compile.
+    "Win32_System_IO",
 ] }
 
 [dev-dependencies]

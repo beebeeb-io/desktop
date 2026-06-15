@@ -38,6 +38,12 @@ mod lockfile;
 mod macos_file_provider;
 mod runner;
 mod state_db;
+// Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
+// Primarily for Windows, where there is no OS extension / IPC socket to fire
+// `QueueFinderCreate`; the macOS File Provider and Linux FUSE paths drive that
+// over the Unix socket instead. Compiled everywhere (cheap, cross-platform via
+// `notify`) but the runner only spawns it on Windows (see `runner::run`).
+mod watcher;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
@@ -1681,13 +1687,104 @@ fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
     }
     let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
 
-    // Snapshot the on-disk paths to unlink BEFORE the DB clears them
-    // (eviction nulls cache_path, so we must read it first). These are exactly
-    // the unpinned, local files eviction will dehydrate.
-    let paths = db
-        .disposable_unpinned_cache_paths()
-        .map_err(|e| format!("list cache paths: {e}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        free_up_space_windows(&db, &sync_root)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Snapshot the on-disk cache paths of every UNPINNED, LOCAL file BEFORE
+        // any DB transition (eviction nulls `cache_path`). Pinned files are
+        // excluded by the query, so they are always kept.
+        let paths = db
+            .disposable_unpinned_cache_paths()
+            .map_err(|e| format!("list cache paths: {e}"))?;
+        free_up_space_unix(&db, &sync_root, paths)
+    }
+}
 
+/// Windows reclaim path (task 0781). On Cloud Files the hydrated bytes live
+/// INSIDE the placeholder's data stream, not in a separate cache copy — so the
+/// old Unix-style `remove_file` would either delete the user's whole file or
+/// (on a still-present placeholder) no-op while the DB falsely flipped the row
+/// to cloud_only with `bytes_freed = 0` (fictional free).
+///
+/// Here we `CfDehydratePlaceholder` each unpinned file, computing `bytes_freed`
+/// from the REAL reclaimed size, and only mark a row cloud_only AFTER its
+/// dehydrate succeeds. Pinned files are already excluded from `paths`. The same
+/// allowed-roots guard is kept: we only touch placeholders under the sync root
+/// (or the engine cache dir), never an arbitrary path from a corrupt DB row.
+#[cfg(target_os = "windows")]
+fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) -> Result<FreeUpSpaceResult, String> {
+    // Reclaim targets are the UNPINNED, LOCAL files — addressed by their
+    // server-relative path, NOT by `cache_path`. On Windows CF the bytes live
+    // inside the placeholder in the sync root, and `cache_path` records the
+    // already-deleted `%TEMP%` decrypt path from the fetch callback, so it is
+    // useless as a dehydration target. We reconstruct the real placeholder path
+    // exactly as `windows_cf::populate_placeholders` does.
+    let candidates = db
+        .unpinned_local_files_for_dehydration()
+        .map_err(|e| format!("list dehydration candidates: {e}"))?;
+
+    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    let mut bytes_freed: u64 = 0;
+    let mut dehydrated_ids: Vec<String> = Vec::new();
+
+    for (file_id, rel_path, _size_bytes) in candidates {
+        let rel = rel_path.trim_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // Path-safety: only dehydrate placeholders that actually resolve under
+        // an allowed engine root (the sync root). A corrupt `path` row can
+        // never point us at a file outside the vault.
+        let Ok(canonical) = local_path.canonicalize() else {
+            // Placeholder missing on disk — nothing to reclaim; leave the row
+            // for the next reconcile to re-seed.
+            continue;
+        };
+        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+            continue;
+        }
+        match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
+            Ok(freed) => {
+                bytes_freed = bytes_freed.saturating_add(freed);
+                // Only NOW is this file genuinely cloud-only on disk — record
+                // it so the DB flip below applies ONLY to files we actually
+                // dehydrated. (`freed == 0` still means "successfully cloud-only
+                // / already dehydrated", a valid end state.)
+                dehydrated_ids.push(file_id);
+            }
+            Err(error) => {
+                // Leave the DB row `local` so the next sweep retries; never
+                // claim space we did not actually reclaim. Zero-knowledge: log
+                // the file_id only.
+                tracing::warn!(file_id = %file_id, error = %error, "free_up_space: CfDehydratePlaceholder failed; keeping file local");
+            }
+        }
+    }
+
+    // Mark cloud_only ONLY for the files we actually dehydrated.
+    let now = now_unix_seconds();
+    if let Err(e) = db.mark_cloud_only_after_dehydrate(&dehydrated_ids, now) {
+        tracing::warn!(error = %e, "free_up_space: could not mark dehydrated files cloud_only");
+    }
+
+    tracing::info!(bytes_freed, "free_up_space dehydrated unpinned placeholders");
+    Ok(FreeUpSpaceResult { bytes_freed })
+}
+
+/// Unix reclaim path (macOS File Provider / Linux FUSE). Unchanged from the
+/// original: the engine stores hydrated copies as separate cache files, so a
+/// `remove_file` genuinely reclaims the bytes. The DB eviction flips rows to
+/// cloud_only and the on-disk cache copies are unlinked.
+#[cfg(not(target_os = "windows"))]
+fn free_up_space_unix(
+    db: &state_db::StateDb,
+    sync_root: &std::path::Path,
+    paths: Vec<String>,
+) -> Result<FreeUpSpaceResult, String> {
     // Flip every unpinned local file to cloud_only in the DB. A budget of 0
     // means "evict everything unpinned."
     let now = now_unix_seconds();
@@ -1699,7 +1796,7 @@ fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
     // Sum the real file sizes we remove so `bytes_freed` is an exact count, not
     // an estimate. A missing file contributes 0 (already gone — nothing
     // reclaimed by us).
-    let allowed_roots = free_up_space_allowed_roots(&sync_root);
+    let allowed_roots = free_up_space_allowed_roots(sync_root);
     let mut bytes_freed: u64 = 0;
     for path in paths {
         let path_buf = PathBuf::from(&path);

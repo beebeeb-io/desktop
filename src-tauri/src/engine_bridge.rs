@@ -355,11 +355,11 @@ impl EngineBridge {
                 self.api.restore_version(file_id, version_id).await?;
                 Ok(())
             }
-            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op).await,
+            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op, sync_root).await,
         }
     }
 
-    async fn upload_version(&self, op: &PendingOperation) -> anyhow::Result<()> {
+    async fn upload_version(&self, op: &PendingOperation, sync_root: &Path) -> anyhow::Result<()> {
         let local_file_id = op
             .file_id
             .as_deref()
@@ -462,7 +462,53 @@ impl EngineBridge {
                 tracing::warn!(path = %payload_path.display(), error = %e, "failed to remove staged upload payload");
             }
         }
+
+        // Windows Cloud Files (task 0780): the file the user dropped in the
+        // sync root is, at this point, a PLAIN local file — Explorer shows it
+        // as always-local, and (worse) it has no Cloud Files identity, so it
+        // can never be dehydrated by "Free up space" or re-hydrated on demand.
+        // Convert it IN PLACE into an in-sync placeholder carrying the server
+        // file_id, so it shows the synced overlay and round-trips through the
+        // same fetch/dehydrate machinery as a downloaded file. Keyed on a
+        // `create_file` op with a `target_path` (the happy path: a brand-new
+        // user file). Best-effort — a failure here leaves a working local file,
+        // it just won't show the synced overlay until the next reconcile.
+        #[cfg(target_os = "windows")]
+        self.finalize_local_upload_placeholder(op, &server_file_id, sync_root);
+
         Ok(())
+    }
+
+    /// Convert a freshly-uploaded NEW local file (still a plain file on disk)
+    /// into an in-sync Cloud Files placeholder. Windows-only, best-effort.
+    /// Only runs for `create_file` operations that carry a `target_path` — the
+    /// happy path of task 0780. Modify-as-new-version is a deferred follow-up
+    /// and is intentionally not converted here.
+    #[cfg(target_os = "windows")]
+    fn finalize_local_upload_placeholder(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path) {
+        let Some(metadata) = op.metadata_json.as_deref() else {
+            return;
+        };
+        let is_create = serde_json::from_str::<serde_json::Value>(metadata)
+            .map(|m| m["operation"].as_str() == Some("create_file"))
+            .unwrap_or(false);
+        if !is_create {
+            return;
+        }
+        let Some(target_path) = op.target_path.as_deref() else {
+            return;
+        };
+        let on_disk = sync_root.join(target_path.trim_start_matches('/').replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !on_disk.is_file() {
+            // The user moved/deleted it between drop and upload — nothing to
+            // convert; the placeholder seeder will mint a cloud-only stub on a
+            // later tick from the server row instead.
+            return;
+        }
+        if let Err(e) = crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&on_disk, server_file_id) {
+            // Zero-knowledge: log the file_id only, never the path/filename.
+            tracing::warn!(file_id = %server_file_id, error = %e, "could not convert uploaded file to in-sync placeholder");
+        }
     }
 
     fn apply_completed_upload(

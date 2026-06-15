@@ -407,6 +407,7 @@ dependencies = [
  "hkdf",
  "hostname",
  "libc",
+ "notify",
  "p256",
  "rand 0.8.6",
  "reqwest 0.12.28",
