@@ -2,10 +2,12 @@
  * BandwidthView — live transfer telemetry from the sync engine heartbeat
  * (PKG-DATA bind for the `bandwidth` nav slot, wave-2).
  *
- * Self-fetches accountClientSessions() on mount, then polls every ~3 s so the
- * numbers feel live (the engine heartbeat fires every ~20 s; the poll catches
- * the latest window without hammering the IPC). Cleans up the interval on
- * unmount.
+ * Self-fetches accountClientSessions() on mount, then polls every ~10 s so the
+ * numbers stay current without competing for the account-data rate limit. This
+ * is telemetry, not a live wire — the engine heartbeat itself only fires every
+ * ~20 s, so polling faster than 10 s buys nothing but extra 429 pressure on the
+ * shared account endpoints. The poll is SILENT (never resets to a skeleton) and
+ * keeps the last-known data on a failed tick. Cleans up the interval on unmount.
  *
  * For each session we render:
  *   - Device line: device_hostname + device_platform, session name
@@ -44,7 +46,10 @@ import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS = 3_000
+// Telemetry refresh cadence. The engine heartbeat is ~20s and this poll shares
+// the account-data rate limit, so 10s is the sweet spot: current enough to feel
+// live, slow enough not to hammer. (Was 3s — that competed on the 429 budget.)
+const POLL_INTERVAL_MS = 10_000
 
 const RED = 'oklch(0.5 0.18 25)'
 const RED_BG = 'oklch(0.97 0.02 25)'
