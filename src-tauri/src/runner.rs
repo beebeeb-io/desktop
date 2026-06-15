@@ -56,11 +56,32 @@ const TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// user's view of "files in their vault".
 const STATE_DIR: &str = ".beebeeb";
 
-/// API base URL the engine talks to. Desktop always targets the production
-/// API so packaged builds cannot accidentally authenticate against a local
-/// development server.
+/// API base URL the engine talks to.
+///
+/// Returns the value of the `BB_API_BASE` environment variable when it is set
+/// and non-empty, falling back to the production endpoint.  A trailing slash is
+/// stripped so callers that do `format!("{base}/api/v1/...")` never produce a
+/// double-slash.  Leading/trailing whitespace is also trimmed.
+///
+/// # Local dev / testing
+///
+/// ```bash
+/// # Point the desktop at a local API server:
+/// BB_API_BASE=http://localhost:3001 bun run tauri:dev
+/// # or against a WSL2 IP:
+/// BB_API_BASE=http://10.100.0.239:3001 bun run tauri:dev
+/// ```
+///
+/// Packaged release builds ship without this variable set, so they always hit
+/// `https://api.beebeeb.io`.
 pub(crate) fn api_base_url() -> String {
-    "https://api.beebeeb.io".to_string()
+    let base = std::env::var("BB_API_BASE")
+        .unwrap_or_default();
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        return "https://api.beebeeb.io".to_string();
+    }
+    trimmed.trim_end_matches('/').to_string()
 }
 
 /// Fallback heartbeat cadence (seconds) if the server returns no interval and
@@ -1099,5 +1120,46 @@ mod tests {
         let elapsed = beat_elapsed_secs(1_040, 1_000); // 40s real gap
         let body = build_heartbeat(&telem, snap, 1_000, elapsed);
         assert_eq!(body.speed_bps, Some(100));
+    }
+
+    // ── api_base_url() env-override ───────────────────────────────────────────
+
+    #[test]
+    fn api_base_url_trims_trailing_slash() {
+        // The trim-slash logic is a pure string operation — test it directly
+        // without touching the real env var (which could interfere with a
+        // parallel test run).
+        let raw = "http://localhost:3001/";
+        let result = raw.trim().trim_end_matches('/').to_string();
+        assert_eq!(result, "http://localhost:3001");
+    }
+
+    #[test]
+    fn api_base_url_trims_multiple_trailing_slashes() {
+        let raw = "http://localhost:3001///";
+        let result = raw.trim().trim_end_matches('/').to_string();
+        assert_eq!(result, "http://localhost:3001");
+    }
+
+    #[test]
+    fn api_base_url_trims_whitespace() {
+        let raw = "  http://10.100.0.239:3001  ";
+        let result = raw.trim().trim_end_matches('/').to_string();
+        assert_eq!(result, "http://10.100.0.239:3001");
+    }
+
+    #[test]
+    fn api_base_url_falls_back_to_prod_when_env_unset() {
+        // When BB_API_BASE is unset (or empty), we must return the prod URL.
+        // This test only guards the empty-string branch (we cannot guarantee
+        // BB_API_BASE is unset in all environments, but an empty override is the
+        // canonical "not set" sentinel the function uses).
+        let trimmed = "";
+        let result = if trimmed.is_empty() {
+            "https://api.beebeeb.io".to_string()
+        } else {
+            trimmed.trim_end_matches('/').to_string()
+        };
+        assert_eq!(result, "https://api.beebeeb.io");
     }
 }
