@@ -70,6 +70,64 @@ pub struct UploadChunkResponse {
     pub skipped: Option<bool>,
 }
 
+// ── Client device + sync-session telemetry (the WRITE/PRODUCE side) ────────────
+//
+// These power the desktop's half of the Bandwidth view: on login the runner
+// registers THIS device and opens ONE sync session, then the heartbeat producer
+// posts live telemetry every interval. The READ side (`client_devices` /
+// `client_sync_sessions` GETs above) is what the BandwidthView polls. Server
+// contract: `repos/server/.../routes/clients.rs` under `/api/v1/clients`.
+
+/// Server response to `POST /api/v1/clients/devices`. We only need the `id`
+/// (to open a session against it), but capture the rest so a caller could
+/// surface the device row without a follow-up GET. Extra/unknown server fields
+/// are ignored by serde, matching the read-side DTO tolerance.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisteredDevice {
+    pub id: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub bb_version: Option<String>,
+}
+
+/// Server response to `POST /api/v1/clients/sessions`. The heartbeat producer
+/// keys off `id` + the (possibly server-defaulted) `heartbeat_interval_secs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatedSession {
+    pub id: String,
+    /// Server defaults this to 60 when the request omits it; we send our own.
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<i32>,
+}
+
+/// Body for `POST /api/v1/clients/sessions/{id}/heartbeat`.
+///
+/// Mirrors the server's `HeartbeatBody` exactly. `status` is required (a free-
+/// form lowercase string the read side maps to a label: `watching` / `syncing`
+/// / `paused` / `idle` / `error`); every other field is optional and skipped on
+/// the wire when `None`, so a minimal heartbeat is just `{status}`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct HeartbeatBody {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_synced: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_total: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_synced: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_bps: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Owned HTTP client + credentials. One per running daemon process.
 ///
 /// Cloning is intentionally not implemented — the master key has the
@@ -565,6 +623,86 @@ impl ApiClient {
         self.get_typed("/api/v1/clients/sessions").await
     }
 
+    // ── Telemetry producers (register device, open session, post heartbeat) ────
+
+    /// `POST /api/v1/clients/devices` — register (UPSERT) THIS device.
+    ///
+    /// The server upserts on `(user_id, hostname, platform)`, so calling this
+    /// repeatedly on every login/relaunch is safe and just refreshes
+    /// `last_seen` + `bb_version`. Goes through `send_with_retry` so a transient
+    /// 429 during a busy login doesn't drop the registration. Returns the device
+    /// row (the caller needs `id` to open a sync session).
+    pub async fn register_device(
+        &self,
+        hostname: &str,
+        platform: &str,
+        bb_version: &str,
+    ) -> anyhow::Result<RegisteredDevice> {
+        let url = self.url("/api/v1/clients/devices");
+        let body = serde_json::json!({
+            "hostname": hostname,
+            "platform": platform,
+            "bb_version": bb_version,
+        });
+        let resp = self
+            .send_with_retry(|| self.client.post(&url).json(&body))
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `POST /api/v1/clients/sessions` — open ONE sync session for `device_id`.
+    ///
+    /// Unlike device registration this is NOT idempotent server-side (each call
+    /// inserts a new `client_sessions` row), so the runner calls it exactly once
+    /// per engine spawn. `session_type` must be one of the server's accepted set
+    /// (`sync`/`backup`/`mount`/`webdav`); the desktop uses `"sync"`.
+    pub async fn create_session(
+        &self,
+        device_id: &str,
+        name: &str,
+        session_type: &str,
+        local_path: Option<&str>,
+        remote_path: &str,
+        heartbeat_interval_secs: i32,
+    ) -> anyhow::Result<CreatedSession> {
+        let url = self.url("/api/v1/clients/sessions");
+        let body = serde_json::json!({
+            "device_id": device_id,
+            "name": name,
+            "session_type": session_type,
+            "local_path": local_path,
+            "remote_path": remote_path,
+            "heartbeat_interval_secs": heartbeat_interval_secs,
+        });
+        let resp = self
+            .send_with_retry(|| self.client.post(&url).json(&body))
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `POST /api/v1/clients/sessions/{id}/heartbeat` — one telemetry beat.
+    ///
+    /// Fire-and-forget: the heartbeat is the lowest-stakes call in the engine
+    /// (a missed beat just means one stale row until the next beat), so it does
+    /// NOT retry on 429 — retrying would only pile the next beat on top of a
+    /// rate-limited one. A non-2xx is surfaced as an error the caller logs and
+    /// swallows; the producer keeps ticking.
+    pub async fn post_heartbeat(&self, session_id: &str, body: &HeartbeatBody) -> anyhow::Result<()> {
+        let url = self.url(&format!(
+            "/api/v1/clients/sessions/{}/heartbeat",
+            encode(session_id)
+        ));
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(body)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
     /// `GET /api/v1/activity` — paginated audit-log feed. `page`/`limit`
     /// are optional; when `None` the server defaults apply.
     pub async fn activity_feed(
@@ -646,6 +784,84 @@ mod tests {
             client.version_download_url("file/one", "version two"),
             "https://api.beebeeb.io/api/v1/files/file%2Fone/versions/version%20two/download"
         );
+    }
+
+    #[test]
+    fn heartbeat_body_minimal_serializes_status_only() {
+        // A status-only beat (no counts/bytes yet) must put `status` on the
+        // wire and OMIT every optional field — the server's HeartbeatBody reads
+        // them as `Option`, so absence is the same as null but smaller.
+        let body = HeartbeatBody {
+            status: "watching".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert_eq!(json, r#"{"status":"watching"}"#);
+    }
+
+    #[test]
+    fn heartbeat_body_full_serializes_all_fields() {
+        let body = HeartbeatBody {
+            status: "syncing".into(),
+            files_synced: Some(10),
+            files_total: Some(12),
+            bytes_synced: Some(1000),
+            bytes_total: Some(2000),
+            current_file: Some("report.pdf".into()),
+            speed_bps: Some(500_000),
+            detail: Some("uploading".into()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["status"], "syncing");
+        assert_eq!(v["files_synced"], 10);
+        assert_eq!(v["files_total"], 12);
+        assert_eq!(v["bytes_synced"], 1000);
+        assert_eq!(v["bytes_total"], 2000);
+        assert_eq!(v["current_file"], "report.pdf");
+        assert_eq!(v["speed_bps"], 500_000);
+        assert_eq!(v["detail"], "uploading");
+    }
+
+    #[test]
+    fn heartbeat_body_skips_none_optionals_but_keeps_zero() {
+        // A zero count is a meaningful value (0 files synced) and MUST be sent;
+        // only `None` is skipped. Guards against a `skip_serializing_if` that
+        // accidentally drops legitimate zeros.
+        let body = HeartbeatBody {
+            status: "idle".into(),
+            files_synced: Some(0),
+            bytes_synced: Some(0),
+            ..Default::default()
+        };
+        let v: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["files_synced"], 0);
+        assert_eq!(v["bytes_synced"], 0);
+        assert!(v.get("files_total").is_none());
+        assert!(v.get("current_file").is_none());
+        assert!(v.get("speed_bps").is_none());
+    }
+
+    #[test]
+    fn registered_device_parses_and_tolerates_extra_fields() {
+        let json = r#"{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "hostname": "guus-pc",
+            "platform": "windows",
+            "bb_version": "0.1.0",
+            "last_seen": "2026-06-15T00:00:00Z",
+            "created_at": "2026-06-01T00:00:00Z"
+        }"#;
+        let d: RegisteredDevice = serde_json::from_str(json).unwrap();
+        assert_eq!(d.id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(d.platform.as_deref(), Some("windows"));
+    }
+
+    #[test]
+    fn created_session_parses_minimal() {
+        let json = r#"{ "id": "cs1", "heartbeat_interval_secs": 20 }"#;
+        let s: CreatedSession = serde_json::from_str(json).unwrap();
+        assert_eq!(s.id, "cs1");
+        assert_eq!(s.heartbeat_interval_secs, Some(20));
     }
 
     #[test]

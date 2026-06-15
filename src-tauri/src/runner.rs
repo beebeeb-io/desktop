@@ -32,14 +32,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
 use crate::engine_bridge::{CachePolicy, ConflictDetected, EngineBridge, sync_tick};
 use crate::lockfile::LockFile;
@@ -61,6 +61,322 @@ const STATE_DIR: &str = ".beebeeb";
 /// development server.
 pub(crate) fn api_base_url() -> String {
     "https://api.beebeeb.io".to_string()
+}
+
+/// Fallback heartbeat cadence (seconds) if the server returns no interval and
+/// we send none. The engine asks the server for 20s on session creation (a sane
+/// middle ground: live enough for the Bandwidth view, gentle on the API).
+const DEFAULT_HEARTBEAT_INTERVAL_SECS: i32 = 20;
+
+/// Hard floor so a misconfigured/garbage server interval can never turn the
+/// producer into a hot loop hammering the heartbeat endpoint.
+const MIN_HEARTBEAT_INTERVAL_SECS: i32 = 5;
+
+/// OS family string the server records on the device row. Kept here (not in
+/// `lockfile::platform`) so the value matches the read side's `platform`
+/// filter exactly (`windows` / `macos` / `linux`).
+fn platform_str() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "linux"
+    }
+}
+
+/// This machine's hostname, or `"unknown"` if the OS won't tell us. Cross-
+/// platform via the `hostname` crate (already a dependency for the lock file).
+fn hostname_or_unknown() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The desktop crate version, surfaced on the device row as `bb_version`.
+fn bb_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+// ── Heartbeat telemetry ───────────────────────────────────────────────────────
+//
+// The runner loop publishes its current high-level engine state into a shared
+// `TelemetryState`; the heartbeat producer task reads it each beat, snapshots
+// the state DB for live counts/bytes, and POSTs a heartbeat. Decoupling the two
+// (loop writes, producer reads) keeps the heartbeat cadence independent of the
+// 5s sync tick — the Bandwidth view gets a steady beat even while a tick is
+// mid-flight.
+
+/// The latest engine status + the file currently in flight, written by the sync
+/// loop and read by the heartbeat producer. Cheap to lock (updated once per tick
+/// / read once per beat).
+#[derive(Debug, Clone, Default)]
+struct TelemetryState {
+    /// One of the `engine-status` strings the loop emits: `running` / `idle` /
+    /// `syncing` / `paused` / `error` / `stopped`.
+    engine_state: String,
+    /// The name of a file actively transferring, if the loop knows one. `None`
+    /// when nothing is in flight (the producer then omits `current_file`).
+    current_file: Option<String>,
+}
+
+/// Map the runner's internal engine-state string to the lowercase heartbeat
+/// status the read side (web `devices.tsx`, the desktop Bandwidth view) maps to
+/// a display label. The CLI uses the same lowercase vocabulary, so a mixed
+/// CLI+desktop account renders consistently.
+///
+/// - `paused`            → `paused`  (user paused sync)
+/// - `syncing`           → `syncing` (files in flight)
+/// - `error`             → `error`
+/// - `running` / `idle`  → `watching` when the engine is alive and caught up
+/// - anything else        → `idle`    (stopped / unknown — a degraded default)
+fn engine_state_to_heartbeat_status(engine_state: &str, files_in_flight: i64) -> &'static str {
+    match engine_state {
+        "paused" => "paused",
+        "error" => "error",
+        // Prefer the live "syncing" signal whenever work is actually in flight,
+        // even if the loop's last emitted state was the post-tick "idle".
+        _ if files_in_flight > 0 => "syncing",
+        "syncing" => "syncing",
+        "running" | "idle" => "watching",
+        _ => "idle",
+    }
+}
+
+/// Wall-clock seconds between two `now_secs()` readings, floored at 1. Used as
+/// the speed denominator so a delayed/suspended loop reports true speed (bytes
+/// over REAL elapsed time) instead of dividing by the nominal interval. The
+/// floor guards against divide-by-zero (two beats in one second) and a clock
+/// that stepped backwards (returns 1, not a negative).
+fn beat_elapsed_secs(now: i64, last_beat: i64) -> i64 {
+    (now - last_beat).max(1)
+}
+
+/// A cheap snapshot of sync progress derived entirely from the state DB — no
+/// transfer-loop instrumentation. Counts/bytes are computed from rows already
+/// maintained by the sync engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SyncSnapshot {
+    /// Files fully present locally (`Local` status) — "synced".
+    files_synced: i64,
+    /// All non-folder rows the engine tracks — the denominator.
+    files_total: i64,
+    /// Files actively downloading or uploading right now.
+    files_in_flight: i64,
+    /// Sum of `size_bytes` for `Local` files (bytes that have landed locally).
+    bytes_synced: i64,
+    /// Sum of `size_bytes` across all tracked non-folder files.
+    bytes_total: i64,
+}
+
+/// Snapshot the state DB. Best-effort: any per-status query failure degrades
+/// that bucket to zero rather than failing the whole heartbeat — a heartbeat
+/// with partial counts is far better than no heartbeat. Folders (`is_dir`) are
+/// excluded from counts and byte sums; they carry no transferable payload.
+fn snapshot_sync_state(db: &StateDb) -> SyncSnapshot {
+    let mut snap = SyncSnapshot::default();
+    // Every tracked file, for the totals.
+    if let Ok(all) = db.list_files() {
+        for entry in &all {
+            if entry.is_dir() {
+                continue;
+            }
+            snap.files_total += 1;
+            snap.bytes_total = snap.bytes_total.saturating_add(entry.size_bytes.max(0));
+            if entry.status == FileStatus::Local {
+                snap.files_synced += 1;
+                snap.bytes_synced = snap.bytes_synced.saturating_add(entry.size_bytes.max(0));
+            }
+        }
+    }
+    // In-flight = currently downloading + uploading.
+    let in_flight = |status: FileStatus| -> i64 {
+        db.list_by_status(status)
+            .map(|v| v.iter().filter(|e| !e.is_dir()).count() as i64)
+            .unwrap_or(0)
+    };
+    snap.files_in_flight = in_flight(FileStatus::Downloading) + in_flight(FileStatus::Uploading);
+    snap
+}
+
+/// Build the heartbeat body for one beat from the engine state + a DB snapshot.
+///
+/// **Bytes/speed decision (NOT a transfer-loop instrumentation follow-up — this
+/// is a focused, honest snapshot):** `bytes_synced` / `bytes_total` are summed
+/// from the state DB's `size_bytes` column (already maintained per row), so they
+/// reflect "bytes landed locally vs total tracked" without threading an atomic
+/// counter through `hydrate_file` / `upload_version`. `speed_bps` is a rolling
+/// estimate: the positive delta of `bytes_synced` since the previous beat,
+/// divided by the elapsed interval. This is cheap and truthful at the
+/// snapshot grain. A finer-grained, true wire-speed counter (instrumenting the
+/// chunk loops in `engine_bridge`) is a deliberate FOLLOW-UP — see the report;
+/// it is intentionally out of scope here to avoid over-building.
+fn build_heartbeat(
+    telemetry: &TelemetryState,
+    snap: SyncSnapshot,
+    prev_bytes_synced: i64,
+    elapsed_secs: i64,
+) -> HeartbeatBody {
+    let status = engine_state_to_heartbeat_status(&telemetry.engine_state, snap.files_in_flight);
+
+    // Rolling speed estimate: only positive deltas over a positive interval
+    // count (a snapshot that went down — e.g. an eviction — is not "negative
+    // speed", it's just no forward progress this beat).
+    let speed_bps = if elapsed_secs > 0 && snap.bytes_synced > prev_bytes_synced {
+        Some((snap.bytes_synced - prev_bytes_synced) / elapsed_secs)
+    } else {
+        Some(0)
+    };
+
+    // current_file only makes sense while we're actually moving bytes.
+    let current_file = if snap.files_in_flight > 0 {
+        telemetry.current_file.clone()
+    } else {
+        None
+    };
+
+    HeartbeatBody {
+        status: status.to_string(),
+        files_synced: Some(snap.files_synced),
+        files_total: Some(snap.files_total),
+        bytes_synced: Some(snap.bytes_synced),
+        bytes_total: Some(snap.bytes_total),
+        current_file,
+        speed_bps,
+        detail: None,
+    }
+}
+
+/// Register THIS device + open ONE sync session, best-effort.
+///
+/// Idempotent on the device (server UPSERTs on hostname+platform); the session
+/// is opened once per engine spawn. Returns `Some((session_id, interval))` on
+/// success. **A failure here must NOT break login / the engine** — every error
+/// path logs and returns `None`, and the caller simply runs the engine without
+/// a heartbeat producer. The Bandwidth view degrades to "no live session" — the
+/// sync engine itself is unaffected.
+async fn register_session(api: &ApiClient, sync_root: &Path) -> Option<(String, i32)> {
+    let hostname = hostname_or_unknown();
+    let device = match api.register_device(&hostname, platform_str(), bb_version()).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "client device registration failed; running engine without heartbeat telemetry");
+            return None;
+        }
+    };
+
+    let local_path = sync_root.to_string_lossy().into_owned();
+    let session = match api
+        .create_session(
+            &device.id,
+            "Beebeeb Desktop",
+            "sync",
+            Some(&local_path),
+            "/",
+            DEFAULT_HEARTBEAT_INTERVAL_SECS,
+        )
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, device_id = %device.id, "client sync-session creation failed; running engine without heartbeat telemetry");
+            return None;
+        }
+    };
+
+    // Honour the server's echoed interval (it may clamp/override ours), floored
+    // so a bad value can't spin the producer.
+    let interval = session
+        .heartbeat_interval_secs
+        .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS)
+        .max(MIN_HEARTBEAT_INTERVAL_SECS);
+
+    tracing::info!(session_id = %session.id, interval, "client sync session registered; heartbeat producer starting");
+    Some((session.id, interval))
+}
+
+/// Spawn the heartbeat producer task. It beats every `interval` seconds until
+/// `cancel` fires (the runner loop exiting on logout/lock/shutdown), reading the
+/// shared `telemetry` + `sync_paused` and snapshotting `db` each beat. Holds its
+/// own `Arc<ApiClient>` + `Arc<StateDb>` clones, which drop with the task on
+/// cancel — releasing the session token / DB handle alongside the rest of the
+/// engine.
+fn spawn_heartbeat_producer(
+    api: Arc<ApiClient>,
+    db: Arc<StateDb>,
+    session_id: String,
+    interval_secs: i32,
+    telemetry: Arc<Mutex<TelemetryState>>,
+    sync_paused: Arc<AtomicBool>,
+    mut cancel: oneshot::Receiver<()>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = Duration::from_secs(interval_secs.max(MIN_HEARTBEAT_INTERVAL_SECS) as u64);
+        let mut ticker = tokio::time::interval(interval);
+        // The first `tick()` completes immediately; we want the FIRST beat to
+        // fire right away (so the session shows live as soon as it's created),
+        // then every `interval` after.
+        let mut prev_bytes_synced: i64 = 0;
+        // Track the WALL-CLOCK time of the last beat so the speed denominator is
+        // the real elapsed interval, not the configured one. A delayed loop
+        // (busy runtime, suspended laptop) would otherwise overstate speed by
+        // dividing a large byte delta by the nominal interval. Seeded to "now"
+        // so the first beat's delta (against prev_bytes_synced = 0) divides by a
+        // tiny elapsed → the ≥0 clamp + the floor below keep it sane.
+        let mut last_beat_secs = now_secs();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut cancel => break,
+                _ = ticker.tick() => {
+                    // Snapshot the engine's live telemetry + the DB.
+                    let telem = telemetry.lock().map(|g| g.clone()).unwrap_or_default();
+                    let snap = snapshot_sync_state(&db);
+
+                    // Actual wall-clock seconds since the previous beat (floored
+                    // at 1) — the real speed denominator, not the nominal interval.
+                    let now = now_secs();
+                    let elapsed_secs = beat_elapsed_secs(now, last_beat_secs);
+
+                    // Respect pause/lock: never report "syncing" while paused —
+                    // overwrite the mapped status with a flat "paused" beat so
+                    // the read side shows the user's intent, not stale activity.
+                    let body = if sync_paused.load(Ordering::Relaxed) {
+                        HeartbeatBody {
+                            status: "paused".to_string(),
+                            files_synced: Some(snap.files_synced),
+                            files_total: Some(snap.files_total),
+                            bytes_synced: Some(snap.bytes_synced),
+                            bytes_total: Some(snap.bytes_total),
+                            current_file: None,
+                            speed_bps: Some(0),
+                            detail: None,
+                        }
+                    } else {
+                        build_heartbeat(&telem, snap, prev_bytes_synced, elapsed_secs)
+                    };
+
+                    prev_bytes_synced = snap.bytes_synced;
+                    last_beat_secs = now;
+
+                    if let Err(e) = api.post_heartbeat(&session_id, &body).await {
+                        // Fire-and-forget: a missed beat is non-fatal (the next
+                        // beat refreshes the row). Network blips + token-rotation
+                        // 401s are expected; log at debug to avoid noise.
+                        tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
+                    }
+                }
+            }
+        }
+        tracing::debug!(session_id = %session_id, "heartbeat producer stopped");
+    })
 }
 
 /// Owned handle to a running engine task. Drop it (or call
@@ -182,7 +498,41 @@ async fn run(
     };
 
     let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(db.clone(), api.clone()));
+
+    // ── Heartbeat telemetry (the WRITE/PRODUCE side of the Bandwidth view) ──
+    //
+    // Register THIS device + open ONE sync session, then spawn a producer task
+    // that posts live telemetry on its own cadence. All best-effort: a failed
+    // registration logs and leaves `heartbeat` `None`, so the sync engine runs
+    // exactly as before, just without telemetry. The producer's cancel handle +
+    // its `Arc<ApiClient>`/`Arc<StateDb>` clones live for the loop's lifetime;
+    // teardown below (after the loop breaks) fires the cancel so the producer
+    // stops — and drops its session token — on logout/lock/shutdown alongside
+    // the rest of the engine.
+    let telemetry = Arc::new(Mutex::new(TelemetryState {
+        engine_state: "running".to_string(),
+        current_file: None,
+    }));
+    // `session_id` is cloned into the producer task AND kept here so the
+    // teardown below can post a final "stopped" beat under the same session.
+    let mut heartbeat: Option<(oneshot::Sender<()>, JoinHandle<()>, String)> =
+        match register_session(&api, &sync_root).await {
+            Some((session_id, interval)) => {
+                let (hb_cancel_tx, hb_cancel_rx) = oneshot::channel::<()>();
+                let handle = spawn_heartbeat_producer(
+                    api.clone(),
+                    db.clone(),
+                    session_id.clone(),
+                    interval,
+                    telemetry.clone(),
+                    sync_paused.clone(),
+                    hb_cancel_rx,
+                );
+                Some((hb_cancel_tx, handle, session_id))
+            }
+            None => None,
+        };
 
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
@@ -252,6 +602,7 @@ async fn run(
                 // signal and so it wakes up promptly when resumed.
                 if sync_paused.load(Ordering::Relaxed) {
                     emit_status(&app, "paused", Some(&sync_root), None);
+                    set_telemetry_state(&telemetry, "paused");
                     continue;
                 }
 
@@ -321,6 +672,11 @@ async fn run(
                         crate::windows_cf::refresh_placeholders(&sync_root);
 
                         emit_status(&app, "idle", Some(&sync_root), None);
+                        // Feed the heartbeat producer the post-tick state. It
+                        // promotes this to "syncing" itself when the DB snapshot
+                        // shows files in flight, so a steady-state tick reads as
+                        // "watching" while an active transfer reads as "syncing".
+                        set_telemetry_state(&telemetry, "idle");
                     }
                     Err(e) => {
                         // Network blips and 401s during token rotation
@@ -328,6 +684,7 @@ async fn run(
                         // error to the WebView so the tray reflects it.
                         tracing::warn!(error = %e, "sync tick failed");
                         emit_status(&app, "error", Some(&sync_root), Some(&e.to_string()));
+                        set_telemetry_state(&telemetry, "error");
                     }
                 }
             }
@@ -335,6 +692,61 @@ async fn run(
     }
 
     emit_status(&app, "stopped", Some(&sync_root), None);
+
+    // Stop the heartbeat producer, then post ONE final best-effort "stopped"
+    // beat. Ordering: cancel + await the producer FIRST so it can't race a
+    // normal beat against this final one, then send the definitive "stopped".
+    //
+    // Why this works at teardown: logout (`clear_session`) and lock
+    // (`lock_vault`) both call `EngineRunner::abort().await` — which fires the
+    // cancel that breaks the loop and runs THIS code — BEFORE they clear the
+    // in-memory session / keychain, and neither calls a server-side session-
+    // revocation endpoint. So `api`'s bearer token is still valid here; the POST
+    // lands.
+    //
+    // Time budget: `EngineRunner::abort` only waits 3s for this whole `run()`
+    // task, so the two phases below are bounded to 1s (producer stop, normally
+    // instant — a biased cancel) + 1.5s (final beat) = ≤2.5s, comfortably under
+    // that 3s window so the beat is never cut off mid-flight by `abort` moving
+    // on to clear the keychain.
+    //
+    // What "stopped" buys the read side: the server stores the heartbeat status
+    // verbatim, so the latest heartbeat row reads `stopped`. The current web
+    // Bandwidth view (`devices.tsx`) does not yet treat a `stopped`
+    // HEARTBEAT_status as instant-offline — it flips offline via the wall-clock
+    // staleness TTL (no heartbeat for ~interval×15) — so this primarily PREVENTS
+    // a misleading final "watching/syncing" beat from lingering and records a
+    // truthful terminal state a frontend follow-up can honor for an immediate
+    // flip. (We deliberately do NOT send `error`, which WOULD flip offline now
+    // but would mislabel a clean logout as a failure.)
+    if let Some((hb_cancel_tx, hb_handle, session_id)) = heartbeat.take() {
+        let _ = hb_cancel_tx.send(());
+        if tokio::time::timeout(Duration::from_secs(1), hb_handle).await.is_err() {
+            tracing::debug!("heartbeat producer did not stop within 1s; abandoning");
+        }
+
+        let final_beat = HeartbeatBody {
+            status: "stopped".to_string(),
+            // Report the last known counts so the row's progress numbers don't
+            // reset to null on the terminal beat; zero speed, no current file.
+            files_synced: db.list_by_status(FileStatus::Local).ok().map(|v| v.len() as i64),
+            current_file: None,
+            speed_bps: Some(0),
+            ..Default::default()
+        };
+        // Best-effort + hard-bounded: swallow any error, never exceed ~1.5s.
+        match tokio::time::timeout(
+            Duration::from_millis(1500),
+            api.post_heartbeat(&session_id, &final_beat),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::debug!(session_id = %session_id, "final 'stopped' heartbeat sent"),
+            Ok(Err(e)) => tracing::debug!(error = %e, "final 'stopped' heartbeat failed (best-effort)"),
+            Err(_) => tracing::debug!("final 'stopped' heartbeat timed out (best-effort)"),
+        }
+    }
+
     #[cfg(unix)]
     {
         let _ = ipc_cancel_tx.send(());
@@ -362,6 +774,15 @@ fn emit_status(app: &AppHandle, state: &str, sync_root: Option<&PathBuf>, error:
     });
     if let Err(e) = app.emit("engine-status", payload) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
+    }
+}
+
+/// Publish the loop's current high-level engine state to the shared telemetry
+/// slot the heartbeat producer reads. Best-effort: a poisoned mutex is swallowed
+/// (a stale heartbeat status is harmless — the next tick re-publishes).
+fn set_telemetry_state(telemetry: &Arc<Mutex<TelemetryState>>, state: &str) {
+    if let Ok(mut guard) = telemetry.lock() {
+        guard.engine_state = state.to_string();
     }
 }
 
@@ -544,5 +965,139 @@ mod tests {
         assert_eq!(payload["item_ids"][1], "shared-root");
         assert!(payload.get("path").is_none());
         assert!(payload.get("token").is_none());
+    }
+
+    // ── Heartbeat telemetry mapping ───────────────────────────────────────────
+
+    #[test]
+    fn engine_state_maps_to_lowercase_heartbeat_status() {
+        // The lowercase vocabulary the read side (web devices.tsx + the desktop
+        // Bandwidth view) maps to a display label. Must match the CLI exactly.
+        assert_eq!(engine_state_to_heartbeat_status("paused", 0), "paused");
+        assert_eq!(engine_state_to_heartbeat_status("error", 0), "error");
+        assert_eq!(engine_state_to_heartbeat_status("running", 0), "watching");
+        assert_eq!(engine_state_to_heartbeat_status("idle", 0), "watching");
+        assert_eq!(engine_state_to_heartbeat_status("syncing", 0), "syncing");
+        // Unknown / stopped degrade to a flat idle rather than panicking.
+        assert_eq!(engine_state_to_heartbeat_status("stopped", 0), "idle");
+        assert_eq!(engine_state_to_heartbeat_status("totally-unknown", 0), "idle");
+    }
+
+    #[test]
+    fn files_in_flight_promotes_status_to_syncing() {
+        // Even when the loop's last emitted state was the post-tick "idle",
+        // active transfers must read as "syncing" — the live signal wins.
+        assert_eq!(engine_state_to_heartbeat_status("idle", 3), "syncing");
+        assert_eq!(engine_state_to_heartbeat_status("running", 1), "syncing");
+        // ...but a user PAUSE always wins over in-flight (we don't report
+        // "syncing" while paused — the producer also hard-overrides this).
+        assert_eq!(engine_state_to_heartbeat_status("paused", 5), "paused");
+        // ...and an error state is preserved over in-flight, so a failing
+        // session doesn't masquerade as healthily syncing.
+        assert_eq!(engine_state_to_heartbeat_status("error", 5), "error");
+    }
+
+    #[test]
+    fn build_heartbeat_carries_counts_and_status() {
+        let telem = TelemetryState {
+            engine_state: "idle".to_string(),
+            current_file: Some("active.bin".to_string()),
+        };
+        let snap = SyncSnapshot {
+            files_synced: 8,
+            files_total: 10,
+            files_in_flight: 2,
+            bytes_synced: 5_000,
+            bytes_total: 9_000,
+        };
+        let body = build_heartbeat(&telem, snap, 1_000, 20);
+        // 2 in flight → syncing, and current_file surfaces.
+        assert_eq!(body.status, "syncing");
+        assert_eq!(body.files_synced, Some(8));
+        assert_eq!(body.files_total, Some(10));
+        assert_eq!(body.bytes_synced, Some(5_000));
+        assert_eq!(body.bytes_total, Some(9_000));
+        assert_eq!(body.current_file.as_deref(), Some("active.bin"));
+        // Rolling speed: (5000 - 1000) / 20 = 200 B/s.
+        assert_eq!(body.speed_bps, Some(200));
+    }
+
+    #[test]
+    fn build_heartbeat_omits_current_file_when_idle() {
+        // Nothing in flight → status is "watching" and current_file is dropped
+        // even though the telemetry slot still holds a stale name.
+        let telem = TelemetryState {
+            engine_state: "idle".to_string(),
+            current_file: Some("stale.bin".to_string()),
+        };
+        let snap = SyncSnapshot {
+            files_synced: 10,
+            files_total: 10,
+            files_in_flight: 0,
+            bytes_synced: 9_000,
+            bytes_total: 9_000,
+        };
+        let body = build_heartbeat(&telem, snap, 9_000, 20);
+        assert_eq!(body.status, "watching");
+        assert_eq!(body.current_file, None);
+        // No forward byte progress → 0 B/s, never a negative number.
+        assert_eq!(body.speed_bps, Some(0));
+    }
+
+    #[test]
+    fn build_heartbeat_speed_never_negative_on_regression() {
+        // A snapshot where bytes_synced dropped (e.g. cache eviction) must report
+        // 0 B/s, not a negative "speed".
+        let telem = TelemetryState {
+            engine_state: "idle".to_string(),
+            current_file: None,
+        };
+        let snap = SyncSnapshot {
+            files_synced: 1,
+            files_total: 5,
+            files_in_flight: 1,
+            bytes_synced: 100,
+            bytes_total: 9_000,
+        };
+        let body = build_heartbeat(&telem, snap, 5_000, 20);
+        assert_eq!(body.speed_bps, Some(0));
+    }
+
+    #[test]
+    fn platform_str_is_a_known_family() {
+        assert!(matches!(platform_str(), "windows" | "macos" | "linux"));
+    }
+
+    #[test]
+    fn beat_elapsed_uses_real_wall_clock_with_a_floor() {
+        // Normal case: real elapsed time is used verbatim.
+        assert_eq!(beat_elapsed_secs(1_020, 1_000), 20);
+        // A long stall (suspended laptop) reports the FULL gap, not the nominal
+        // interval — so speed isn't overstated by dividing by a small interval.
+        assert_eq!(beat_elapsed_secs(1_300, 1_000), 300);
+        // Two beats in the same second floor to 1 (never divide by zero).
+        assert_eq!(beat_elapsed_secs(1_000, 1_000), 1);
+        // Clock stepped backwards floors to 1 (never divide by a negative).
+        assert_eq!(beat_elapsed_secs(990, 1_000), 1);
+    }
+
+    #[test]
+    fn build_heartbeat_speed_uses_real_elapsed_not_nominal_interval() {
+        // 4000 bytes of progress over a REAL 40s gap (e.g. a delayed loop) is
+        // 100 B/s — NOT 200 B/s (which dividing by the nominal 20s would give).
+        let telem = TelemetryState {
+            engine_state: "idle".to_string(),
+            current_file: None,
+        };
+        let snap = SyncSnapshot {
+            files_synced: 2,
+            files_total: 4,
+            files_in_flight: 1,
+            bytes_synced: 5_000,
+            bytes_total: 9_000,
+        };
+        let elapsed = beat_elapsed_secs(1_040, 1_000); // 40s real gap
+        let body = build_heartbeat(&telem, snap, 1_000, elapsed);
+        assert_eq!(body.speed_bps, Some(100));
     }
 }
