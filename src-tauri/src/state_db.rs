@@ -19,7 +19,7 @@
 //! WAL journal mode so reads from the OS extension don't block the
 //! daemon's writes.
 
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -991,20 +991,37 @@ impl StateDb {
     pub fn set_recursive_pin(&self, root_file_id: &str, pinned: bool, now: i64) -> Result<Vec<String>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
+
+        // The subtree is identified by PATH PREFIX, not `parent_id`: live
+        // `files` rows leave `parent_id` empty and encode the hierarchy only in
+        // `path` (folder "R", child "R/leaf"). A `parent_id` walk would match
+        // only the root and never reach descendants, so a folder pin would never
+        // propagate. Look up the root's path R first; descendants are
+        // `path = R` (the root itself) OR rows whose path starts with `R || '/'`.
+        // The prefix test is `substr(path, 1, length(R) + 1) = R || '/'` — a
+        // metacharacter-safe equality (NOT `LIKE`, whose `%`/`_` in R would
+        // misbehave). If the root id is unknown, this is a no-op returning [].
+        let Some(root_path) = ({
+            let mut stmt = tx.prepare("SELECT path FROM files WHERE file_id = ?1")?;
+            let mut rows = stmt.query(params![root_file_id])?;
+            match rows.next()? {
+                Some(row) => Some(row.get::<_, String>(0)?),
+                None => None,
+            }
+        }) else {
+            tx.commit()?;
+            return Ok(Vec::new());
+        };
+
         let ids = {
             let mut stmt = tx.prepare(
                 "
-                WITH RECURSIVE tree(file_id) AS (
-                    SELECT file_id FROM files WHERE file_id = ?1
-                    UNION ALL
-                    SELECT f.file_id
-                    FROM files f
-                    JOIN tree t ON f.parent_id = t.file_id
-                )
-                SELECT file_id FROM tree ORDER BY file_id ASC
+                SELECT file_id FROM files
+                WHERE path = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/'
+                ORDER BY file_id ASC
                 ",
             )?;
-            let rows = stmt.query_map(params![root_file_id], |row| row.get::<_, String>(0))?;
+            let rows = stmt.query_map(params![root_path], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>>>()?
         };
 
@@ -1016,23 +1033,78 @@ impl StateDb {
              WHERE file_id = ?1",
             params![root_file_id, state_str, now],
         )?;
+        // Descendants (strict prefix `R || '/'`, excluding the root row itself)
+        // get only `inherited_pin_state` — the root keeps its explicit
+        // `pin_state` set above.
         tx.execute(
-            "
-            WITH RECURSIVE tree(file_id) AS (
-                SELECT file_id FROM files WHERE file_id = ?1
-                UNION ALL
-                SELECT f.file_id
-                FROM files f
-                JOIN tree t ON f.parent_id = t.file_id
-            )
-            UPDATE files
-            SET inherited_pin_state = ?2, last_sync_at = ?3
-            WHERE file_id IN (SELECT file_id FROM tree WHERE file_id != ?1)
-            ",
-            params![root_file_id, state_str, now],
+            "UPDATE files
+             SET inherited_pin_state = ?2, last_sync_at = ?3
+             WHERE substr(path, 1, length(?1) + 1) = ?1 || '/'
+               AND file_id != ?4",
+            params![root_path, state_str, now, root_file_id],
         )?;
         tx.commit()?;
         Ok(ids)
+    }
+
+    /// All cloud-only FILE rows in the subtree rooted at `root_file_id`,
+    /// INCLUDING the root itself when the root is a cloud-only file.
+    ///
+    /// Used by the Windows proactive-hydrate-on-pin path
+    /// ([`crate::engine_bridge::EngineBridge::set_recursive_pin`]): after
+    /// `CfSetPinState(PINNED)` marks the subtree pinned, Windows does NOT
+    /// eagerly download a not-yet-opened placeholder, so we walk the descendants
+    /// that are still cloud-only and `CfHydratePlaceholder` each one to make them
+    /// genuinely available offline.
+    ///
+    /// Folders are excluded (`item_kind != 'folder'`): a directory placeholder
+    /// has no data stream to hydrate — only its file children do. Zero-byte
+    /// files are excluded too (nothing to fetch). The subtree is identified by
+    /// PATH PREFIX, not `parent_id`: live `files` rows leave `parent_id` empty
+    /// and encode the hierarchy only in `path`, so a `parent_id` walk would
+    /// match only the root. We look up the root's path R, then take rows where
+    /// `path = R` (the root itself, when it is a cloud-only file) OR
+    /// `substr(path, 1, length(R) + 1) = R || '/'` (strict descendants) — a
+    /// metacharacter-safe prefix equality (NOT `LIKE`). An unknown root id
+    /// returns []. The row mapper mirrors [`Self::list_files`].
+    pub fn cloud_only_file_descendants(&self, root_file_id: &str) -> Result<Vec<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let root_path: Option<String> = conn
+            .query_row(
+                "SELECT path FROM files WHERE file_id = ?1",
+                params![root_file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(root_path) = root_path else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = conn.prepare(
+            "
+            SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                   parent_id, item_kind
+            FROM files
+            WHERE (path = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/')
+              AND status = 'cloud_only'
+              AND item_kind != 'folder'
+              AND size_bytes > 0
+            ORDER BY path ASC
+            ",
+        )?;
+        let rows = stmt.query_map(params![root_path], |row| {
+            Ok(FileEntry {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                size_bytes: row.get(3)?,
+                modified_at: row.get(4)?,
+                content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn mark_cached(&self, file_id: &str, cache_path: &str, cache_bytes: i64, opened_at: i64) -> Result<()> {

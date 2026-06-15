@@ -415,6 +415,85 @@ pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
     Ok(size_before)
 }
 
+/// Proactively **hydrate** the Cloud Files placeholder at `path`: force Windows
+/// to materialise a cloud-only placeholder's bytes on disk now, instead of
+/// waiting for the user to open it. This is the missing half of "available
+/// offline": [`set_pin_state`] tells Windows a file is PINNED (kept resident,
+/// exempt from auto-dehydration) but does NOT itself download a not-yet-opened
+/// file — a pinned-but-unopened placeholder stays `RECALL_ON_DATA_ACCESS`
+/// (cloud-only) until something reads it. `CfHydratePlaceholder` is the API that
+/// performs that download eagerly.
+///
+/// It works by triggering our existing `FETCH_DATA` callback
+/// (`super::callbacks::fetch_data_callback` → `EngineBridge::hydrate_file` →
+/// decrypt + transfer), i.e. the exact working hydration path an open would take
+/// — so a successful call leaves a fully-resident, openable file.
+///
+/// We hydrate the WHOLE file (`startingoffset = 0`, `length = -1` meaning "to
+/// EOF" per the Cloud Files contract, identical to [`dehydrate_placeholder`]'s
+/// range) with `CF_HYDRATE_FLAG_NONE` (synchronous foreground hydration). The
+/// call BLOCKS until the bytes are on disk, so callers must run it OFF any IPC /
+/// latency-sensitive thread.
+///
+/// In windows-0.58 `CfHydratePlaceholder(filehandle, startingoffset: i64,
+/// length: i64, hydrateflags: CF_HYDRATE_FLAGS, overlapped)` takes the range as
+/// two bare `i64`s (NOT a `CF_FILE_RANGE` struct) — the same shape as
+/// `CfDehydratePlaceholder` — verified at
+/// `windows-0.58.0/src/Windows/Win32/Storage/CloudFilters/mod.rs`.
+///
+/// Map the "nothing to do" outcomes to `Ok(())`: `ERROR_NOT_A_CLOUD_FILE`
+/// (0x80070178 — already a plain/fully-resident file) and
+/// `ERROR_CLOUD_FILE_NOT_IN_SYNC` (0x80070179 — the placeholder can't be
+/// hydrated right now, e.g. locally-modified); both mean the per-file proactive
+/// hydrate has no work to do and must not abort a folder-wide sweep.
+///
+/// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// (matching [`dehydrate_placeholder`]) and always closes it via `CfCloseHandle`
+/// before returning — on every exit path, no leak.
+pub fn hydrate_placeholder(path: &std::path::Path) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
+    // every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (hydrate): {e}"))?;
+
+        // length = -1 → hydrate from `startingoffset` to EOF (whole file). NONE
+        // flags = synchronous foreground hydration: the call returns only once
+        // the bytes are on disk. This drives our FETCH_DATA callback, the same
+        // path a user open would take.
+        let result = CfHydratePlaceholder(handle, 0, -1, CF_HYDRATE_FLAG_NONE, None);
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // 0x80070178 = ERROR_NOT_A_CLOUD_FILE — already a plain file or
+            // already fully hydrated; nothing to fetch.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            // 0x80070179 = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_NOT_IN_SYNC):
+            // the placeholder isn't in-sync (e.g. locally-modified) so it can't
+            // be hydrated right now — skip it, don't error the whole sweep.
+            const NOT_IN_SYNC: windows::core::HRESULT = windows::core::HRESULT(0x80070179u32 as i32);
+            if e.code() == NOT_A_CLOUD_FILE || e.code() == NOT_IN_SYNC {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfHydratePlaceholder: {e}"));
+        }
+    }
+
+    // Zero-knowledge: no parameters carry the decrypted path; log a bare marker.
+    tracing::debug!("hydrated cloud placeholder (proactive pin)");
+    Ok(())
+}
+
 /// Set the **pin state** of the Cloud Files placeholder at `path` — the
 /// OS-level "available offline" flag that drives Explorer's "Always keep on
 /// this device" green-check (pinned) vs the cloud-only overlay (unpinned).

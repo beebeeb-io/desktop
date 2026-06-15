@@ -1038,6 +1038,53 @@ impl EngineBridge {
                         tracing::warn!(file_id = %file_id, pinned, recurse, error = %e, "CfSetPinState failed for pin toggle");
                     }
                 }
+
+                // Proactive hydrate. CfSetPinState(PINNED) marks the subtree
+                // pinned but Windows does NOT eagerly download a not-yet-opened
+                // placeholder — a pinned-but-unopened file stays cloud-only
+                // (RECALL_ON_DATA_ACCESS) until something reads it. So "available
+                // offline" is only real once we force the download. Collect the
+                // cloud-only file descendants (the toggled item itself if it is a
+                // cloud-only file, or every cloud-only file under it if a folder)
+                // and CfHydratePlaceholder each. We only ever hydrate on pin, not
+                // unpin (unpinning just makes files reclaim-eligible again).
+                if pinned {
+                    match self.db.cloud_only_file_descendants(file_id) {
+                        Ok(entries) if !entries.is_empty() => {
+                            // Resolve placeholder paths the SAME way the pin does,
+                            // dropping any that fail the containment guard.
+                            let paths: Vec<PathBuf> = entries
+                                .iter()
+                                .filter_map(|e| Self::placeholder_path_under(sync_root, &e.path))
+                                .collect();
+                            // CfHydratePlaceholder BLOCKS until each file's bytes
+                            // are on disk, and a folder may hold many/large files,
+                            // so run the whole sweep OFF the IPC thread — set_recursive_pin
+                            // returns immediately while hydration proceeds in the
+                            // background. A per-file failure is logged and never
+                            // aborts the rest of the sweep.
+                            let total = paths.len();
+                            std::thread::spawn(move || {
+                                tracing::debug!(count = total, "proactive pin hydrate: starting");
+                                let mut ok = 0usize;
+                                for path in &paths {
+                                    match crate::windows_cf::placeholders::hydrate_placeholder(path) {
+                                        Ok(()) => ok += 1,
+                                        // Zero-knowledge: never log the path.
+                                        Err(e) => tracing::warn!(error = %e, "proactive pin hydrate: file failed"),
+                                    }
+                                }
+                                tracing::debug!(hydrated = ok, total, "proactive pin hydrate: finished");
+                            });
+                        }
+                        Ok(_) => {} // nothing cloud-only to hydrate
+                        Err(e) => {
+                            // A query failure must not abort the DB+server pin that
+                            // already succeeded; log and continue.
+                            tracing::warn!(file_id = %file_id, error = %e, "proactive pin hydrate: descendant query failed");
+                        }
+                    }
+                }
             }
         }
 
