@@ -790,29 +790,26 @@ function ExplorerIntegrationPanel() {
 
 // ── Updates panel (System → Updates) ─────────────────────────────────────────
 //
-// Shows the current app version and when the updater last checked. The actual
-// update banner (UpdateBanner.tsx) is shown at the top of the window whenever
-// the backend emits "update-available". This panel is the "nothing pending"
-// counterpart — it answers "is the updater working?" without nagging.
+// Shows the current app version. The actual update banner (UpdateBanner.tsx)
+// is shown at the top of the window whenever the backend emits
+// "update-available". This panel is the "nothing pending" counterpart — it
+// answers "is the updater working?" without nagging.
+//
+// We deliberately do NOT show a "last checked" timestamp: the real update check
+// runs in the Rust backend at startup and every 4 h, and the frontend has no
+// event telling it when that happened. Inventing a time from when the panel
+// opened would be a false claim — honest over reassuring. We state the true
+// cadence instead.
 function UpdatesPanel() {
   const [version, setVersion] = useState<string | null>(null)
-  const [checkedAt, setCheckedAt] = useState<Date | null>(null)
 
   useEffect(() => {
     let cancelled = false
     command<string>('app_version').then((r) => {
       if (!cancelled && r.ok) setVersion(r.value)
     })
-    // Record when the component mounts as a proxy for "last checked" — the
-    // real check happens at startup and every 4 h in the Rust backend; if the
-    // panel is open the check has already run at least once.
-    setCheckedAt(new Date())
     return () => { cancelled = true }
   }, [])
-
-  const checkedLabel = checkedAt
-    ? checkedAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    : '…'
 
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
@@ -860,11 +857,15 @@ function UpdatesPanel() {
             {version != null ? `Version ${version}` : 'Loading…'}
           </div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4, fontFamily: T.fontMono }}>
-            Up to date &middot; last checked {checkedLabel}
+            Up to date
           </div>
         </div>
         <Chip>Up to date</Chip>
       </div>
+
+      <p style={{ margin: '0 0 16px', fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
+        Beebeeb checks for updates automatically at startup and every 4 hours.
+      </p>
 
       <p style={{ margin: 0, fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
         Updates are verified with a minisign signature before installation. No update is
