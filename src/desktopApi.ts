@@ -442,6 +442,53 @@ export interface StorageBreakdown {
   total_bytes: number
 }
 
+// ── File overview — per-PC sync-state lens (in-app Files tab) ─────────────────
+// Computed LOCALLY from the desktop SQLite mirror (no server endpoint), this is
+// the device sync-state lens that complements StorageBreakdown (the by-type /
+// billing lens). Mirrors src-tauri/src/account_dto.rs::FileOverview.
+
+/** Possible sync statuses — matches `state_db::FileStatus::as_str`. */
+export type FileSyncStatus =
+  | 'cloud_only'
+  | 'local'
+  | 'downloading'
+  | 'uploading'
+  | 'conflict'
+  | 'error'
+
+/** One sync-status bucket. `status` is a {@link FileSyncStatus} string; an
+ *  unknown value is tolerated (forward-compat) but treated as `error`-like. */
+export interface StatusBucket {
+  status: string
+  count: number
+  bytes: number
+}
+
+/** One recently-changed file. `modified_at` is seconds since the Unix epoch. */
+export interface RecentFile {
+  path: string
+  size_bytes: number
+  status: string
+  pinned: boolean
+  modified_at: number
+}
+
+/** Per-PC sync-state overview for the Files tab. */
+export interface FileOverview {
+  /** Buckets for statuses that have files, descending by count. Statuses with
+   *  zero files are omitted; the UI renders a fixed legend and treats a missing
+   *  status as zero. */
+  by_status: StatusBucket[]
+  /** Most-recently-changed files, descending by `modified_at`, capped. */
+  recent: RecentFile[]
+  total_files: number
+  total_bytes: number
+  /** Count of effectively-pinned files (cuts across status buckets). */
+  pinned_count: number
+  /** Sum of effectively-pinned file sizes. */
+  pinned_bytes: number
+}
+
 // ── Data residency / region — GET /api/v1/me/region ──────────────────────────
 // Mirrors the webapp `@beebeeb/shared` shapes so the desktop resolves the
 // effective region's CITY the same way the webapp does. Brand rule: surface the
@@ -597,6 +644,15 @@ export function accountStorageBreakdown(
   largestLimit?: number,
 ): Promise<CommandResult<StorageBreakdown>> {
   return command<StorageBreakdown>('account_storage_breakdown', { largestLimit })
+}
+
+/** Per-PC sync-state overview for the in-app Files tab (local vs online-only vs
+ *  pinned vs conflicts + recently-changed files). Computed locally from the
+ *  SQLite mirror; complements {@link accountStorageBreakdown}. */
+export function desktopFileOverview(
+  recentLimit?: number,
+): Promise<CommandResult<FileOverview>> {
+  return command<FileOverview>('desktop_file_overview', { recentLimit })
 }
 
 /** Open the main Beebeeb app window (Windows). Falls back gracefully if the

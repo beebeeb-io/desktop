@@ -559,6 +559,133 @@ fn extension_of(path: &str) -> String {
     }
 }
 
+// ── 9. File overview — the per-PC sync-state lens (Files tab) ──────────────────
+//
+// Where `compute_storage_breakdown` (above) is the by-TYPE / billing lens,
+// this is the by-SYNC-STATE / per-device lens that powers the in-app "Files"
+// tab. It groups every mirrored file by its `state_db::FileStatus` (how many
+// are local vs cloud-only vs conflicting…), surfaces the most-recently-changed
+// files, and rolls up totals — all computed LOCALLY from the SQLite mirror, no
+// server endpoint. Folders are excluded by the caller; `pinned` is the
+// effective pin state computed in the state-db pass (see
+// `state_db::file_overview_rows`).
+
+/// One sync-status bucket (e.g. `local`, `cloud_only`, `conflict`). The
+/// `status` string matches `state_db::FileStatus::as_str` exactly so the
+/// frontend can map it to a label/pill without a separate enum.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StatusBucket {
+    pub status: String,
+    pub count: u64,
+    pub bytes: i64,
+}
+
+/// One recently-changed file row for the Files tab. `modified_at` is the
+/// row's `modified_at` (seconds since the Unix epoch — see
+/// `state_db::FileEntry::modified_at`); the frontend renders it relative.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RecentFile {
+    pub path: String,
+    pub size_bytes: i64,
+    pub status: String,
+    pub pinned: bool,
+    pub modified_at: i64,
+}
+
+/// Result of [`compute_file_overview`]: the device sync-state dashboard.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FileOverview {
+    /// One entry per status that actually has files, descending by count then
+    /// status name (stable). Statuses with zero files are omitted — the
+    /// frontend renders a fixed legend and treats a missing status as zero.
+    pub by_status: Vec<StatusBucket>,
+    /// Most-recently-changed files, descending by `modified_at` (ties broken by
+    /// path), capped at `recent_limit`.
+    pub recent: Vec<RecentFile>,
+    /// Total file count (folders excluded by the caller).
+    pub total_files: u64,
+    /// Sum of all file sizes (folders excluded). Negative sizes clamped to 0.
+    pub total_bytes: i64,
+    /// Count of effectively-pinned files (cuts across status buckets — a pinned
+    /// file may be `local`, `downloading`, etc.). Surfaced as its own metric so
+    /// the UI doesn't have to undercount from the capped `recent` list.
+    pub pinned_count: u64,
+    /// Sum of effectively-pinned file sizes (negative sizes clamped to 0).
+    pub pinned_bytes: i64,
+}
+
+/// A minimal view of a mirrored file for the overview computation, paired with
+/// its effective-pinned flag. Decoupled from `state_db::FileEntry` so the pure
+/// computation is unit-testable without a SQLite handle — the caller maps
+/// `(FileEntry, bool)` → this, skipping folders.
+#[derive(Debug, Clone)]
+pub struct FileOverviewInput {
+    pub path: String,
+    pub size_bytes: i64,
+    /// The file's sync status string (`state_db::FileStatus::as_str`).
+    pub status: String,
+    pub pinned: bool,
+    pub modified_at: i64,
+}
+
+/// Pure file-overview computation. `files` should already exclude folders.
+/// `recent_limit` caps the `recent` list. Negative sizes are clamped to 0.
+pub fn compute_file_overview(files: &[FileOverviewInput], recent_limit: usize) -> FileOverview {
+    use std::collections::BTreeMap;
+
+    // Group by status string. BTreeMap keeps a deterministic base order before
+    // we re-sort by count, so ties are stable across runs.
+    let mut buckets: BTreeMap<String, StatusBucket> = BTreeMap::new();
+    let mut total_bytes: i64 = 0;
+    let mut total_files: u64 = 0;
+    let mut pinned_count: u64 = 0;
+    let mut pinned_bytes: i64 = 0;
+    let mut ranked: Vec<RecentFile> = Vec::with_capacity(files.len());
+
+    for f in files {
+        let size = f.size_bytes.max(0);
+        let bucket = buckets.entry(f.status.clone()).or_insert_with(|| StatusBucket {
+            status: f.status.clone(),
+            count: 0,
+            bytes: 0,
+        });
+        bucket.count += 1;
+        bucket.bytes = bucket.bytes.saturating_add(size);
+
+        total_bytes = total_bytes.saturating_add(size);
+        total_files += 1;
+        if f.pinned {
+            pinned_count += 1;
+            pinned_bytes = pinned_bytes.saturating_add(size);
+        }
+
+        ranked.push(RecentFile {
+            path: f.path.clone(),
+            size_bytes: size,
+            status: f.status.clone(),
+            pinned: f.pinned,
+            modified_at: f.modified_at,
+        });
+    }
+
+    // Most recent first; ties (same modified_at) broken by path for stability.
+    ranked.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| a.path.cmp(&b.path)));
+    ranked.truncate(recent_limit);
+
+    // Buckets descending by count, ties by status name (stable, deterministic).
+    let mut by_status: Vec<StatusBucket> = buckets.into_values().collect();
+    by_status.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.status.cmp(&b.status)));
+
+    FileOverview {
+        by_status,
+        recent: ranked,
+        total_files,
+        total_bytes,
+        pinned_count,
+        pinned_bytes,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,5 +1208,101 @@ mod tests {
         assert_eq!(b.total_bytes, 0);
         assert_eq!(b.by_category.len(), 3);
         assert!(b.largest_files.is_empty());
+    }
+
+    // ── compute_file_overview ────────────────────────────────────────────────
+
+    fn ovr(path: &str, size: i64, status: &str, pinned: bool, modified_at: i64) -> FileOverviewInput {
+        FileOverviewInput {
+            path: path.into(),
+            size_bytes: size,
+            status: status.into(),
+            pinned,
+            modified_at,
+        }
+    }
+
+    #[test]
+    fn file_overview_empty_is_zeroed() {
+        let o = compute_file_overview(&[], 5);
+        assert_eq!(o.total_files, 0);
+        assert_eq!(o.total_bytes, 0);
+        assert_eq!(o.pinned_count, 0);
+        assert_eq!(o.pinned_bytes, 0);
+        // Unlike the by-category breakdown, status buckets are emitted only for
+        // statuses that have files — an empty mirror has no buckets at all.
+        assert!(o.by_status.is_empty());
+        assert!(o.recent.is_empty());
+    }
+
+    #[test]
+    fn file_overview_groups_mixed_statuses_and_clamps_negative() {
+        let files = vec![
+            ovr("/a.txt", 100, "local", false, 10),
+            ovr("/b.txt", 200, "local", true, 20),
+            ovr("/c.jpg", 300, "cloud_only", false, 30),
+            ovr("/d.pdf", 400, "conflict", false, 40),
+            // Negative size is clamped to 0 in totals and the bucket.
+            ovr("/e.bin", -50, "cloud_only", false, 50),
+        ];
+        let o = compute_file_overview(&files, 10);
+
+        assert_eq!(o.total_files, 5);
+        assert_eq!(o.total_bytes, 100 + 200 + 300 + 400); // -50 clamped to 0
+
+        // Pinned cuts across statuses: only /b.txt (local, pinned) here.
+        assert_eq!(o.pinned_count, 1);
+        assert_eq!(o.pinned_bytes, 200);
+
+        let local = o.by_status.iter().find(|b| b.status == "local").unwrap();
+        assert_eq!(local.count, 2);
+        assert_eq!(local.bytes, 300);
+
+        let cloud = o.by_status.iter().find(|b| b.status == "cloud_only").unwrap();
+        assert_eq!(cloud.count, 2);
+        assert_eq!(cloud.bytes, 300); // 300 + 0 (clamped)
+
+        let conflict = o.by_status.iter().find(|b| b.status == "conflict").unwrap();
+        assert_eq!(conflict.count, 1);
+        assert_eq!(conflict.bytes, 400);
+
+        // Buckets sorted by count desc: local & cloud_only (2 each, tie broken
+        // by status name → cloud_only first), then conflict (1).
+        assert_eq!(o.by_status[0].status, "cloud_only");
+        assert_eq!(o.by_status[1].status, "local");
+        assert_eq!(o.by_status[2].status, "conflict");
+    }
+
+    #[test]
+    fn file_overview_recent_is_ordered_by_modified_desc() {
+        let files = vec![
+            ovr("/old.txt", 1, "local", false, 100),
+            ovr("/new.txt", 1, "local", true, 300),
+            ovr("/mid.txt", 1, "cloud_only", false, 200),
+        ];
+        let o = compute_file_overview(&files, 10);
+
+        assert_eq!(o.recent.len(), 3);
+        assert_eq!(o.recent[0].path, "/new.txt");
+        assert_eq!(o.recent[0].modified_at, 300);
+        assert!(o.recent[0].pinned);
+        assert_eq!(o.recent[1].path, "/mid.txt");
+        assert_eq!(o.recent[2].path, "/old.txt");
+    }
+
+    #[test]
+    fn file_overview_recent_limit_caps_list() {
+        let files: Vec<FileOverviewInput> = (0..10)
+            .map(|i| ovr(&format!("/f{i}.txt"), 1, "local", false, i as i64))
+            .collect();
+        let o = compute_file_overview(&files, 3);
+
+        // All ten counted in totals/buckets…
+        assert_eq!(o.total_files, 10);
+        // …but only the 3 most recent surfaced in `recent` (modified_at 9, 8, 7).
+        assert_eq!(o.recent.len(), 3);
+        assert_eq!(o.recent[0].modified_at, 9);
+        assert_eq!(o.recent[1].modified_at, 8);
+        assert_eq!(o.recent[2].modified_at, 7);
     }
 }

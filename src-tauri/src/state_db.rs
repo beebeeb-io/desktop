@@ -38,7 +38,7 @@ pub enum FileStatus {
 }
 
 impl FileStatus {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             FileStatus::CloudOnly => "cloud_only",
             FileStatus::Downloading => "downloading",
@@ -637,6 +637,51 @@ impl StateDb {
                 parent_id: row.get(7)?,
                 item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
             })
+        })?;
+        rows.collect()
+    }
+
+    /// Return every tracked file paired with its **effective-pinned** flag —
+    /// the per-PC sync-state lens behind the in-app "Files" tab
+    /// (`account_dto::compute_file_overview`).
+    ///
+    /// This exists alongside [`Self::list_files`] because `FileEntry` does not
+    /// carry pin state: pinning lives on the `pin_state` / `inherited_pin_state`
+    /// columns owned by [`FileContractState`]. Rather than widen `FileEntry`
+    /// (and every caller of it), this method SELECTs those two extra columns and
+    /// computes `pinned` with the SAME predicate as
+    /// [`FileContractState::effective_pin_state`]: the row's own `pin_state` if
+    /// it is set (`pinned` / `unpinned`), otherwise the `inherited_pin_state` —
+    /// pinned only when that resolves to [`PinState::Pinned`].
+    pub fn file_overview_rows(&self) -> Result<Vec<(FileEntry, bool)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind, pin_state, inherited_pin_state
+             FROM files ORDER BY path ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let entry = FileEntry {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                size_bytes: row.get(3)?,
+                modified_at: row.get(4)?,
+                content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+            };
+            let pin_state = PinState::from_str(&row.get::<_, String>(9)?);
+            let inherited_pin_state = PinState::from_str(&row.get::<_, String>(10)?);
+            // Mirror FileContractState::effective_pin_state: own pin wins unless
+            // it's `inherit`, in which case the inherited state decides.
+            let effective = match pin_state {
+                PinState::Inherit => inherited_pin_state,
+                explicit => explicit,
+            };
+            let pinned = effective == PinState::Pinned;
+            Ok((entry, pinned))
         })?;
         rows.collect()
     }

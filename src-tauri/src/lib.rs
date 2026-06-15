@@ -3624,6 +3624,72 @@ async fn account_storage_breakdown(
     Ok(breakdown)
 }
 
+/// Per-PC **sync-state** overview for the in-app "Files" tab — the device
+/// lens that complements `account_storage_breakdown` (the by-TYPE / billing
+/// lens). Computed LOCALLY from the desktop SQLite mirror
+/// (`state_db::file_overview_rows`): files grouped by sync status
+/// (local / cloud_only / downloading / uploading / conflict / error), the N
+/// most-recently-changed files (with effective-pinned flag), and totals.
+/// Folders are excluded.
+///
+/// `recent_limit` caps the returned `recent` list; defaults to 15 when `None`.
+/// Returns an empty overview when no sync root is configured or the state DB is
+/// absent — the UI renders a stable empty state rather than an error.
+///
+/// Gated on an in-memory session (`Err("vault is locked")` when absent) for
+/// parity with the other data IPCs: this surfaces local vault file paths, so it
+/// must not answer before the user has unlocked.
+#[tauri::command]
+async fn desktop_file_overview(
+    state: State<'_, AppState>,
+    recent_limit: Option<usize>,
+) -> Result<account_dto::FileOverview, String> {
+    // Auth gate: require an unlocked session, same signal as the others.
+    {
+        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        if guard.is_none() {
+            return Err("vault is locked".to_string());
+        }
+    }
+
+    let limit = recent_limit.unwrap_or(15);
+
+    // Resolve the state DB from the configured sync root, mirroring
+    // `account_storage_breakdown`. No root / no DB → empty (not an error).
+    let db_path = match DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
+        Some(root) => root.join(".beebeeb").join("state.db"),
+        None => return Ok(account_dto::compute_file_overview(&[], limit)),
+    };
+    if !db_path.exists() {
+        return Ok(account_dto::compute_file_overview(&[], limit));
+    }
+
+    // SQLite work is blocking; run it off the async executor (mirrors
+    // `account_storage_breakdown`).
+    let overview = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+        let rows = db.file_overview_rows().map_err(|e| format!("list files: {e}"))?;
+        // Folders carry no real size and no sync state worth surfacing; exclude
+        // them from the overview.
+        let inputs: Vec<account_dto::FileOverviewInput> = rows
+            .into_iter()
+            .filter(|(e, _)| !e.is_dir())
+            .map(|(e, pinned)| account_dto::FileOverviewInput {
+                path: e.path,
+                size_bytes: e.size_bytes,
+                status: e.status.as_str().to_string(),
+                pinned,
+                modified_at: e.modified_at,
+            })
+            .collect();
+        Ok(account_dto::compute_file_overview(&inputs, limit))
+    })
+    .await
+    .map_err(|e| format!("file overview task failed: {e}"))??;
+
+    Ok(overview)
+}
+
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
 
 /// Internal helper that does the actual window-building work. Called
@@ -3973,6 +4039,7 @@ pub fn run() {
             account_notification_preferences,
             account_update_notification_preferences,
             account_storage_breakdown,
+            desktop_file_overview,
             // Task 0090 — selective sync
             get_selective_sync,
             set_selective_sync,
