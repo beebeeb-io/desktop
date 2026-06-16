@@ -723,3 +723,38 @@ export function getSelectiveSync(): Promise<CommandResult<string[]>> {
 export function setSelectiveSync(excluded: string[]): Promise<CommandResult<void>> {
   return command<void>('set_selective_sync', { excluded })
 }
+
+// ── Known-folder backup ("Manage backup", task 0797) ─────────────────────────
+//
+// OneDrive-style one-way backup of the user's Windows known folders (Desktop /
+// Documents / Pictures / Music / Videos / Downloads) into a matching subfolder
+// under the sync root. Model 2: NO OS redirect — the real folders are untouched;
+// we just mirror their contents into the vault and the sync engine uploads them.
+// Windows-only: on macOS/Linux every row reports `source_path: null`.
+
+/** One backupable known folder + its current state for the Manage-backup panel. */
+export interface KnownFolderStatus {
+  /** Stable key persisted in config + sent to `set_known_folder_backup`. */
+  key: string
+  /** UI label / vault subfolder name (e.g. "Documents"). */
+  display_name: string
+  /** Absolute source path on this machine, or null if not resolvable here
+   *  (e.g. non-Windows, or a folder this user has no provisioned path for). */
+  source_path: string | null
+  /** True if this folder is currently being backed up. */
+  enabled: boolean
+  /** Rough (bounded) count of files in the source tree, or null if unknown. */
+  item_count: number | null
+}
+
+/** List the backupable known folders with resolved source paths + enabled state. */
+export function getKnownFolderBackup(): Promise<CommandResult<KnownFolderStatus[]>> {
+  return command<KnownFolderStatus[]>('get_known_folder_backup')
+}
+
+/** Enable/disable backup for one known folder. Enabling triggers an immediate
+ *  mirror pass; disabling stops FUTURE copies but does not delete what's already
+ *  backed up (that would remove it from your cloud vault). */
+export function setKnownFolderBackup(key: string, enabled: boolean): Promise<CommandResult<void>> {
+  return command<void>('set_known_folder_backup', { key, enabled })
+}

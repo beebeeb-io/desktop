@@ -27,6 +27,13 @@ mod engine_bridge;
 #[cfg(unix)]
 mod ipc_socket;
 mod keychain;
+// Known-folder backup ("Manage backup", task 0797 / Model 2). The catalog +
+// pure copy-diff classifier compile everywhere (unit-tested cross-platform);
+// the `SHGetKnownFolderPath` resolver + the source→vault mirror loop are
+// Windows-only (gated inside the module). The runner calls
+// `mirror_enabled_known_folders` on Windows; non-Windows builds only use the
+// catalog for the IPC source-path listing.
+mod known_folder;
 #[cfg(target_os = "linux")]
 mod linux_fuse;
 #[cfg(all(test, not(target_os = "linux")))]
@@ -2744,6 +2751,155 @@ async fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+// ── IPC commands: Task 0797 — known-folder backup ("Manage backup") ───────────
+
+/// One row in the "Manage backup" panel: a Windows known folder, its real
+/// source path on this machine, whether the user has opted into backing it up,
+/// and (when cheap to compute) a rough item count for the source.
+///
+/// Mirrors the selective-sync IPC shape (a flat DTO the TS side renders without
+/// further lookups). `source_path` is `None` when the folder can't be resolved
+/// on this OS — on non-Windows there ARE no Windows known folders, so every row
+/// reports `source_path: None` + `enabled: false`, which the panel renders as
+/// "not available on this platform".
+#[derive(Debug, Clone, serde::Serialize)]
+struct KnownFolderStatus {
+    /// Stable key, e.g. `"documents"`. Matches `desktop.toml`.
+    key: String,
+    /// UI label / vault subfolder name, e.g. `"Documents"`.
+    display_name: String,
+    /// Absolute source path on this machine, or `None` if unresolved.
+    source_path: Option<String>,
+    /// `true` if this folder is in the persisted backup set.
+    enabled: bool,
+    /// Rough count of files in the source tree (top-level + nested, bounded), or
+    /// `None` when the source can't be enumerated. Cheap-ish, best-effort.
+    item_count: Option<u64>,
+}
+
+/// List the backupable known folders with their resolved source paths + current
+/// enabled state. Drives the "Manage backup" panel in the Files dashboard.
+///
+/// On Windows: resolves each `FOLDERID_*` via `SHGetKnownFolderPath` and counts
+/// items (bounded). On other platforms: returns the catalog with `source_path:
+/// None` so the panel can render a "Windows only" state rather than 404-ing.
+#[tauri::command]
+fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String> {
+    let cfg = DesktopConfig::load()?;
+    let mut out = Vec::with_capacity(known_folder::KNOWN_FOLDERS.len());
+    for kf in known_folder::KNOWN_FOLDERS {
+        let enabled = cfg.known_folder_enabled(kf.key);
+
+        #[cfg(target_os = "windows")]
+        let (source_path, item_count) = match known_folder::resolve_known_folder(kf.key) {
+            Some(p) => {
+                let count = count_items_bounded(&p);
+                (Some(p.to_string_lossy().into_owned()), count)
+            }
+            None => (None, None),
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (source_path, item_count): (Option<String>, Option<u64>) = (None, None);
+
+        out.push(KnownFolderStatus {
+            key: kf.key.to_string(),
+            display_name: kf.display_name.to_string(),
+            source_path,
+            enabled,
+            item_count,
+        });
+    }
+    Ok(out)
+}
+
+/// Bounded, best-effort count of regular files under `root` (≤ this many before
+/// we stop — the panel only needs an "about this many" signal, not an exact
+/// total, and an exact recursive count of a huge Documents folder would block
+/// the IPC thread). Windows-only (the only caller is gated).
+#[cfg(target_os = "windows")]
+fn count_items_bounded(root: &std::path::Path) -> Option<u64> {
+    const CAP: u64 = 10_000;
+    fn walk(dir: &std::path::Path, depth: usize, count: &mut u64) {
+        if depth > 32 || *count >= CAP {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if *count >= CAP {
+                return;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                walk(&entry.path(), depth + 1, count);
+            } else if ft.is_file() {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0u64;
+    walk(root, 0, &mut count);
+    Some(count)
+}
+
+/// Enable or disable known-folder backup for one folder key.
+///
+/// Persists the new state to `desktop.toml`, then (on Windows) triggers an
+/// immediate mirror pass so the user sees their files start backing up right
+/// away rather than waiting for the next slow runner tick. The mirror is
+/// one-way (source → `<sync_root>\<DisplayName>`); the existing enumeration scan
+/// uploads whatever it copies in. Disabling only stops FUTURE copies — it does
+/// NOT delete the already-backed-up vault copies (removing them would delete the
+/// user's cloud vault content, which we never do silently).
+///
+/// Validates `key` against the catalog so a typo from the frontend can't write a
+/// junk entry into the config.
+#[tauri::command]
+async fn set_known_folder_backup(key: String, enabled: bool) -> Result<(), String> {
+    // Reject unknown keys — the catalog is the source of truth.
+    if known_folder::known_folder_by_key(&key).is_none() {
+        return Err(format!("unknown known-folder key: {key}"));
+    }
+
+    let mut cfg = DesktopConfig::load()?;
+    cfg.set_known_folder(&key, enabled);
+    cfg.save()?;
+
+    // On enable, kick an immediate mirror so backup starts now. Best-effort:
+    // a missing sync root or a copy error doesn't undo the persisted choice.
+    // (On disable there's nothing to do — future passes just skip the folder.)
+    //
+    // NOTE (pin / available-offline): decision 0797 wants backed-up folders kept
+    // available-offline (pinned). Pinning operates on Cloud Files PLACEHOLDERS,
+    // which only exist AFTER the mirrored plain file has been uploaded and
+    // converted to a placeholder — so there's nothing to pin at this point. The
+    // honest path is to pin the vault subtree once it materialises as
+    // placeholders (a follow-up that hooks the existing `set_recursive_pin` /
+    // reconcile flow), not a no-op pin call here. TODO(0797-pin).
+    #[cfg(target_os = "windows")]
+    if enabled {
+        if let Ok(cfg) = DesktopConfig::load() {
+            if let Some(sync_root) = cfg.sync_root.clone() {
+                let enabled_keys = cfg.known_folder_backup.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    known_folder::mirror_enabled_known_folders(&sync_root, &enabled_keys);
+                });
+                if let Err(e) = join.await {
+                    tracing::warn!(error = %e, "set_known_folder_backup: immediate mirror task panicked");
+                }
+            } else {
+                tracing::debug!("set_known_folder_backup: no sync root yet; mirror deferred to next tick");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve and dehydrate the local, unpinned files under each newly-excluded
 /// folder. Returns total bytes reclaimed. Shared by Windows (real CF
 /// dehydrate) and non-Windows (DB-only flip) via the inner cfg blocks —
@@ -4043,6 +4199,9 @@ pub fn run() {
             // Task 0090 — selective sync
             get_selective_sync,
             set_selective_sync,
+            // Task 0797 — known-folder backup ("Manage backup")
+            get_known_folder_backup,
+            set_known_folder_backup,
             list_vault_folders,
             list_remote_tree,
             set_recursive_pin,

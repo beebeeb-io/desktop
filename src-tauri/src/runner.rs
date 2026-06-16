@@ -54,6 +54,13 @@ use crate::state_db::{FileStatus, StateDb};
 /// event-driven and this fixed poll goes away.
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Known-folder backup (task 0797): run the source→vault mirror every Nth sync
+/// tick. With a 30s `TICK_INTERVAL` that is ~5 minutes — frequent enough that a
+/// file dropped in Desktop/Documents reaches the vault within minutes, slow
+/// enough that the recursive known-folder walk is negligible. Windows-only.
+#[cfg(target_os = "windows")]
+const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 10;
+
 /// Subdirectory inside the sync root where the daemon keeps its
 /// SQLite state DB. Hidden by leading dot so it doesn't pollute the
 /// user's view of "files in their vault".
@@ -616,6 +623,16 @@ async fn run(
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
 
+    // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
+    // SLOW cadence relative to the 30s sync tick — every `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS`
+    // ticks. The mirror only copies NEW/CHANGED files (mtime+size diff), so an
+    // idle pass is cheap, but it still reads the whole known-folder tree, so we
+    // don't want it on every tick. `0` runs the first mirror on the first tick.
+    // Windows-only: on other platforms there are no Windows known folders to
+    // mirror, so the counter would be unused.
+    #[cfg(target_os = "windows")]
+    let mut tick_count: u64 = 0;
+
     loop {
         tokio::select! {
             biased;
@@ -631,6 +648,19 @@ async fn run(
                     #[cfg(target_os = "windows")]
                     refresh_status_ui_snapshot(&db, true, false);
                     continue;
+                }
+
+                // Known-folder backup mirror (task 0797). Run BEFORE the sync
+                // tick on the slow cadence so any files it copies into the sync
+                // root are present when the enumeration scan next walks the tree.
+                // Windows-only (SHGetKnownFolderPath); a no-op when the user has
+                // opted into nothing.
+                #[cfg(target_os = "windows")]
+                {
+                    if tick_count % KNOWN_FOLDER_MIRROR_EVERY_N_TICKS == 0 {
+                        run_known_folder_mirror(&sync_root).await;
+                    }
+                    tick_count = tick_count.wrapping_add(1);
                 }
 
                 match bridge.refresh_shared_roots().await {
@@ -845,6 +875,34 @@ fn refresh_status_ui_snapshot(db: &StateDb, paused: bool, engine_error: bool) {
     let syncing = count(FileStatus::Downloading).saturating_add(count(FileStatus::Uploading));
     let conflicts = count(FileStatus::Conflict);
     crate::windows_cf::status_ui::set_engine_state(paused, syncing, conflicts, engine_error);
+}
+
+/// Run one known-folder backup mirror pass (task 0797, Windows). Reads the
+/// enabled-key list from `desktop.toml`, then mirrors each enabled known folder
+/// (`SHGetKnownFolderPath` source) into `<sync_root>\<DisplayName>`. The whole
+/// thing is blocking `std::fs` + Win32, so it runs on a blocking thread to keep
+/// the async runtime free. Best-effort: a config-load failure or an empty set is
+/// a quiet no-op; per-file errors are counted inside the mirror, not surfaced.
+#[cfg(target_os = "windows")]
+async fn run_known_folder_mirror(sync_root: &Path) {
+    let enabled = match crate::config::DesktopConfig::load() {
+        Ok(cfg) => cfg.known_folder_backup,
+        Err(e) => {
+            tracing::debug!(error = %e, "known-folder backup: config load failed; skipping pass");
+            return;
+        }
+    };
+    if enabled.is_empty() {
+        return;
+    }
+    let root = sync_root.to_path_buf();
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        crate::known_folder::mirror_enabled_known_folders(&root, &enabled);
+    })
+    .await
+    {
+        tracing::warn!(error = %e, "known-folder backup mirror task panicked");
+    }
 }
 
 pub(crate) fn file_provider_invalidation_payload(reason: &str, item_ids: Vec<String>) -> serde_json::Value {

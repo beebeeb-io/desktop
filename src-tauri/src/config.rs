@@ -85,6 +85,34 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub excluded_folder_ids: Option<Vec<String>>,
 
+    // ── Task 0797 — known-folder backup ("Manage backup", Windows) ────────
+    //
+    // OneDrive-style one-way mirror of the user's real Windows known folders
+    // (Desktop / Documents / Pictures / Music / Videos / Downloads) into a
+    // matching subfolder under the sync root (Model 2 — decision 0797). The
+    // existing enumeration scan then auto-encrypts + uploads whatever the
+    // mirror copies in, so the only new engine code is the source→vault copy.
+    //
+    // Stored as a `Vec<String>` of stable folder *keys* (e.g. "documents",
+    // "pictures") — NOT absolute paths — so the list is portable across
+    // machines and small to hand-edit. Empty (the `#[serde(default)]`) means
+    // "no folders backed up," which is the v1 default (opt-in; see below).
+    //
+    // IMPORTANT (v1 default-OFF): this list starts EMPTY on a fresh install.
+    // We deliberately do NOT auto-enable Desktop/Documents/Pictures on first
+    // launch even though decision 0797 named them as the default-on set —
+    // silently mirroring the user's personal folders without an explicit
+    // prompt would upload a large amount of private data the user never asked
+    // to back up. The "default-on Desktop/Documents/Pictures" belongs in an
+    // ONBOARDING PROMPT (like OneDrive's setup step) where the user sees and
+    // confirms it.
+    // TODO(0797-onboarding): add a first-run "Back up these folders?" step
+    //   that pre-checks Desktop/Documents/Pictures and writes them here on
+    //   accept. Until then the Manage-backup panel is the only enable path.
+    /// Known-folder keys the user has opted into backing up. Empty = none.
+    #[serde(default)]
+    pub known_folder_backup: Vec<String>,
+
     /// Last known Finder/File Provider setup status. This is persisted so
     /// a failed deferred setup remains visible after navigation or restart.
     #[serde(default)]
@@ -153,6 +181,7 @@ impl Default for DesktopConfig {
             notify_sync_complete: false,
             notify_quota_warnings: true,
             excluded_folder_ids: None,
+            known_folder_backup: Vec::new(),
             finder_install_status: None,
             finder_install_last_error: None,
             finder_install_last_attempt_at: None,
@@ -241,6 +270,26 @@ impl DesktopConfig {
         }
         if s.sync_overlays.is_some() {
             self.sync_overlays = s.sync_overlays;
+        }
+    }
+
+    // ── Known-folder backup helpers (task 0797) ───────────────────────────
+
+    /// `true` if `key` is currently opted into known-folder backup.
+    pub fn known_folder_enabled(&self, key: &str) -> bool {
+        self.known_folder_backup.iter().any(|k| k == key)
+    }
+
+    /// Add or remove a known-folder key from the backup set. Idempotent:
+    /// enabling an already-enabled key (or disabling an absent one) is a
+    /// no-op. Keeps the list de-duplicated. Does NOT persist — the caller
+    /// (the `set_known_folder_backup` IPC) saves.
+    pub fn set_known_folder(&mut self, key: &str, enabled: bool) {
+        let present = self.known_folder_enabled(key);
+        if enabled && !present {
+            self.known_folder_backup.push(key.to_string());
+        } else if !enabled && present {
+            self.known_folder_backup.retain(|k| k != key);
         }
     }
 }
@@ -352,7 +401,55 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::default_sync_root_suggestion;
+    use super::{DesktopConfig, default_sync_root_suggestion};
+
+    #[test]
+    fn known_folder_backup_defaults_empty() {
+        // v1 default-OFF: a fresh config opts into nothing.
+        let cfg = DesktopConfig::default();
+        assert!(cfg.known_folder_backup.is_empty());
+        assert!(!cfg.known_folder_enabled("documents"));
+    }
+
+    #[test]
+    fn known_folder_backup_set_is_idempotent_and_dedupes() {
+        let mut cfg = DesktopConfig::default();
+
+        // Enable twice → present exactly once.
+        cfg.set_known_folder("documents", true);
+        cfg.set_known_folder("documents", true);
+        assert!(cfg.known_folder_enabled("documents"));
+        assert_eq!(cfg.known_folder_backup.iter().filter(|k| *k == "documents").count(), 1);
+
+        // A second key coexists.
+        cfg.set_known_folder("pictures", true);
+        assert!(cfg.known_folder_enabled("pictures"));
+        assert_eq!(cfg.known_folder_backup.len(), 2);
+
+        // Disable removes only that key; disabling an absent key is a no-op.
+        cfg.set_known_folder("documents", false);
+        cfg.set_known_folder("documents", false);
+        assert!(!cfg.known_folder_enabled("documents"));
+        assert!(cfg.known_folder_enabled("pictures"));
+        assert_eq!(cfg.known_folder_backup.len(), 1);
+    }
+
+    #[test]
+    fn known_folder_backup_round_trips_through_toml() {
+        // Missing key (older file) → empty vec via #[serde(default)].
+        let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
+        assert!(cfg.known_folder_backup.is_empty());
+
+        // A populated list survives a serialise/parse round-trip.
+        let mut cfg = DesktopConfig::default();
+        cfg.set_known_folder("desktop", true);
+        cfg.set_known_folder("pictures", true);
+        let s = toml::to_string_pretty(&cfg).expect("serialize");
+        let back: DesktopConfig = toml::from_str(&s).expect("parse");
+        assert!(back.known_folder_enabled("desktop"));
+        assert!(back.known_folder_enabled("pictures"));
+        assert_eq!(back.known_folder_backup.len(), 2);
+    }
 
     #[test]
     #[cfg(target_os = "macos")]

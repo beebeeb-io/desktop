@@ -229,6 +229,15 @@ windows = { version = "0.58", features = [
     #     DOES NOT EXIST in the generated bindings (we always pass None).
     "Win32_System_Registry",
     "Win32_Security",
+    # ── Known-folder backup ("Manage backup", task 0797) ──────────────────────
+    # `SHGetKnownFolderPath` + the `FOLDERID_*` GUID constants (FOLDERID_Desktop,
+    # _Documents, _Pictures, _Music, _Videos, _Downloads) and KF_FLAG_DEFAULT live
+    # in `Win32::UI::Shell`. `known_folder.rs` resolves each enabled folder's real
+    # path with it, then one-way mirrors its contents into the sync root (the
+    # existing scan uploads them). `Win32_UI_Shell_Common` carries the shared
+    # shell types `Win32_UI_Shell` re-exports.
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
 ] }
 
 # Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`

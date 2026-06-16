@@ -38,6 +38,9 @@ import {
   accountProfile,
   accountActivity,
   desktopFileOverview,
+  getKnownFolderBackup,
+  setKnownFolderBackup,
+  type KnownFolderStatus,
   type BillingUsage,
   type StorageSummary,
   type SyncStatus,
@@ -900,6 +903,211 @@ function FilesEmptyState() {
   )
 }
 
+// ── Section: Manage backup (known-folder backup, task 0797) ───────────────────
+//
+// OneDrive-style "Manage backup": one-way mirror of the user's Windows known
+// folders (Desktop / Documents / Pictures / Music / Videos / Downloads) into the
+// vault. Model 2 — the real folders are NOT redirected; we copy their contents
+// into the sync root and the engine uploads them. Honest copy, no emojis. The
+// toggle is NEUTRAL (ink), not amber — amber is reserved for encryption state.
+
+/** A small on/off switch matching the Windows app's neutral palette. */
+function BackupToggle({
+  on,
+  busy,
+  onChange,
+  label,
+}: {
+  on: boolean
+  busy: boolean
+  onChange: () => void
+  label: string
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={busy}
+      onClick={onChange}
+      style={{
+        position: 'relative' as const,
+        width: 36,
+        height: 20,
+        flexShrink: 0,
+        borderRadius: 999,
+        border: `1px solid ${on ? T.ink : T.line2}`,
+        background: on ? T.ink : T.paper2,
+        cursor: busy ? 'wait' : 'pointer',
+        opacity: busy ? 0.6 : 1,
+        padding: 0,
+        transition: 'background 120ms ease, border-color 120ms ease',
+      }}
+    >
+      <span
+        style={{
+          position: 'absolute' as const,
+          top: 2,
+          left: on ? 18 : 2,
+          width: 14,
+          height: 14,
+          borderRadius: 999,
+          background: T.paper,
+          boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+          transition: 'left 120ms ease',
+        }}
+      />
+    </button>
+  )
+}
+
+/** Status line under each folder name: Backed up / Off / Syncing / unavailable. */
+function backupStatus(f: KnownFolderStatus, pending: boolean): { text: string; tone: 'on' | 'off' | 'busy' | 'na' } {
+  if (f.source_path == null) return { text: 'Not available on this platform', tone: 'na' }
+  if (pending) return { text: f.enabled ? 'Starting backup…' : 'Updating…', tone: 'busy' }
+  if (f.enabled) return { text: 'Backed up to your vault', tone: 'on' }
+  return { text: 'Not backed up', tone: 'off' }
+}
+
+function ManageBackupCard() {
+  const [folders, setFolders] = useState<KnownFolderStatus[] | null>(null)
+  const [unsupported, setUnsupported] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Keys with an in-flight set_known_folder_backup call.
+  const [pending, setPending] = useState<Set<string>>(new Set())
+
+  const load = async () => {
+    const res = await getKnownFolderBackup()
+    if (!res.ok) {
+      if (res.unsupported) setUnsupported(true)
+      else setError(res.reason)
+      return
+    }
+    setFolders(res.value)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const res = await getKnownFolderBackup()
+      if (cancelled) return
+      if (!res.ok) {
+        if (res.unsupported) setUnsupported(true)
+        else setError(res.reason)
+        return
+      }
+      setFolders(res.value)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const toggle = async (f: KnownFolderStatus) => {
+    if (f.source_path == null) return
+    const next = !f.enabled
+    setError(null)
+    setPending((p) => new Set(p).add(f.key))
+    // Optimistic flip.
+    setFolders((prev) => prev?.map((x) => (x.key === f.key ? { ...x, enabled: next } : x)) ?? prev)
+    const res = await setKnownFolderBackup(f.key, next)
+    setPending((p) => {
+      const n = new Set(p)
+      n.delete(f.key)
+      return n
+    })
+    if (!res.ok) {
+      // Roll back the optimistic flip and surface the error.
+      setFolders((prev) => prev?.map((x) => (x.key === f.key ? { ...x, enabled: f.enabled } : x)) ?? prev)
+      setError(res.unsupported ? commandUnavailableLabel('set_known_folder_backup') : res.reason)
+      return
+    }
+    // Refresh to pick up updated item counts after a mirror pass.
+    void load()
+  }
+
+  // Windows-only feature — render nothing on macOS/Linux rather than an empty card.
+  if (unsupported) return null
+  if (folders != null && folders.every((f) => f.source_path == null)) return null
+
+  return (
+    <Card style={{ padding: 0, marginBottom: 14 }}>
+      <div style={{ padding: '16px 18px 12px', borderBottom: `1px solid ${T.line}` }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>Manage backup</div>
+          <Chip tone="neutral">One-way</Chip>
+        </div>
+        <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55, marginTop: 4, maxWidth: 520 }}>
+          Back up your Windows folders to your encrypted vault. Files are copied in — your
+          original folders stay exactly where they are, so this works alongside OneDrive. Turning a
+          folder off stops new backups; what’s already in your vault stays.
+        </div>
+      </div>
+
+      {folders == null ? (
+        <div style={{ padding: 18, display: 'grid', gap: 12 }}>
+          <Skeleton height={40} />
+          <Skeleton height={40} />
+          <Skeleton height={40} />
+        </div>
+      ) : (
+        <div>
+          {folders.map((f, i) => {
+            const isPending = pending.has(f.key)
+            const status = backupStatus(f, isPending)
+            const statusColor =
+              status.tone === 'on' ? T.green : status.tone === 'busy' ? T.ink2 : T.ink3
+            const disabled = f.source_path == null
+            return (
+              <div
+                key={f.key}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 14,
+                  padding: '12px 18px',
+                  borderTop: i === 0 ? 'none' : `1px solid ${T.line}`,
+                  opacity: disabled ? 0.55 : 1,
+                }}
+              >
+                <div style={{ width: 30, height: 30, borderRadius: 8, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <NavIcon name="folder" size={14} color={T.ink3} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>{f.display_name}</span>
+                    {f.item_count != null && f.item_count > 0 && (
+                      <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink4 }}>
+                        {f.item_count.toLocaleString('en-US')}
+                        {f.item_count >= 10000 ? '+' : ''} {f.item_count === 1 ? 'file' : 'files'}
+                      </span>
+                    )}
+                  </div>
+                  {f.source_path && (
+                    <div
+                      title={f.source_path}
+                      style={{ fontSize: 11, fontFamily: T.fontMono, color: T.ink4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, marginTop: 1 }}
+                    >
+                      {f.source_path}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11, color: statusColor, marginTop: 2 }}>{status.text}</div>
+                </div>
+                <BackupToggle
+                  on={f.enabled}
+                  busy={isPending}
+                  onChange={() => void toggle(f)}
+                  label={`${f.enabled ? 'Stop backing up' : 'Back up'} ${f.display_name}`}
+                />
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {error && <div style={{ padding: '0 18px 14px', fontSize: 11.5, color: FILES_DANGER }}>{error}</div>}
+    </Card>
+  )
+}
+
 // ── Root: FilesView ───────────────────────────────────────────────────────────
 
 function FilesView() {
@@ -943,10 +1151,17 @@ function FilesView() {
       ) : err ? (
         <FilesErrorState err={err} onRetry={retry} />
       ) : isEmpty ? (
-        <FilesEmptyState />
+        <>
+          <SyncFolderCard />
+          {/* Manage backup is useful even before any files exist — it's how the
+              user opts their Windows folders INTO the vault in the first place. */}
+          <ManageBackupCard />
+          <FilesEmptyState />
+        </>
       ) : overview ? (
         <>
           <SyncFolderCard />
+          <ManageBackupCard />
           <FilesMetricStrip overview={overview} />
           <ByStatusBar overview={overview} />
           {overview.recent.length > 0 && <RecentlyChanged files={overview.recent} />}
