@@ -59,11 +59,14 @@ mod watcher;
 #[cfg(target_os = "windows")]
 mod windows_cf;
 use config::DesktopConfig;
-// `platform_keychain_store()` resolves to the macOS Keychain store on macOS and
-// the Windows Credential Manager store on Windows (Linux keeps the fail-closed
-// stub). All session/vault persistence below routes through it so secrets land
-// in the OS-native credential vault for the current target.
-use keychain::{AuthVault, SecretBytes, SessionToken, platform_keychain_store};
+// `platform_keychain_store_for(id)` resolves to the macOS Keychain store on
+// macOS and the Windows Credential Manager store on Windows (Linux keeps the
+// fail-closed stub), segmenting every secret under the per-account id
+// (`io.beebeeb.app/<id>/<leaf>`). `legacy_platform_keychain_store()` is the
+// un-segmented pre-Phase-1 layout, used read-only by the migration + the
+// anti-lockout legacy fallback. All session/vault persistence below routes
+// through these so secrets land in the OS-native credential vault.
+use keychain::{AuthVault, SecretBytes, SessionToken, platform_keychain_store_for};
 use runner::EngineRunner;
 
 use account::{AccountId, AccountRuntime, synthesize_single_account};
@@ -223,8 +226,13 @@ fn clear_cached_profile(state: &AppState) {
     }
 }
 
-fn persist_session_to_keychain(token: &str, master_key: [u8; 32], email: Option<&str>) -> Result<(), String> {
-    let vault = AuthVault::new(platform_keychain_store());
+fn persist_session_to_keychain(
+    account_id: &str,
+    token: &str,
+    master_key: [u8; 32],
+    email: Option<&str>,
+) -> Result<(), String> {
+    let vault = AuthVault::new(platform_keychain_store_for(account_id));
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
     vault
         .install_session(token)
@@ -239,8 +247,8 @@ fn persist_session_to_keychain(token: &str, master_key: [u8; 32], email: Option<
     persist_account_email_to_keychain(&vault, email)
 }
 
-fn persist_session_token_to_keychain(token: &str, email: Option<&str>) -> Result<(), String> {
-    let vault = AuthVault::new(platform_keychain_store());
+fn persist_session_token_to_keychain(account_id: &str, token: &str, email: Option<&str>) -> Result<(), String> {
+    let vault = AuthVault::new(platform_keychain_store_for(account_id));
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
     vault
         .install_session(token)
@@ -268,21 +276,63 @@ fn persist_account_email_to_keychain(
     Ok(())
 }
 
-fn persist_vault_key_to_keychain(master_key: [u8; 32]) -> Result<(), String> {
-    AuthVault::new(platform_keychain_store())
+fn persist_vault_key_to_keychain(account_id: &str, master_key: [u8; 32]) -> Result<(), String> {
+    AuthVault::new(platform_keychain_store_for(account_id))
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))
 }
 
-fn load_session_token_from_keychain() -> Result<Option<String>, String> {
-    AuthVault::new(platform_keychain_store())
+fn load_session_token_from_keychain(account_id: &str) -> Result<Option<String>, String> {
+    let id_keyed = AuthVault::new(platform_keychain_store_for(account_id))
         .session_token()
-        .map_err(|e| keychain_error("load session from Keychain", e))
-        .map(|token| token.map(|t| t.expose_for_request().to_string()))
+        .map_err(|e| keychain_error("load session from Keychain", e))?;
+    if let Some(token) = id_keyed {
+        return Ok(Some(token.expose_for_request().to_string()));
+    }
+    // LEGACY READ FALLBACK (anti-lockout): the id-keyed lookup found nothing, so
+    // fall back to the legacy flat store before concluding "no session." This
+    // makes auto-unlock robust even if the migration no-op'd or failed.
+    let legacy = AuthVault::new(keychain::legacy_platform_keychain_store())
+        .session_token()
+        .map_err(|e| keychain_error("load legacy session from Keychain", e))?;
+    Ok(legacy.map(|t| t.expose_for_request().to_string()))
 }
 
-fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, String> {
-    let mut vault = AuthVault::new(platform_keychain_store());
+fn load_session_from_keychain(account_id: &str, email: Option<String>) -> Result<Option<Session>, String> {
+    // Try the id-segmented store first; if it has no session token, fall back to
+    // the legacy flat store (anti-lockout READ FALLBACK §4D). The fallback is
+    // read-only — it never writes — so it can never re-create orphan-able flat
+    // entries; it only keeps a not-yet-migrated install auto-unlocking.
+    let vault = AuthVault::new(platform_keychain_store_for(account_id));
+    if vault
+        .session_token()
+        .map_err(|e| keychain_error("load session from Keychain", e))?
+        .is_some()
+    {
+        return load_session_from_vault(vault, email);
+    }
+    // Id-keyed lookup empty → legacy fallback.
+    let legacy = AuthVault::new(keychain::legacy_platform_keychain_store());
+    if legacy
+        .session_token()
+        .map_err(|e| keychain_error("load legacy session from Keychain", e))?
+        .is_some()
+    {
+        return load_session_from_vault(legacy, email);
+    }
+    Ok(None)
+}
+
+/// Shared tail of `load_session_from_keychain` for whichever store (id-keyed or
+/// legacy) actually holds the session. Loads the token, unlocks the vault
+/// (validating the 32-byte key), and recovers the email. Returns `Ok(None)` only
+/// if the token vanished between the presence check and here (a race the caller
+/// already filtered out); any unlock failure (incl. genuine `NotFound`) is an
+/// `Err` so the startup restore can distinguish "no key on this PC" from success.
+fn load_session_from_vault<S: keychain::AuthSecretStore>(
+    mut vault: AuthVault<S>,
+    email: Option<String>,
+) -> Result<Option<Session>, String> {
     let Some(token) = vault
         .session_token()
         .map_err(|e| keychain_error("load session from Keychain", e))?
@@ -312,18 +362,37 @@ fn load_session_from_keychain(email: Option<String>) -> Result<Option<Session>, 
     }))
 }
 
-fn keychain_session_present() -> bool {
-    AuthVault::new(platform_keychain_store())
+fn keychain_session_present(account_id: &str) -> bool {
+    let id_keyed = AuthVault::new(platform_keychain_store_for(account_id))
+        .session_token()
+        .map(|token| token.is_some())
+        .unwrap_or(false);
+    if id_keyed {
+        return true;
+    }
+    // LEGACY READ FALLBACK (anti-lockout): report present if a legacy flat
+    // session still exists (e.g. migration hasn't run yet), so onboarding routing
+    // sees the signed-in state rather than falling back to the sign-in prompt.
+    AuthVault::new(keychain::legacy_platform_keychain_store())
         .session_token()
         .map(|token| token.is_some())
         .unwrap_or(false)
 }
 
-fn clear_keychain_session() -> Result<(), String> {
-    let mut vault = AuthVault::new(platform_keychain_store());
+fn clear_keychain_session(account_id: &str) -> Result<(), String> {
+    // Clear the id-segmented trio (the live layout post-migration).
+    let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
     vault
         .clear_session()
-        .map_err(|e| keychain_error("clear Keychain session", e))
+        .map_err(|e| keychain_error("clear Keychain session", e))?;
+    // Belt-and-braces: also clear any lingering legacy flat trio so a logout
+    // leaves no recoverable secrets behind even if migration never ran (or the
+    // legacy fallback had been serving the session). `clear_session` is
+    // idempotent (NotFound → Ok), so this is safe when nothing legacy exists.
+    let mut legacy = AuthVault::new(keychain::legacy_platform_keychain_store());
+    legacy
+        .clear_session()
+        .map_err(|e| keychain_error("clear legacy Keychain session", e))
 }
 
 /// On launch, resume a fully signed-in **and unlocked** session when the
@@ -375,7 +444,7 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
     }
 
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let session = match load_session_from_keychain(email) {
+    let session = match load_session_from_keychain(acct.id.as_str(), email) {
         // Both token + master key present → vault is unlocked; resume.
         Ok(Some(session)) => session,
         // No stored session TOKEN at all (never signed in / logged out).
@@ -686,16 +755,17 @@ async fn desktop_login(
         .to_string();
 
     let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    // Cache the profile we just fetched so the `account_profile` IPC can serve
-    // the Account page immediately without re-hitting `/auth/me`. The cache is
+    // Resolve the active account up front so we can both cache the profile and
+    // segment the keychain write under its id (task 0800). The cache is
     // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
+    let account_id = state.active_account()?.id.as_str().to_string();
     if let Ok(acct) = state.active_account()
         && let Ok(mut guard) = acct.cached_profile.lock()
     {
         *guard = Some(profile);
     }
 
-    if let Err(e) = persist_session_token_to_keychain(&session_token, Some(&email)) {
+    if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err(e);
     }
@@ -775,13 +845,14 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
     // Same post-finish setup as `desktop_login`'s no-2FA success path. The
     // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
     let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+    let account_id = state.active_account()?.id.as_str().to_string();
     if let Ok(acct) = state.active_account()
         && let Ok(mut guard) = acct.cached_profile.lock()
     {
         *guard = Some(profile);
     }
 
-    if let Err(e) = persist_session_token_to_keychain(&session_token, Some(&email)) {
+    if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
         let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
         return Err(e);
     }
@@ -822,19 +893,21 @@ async fn desktop_unlock_with_recovery_phrase(
         return Ok(());
     }
 
-    let token = load_session_token_from_keychain()?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let account_id = acct.id.as_str().to_string();
+    let token =
+        load_session_token_from_keychain(&account_id)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
     let recovery_phrase = normalize_recovery_phrase_input(&recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
         .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
     let master_key: [u8; 32] = master_key_struct.to_bytes();
 
-    persist_vault_key_to_keychain(master_key)?;
+    persist_vault_key_to_keychain(&account_id, master_key)?;
     // `desktop_login` already persisted the email when it stored the token, but
     // persist again here (idempotent) so the invariant "a fully-provisioned
     // session has its email in the store" holds even if memory and store drift.
     if let Some(email) = email.as_deref() {
-        let vault = AuthVault::new(platform_keychain_store());
+        let vault = AuthVault::new(platform_keychain_store_for(&account_id));
         if let Err(e) = vault.store_account_email(email) {
             // Non-fatal: the email is display metadata, not required to unlock.
             tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
@@ -970,7 +1043,8 @@ pub(crate) async fn apply_session(
     master_key: [u8; 32],
     email: Option<String>,
 ) -> Result<(), String> {
-    persist_session_to_keychain(&token, master_key, email.as_deref())?;
+    let account_id = state.active_account()?.id.as_str().to_string();
+    persist_session_to_keychain(&account_id, &token, master_key, email.as_deref())?;
     let token_clone = token.clone();
 
     {
@@ -1047,7 +1121,7 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
-    clear_keychain_session()?;
+    clear_keychain_session(acct.id.as_str())?;
     set_auth_present(&state, false);
     set_auth_email(&state, None);
     Ok(())
@@ -1072,8 +1146,8 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     }
 
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let session =
-        load_session_from_keychain(email)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let session = load_session_from_keychain(acct.id.as_str(), email)?
+        .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let token = session.token.clone();
     let master_key = session.master_key;
     {
@@ -1119,7 +1193,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
-    set_auth_present(&state, keychain_session_present());
+    set_auth_present(&state, keychain_session_present(acct.id.as_str()));
     Ok(())
 }
 
@@ -4344,14 +4418,39 @@ pub fn run() {
             set_sync_mode,
         ])
         .setup(|app| {
-            // Multi-account Phase 0 (decision 0800): mint the single synthesized
-            // account into the registry that `.manage(AppState::default())`
-            // installed. MUST run before anything reads per-account state — the
-            // `auth_present` seed below, the `restore_session_on_startup` task
-            // (which lands the keychain session in `accounts[0].session`), the
-            // engine-status listener, and first-launch detection all depend on a
-            // resolvable active account. Idempotent; invisible at N=1.
-            synthesize_single_account(&app.state::<AppState>());
+            // Multi-account Phase 1 (decision 0800/0808): resolve the PERSISTED
+            // account id, synthesize the single account under it, then lazily
+            // migrate the legacy flat keychain trio into the id-segmented layout.
+            // This ORDER is load-bearing and MUST run before anything reads
+            // per-account credential state — the `auth_present` seed below, the
+            // `restore_session_on_startup` task (which lands the keychain session
+            // in `accounts[0].session`), and first-launch detection all depend on
+            // both a resolvable active account AND the migration having run.
+            //
+            // Step 1 — persist/read the account id (mints + saves on first login,
+            // returns the same value thereafter). On error we fall back to an
+            // ephemeral id so the app still boots; the legacy READ FALLBACK in the
+            // keychain helpers keeps auto-unlock working in that degraded case.
+            let account_id = match DesktopConfig::load().and_then(|mut cfg| cfg.ensure_account_id()) {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::warn!(%error, "could not persist account id; using ephemeral id this run");
+                    AccountId::new_v4().0
+                }
+            };
+            // Step 2 — synthesize the single account under the persisted id.
+            // Idempotent; invisible at N=1.
+            synthesize_single_account(&app.state::<AppState>(), AccountId(account_id.clone()));
+
+            // Step 3 — lazy migration: legacy flat trio → id-segmented trio. Runs
+            // SYNCHRONOUSLY here (decision 0808) BEFORE the auth seed + restore so
+            // the auto-unlock below reads the segmented layout. Verify-before-delete
+            // + the legacy READ FALLBACK are the two anti-lockout nets; a failure
+            // here is LOGGED AND SWALLOWED (must not block startup — the fallback
+            // keeps the vault usable).
+            if let Err(error) = keychain::migrate_legacy_keychain_to_account(&account_id) {
+                tracing::warn!(%error, "legacy keychain migration did not complete; legacy fallback remains in effect");
+            }
 
             setup_native_menu(app)?;
             setup_tray(app)?;
@@ -4377,7 +4476,10 @@ pub fn run() {
             {
                 let app_state = app.state::<AppState>();
                 if let Ok(mut guard) = app_state.auth_present.lock() {
-                    *guard = keychain_session_present();
+                    // Segmented under the persisted id (with the legacy READ
+                    // FALLBACK inside `keychain_session_present` covering a not-yet-
+                    // migrated install).
+                    *guard = keychain_session_present(&account_id);
                 }
             }
 
@@ -4955,7 +5057,7 @@ mod tests {
         let state = AppState::default();
         // The cached profile is per-account (decision 0800) — synthesize the
         // single account so `clear_cached_profile`/`active_account` resolve.
-        crate::account::synthesize_single_account(&state);
+        crate::account::synthesize_single_account(&state, crate::account::AccountId("test-acct".to_string()));
         let acct = state.active_account().expect("synthesized account resolves");
         // Seed a cached profile, as login would.
         {

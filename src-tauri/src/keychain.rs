@@ -237,13 +237,54 @@ impl<S: AuthSecretStore> fmt::Debug for AuthVault<S> {
     }
 }
 
+// ── Keychain account segmentation (task 0800 — multi-account Phase 1) ─────────
+//
+// Every store carries an optional `account_prefix`. When set, all six secret
+// leaves are stored under `<account_id>/<leaf>` (e.g.
+// `io.beebeeb.app/<uuid>/session-token`) instead of the bare legacy leaf
+// (`io.beebeeb.app/session-token`). `account_path` composes that. The platform
+// free functions (`macos_keychain::save/load/delete`, `windows_credentials::…`)
+// are UNCHANGED — they already take an `account: &str`, so the segmentation is
+// purely a matter of what string we pass them. `AuthVault` is likewise
+// unchanged: the id lives entirely in the store.
+//
+// `None` prefix = the legacy flat layout, used ONLY by `legacy_platform_keychain_store`
+// for the one-time migration read/sweep. New code must construct stores via
+// `platform_keychain_store_for(id)` so a reviewer can grep every legacy access.
+
+/// Compose the per-account credential leaf from an optional prefix.
+///
+/// `Some(id)` → `"<id>/<leaf>"` (segmented, Phase 1); `None` → bare `leaf`
+/// (legacy, pre-Phase-1 layout). Shared by every concrete store so the
+/// composition rule lives in exactly one place.
+fn account_path(prefix: Option<&str>, leaf: &str) -> String {
+    match prefix {
+        Some(id) => format!("{id}/{leaf}"),
+        None => leaf.to_string(),
+    }
+}
+
 #[cfg(target_os = "macos")]
-pub struct MacOsKeychainStore;
+pub struct MacOsKeychainStore {
+    account_prefix: Option<String>,
+}
 
 #[cfg(target_os = "macos")]
 impl MacOsKeychainStore {
+    /// Legacy flat store (no account segmentation). Prefer `with_account`.
     pub fn new() -> Self {
-        Self
+        Self { account_prefix: None }
+    }
+
+    /// Store segmented under `account_id` (Phase 1).
+    pub fn with_account(account_id: impl Into<String>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+        }
+    }
+
+    fn account_path(&self, leaf: &str) -> String {
+        account_path(self.account_prefix.as_deref(), leaf)
     }
 }
 
@@ -257,11 +298,11 @@ impl Default for MacOsKeychainStore {
 #[cfg(target_os = "macos")]
 impl AuthSecretStore for MacOsKeychainStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
-        macos_keychain::save(SESSION_TOKEN_ACCOUNT, token.expose_for_request().as_bytes())
+        macos_keychain::save(&self.account_path(SESSION_TOKEN_ACCOUNT), token.expose_for_request().as_bytes())
     }
 
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-        macos_keychain::load(SESSION_TOKEN_ACCOUNT)?
+        macos_keychain::load(&self.account_path(SESSION_TOKEN_ACCOUNT))?
             .map(|bytes| {
                 String::from_utf8(bytes)
                     .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
@@ -271,45 +312,57 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn delete_session_token(&self) -> AuthResult<()> {
-        macos_keychain::delete(SESSION_TOKEN_ACCOUNT)
+        macos_keychain::delete(&self.account_path(SESSION_TOKEN_ACCOUNT))
     }
 
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
-        macos_keychain::save(WRAPPED_MASTER_KEY_ACCOUNT, wrapped.expose_for_crypto())
+        macos_keychain::save(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT), wrapped.expose_for_crypto())
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        macos_keychain::load(WRAPPED_MASTER_KEY_ACCOUNT)?
+        macos_keychain::load(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT))?
             .map(SecretBytes::new)
             .transpose()
     }
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-        macos_keychain::delete(WRAPPED_MASTER_KEY_ACCOUNT)
+        macos_keychain::delete(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT))
     }
 
     fn save_account_email(&self, email: &str) -> AuthResult<()> {
-        macos_keychain::save(ACCOUNT_EMAIL_ACCOUNT, email.as_bytes())
+        macos_keychain::save(&self.account_path(ACCOUNT_EMAIL_ACCOUNT), email.as_bytes())
     }
 
     fn load_account_email(&self) -> AuthResult<Option<String>> {
-        macos_keychain::load(ACCOUNT_EMAIL_ACCOUNT)?
+        macos_keychain::load(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))?
             .map(|bytes| String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8")))
             .transpose()
     }
 
     fn delete_account_email(&self) -> AuthResult<()> {
-        macos_keychain::delete(ACCOUNT_EMAIL_ACCOUNT)
+        macos_keychain::delete(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub struct MacOsKeychainStore;
+pub struct MacOsKeychainStore {
+    // Carried for type parity with the macOS store so the same
+    // `with_account`/`platform_keychain_store_for` plumbing compiles on every
+    // target. Unused on the stub path (every method returns Unsupported).
+    #[allow(dead_code)]
+    account_prefix: Option<String>,
+}
 
 #[cfg(not(target_os = "macos"))]
 impl MacOsKeychainStore {
     pub fn new() -> Self {
-        Self
+        Self { account_prefix: None }
+    }
+
+    pub fn with_account(account_id: impl Into<String>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+        }
     }
 }
 
@@ -373,12 +426,26 @@ impl AuthSecretStore for MacOsKeychainStore {
 // rather than the machine.
 
 #[cfg(target_os = "windows")]
-pub struct WindowsCredentialStore;
+pub struct WindowsCredentialStore {
+    account_prefix: Option<String>,
+}
 
 #[cfg(target_os = "windows")]
 impl WindowsCredentialStore {
+    /// Legacy flat store (no account segmentation). Prefer `with_account`.
     pub fn new() -> Self {
-        Self
+        Self { account_prefix: None }
+    }
+
+    /// Store segmented under `account_id` (Phase 1).
+    pub fn with_account(account_id: impl Into<String>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+        }
+    }
+
+    fn account_path(&self, leaf: &str) -> String {
+        account_path(self.account_prefix.as_deref(), leaf)
     }
 }
 
@@ -392,11 +459,11 @@ impl Default for WindowsCredentialStore {
 #[cfg(target_os = "windows")]
 impl AuthSecretStore for WindowsCredentialStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
-        windows_credentials::save(SESSION_TOKEN_ACCOUNT, token.expose_for_request().as_bytes())
+        windows_credentials::save(&self.account_path(SESSION_TOKEN_ACCOUNT), token.expose_for_request().as_bytes())
     }
 
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-        windows_credentials::load(SESSION_TOKEN_ACCOUNT)?
+        windows_credentials::load(&self.account_path(SESSION_TOKEN_ACCOUNT))?
             .map(|bytes| {
                 String::from_utf8(bytes)
                     .map_err(|e| {
@@ -413,45 +480,55 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 
     fn delete_session_token(&self) -> AuthResult<()> {
-        windows_credentials::delete(SESSION_TOKEN_ACCOUNT)
+        windows_credentials::delete(&self.account_path(SESSION_TOKEN_ACCOUNT))
     }
 
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
-        windows_credentials::save(WRAPPED_MASTER_KEY_ACCOUNT, wrapped.expose_for_crypto())
+        windows_credentials::save(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT), wrapped.expose_for_crypto())
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        windows_credentials::load(WRAPPED_MASTER_KEY_ACCOUNT)?
+        windows_credentials::load(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT))?
             .map(SecretBytes::new)
             .transpose()
     }
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-        windows_credentials::delete(WRAPPED_MASTER_KEY_ACCOUNT)
+        windows_credentials::delete(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT))
     }
 
     fn save_account_email(&self, email: &str) -> AuthResult<()> {
-        windows_credentials::save(ACCOUNT_EMAIL_ACCOUNT, email.as_bytes())
+        windows_credentials::save(&self.account_path(ACCOUNT_EMAIL_ACCOUNT), email.as_bytes())
     }
 
     fn load_account_email(&self) -> AuthResult<Option<String>> {
-        windows_credentials::load(ACCOUNT_EMAIL_ACCOUNT)?
+        windows_credentials::load(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))?
             .map(|bytes| String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8")))
             .transpose()
     }
 
     fn delete_account_email(&self) -> AuthResult<()> {
-        windows_credentials::delete(ACCOUNT_EMAIL_ACCOUNT)
+        windows_credentials::delete(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub struct WindowsCredentialStore;
+pub struct WindowsCredentialStore {
+    // Type-parity with the Windows store (see MacOsKeychainStore stub note).
+    #[allow(dead_code)]
+    account_prefix: Option<String>,
+}
 
 #[cfg(not(target_os = "windows"))]
 impl WindowsCredentialStore {
     pub fn new() -> Self {
-        Self
+        Self { account_prefix: None }
+    }
+
+    pub fn with_account(account_id: impl Into<String>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+        }
     }
 }
 
@@ -523,10 +600,153 @@ pub type PlatformKeychainStore = WindowsCredentialStore;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub type PlatformKeychainStore = MacOsKeychainStore;
 
-/// Construct the secret store for the current OS. Used by the Tauri runner so
-/// session/vault persistence routes to the platform-native credential vault.
-pub fn platform_keychain_store() -> PlatformKeychainStore {
+/// Construct the secret store for the current OS, segmented under `account_id`
+/// (task 0800 — multi-account Phase 1). Used by the Tauri runner so
+/// session/vault persistence routes to the platform-native credential vault
+/// under `io.beebeeb.app/<account_id>/<leaf>`.
+///
+/// This is the ONLY constructor production code should use. The bare legacy
+/// constructor is deliberately not exposed (see `legacy_platform_keychain_store`)
+/// so a reviewer can grep every legacy-keyed access — there is exactly one, in
+/// the migration path.
+pub fn platform_keychain_store_for(account_id: &str) -> PlatformKeychainStore {
+    PlatformKeychainStore::with_account(account_id)
+}
+
+/// Construct the legacy (un-segmented) secret store — the pre-Phase-1 flat
+/// `io.beebeeb.app/<leaf>` layout.
+///
+/// Used in EXACTLY two places, both read-or-delete-only:
+///   1. the one-time `migrate_legacy_keychain_to_account` (read legacy secrets,
+///      then delete them only after verifying the segmented copies); and
+///   2. the legacy READ FALLBACK on the auto-unlock path (if the id-keyed
+///      lookup returns `None`, fall back to the legacy store before concluding
+///      "no session") — the anti-lockout safety net.
+///
+/// New session WRITES must NEVER go through this store (that would re-create the
+/// orphan-able flat entries). Production write paths use
+/// `platform_keychain_store_for` exclusively.
+pub fn legacy_platform_keychain_store() -> PlatformKeychainStore {
     PlatformKeychainStore::new()
+}
+
+// ── Lazy migration: legacy flat trio → id-segmented trio (task 0800) ─────────
+//
+// VAULT-LOCKOUT-class change. The contract that protects against lockout:
+//   • write-new → VERIFY readback → ONLY THEN delete legacy (§3.4-3.6); and
+//   • a legacy READ FALLBACK on the unlock path (lib.rs) — two independent nets.
+// The function is IDEMPOTENT and INTERRUPT-CONVERGENT: interrupted after a crash
+// at any step, a re-run ends fully-migrated-with-legacy-gone.
+
+/// Migrate the legacy flat keychain trio into the id-segmented layout.
+///
+/// `migrate_legacy_keychain_to_account(id)` builds the segmented store for `id`
+/// and the legacy flat store, then runs [`migrate_legacy_keychain_between`].
+/// LOG+SWALLOW errors at the call site — a migration failure must never block
+/// startup, because the legacy READ FALLBACK keeps the vault usable.
+pub fn migrate_legacy_keychain_to_account(account_id: &str) -> AuthResult<()> {
+    let new = platform_keychain_store_for(account_id);
+    let legacy = legacy_platform_keychain_store();
+    migrate_legacy_keychain_between(&new, &legacy)
+}
+
+/// Core migration algorithm, generic over the two stores so it is unit-testable
+/// with in-memory stores (the platform credential vaults can't run in CI).
+///
+/// `new` is the id-segmented destination, `legacy` the flat source. Steps mirror
+/// blueprint §3:
+///
+/// 1/2. SHORT-CIRCUIT (interrupt-safe). If the new token is present AND
+///      (the new key is present OR legacy has no key) → migration is already
+///      complete; opportunistically sweep any leftover legacy entries and
+///      return. The `OR legacy has no key` guards the partial-write hole: if the
+///      new token landed but the new key did NOT and legacy still HAS a key, we
+///      must fall THROUGH and re-run 4-6 (don't declare victory with a missing
+///      key while a recoverable legacy key still exists).
+/// 3.   Read the legacy token. `None` → nothing to migrate (fresh/clean) → Ok.
+///      Read legacy key + email (each `Option`).
+/// 4.   WRITE new: token always; key/email only if legacy had them. `SecretBytes`
+///      is `!Clone`, so the loaded key is MOVED straight into the save (never
+///      bound + reused). `SessionToken` IS `Clone`.
+/// 5.   VERIFY readback BEFORE any delete: new token present; if legacy had a
+///      key → new key present; if legacy had email → new email present. ANY
+///      failure → return `Err` WITHOUT deleting (vault still usable via the
+///      legacy fallback).
+/// 6.   ONLY now delete the legacy trio (each delete idempotent; NotFound → Ok).
+pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(
+    new: &N,
+    legacy: &L,
+) -> AuthResult<()> {
+    // ── Steps 1-2: short-circuit if already (effectively) migrated ──────────
+    let new_token_present = new.load_session_token()?.is_some();
+    if new_token_present {
+        let new_key_present = new.load_wrapped_master_key()?.is_some();
+        let legacy_has_key = legacy.load_wrapped_master_key()?.is_some();
+        if new_key_present || !legacy_has_key {
+            // Migration complete. Opportunistically sweep any leftover legacy
+            // entries (e.g. a crash between writing the new trio and deleting
+            // legacy). Each delete is idempotent (NotFound → Ok).
+            sweep_legacy(legacy)?;
+            return Ok(());
+        }
+        // else: new token present but new key MISSING while legacy STILL HAS a
+        // key → partial write. Fall through to re-run the write/verify/delete.
+    }
+
+    // ── Step 3: read legacy; nothing to migrate if there is no legacy token ──
+    let Some(legacy_token) = legacy.load_session_token()? else {
+        // No legacy session at all (fresh install, or already swept) → nothing
+        // to do. If a new token exists it's handled by the short-circuit above.
+        return Ok(());
+    };
+    let legacy_key = legacy.load_wrapped_master_key()?; // Option<SecretBytes>
+    let legacy_email = legacy.load_account_email()?; // Option<String>
+    let key_existed = legacy_key.is_some();
+    let email_existed = legacy_email.is_some();
+
+    // ── Step 4: write the new (segmented) trio ──────────────────────────────
+    // Token: SessionToken is Clone, but we own `legacy_token` here so pass by ref.
+    new.save_session_token(&legacy_token)?;
+    // Key: SecretBytes is !Clone → MOVE the loaded value straight into save.
+    if let Some(key) = legacy_key {
+        new.save_wrapped_master_key(key)?;
+    }
+    // Email: plain string metadata; store best-effort. An Unsupported store
+    // (Linux stub) would error here, but on Linux there is no legacy token to
+    // migrate in the first place, so this branch is unreachable there.
+    if let Some(email) = &legacy_email {
+        new.save_account_email(email)?;
+    }
+
+    // ── Step 5: VERIFY readback BEFORE deleting anything ────────────────────
+    if new.load_session_token()?.is_none() {
+        return Err(AuthStoreError::Backend(
+            "migration verify failed: new session token not readable after write".to_string(),
+        ));
+    }
+    if key_existed && new.load_wrapped_master_key()?.is_none() {
+        return Err(AuthStoreError::Backend(
+            "migration verify failed: new wrapped master key not readable after write".to_string(),
+        ));
+    }
+    if email_existed && new.load_account_email()?.is_none() {
+        return Err(AuthStoreError::Backend(
+            "migration verify failed: new account email not readable after write".to_string(),
+        ));
+    }
+
+    // ── Step 6: only now delete the legacy trio (idempotent) ────────────────
+    sweep_legacy(legacy)
+}
+
+/// Delete the legacy flat trio. Each delete is idempotent (NotFound → Ok), so
+/// this is safe to call when some/all entries are already gone — used both as
+/// the final migration step and the opportunistic short-circuit sweep.
+fn sweep_legacy<L: AuthSecretStore>(legacy: &L) -> AuthResult<()> {
+    legacy.delete_session_token()?;
+    legacy.delete_wrapped_master_key()?;
+    legacy.delete_account_email()?;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -836,6 +1056,367 @@ mod tests {
 
         assert_eq!(vault.account_email().unwrap(), None);
         assert_eq!(vault.session_token().unwrap(), None);
+    }
+
+    // ── Lazy migration tests (task 0800) ────────────────────────────────────
+    //
+    // A single shared backing map keyed by the FULL account string models one OS
+    // keychain namespace: the legacy store reads/writes bare leaves
+    // (`session-token`), the segmented store reads/writes `<id>/session-token`.
+    // Two `KeyedMemoryStore` handles over the same `Arc<Mutex<HashMap>>` give us
+    // exactly the legacy-vs-segmented separation the real credential vault has.
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    type SharedVault = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+    /// In-memory store backed by a shared map, mirroring the per-OS store's
+    /// `account_path` prefixing so legacy and segmented entries land at distinct
+    /// keys in the same namespace.
+    struct KeyedMemoryStore {
+        vault: SharedVault,
+        prefix: Option<String>,
+    }
+
+    impl KeyedMemoryStore {
+        fn legacy(vault: SharedVault) -> Self {
+            Self { vault, prefix: None }
+        }
+        fn with_account(vault: SharedVault, id: &str) -> Self {
+            Self {
+                vault,
+                prefix: Some(id.to_string()),
+            }
+        }
+        fn key(&self, leaf: &str) -> String {
+            account_path(self.prefix.as_deref(), leaf)
+        }
+    }
+
+    impl AuthSecretStore for KeyedMemoryStore {
+        fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+            self.vault
+                .lock()
+                .unwrap()
+                .insert(self.key(SESSION_TOKEN_ACCOUNT), token.expose_for_request().as_bytes().to_vec());
+            Ok(())
+        }
+        fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+            self.vault
+                .lock()
+                .unwrap()
+                .get(&self.key(SESSION_TOKEN_ACCOUNT))
+                .cloned()
+                .map(|bytes| SessionToken::new(String::from_utf8(bytes).unwrap()))
+                .transpose()
+        }
+        fn delete_session_token(&self) -> AuthResult<()> {
+            self.vault.lock().unwrap().remove(&self.key(SESSION_TOKEN_ACCOUNT));
+            Ok(())
+        }
+        fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+            self.vault
+                .lock()
+                .unwrap()
+                .insert(self.key(WRAPPED_MASTER_KEY_ACCOUNT), wrapped.expose_for_crypto().to_vec());
+            Ok(())
+        }
+        fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+            self.vault
+                .lock()
+                .unwrap()
+                .get(&self.key(WRAPPED_MASTER_KEY_ACCOUNT))
+                .cloned()
+                .map(SecretBytes::new)
+                .transpose()
+        }
+        fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+            self.vault.lock().unwrap().remove(&self.key(WRAPPED_MASTER_KEY_ACCOUNT));
+            Ok(())
+        }
+        fn save_account_email(&self, email: &str) -> AuthResult<()> {
+            self.vault
+                .lock()
+                .unwrap()
+                .insert(self.key(ACCOUNT_EMAIL_ACCOUNT), email.as_bytes().to_vec());
+            Ok(())
+        }
+        fn load_account_email(&self) -> AuthResult<Option<String>> {
+            Ok(self
+                .vault
+                .lock()
+                .unwrap()
+                .get(&self.key(ACCOUNT_EMAIL_ACCOUNT))
+                .map(|bytes| String::from_utf8(bytes.clone()).unwrap()))
+        }
+        fn delete_account_email(&self) -> AuthResult<()> {
+            self.vault.lock().unwrap().remove(&self.key(ACCOUNT_EMAIL_ACCOUNT));
+            Ok(())
+        }
+    }
+
+    /// A store that, on demand, drops EVERY write to the wrapped master key —
+    /// used to simulate "verify readback fails" without touching a real vault.
+    /// Token + email writes still succeed (so verify fails on the KEY specifically).
+    struct KeyDropStore {
+        inner: KeyedMemoryStore,
+    }
+    impl AuthSecretStore for KeyDropStore {
+        fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+            self.inner.save_session_token(token)
+        }
+        fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+            self.inner.load_session_token()
+        }
+        fn delete_session_token(&self) -> AuthResult<()> {
+            self.inner.delete_session_token()
+        }
+        fn save_wrapped_master_key(&self, _wrapped: SecretBytes) -> AuthResult<()> {
+            // Silently drop — write "succeeds" but the value never lands, so the
+            // verify-readback in step 5 sees a missing key and must NOT delete legacy.
+            Ok(())
+        }
+        fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+            self.inner.load_wrapped_master_key()
+        }
+        fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+            self.inner.delete_wrapped_master_key()
+        }
+        fn save_account_email(&self, email: &str) -> AuthResult<()> {
+            self.inner.save_account_email(email)
+        }
+        fn load_account_email(&self) -> AuthResult<Option<String>> {
+            self.inner.load_account_email()
+        }
+        fn delete_account_email(&self) -> AuthResult<()> {
+            self.inner.delete_account_email()
+        }
+    }
+
+    const TEST_ID: &str = "acct-uuid-0001";
+
+    fn seed_legacy(vault: &SharedVault, token: &str, key: Option<[u8; 32]>, email: Option<&str>) {
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        legacy.save_session_token(&SessionToken::new(token).unwrap()).unwrap();
+        if let Some(k) = key {
+            legacy.save_wrapped_master_key(SecretBytes::new_master_key(k)).unwrap();
+        }
+        if let Some(e) = email {
+            legacy.save_account_email(e).unwrap();
+        }
+    }
+
+    fn legacy_present(vault: &SharedVault) -> bool {
+        let m = vault.lock().unwrap();
+        m.contains_key(SESSION_TOKEN_ACCOUNT)
+            || m.contains_key(WRAPPED_MASTER_KEY_ACCOUNT)
+            || m.contains_key(ACCOUNT_EMAIL_ACCOUNT)
+    }
+
+    /// Happy path: a full legacy trio migrates into the segmented layout, the
+    /// segmented entries are present + correct, and the legacy trio is GONE.
+    #[test]
+    fn migration_happy_path_moves_trio_and_deletes_legacy() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok", Some([9u8; 32]), Some("u@example.com"));
+
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        migrate_legacy_keychain_between(&new, &legacy).expect("happy migration");
+
+        // Segmented copies present + correct.
+        assert_eq!(
+            new.load_session_token().unwrap().unwrap().expose_for_request(),
+            "tok"
+        );
+        assert_eq!(
+            new.load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
+            &[9u8; 32]
+        );
+        assert_eq!(new.load_account_email().unwrap().as_deref(), Some("u@example.com"));
+        // Legacy trio gone.
+        assert!(!legacy_present(&vault), "legacy entries must be deleted after migration");
+    }
+
+    /// Idempotent: re-running after a complete migration is a no-op that leaves
+    /// the segmented trio intact and legacy still gone.
+    #[test]
+    fn migration_is_idempotent() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok", Some([9u8; 32]), Some("u@example.com"));
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+
+        migrate_legacy_keychain_between(&new, &legacy).expect("first run");
+        // Second run: short-circuits (new token + new key present) → no-op.
+        migrate_legacy_keychain_between(&new, &legacy).expect("idempotent re-run");
+
+        assert_eq!(
+            new.load_session_token().unwrap().unwrap().expose_for_request(),
+            "tok"
+        );
+        assert_eq!(
+            new.load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
+            &[9u8; 32]
+        );
+        assert!(!legacy_present(&vault));
+    }
+
+    /// Interrupted at step 4 (after the new token+key+email were written, before
+    /// the legacy delete): the short-circuit sees new token + new key present and
+    /// sweeps the leftover legacy entries. Converges to fully-migrated-legacy-gone.
+    #[test]
+    fn migration_interrupted_before_delete_converges() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok", Some([9u8; 32]), Some("u@example.com"));
+        // Simulate a crash right after step 4: new trio written, legacy NOT yet
+        // deleted. Pre-write the segmented copies manually to model that state.
+        {
+            let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+            new.save_session_token(&SessionToken::new("tok").unwrap()).unwrap();
+            new.save_wrapped_master_key(SecretBytes::new_master_key([9u8; 32])).unwrap();
+            new.save_account_email("u@example.com").unwrap();
+        }
+        assert!(legacy_present(&vault), "precondition: legacy still present pre-rerun");
+
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        migrate_legacy_keychain_between(&new, &legacy).expect("re-run converges");
+
+        assert!(!legacy_present(&vault), "leftover legacy swept on re-run");
+        assert_eq!(
+            new.load_session_token().unwrap().unwrap().expose_for_request(),
+            "tok"
+        );
+    }
+
+    /// Interrupted at step 6 (partway through deleting the legacy trio): some
+    /// legacy entries remain alongside the full new trio. The short-circuit sweep
+    /// finishes the deletion — convergent, idempotent.
+    #[test]
+    fn migration_interrupted_during_legacy_delete_converges() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        // New trio complete; legacy token already deleted but legacy key+email
+        // still linger (crash mid-sweep).
+        {
+            let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+            new.save_session_token(&SessionToken::new("tok").unwrap()).unwrap();
+            new.save_wrapped_master_key(SecretBytes::new_master_key([9u8; 32])).unwrap();
+            new.save_account_email("u@example.com").unwrap();
+        }
+        {
+            let legacy = KeyedMemoryStore::legacy(vault.clone());
+            // Only key + email remain (token was deleted before the crash).
+            legacy.save_wrapped_master_key(SecretBytes::new_master_key([9u8; 32])).unwrap();
+            legacy.save_account_email("u@example.com").unwrap();
+        }
+
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        migrate_legacy_keychain_between(&new, &legacy).expect("re-run converges");
+
+        assert!(!legacy_present(&vault), "leftover legacy key/email swept");
+    }
+
+    /// PARTIAL-WRITE HOLE (the §3 step-2 fix): new token present but new key
+    /// MISSING while legacy STILL HAS a key. The short-circuit must NOT declare
+    /// victory — it must fall through and re-run 4-6 so the key is recovered.
+    #[test]
+    fn migration_partial_write_new_token_no_key_falls_through() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok", Some([9u8; 32]), Some("u@example.com"));
+        // Model the partial write: new TOKEN landed, new KEY did not.
+        {
+            let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+            new.save_session_token(&SessionToken::new("tok").unwrap()).unwrap();
+            // deliberately NO key write
+        }
+
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        migrate_legacy_keychain_between(&new, &legacy).expect("falls through and completes");
+
+        // The fall-through must have recovered the key from legacy.
+        assert_eq!(
+            new.load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
+            &[9u8; 32],
+            "partial-write hole: key must be recovered, not stranded"
+        );
+        assert!(!legacy_present(&vault), "legacy swept after completing migration");
+    }
+
+    /// Verify-fails: the new-key write silently drops, so step 5's readback finds
+    /// the key missing. The migration MUST return Err WITHOUT deleting legacy, so
+    /// the vault stays usable through the legacy fallback.
+    #[test]
+    fn migration_verify_fails_keeps_legacy() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok", Some([9u8; 32]), Some("u@example.com"));
+
+        let new = KeyDropStore {
+            inner: KeyedMemoryStore::with_account(vault.clone(), TEST_ID),
+        };
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        let result = migrate_legacy_keychain_between(&new, &legacy);
+
+        assert!(result.is_err(), "verify-readback failure must surface as Err");
+        // CRITICAL: legacy NOT deleted — the vault is still recoverable.
+        assert!(
+            legacy_present(&vault),
+            "legacy MUST survive a failed verify (anti-lockout invariant)"
+        );
+    }
+
+    /// Fresh/clean install: no legacy token at all → migration is a no-op Ok and
+    /// writes nothing. (Models the legacy-fallback's "nothing to migrate" case.)
+    #[test]
+    fn migration_no_legacy_is_noop() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+
+        migrate_legacy_keychain_between(&new, &legacy).expect("no-op on clean install");
+
+        assert!(new.load_session_token().unwrap().is_none());
+        assert!(!legacy_present(&vault));
+        assert!(vault.lock().unwrap().is_empty(), "nothing written on a clean install");
+    }
+
+    /// LEGACY FALLBACK semantics: after migration the segmented store serves the
+    /// session; but a store that only ever had legacy entries (migration skipped)
+    /// still reads them through the legacy handle — the read path the anti-lockout
+    /// fallback relies on. Token-only legacy (no key) also migrates cleanly.
+    #[test]
+    fn migration_token_only_legacy_migrates_and_legacy_fallback_reads() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        // Token-only legacy (an install that signed in but never provisioned a
+        // local key — onboarding would prompt for the recovery phrase).
+        seed_legacy(&vault, "tok", None, None);
+
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        let legacy = KeyedMemoryStore::legacy(vault.clone());
+        migrate_legacy_keychain_between(&new, &legacy).expect("token-only migration");
+
+        assert_eq!(
+            new.load_session_token().unwrap().unwrap().expose_for_request(),
+            "tok"
+        );
+        assert!(new.load_wrapped_master_key().unwrap().is_none());
+        assert!(!legacy_present(&vault), "legacy token swept after token-only migration");
+
+        // Legacy-fallback read sanity: a legacy handle over a vault that still has
+        // a flat token returns it (the fallback the unlock path performs).
+        let vault2: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault2, "legacy-tok", Some([3u8; 32]), Some("e@example.com"));
+        let new2 = KeyedMemoryStore::with_account(vault2.clone(), TEST_ID);
+        let legacy2 = KeyedMemoryStore::legacy(vault2.clone());
+        // Segmented lookup is empty (migration hasn't run) → fall back to legacy.
+        assert!(new2.load_session_token().unwrap().is_none());
+        assert_eq!(
+            legacy2.load_session_token().unwrap().unwrap().expose_for_request(),
+            "legacy-tok"
+        );
     }
 }
 

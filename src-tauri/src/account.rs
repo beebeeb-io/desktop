@@ -159,19 +159,22 @@ impl AccountRuntime {
 /// `accounts[0]` and the single `DesktopConfig` still yields the same sync root.
 ///
 /// ───────────────────────────────────────────────────────────────────────────
-/// ⚠️  PHASE 1 MUST PERSIST `accounts[0].id`.  ⚠️
-/// The id minted here is **process-EPHEMERAL** — a fresh UUID every launch.
-/// This is SAFE in Phase 0 *only because nothing on disk or in the keychain
-/// keys off it yet* (the keychain still uses the fixed `io.beebeeb.app` trio,
-/// the sync root comes from the single `DesktopConfig`, the Windows shell Id is
-/// path-derived). The moment Phase 1 introduces per-account keychain segments
-/// or an on-disk `accounts[]` table, this id becomes load-bearing: if it is
-/// still minted fresh each launch, every keychain segment from the previous run
-/// ORPHANS (the secrets are stranded under a dead id). Phase 1's FIRST step is
-/// to persist `accounts[0].id` (and read it back here instead of minting) —
-/// do NOT ship per-account persistence without that.
+/// ✅  PHASE 1: the id is now PERSISTED, not minted here.  ✅
+/// The caller (`setup()`) computes the account id FIRST via
+/// `DesktopConfig::ensure_account_id` — which mints a fresh UUID v4 and writes it
+/// to `desktop.toml` on the first login, then returns the same value on every
+/// subsequent launch — and passes it in. This closes the Phase-0
+/// orphan-on-relaunch hole: because the keychain secrets are now segmented under
+/// this id (`io.beebeeb.app/<id>/<leaf>`), a fresh-each-launch id would strand
+/// every previous run's secrets under a dead id. Persisting the id BEFORE any
+/// segment is written under it is the invariant that keeps auto-unlock working
+/// across relaunches.
+///
+/// Still idempotent + invisible at N=1: a no-op if `accounts` is already
+/// non-empty, so a second call (or a fresh login that already created the
+/// account) can never spawn a second runtime.
 /// ───────────────────────────────────────────────────────────────────────────
-pub fn synthesize_single_account(state: &AppState) {
+pub fn synthesize_single_account(state: &AppState, id: AccountId) {
     let mut accounts = match state.accounts.lock() {
         Ok(guard) => guard,
         Err(_) => return,
@@ -179,8 +182,7 @@ pub fn synthesize_single_account(state: &AppState) {
     if !accounts.is_empty() {
         return;
     }
-    // Process-ephemeral id (see the loud Phase-1 note above).
-    let id = AccountId::new_v4();
+    // Persisted id, supplied by the caller (see the Phase-1 note above).
     accounts.push(Arc::new(AccountRuntime::new(id.clone())));
     if let Ok(mut active) = state.active_account_id.lock() {
         *active = Some(id);
@@ -192,11 +194,17 @@ mod tests {
     use super::*;
     use crate::AppState;
 
+    /// A fixed id stands in for the value `DesktopConfig::ensure_account_id`
+    /// persists, so these tests don't depend on a random mint.
+    fn fixed_id() -> AccountId {
+        AccountId("acct-fixed-0001".to_string())
+    }
+
     #[test]
     fn synthesize_is_idempotent() {
         let state = AppState::default();
-        synthesize_single_account(&state);
-        synthesize_single_account(&state);
+        synthesize_single_account(&state, fixed_id());
+        synthesize_single_account(&state, fixed_id());
         assert_eq!(
             state.accounts.lock().unwrap().len(),
             1,
@@ -205,9 +213,25 @@ mod tests {
     }
 
     #[test]
+    fn synthesize_uses_the_supplied_persisted_id() {
+        // The synthesized account must carry exactly the id the caller passes
+        // (the persisted desktop.toml account_id), not a freshly-minted one —
+        // this is what keeps the keychain segments stable across relaunches.
+        let state = AppState::default();
+        synthesize_single_account(&state, fixed_id());
+        let acct = state.active_account().expect("resolves after synthesis");
+        assert_eq!(acct.id, fixed_id(), "runtime id must equal the supplied id");
+        assert_eq!(
+            state.active_account_id.lock().unwrap().as_ref(),
+            Some(&fixed_id()),
+            "active id must equal the supplied id"
+        );
+    }
+
+    #[test]
     fn active_account_after_synthesis_is_default_shape() {
         let state = AppState::default();
-        synthesize_single_account(&state);
+        synthesize_single_account(&state, fixed_id());
         let acct = state
             .active_account()
             .expect("active account resolves after synthesis");
