@@ -1,70 +1,181 @@
 /**
- * WindowsTray — Windows 11 taskbar tray flyout.
+ * WindowsTray — Windows 11 taskbar tray flyout (OneDrive-class).
  *
- * Mounted when ?window=tray is in the query string. The window is small
- * (400 × 280) and frameless; the Tauri side positions it above the system
- * tray icon. Faithfully ported from HiWindowsTray in design/hifi/hifi-desktop.jsx.
+ * Mounted when ?window=tray is in the query string. The window is a frameless,
+ * transparent, always-on-top, skip-taskbar flyout (see tauri.conf.json) that the
+ * Tauri side positions above the system-tray icon (lib.rs on_tray_icon_event).
  *
- * Invoke commands used:
- *   sync_status, show_main_app_window
- *   tray_pause_sync, tray_resume_sync
- *   tray_recent_activity → returns TrayActivity[]
- *   desktop_storage_summary → returns StorageSummary
+ * Native behaviour:
+ *   • Hides on blur (click-outside dismiss), like OneDrive — getCurrentWindow()
+ *     .onFocusChanged → hide() when focus is lost.
+ *   • No window-chrome buttons — a native flyout has no titlebar.
+ *   • The single visible surface is one rounded card; the document itself is
+ *     transparent (design.css `.tray-window`), so there is no opaque rectangle
+ *     behind the card's rounded corners.
+ *
+ * Layout (top → bottom):
+ *   • Header   — BrandMark + "Beebeeb" + settings gear (→ show_settings_window).
+ *   • Status   — green check + a sync-state line derived from `sync_status`.
+ *   • Recent   — scrollable list of recently-changed files (desktopFileOverview).
+ *   • Actions  — Open folder · View online · Recycle bin.
+ *
+ * Data sources:
+ *   sync_status              → SyncStatus (logged_in / engine / syncing / conflicts)
+ *   desktop_file_overview(8) → FileOverview.recent[] (path, size_bytes, status, modified_at)
+ *   show_settings_window     → opens the Windows settings shell
+ *   open_finder_location     → opens the sync root in Explorer
+ *   openUrl                  → app.beebeeb.io / app.beebeeb.io/trash
  */
 
 import { useEffect, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { command, formatBytes, loadSyncStatus, type StorageSummary, type SyncStatus } from './desktopApi'
-import { useRegionCity } from './windows/useRegion'
+import {
+  command,
+  desktopFileOverview,
+  loadSyncStatus,
+  openUrl,
+  type FileOverview,
+  type RecentFile,
+  type SyncStatus,
+} from './desktopApi'
+import { T } from './windows/ui'
 
-export interface TrayActivity {
-  id: string
-  name: string
-  status: string
-  icon: 'file' | 'shield' | 'cloud' | 'pause'
-  active?: boolean
-  warn?: boolean
-  ok?: boolean
-  progress?: number
+// ── File-type classification (ported from repos/web file-icon.tsx getFileType,
+//    pure, no @beebeeb/shared import) ─────────────────────────────────────────
+
+type TrayFileType = 'pdf' | 'image' | 'video' | 'audio' | 'code' | 'archive' | 'default'
+
+function getFileType(name: string): TrayFileType {
+  const ext = name.split('.').pop()?.toLowerCase() ?? ''
+
+  if (ext === 'pdf') return 'pdf'
+
+  if (
+    ['jpg', 'jpeg', 'png', 'gif', 'heic', 'heif', 'webp', 'svg', 'ico', 'bmp', 'tiff', 'tif', 'avif', 'dng', 'cr2', 'cr3', 'nef', 'arw', 'orf', 'rw2', 'raf'].includes(ext)
+  )
+    return 'image'
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', 'hevc'].includes(ext)) return 'video'
+  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma', 'm4a', 'aiff', 'opus'].includes(ext)) return 'audio'
+
+  if (
+    ['js', 'jsx', 'ts', 'tsx', 'py', 'rs', 'go', 'rb', 'java', 'kt', 'swift', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'r', 'scala', 'zig', 'asm', 'sql', 'graphql', 'proto'].includes(ext)
+  )
+    return 'code'
+  if (['html', 'htm', 'css', 'scss', 'sass', 'less', 'vue', 'svelte', 'astro'].includes(ext)) return 'code'
+
+  if (['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz', 'zst', 'lz', 'dmg', 'iso'].includes(ext)) return 'archive'
+
+  return 'default'
 }
 
-// ── Mini icon set for the tray (inline SVG, no external dep) ───────────────
+// Per-type tint for the file glyph. Neutral by default; amber is reserved for
+// encryption state only (brand rule), so these are non-amber category hues.
+const FILE_COLOR: Record<TrayFileType, string> = {
+  pdf: '#dc2626',
+  image: '#0d9488',
+  video: '#9333ea',
+  audio: '#db2777',
+  code: '#0f766e',
+  archive: '#92400e',
+  default: T.ink3,
+}
 
-function TrayIcon({ name, size = 11, color = 'currentColor' }: { name: string; size?: number; color?: string }) {
+// ── Inline SVG file glyphs (no external dep) ─────────────────────────────────
+
+function FileGlyph({ type, size = 13, color }: { type: TrayFileType; size?: number; color: string }) {
   const s = size
-  switch (name) {
-    case 'shield':
+  const common = { width: s, height: s, viewBox: '0 0 16 16', fill: 'none', stroke: color, strokeWidth: 1.4 }
+  switch (type) {
+    case 'pdf':
       return (
-        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round">
-          <path d="M8 2 L13 4 L13 8 C13 11.5 10.5 13.5 8 14.5 C5.5 13.5 3 11.5 3 8 L3 4 Z" />
-        </svg>
-      )
-    case 'file':
-      return (
-        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.5">
+        <svg {...common}>
           <path d="M4 2 L10 2 L12 4.5 L12 14 L4 14 Z" strokeLinejoin="round" />
-          <line x1="6" y1="7" x2="10" y2="7" />
-          <line x1="6" y1="9.5" x2="10" y2="9.5" />
+          <path d="M6 8 L10 8 M6 10.3 L9 10.3" strokeLinecap="round" />
         </svg>
       )
-    case 'cloud':
+    case 'image':
       return (
-        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.5">
-          <path d="M4 11 C2 11 2 8 4 8 C4 5.5 7 4 9.5 5 C11 4 14 5.5 13 8 C15 8 15 11 13 11 Z" />
+        <svg {...common}>
+          <rect x="2.5" y="3" width="11" height="10" rx="1.5" />
+          <circle cx="6" cy="6.5" r="1.1" fill={color} stroke="none" />
+          <path d="M3 12 L6.5 8.5 L9 11 L11 9 L13.5 12" strokeLinejoin="round" />
         </svg>
       )
-    case 'pause':
+    case 'video':
       return (
-        <svg width={s} height={s} viewBox="0 0 16 16" fill={color}>
-          <rect x="4" y="3" width="2.5" height="10" rx="1" />
-          <rect x="9.5" y="3" width="2.5" height="10" rx="1" />
+        <svg {...common}>
+          <rect x="2" y="4" width="9" height="8" rx="1.5" />
+          <path d="M11 7 L14 5 L14 11 L11 9 Z" strokeLinejoin="round" />
         </svg>
       )
-    case 'settings':
+    case 'audio':
       return (
-        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.5">
+        <svg {...common}>
+          <path d="M6 11 L6 4 L12 2.5 L12 9.5" strokeLinejoin="round" />
+          <circle cx="4.5" cy="11.5" r="1.6" />
+          <circle cx="10.5" cy="9.8" r="1.6" />
+        </svg>
+      )
+    case 'code':
+      return (
+        <svg {...common} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M6 5 L3 8 L6 11" />
+          <path d="M10 5 L13 8 L10 11" />
+        </svg>
+      )
+    case 'archive':
+      return (
+        <svg {...common}>
+          <path d="M4 2 L12 2 L12 14 L4 14 Z" strokeLinejoin="round" />
+          <path d="M8 2 L8 4 M8 5.5 L8 7.5" strokeLinecap="round" />
+          <rect x="7" y="8" width="2" height="2.4" rx="0.4" />
+        </svg>
+      )
+    default:
+      return (
+        <svg {...common}>
+          <path d="M4 2 L10 2 L12 4.5 L12 14 L4 14 Z" strokeLinejoin="round" />
+          <path d="M6 7.5 L10 7.5 M6 10 L10 10" strokeLinecap="round" />
+        </svg>
+      )
+  }
+}
+
+// ── Small action-bar / header icons ──────────────────────────────────────────
+
+function ActionIcon({ name, size = 13, color = 'currentColor' }: { name: string; size?: number; color?: string }) {
+  const s = size
+  const common = { width: s, height: s, viewBox: '0 0 16 16', fill: 'none', stroke: color, strokeWidth: 1.4 }
+  switch (name) {
+    case 'cog':
+      return (
+        <svg {...common}>
           <circle cx="8" cy="8" r="2.5" />
-          <path d="M8 1 L8 3 M8 13 L8 15 M1 8 L3 8 M13 8 L15 8 M3.2 3.2 L4.6 4.6 M11.4 11.4 L12.8 12.8 M12.8 3.2 L11.4 4.6 M4.6 11.4 L3.2 12.8" strokeLinecap="round" />
+          <path
+            d="M8 1.5 L8 3.5 M8 12.5 L8 14.5 M1.5 8 L3.5 8 M12.5 8 L14.5 8 M3.5 3.5 L5 5 M11 11 L12.5 12.5 M12.5 3.5 L11 5 M5 11 L3.5 12.5"
+            strokeLinecap="round"
+          />
+        </svg>
+      )
+    case 'folder':
+      return (
+        <svg {...common}>
+          <path d="M2 5 L2 13 L14 13 L14 6 L7 6 L5.5 4 L2 4 Z" strokeLinejoin="round" />
+        </svg>
+      )
+    case 'external':
+      return (
+        <svg {...common} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M9 2 L14 2 L14 7 M14 2 L7.5 8.5" />
+          <path d="M12 9.5 L12 13 L3 13 L3 4 L6.5 4" />
+        </svg>
+      )
+    case 'trash':
+      return (
+        <svg {...common} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 4.5 L13 4.5" />
+          <path d="M5.5 4.5 L5.5 3 L10.5 3 L10.5 4.5" />
+          <path d="M4.2 4.5 L4.8 13.5 L11.2 13.5 L11.8 4.5" />
         </svg>
       )
     default:
@@ -72,73 +183,118 @@ function TrayIcon({ name, size = 11, color = 'currentColor' }: { name: string; s
   }
 }
 
-// Amber hex mark (the Beebeeb "b" brand mark)
+// Amber hex mark (the Beebeeb "b" brand mark).
 function BrandMark() {
   return (
-    <div style={{
-      width: 26,
-      height: 26,
-      borderRadius: 7,
-      background: 'oklch(0.97 0.03 92)',
-      border: '1px solid oklch(0.66 0.15 72)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: 0,
-    }}>
-      <span style={{
-        fontFamily: "'Inter', sans-serif",
-        fontWeight: 800,
-        fontSize: 13,
-        color: 'oklch(0.66 0.15 72)',
-        lineHeight: 1,
-        letterSpacing: '-0.02em',
-      }}>b</span>
+    <div
+      style={{
+        width: 26,
+        height: 26,
+        borderRadius: 7,
+        background: 'oklch(0.97 0.03 92)',
+        border: '1px solid oklch(0.66 0.15 72)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: T.fontSans,
+          fontWeight: 800,
+          fontSize: 13,
+          color: 'oklch(0.66 0.15 72)',
+          lineHeight: 1,
+          letterSpacing: '-0.02em',
+        }}
+      >
+        b
+      </span>
     </div>
   )
 }
 
-// Spinner for an active sync item
-function Spinner({ pct }: { pct: number }) {
-  return (
-    <div style={{
-      marginTop: 5,
-      height: 2,
-      background: 'oklch(0.945 0.008 82)',
-      borderRadius: 999,
-      overflow: 'hidden',
-    }}>
-      <div style={{
-        height: '100%',
-        width: `${pct}%`,
-        background: 'oklch(0.82 0.17 84)',
-        borderRadius: 'inherit',
-        transition: 'width 0.4s ease',
-      }} />
-    </div>
-  )
+// ── Pure helpers ─────────────────────────────────────────────────────────────
+
+/** Last path segment (handles both `/` and `\` separators). */
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : path
 }
 
-// Checkmark for completed items
-function CheckMark() {
-  return (
-    <span style={{
-      fontSize: 11,
-      color: 'oklch(0.55 0.14 155)',
-      lineHeight: 1,
-    }}>&#x2713;</span>
-  )
+/** The folder a file lives in — the path segment before the basename. */
+function parentFolder(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  return parts.length >= 2 ? parts[parts.length - 2] : 'Beebeeb'
 }
+
+/** Honest per-status subline. `<F>` is the parent folder. */
+function statusSubline(status: string, folder: string): string {
+  switch (status) {
+    case 'cloud_only':
+      return `Online-only in ${folder}`
+    case 'downloading':
+      return `Downloading to ${folder}`
+    case 'conflict':
+      return `Needs review — ${folder}`
+    case 'error':
+      return `Sync error — ${folder}`
+    case 'local':
+    case 'uploading':
+    default:
+      return `Synced to ${folder}`
+  }
+}
+
+/** Relative time from a Unix-epoch-seconds timestamp, e.g. "12 hr ago". */
+function relativeTime(epochSeconds: number): string {
+  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return ''
+  const deltaMs = Date.now() - epochSeconds * 1000
+  const sec = Math.max(0, Math.round(deltaMs / 1000))
+  if (sec < 45) return 'just now'
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min} min ago`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr} hr ago`
+  const day = Math.round(hr / 24)
+  if (day < 7) return `${day} day${day === 1 ? '' : 's'} ago`
+  const wk = Math.round(day / 7)
+  if (wk < 5) return `${wk} wk${wk === 1 ? '' : 's'} ago`
+  const mo = Math.round(day / 30)
+  if (mo < 12) return `${mo} mo ago`
+  const yr = Math.round(day / 365)
+  return `${yr} yr${yr === 1 ? '' : 's'} ago`
+}
+
+// Sublines that warn (need attention) get a warm/neutral non-amber tint.
+const WARN_STATUSES = new Set(['conflict', 'error'])
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 export default function WindowsTray() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
-  const [paused, setPaused] = useState(false)
-  const [activities, setActivities] = useState<TrayActivity[]>([])
-  const [storage, setStorage] = useState<StorageSummary | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
-  const regionCity = useRegionCity()
+  const [recent, setRecent] = useState<RecentFile[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [signedOut, setSignedOut] = useState(false)
 
-  // Poll sync status
+  // Hide on blur (click-outside dismiss), like OneDrive. Set up once on mount.
+  useEffect(() => {
+    const win = getCurrentWindow()
+    let unlisten: (() => void) | undefined
+    void win
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused) void win.hide()
+      })
+      .then((fn) => {
+        unlisten = fn
+      })
+    return () => {
+      unlisten?.()
+    }
+  }, [])
+
+  // Poll sync status (~3s).
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
@@ -153,35 +309,21 @@ export default function WindowsTray() {
     }
   }, [])
 
-  // Load real storage summary on demand
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      const result = await command<StorageSummary>('desktop_storage_summary')
-      if (!cancelled && result.ok) setStorage(result.value)
-    }
-    void load()
-    // Refresh every 60s — storage totals change slowly
-    const id = window.setInterval(load, 60_000)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [])
-
-  // Load real recent activity — no fallback fake rows
+  // Poll recent files (~5s). A failed overview (e.g. vault locked) → empty
+  // "Sign in" state, not an error banner.
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const result = await command<TrayActivity[]>('tray_recent_activity')
+      const result = await command<FileOverview>('desktop_file_overview', { recentLimit: 8 })
       if (cancelled) return
       if (result.ok) {
-        setActivities(result.value)
+        setRecent(result.value.recent ?? [])
+        setSignedOut(false)
       } else {
-        // Real command failed for a real reason — surface it, show empty list
-        setActionError(result.reason)
-        setActivities([])
+        setRecent([])
+        setSignedOut(true)
       }
+      setLoaded(true)
     }
     void refresh()
     const id = window.setInterval(refresh, 5000)
@@ -191,289 +333,297 @@ export default function WindowsTray() {
     }
   }, [])
 
-  const syncedLabel = status?.logged_in
-    ? status.engine === 'running'
-      ? status.syncing > 0
-        ? `${status.syncing} item${status.syncing === 1 ? '' : 's'} syncing`
-        : 'Up to date'
-      : 'Sync paused'
-    : 'Signed out'
+  // Status line — green for "synced"; honest phrasing for in-flight / paused /
+  // conflicts / signed out. Amber is encryption-only, so this never uses amber.
+  const statusLine: string = (() => {
+    if (!status?.logged_in) return 'Sign in to start syncing'
+    if (status.conflicts > 0) return `${status.conflicts} conflict${status.conflicts === 1 ? '' : 's'} to review`
+    if (status.syncing > 0) return `${status.syncing} file${status.syncing === 1 ? '' : 's'} syncing`
+    if (status.engine !== 'running') return 'Sync paused'
+    return 'Your files are synced'
+  })()
+  const statusIsGood = !!status?.logged_in && status.conflicts === 0 && status.engine === 'running'
 
-  // Real storage line: show used/total when available, honest neutral otherwise
-  const storageLine = storage != null
-    ? `${formatBytes(storage.pinned_bytes + storage.cache_bytes)} on this PC`
-    : 'E2E encrypted'
-
-  const handlePause = async () => {
-    setActionError(null)
-    const cmd = paused ? 'tray_resume_sync' : 'tray_pause_sync'
-    const result = await command<void>(cmd)
-    if (result.ok) {
-      setPaused((prev) => !prev)
-    } else {
-      setActionError(result.reason)
-    }
+  const openSettings = async () => {
+    await command<void>('show_settings_window')
+    void getCurrentWindow().hide()
   }
 
-  const handleOpenApp = async () => {
-    setActionError(null)
-    const result = await command<void>('show_main_app_window')
-    if (!result.ok) {
-      setActionError(result.reason)
-    }
+  const openFolder = async () => {
+    await command<void>('open_finder_location')
+    void getCurrentWindow().hide()
+  }
+
+  const viewOnline = async () => {
+    await openUrl('https://app.beebeeb.io')
+    void getCurrentWindow().hide()
+  }
+
+  const openRecycleBin = async () => {
+    await openUrl('https://app.beebeeb.io/trash')
+    void getCurrentWindow().hide()
   }
 
   return (
-    <div style={{
-      width: 400,
-      height: 280,
-      background: 'oklch(0.985 0.004 85)',
-      borderRadius: 10,
-      overflow: 'hidden',
-      border: '1px solid oklch(0.83 0.01 80)',
-      boxShadow: '0 22px 60px -18px rgba(0,0,0,0.35), 0 0 0 1px oklch(0.83 0.01 80)',
-      display: 'flex',
-      flexDirection: 'column',
-      fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
-      fontSize: 13,
-      color: 'oklch(0.18 0.01 70)',
-      position: 'relative',
-    }}>
-
-      {/* Header */}
-      <div style={{
-        padding: '12px 14px 10px',
+    <div
+      style={{
+        // Small inset so the card's drop shadow has room to render inside the
+        // transparent window without being clipped.
+        position: 'absolute',
+        inset: 8,
+        background: T.paper,
+        borderRadius: 12,
+        overflow: 'hidden',
+        border: `1px solid ${T.line2}`,
+        boxShadow: '0 24px 60px -16px rgba(0,0,0,0.40)',
         display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        borderBottom: '1px solid oklch(0.90 0.008 82)',
-        background: 'oklch(0.985 0.004 85)',
-      }}>
+        flexDirection: 'column',
+        fontFamily: T.fontSans,
+        fontSize: 13,
+        color: T.ink,
+      }}
+    >
+      {/* Header — brand + settings gear (no window-chrome buttons) */}
+      <div
+        style={{
+          padding: '12px 12px 12px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          borderBottom: `1px solid ${T.line}`,
+        }}
+      >
         <BrandMark />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.2 }}>Beebeeb</div>
-          <div style={{ fontSize: 11, color: 'oklch(0.52 0.01 78)', marginTop: 2, lineHeight: 1.3 }}>
-            {syncedLabel} &middot; {storageLine}
-          </div>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em' }}>
+          Beebeeb
         </div>
-        <div style={{ display: 'flex', gap: 2, marginLeft: 'auto' }}>
-          <button
-            title="Minimize"
-            onClick={() => { void getCurrentWindow().hide() }}
-            style={{
-              width: 24,
-              height: 24,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 11,
-              color: 'oklch(0.52 0.01 78)',
-              background: 'transparent',
-              border: 'none',
-              borderRadius: 4,
-              cursor: 'pointer',
-              lineHeight: 1,
-            }}
-          >
-            –
-          </button>
-          <button
-            title="Close"
-            onClick={() => { void getCurrentWindow().hide() }}
-            style={{
-              width: 24,
-              height: 24,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 11,
-              color: 'oklch(0.52 0.01 78)',
-              background: 'transparent',
-              border: 'none',
-              borderRadius: 4,
-              cursor: 'pointer',
-              lineHeight: 1,
-            }}
-          >
-            ×
-          </button>
-        </div>
-      </div>
-
-      {/* Activity list */}
-      <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
-        {activities.length === 0 ? (
-          <div style={{
+        <button
+          title="Settings"
+          onClick={() => void openSettings()}
+          style={{
+            width: 28,
+            height: 28,
             display: 'flex',
-            flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            height: '100%',
-            gap: 6,
-          }}>
-            <TrayIcon name="shield" size={18} color="oklch(0.68 0.008 80)" />
-            <span style={{
-              fontSize: 11,
-              color: 'oklch(0.52 0.01 78)',
-              fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
-            }}>
-              No recent activity
+            color: T.ink3,
+            background: 'transparent',
+            border: 'none',
+            borderRadius: 6,
+            cursor: 'pointer',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = T.paper3
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'transparent'
+          }}
+        >
+          <ActionIcon name="cog" size={15} />
+        </button>
+      </div>
+
+      {/* Status line */}
+      <div
+        style={{
+          padding: '10px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          borderBottom: `1px solid ${T.line}`,
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            width: 16,
+            height: 16,
+            borderRadius: 999,
+            background: statusIsGood ? T.green : T.paper3,
+            color: statusIsGood ? 'white' : T.ink3,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}
+        >
+          {statusIsGood ? (
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" />
+            </svg>
+          ) : (
+            <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M8 4 L8 9" />
+              <circle cx="8" cy="12" r="0.6" fill="currentColor" stroke="none" />
+            </svg>
+          )}
+        </span>
+        <span style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2 }}>{statusLine}</span>
+      </div>
+
+      {/* Recent files list */}
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        {!loaded ? null : signedOut || recent.length === 0 ? (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: '100%',
+              gap: 8,
+              padding: 20,
+              textAlign: 'center',
+            }}
+          >
+            <FileGlyph type="default" size={22} color={T.ink4} />
+            <span style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4 }}>
+              {signedOut ? 'Sign in to see your recent files' : 'No recent files yet'}
             </span>
           </div>
         ) : (
-          activities.map((row) => (
-            <div
-              key={row.id}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '28px 1fr auto',
-                alignItems: 'center',
-                gap: 10,
-                padding: '8px 14px',
-                background: row.active ? 'oklch(0.97 0.03 92)' : 'transparent',
-              }}
-            >
-              <div style={{
-                width: 22,
-                height: 22,
-                borderRadius: 6,
-                background: 'oklch(0.968 0.006 85)',
-                border: '1px solid oklch(0.90 0.008 82)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}>
-                <TrayIcon
-                  name={row.icon}
-                  size={11}
-                  color={row.active ? 'oklch(0.66 0.15 72)' : 'oklch(0.52 0.01 78)'}
-                />
-              </div>
-
-              <div style={{ minWidth: 0 }}>
-                <div style={{
-                  fontSize: 11.5,
-                  fontWeight: 500,
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                }}>
-                  {row.name}
+          recent.map((file) => {
+            const name = basename(file.path)
+            const folder = parentFolder(file.path)
+            const type = getFileType(name)
+            const warn = WARN_STATUSES.has(file.status)
+            return (
+              <div
+                key={file.path}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '30px 1fr auto',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '9px 14px',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = T.paper2
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                <div
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: 6,
+                    background: T.paper2,
+                    border: `1px solid ${T.line}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <FileGlyph type={type} size={14} color={FILE_COLOR[type]} />
                 </div>
-                <div style={{
-                  fontSize: 11,
-                  color: row.warn ? 'oklch(0.55 0.12 55)' : 'oklch(0.52 0.01 78)',
-                  marginTop: 2,
-                  lineHeight: 1.3,
-                }}>
-                  {row.status}
-                </div>
-                {row.active && row.progress !== undefined && (
-                  <Spinner pct={row.progress} />
-                )}
-              </div>
 
-              <div style={{ width: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {row.ok && <CheckMark />}
+                <div style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 11.5,
+                      fontWeight: 500,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      fontFamily: T.fontMono,
+                      color: T.ink,
+                    }}
+                  >
+                    {name}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: warn ? 'oklch(0.55 0.12 55)' : T.ink3,
+                      marginTop: 2,
+                      lineHeight: 1.3,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {statusSubline(file.status, folder)}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    fontSize: 10.5,
+                    color: T.ink3,
+                    fontFamily: T.fontMono,
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                >
+                  {relativeTime(file.modified_at)}
+                </div>
               </div>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
 
-      {/* Footer bar */}
-      <div style={{
-        borderTop: '1px solid oklch(0.90 0.008 82)',
-        padding: '8px 14px',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        background: 'oklch(0.968 0.006 85)',
-        flexShrink: 0,
-      }}>
-        <TrayIcon name="shield" size={11} color="oklch(0.66 0.15 72)" />
-        <span style={{
-          fontSize: 11,
-          color: 'oklch(0.34 0.012 75)',
-          lineHeight: 1,
-          fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        }}>
-          {regionCity} · E2E encrypted
-        </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          <button
-            onClick={() => void handlePause()}
-            style={{
-              padding: '3px 8px',
-              fontSize: 11,
-              fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
-              fontWeight: 500,
-              background: 'transparent',
-              border: '1px solid transparent',
-              borderRadius: 4,
-              cursor: 'pointer',
-              color: 'oklch(0.34 0.012 75)',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = 'oklch(0.945 0.008 82)' }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
-          >
-            {paused ? 'Resume' : 'Pause'}
-          </button>
-          <button
-            onClick={() => void handleOpenApp()}
-            style={{
-              padding: '3px 8px',
-              fontSize: 11,
-              fontFamily: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
-              fontWeight: 500,
-              background: 'transparent',
-              border: '1px solid transparent',
-              borderRadius: 4,
-              cursor: 'pointer',
-              color: 'oklch(0.34 0.012 75)',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = 'oklch(0.945 0.008 82)' }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
-          >
-            Open Beebeeb
-          </button>
-        </div>
+      {/* Action bar — 3 equal ghost buttons */}
+      <div
+        style={{
+          borderTop: `1px solid ${T.line}`,
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr 1fr',
+          background: T.paper2,
+          flexShrink: 0,
+        }}
+      >
+        <ActionButton icon="folder" label="Open folder" onClick={() => void openFolder()} />
+        <ActionButton icon="external" label="View online" onClick={() => void viewOnline()} borderLeft />
+        <ActionButton icon="trash" label="Recycle bin" onClick={() => void openRecycleBin()} borderLeft />
       </div>
-
-      {/* Inline action error (non-blocking) */}
-      {actionError && (
-        <div style={{
-          position: 'absolute',
-          bottom: 44,
-          left: 14,
-          right: 14,
-          padding: '6px 10px',
-          background: 'oklch(0.98 0.02 25)',
-          border: '1px solid oklch(0.88 0.05 25)',
-          borderRadius: 6,
-          fontSize: 11,
-          color: 'oklch(0.42 0.15 25)',
-          lineHeight: 1.4,
-        }}>
-          {actionError}
-        </div>
-      )}
-
-      {/* Caret pointing down to the tray icon */}
-      <div style={{
-        position: 'absolute',
-        bottom: -6,
-        right: 40,
-        width: 12,
-        height: 12,
-        background: 'oklch(0.968 0.006 85)',
-        borderRight: '1px solid oklch(0.83 0.01 80)',
-        borderBottom: '1px solid oklch(0.83 0.01 80)',
-        transform: 'rotate(45deg)',
-        pointerEvents: 'none',
-      }} />
     </div>
+  )
+}
+
+function ActionButton({
+  icon,
+  label,
+  onClick,
+  borderLeft,
+}: {
+  icon: string
+  label: string
+  onClick: () => void
+  borderLeft?: boolean
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 5,
+        padding: '10px 4px',
+        fontSize: 11,
+        fontFamily: T.fontSans,
+        fontWeight: 500,
+        color: T.ink2,
+        background: 'transparent',
+        border: 'none',
+        borderLeft: borderLeft ? `1px solid ${T.line}` : 'none',
+        cursor: 'pointer',
+        lineHeight: 1,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = T.paper3
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent'
+      }}
+    >
+      <ActionIcon name={icon} size={15} color={T.ink2} />
+      {label}
+    </button>
   )
 }

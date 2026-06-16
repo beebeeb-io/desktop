@@ -4436,16 +4436,18 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                             let _ = win.hide();
                         } else {
                             // Position the flyout above the tray icon.
-                            // The window is 400×280; place it so the bottom-right
+                            // The window is 400×390; place it so the bottom-right
                             // corner aligns with the click position (tray icon centre).
                             // The tray event's `position` is already in physical
                             // pixels, so we pass `Position::Physical` and offset in
                             // the same (physical) coordinate space — no DPI
-                            // conversion needed here.
+                            // conversion needed here. The Y offset matches the
+                            // window height (+ a small gap) so the flyout sits
+                            // above, not over, the taskbar.
                             let _ = win.set_position(tauri::Position::Physical(
                                 tauri::PhysicalPosition {
                                     x: (position.x as i32).saturating_sub(400),
-                                    y: (position.y as i32).saturating_sub(290),
+                                    y: (position.y as i32).saturating_sub(400),
                                 },
                             ));
                             let _ = win.show();

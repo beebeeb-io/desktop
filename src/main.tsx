@@ -45,6 +45,10 @@ let component: ReactElement
 if (which === 'conflict') {
   component = <ConflictWindow />
 } else if (which === 'tray') {
+  // The tray webview is frameless + transparent. Tag <html> so design.css can
+  // force html/body/#root to transparent — otherwise the opaque shared body
+  // background shows behind the flyout card's rounded corners.
+  document.documentElement.classList.add('tray-window')
   component = <WindowsTray />
 } else if (which === 'onboarding' && platform === 'windows') {
   component = <WindowsFirstRun />
