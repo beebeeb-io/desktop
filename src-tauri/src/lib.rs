@@ -1910,6 +1910,117 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
     }
 }
 
+// ── reveal_and_open_file — security helpers ───────────────────────────────────
+//
+// These helpers are NOT cfg-gated so they compile and are testable on any
+// platform (the host CI runs on Linux). Each helper carries an allow(dead_code)
+// attribute that fires only on non-Windows platforms where the helpers are not
+// called from a #[cfg(target_os="windows")] block; under `cargo test` (which
+// compiles the test module) they are referenced and the allow never fires.
+
+/// Layer 1: Pure, cross-platform path-traversal guard.
+///
+/// Validates `rel_path` (as received from the IPC call, before any separator
+/// normalisation) against every traversal vector we know of. Must be kept
+/// platform-deterministic — it must catch Windows-style attacks even when
+/// compiled and tested on Linux.
+///
+/// Returns `Err(reason)` on any dangerous input.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
+    // 1. Reject empty or whitespace-only input.
+    if rel_path.trim().is_empty() {
+        return Err("rel_path must not be empty".to_string());
+    }
+
+    // 2. Reject UNC paths (\\server\share or //server/share).
+    if rel_path.starts_with("\\\\") || rel_path.starts_with("//") {
+        return Err("rel_path must not be a UNC path".to_string());
+    }
+
+    // 3. Reject absolute Unix paths (leading '/') and root-relative Windows
+    //    paths (leading '\').
+    if rel_path.starts_with('/') || rel_path.starts_with('\\') {
+        return Err("rel_path must not be absolute".to_string());
+    }
+
+    // 4. Reject Windows drive-letter prefixes: 'C:' (followed by anything,
+    //    including just 'C:foo' or 'C:\foo'). On Linux `std::path::Component`
+    //    never returns `Prefix`, so we must catch this with string inspection.
+    {
+        let bytes = rel_path.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            return Err("rel_path must not contain a drive-letter prefix".to_string());
+        }
+    }
+
+    // 5. Inspect every path component (split on BOTH '/' and '\') for '..'
+    //    to catch traversal in any separator convention.
+    for component in rel_path.split(['/', '\\']) {
+        if component == ".." {
+            return Err("rel_path must not contain '..' components".to_string());
+        }
+    }
+
+    // 6. Defense-in-depth: also run the platform's path parser.  On Windows
+    //    this catches `Component::Prefix` (drive letters, UNC) and
+    //    `Component::RootDir`; on Linux it catches `Component::RootDir` and
+    //    `Component::ParentDir` for Unix-style paths. Cross-platform: catches
+    //    `Component::ParentDir` regardless of OS.
+    use std::path::{Component, Path};
+    for component in Path::new(rel_path).components() {
+        match component {
+            Component::ParentDir => {
+                return Err("rel_path must not contain '..' (ParentDir) components".to_string());
+            }
+            Component::RootDir => {
+                return Err("rel_path must not be rooted".to_string());
+            }
+            Component::Prefix(_) => {
+                return Err("rel_path must not contain a drive/UNC prefix".to_string());
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Layer 2: Canonicalization containment check.
+///
+/// Returns true iff `full` is strictly inside (or equal to) `root` after
+/// both paths are canonicalized with the same function — keeping the `\\?\`
+/// verbatim prefix consistent on Windows so `starts_with` works correctly.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_contained(root: &std::path::Path, full: &std::path::Path) -> bool {
+    let Ok(root_canon) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(full_canon) = std::fs::canonicalize(full) else {
+        return false;
+    };
+    full_canon.starts_with(&root_canon)
+}
+
+/// Layer 3: Executable denylist for the OPEN step.
+///
+/// Returns true when the file's extension (case-insensitive) is a type that
+/// Windows will execute when opened with `ShellExecute` / `open_path`.
+/// The REVEAL step (explorer /select) is safe for any contained path; this
+/// guard only blocks the `open_path` call.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_dangerous_executable(path: &std::path::Path) -> bool {
+    const DANGEROUS_EXTS: &[&str] = &[
+        "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js",
+        "jse", "wsf", "wsh", "msi", "reg", "cpl", "pif", "msc", "jar",
+    ];
+    let Some(ext) = path.extension() else {
+        return false;
+    };
+    let ext_lower = ext.to_string_lossy().to_lowercase();
+    DANGEROUS_EXTS.contains(&ext_lower.as_str())
+}
+
 /// Open the folder containing a recently-changed file in Windows Explorer
 /// (selecting the file) and then open the file with its default application.
 ///
@@ -1921,11 +2032,21 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
 /// the binary still compiles cross-platform.
 ///
 /// Zero-knowledge: the file path is NOT logged — only a fixed message is.
+///
+/// Security: four layers of defense against path-traversal / RCE:
+///   1. `reject_unsafe_rel_path` — pure string checks before any path join.
+///   2. `is_contained` — canonicalization containment after join.
+///   3. Fallback containment — parent-dir canonicalization when the file
+///      doesn't exist yet (cloud placeholder not yet hydrated).
+///   4. `is_dangerous_executable` — executable denylist on the OPEN step only.
 #[tauri::command]
 fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use tauri_plugin_opener::OpenerExt;
+
+        // ── Layer 1: reject traversal before any path operations ──────────────
+        reject_unsafe_rel_path(&rel_path)?;
 
         let sync_root = DesktopConfig::load()
             .ok()
@@ -1936,7 +2057,36 @@ fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> Result<(), S
         let rel = rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
         let full_path = sync_root.join(&rel);
 
-        // (a) REVEAL — open Explorer selecting the file.
+        // ── Layer 2: canonicalization containment ─────────────────────────────
+        // If the file exists, canonicalize both root and full_path and verify.
+        // If the file doesn't exist yet (cloud placeholder not materialized),
+        // fall back to verifying the parent directory is contained AND the
+        // file name is a single normal component with no embedded separators.
+        let contained = if full_path.exists() {
+            is_contained(&sync_root, &full_path)
+        } else {
+            // Fallback: verify parent is contained.
+            let parent_ok = full_path
+                .parent()
+                .map(|p| is_contained(&sync_root, p))
+                .unwrap_or(false);
+            // And the file name component must not contain any separator.
+            let name_ok = full_path
+                .file_name()
+                .map(|n| {
+                    let s = n.to_string_lossy();
+                    !s.contains('/') && !s.contains('\\')
+                })
+                .unwrap_or(false);
+            parent_ok && name_ok
+        };
+
+        if !contained {
+            tracing::warn!("reveal_and_open_file: path rejected by containment check");
+            return Err("path is outside sync root".to_string());
+        }
+
+        // ── (a) REVEAL — always safe for any contained path ───────────────────
         tracing::info!("reveal_and_open_file: launching Explorer");
         std::process::Command::new("explorer")
             .arg("/select,")
@@ -1944,8 +2094,13 @@ fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> Result<(), S
             .spawn()
             .map_err(|e| format!("reveal in Explorer: {e}"))?;
 
-        // (b) OPEN — launch the file in its default app (fire-and-forget so
-        // cloud-only placeholder hydration doesn't block the IPC call).
+        // ── (b) OPEN — blocked for executable file types (Layer 3) ───────────
+        if is_dangerous_executable(&full_path) {
+            // Zero-knowledge: no path in the log.
+            tracing::warn!("reveal_and_open_file: open blocked for executable file type");
+            return Ok(());
+        }
+
         tracing::info!("reveal_and_open_file: opening file with default app");
         let path_str = full_path.to_string_lossy().into_owned();
         if let Err(e) = app.opener().open_path(path_str, None::<&str>) {
@@ -1959,6 +2114,165 @@ fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> Result<(), S
     {
         let _ = (app, rel_path);
         Err("unsupported".to_string())
+    }
+}
+
+// ── Unit tests for reveal_and_open_file security helpers ─────────────────────
+#[cfg(test)]
+mod reveal_and_open_file_tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── reject_unsafe_rel_path ───────────────────────────────────────────────
+
+    #[test]
+    fn safe_paths_are_accepted() {
+        assert!(reject_unsafe_rel_path("Documents/report.pdf").is_ok());
+        assert!(reject_unsafe_rel_path("a/b/c.txt").is_ok());
+        assert!(reject_unsafe_rel_path("Photos/2024/vacation.jpg").is_ok());
+        assert!(reject_unsafe_rel_path("file.txt").is_ok());
+    }
+
+    #[test]
+    fn rejects_dotdot_forward_slash() {
+        assert!(reject_unsafe_rel_path("../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_dotdot_mid_path() {
+        assert!(reject_unsafe_rel_path("a/../../b").is_err());
+    }
+
+    #[test]
+    fn rejects_unix_absolute() {
+        assert!(reject_unsafe_rel_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_unc_path_backslash() {
+        assert!(reject_unsafe_rel_path("\\\\server\\share").is_err());
+    }
+
+    #[test]
+    fn rejects_unc_path_forward_slash() {
+        assert!(reject_unsafe_rel_path("//server/share").is_err());
+    }
+
+    #[test]
+    fn rejects_windows_drive_absolute() {
+        assert!(reject_unsafe_rel_path("C:\\Windows\\x").is_err());
+    }
+
+    #[test]
+    fn rejects_windows_drive_relative() {
+        // 'C:foo' is still drive-prefixed, not a plain relative path.
+        assert!(reject_unsafe_rel_path("C:foo").is_err());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(reject_unsafe_rel_path("").is_err());
+    }
+
+    #[test]
+    fn rejects_whitespace_only() {
+        assert!(reject_unsafe_rel_path("   ").is_err());
+    }
+
+    #[test]
+    fn rejects_dotdot_backslash_separator() {
+        // Backslash-separated traversal must also be caught.
+        assert!(reject_unsafe_rel_path("a\\..\\b").is_err());
+    }
+
+    // ── is_dangerous_executable ──────────────────────────────────────────────
+
+    #[test]
+    fn exe_is_dangerous() {
+        assert!(is_dangerous_executable(Path::new("evil.exe")));
+    }
+
+    #[test]
+    fn bat_is_dangerous() {
+        assert!(is_dangerous_executable(Path::new("run.bat")));
+    }
+
+    #[test]
+    fn lnk_is_dangerous() {
+        assert!(is_dangerous_executable(Path::new("shortcut.lnk")));
+    }
+
+    #[test]
+    fn ps1_is_dangerous() {
+        assert!(is_dangerous_executable(Path::new("script.ps1")));
+    }
+
+    #[test]
+    fn uppercase_exe_is_dangerous() {
+        // Extension check must be case-insensitive.
+        assert!(is_dangerous_executable(Path::new("evil.EXE")));
+    }
+
+    #[test]
+    fn pdf_is_safe() {
+        assert!(!is_dangerous_executable(Path::new("report.pdf")));
+    }
+
+    #[test]
+    fn txt_is_safe() {
+        assert!(!is_dangerous_executable(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn png_is_safe() {
+        assert!(!is_dangerous_executable(Path::new("photo.png")));
+    }
+
+    #[test]
+    fn no_extension_is_safe() {
+        assert!(!is_dangerous_executable(Path::new("Makefile")));
+    }
+
+    // ── is_contained ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn file_inside_root_is_contained() {
+        // Build a real temp dir so canonicalize works.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let file_path = root.join("subdir").join("file.txt");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"").unwrap();
+
+        assert!(is_contained(root, &file_path));
+    }
+
+    #[test]
+    fn file_outside_root_is_not_contained() {
+        let tmp_root = tempfile::tempdir().expect("root tempdir");
+        let tmp_outside = tempfile::tempdir().expect("outside tempdir");
+
+        // Put a real file in the "outside" dir.
+        let outside_file = tmp_outside.path().join("other.txt");
+        std::fs::write(&outside_file, b"").unwrap();
+
+        assert!(!is_contained(tmp_root.path(), &outside_file));
+    }
+
+    #[test]
+    fn sibling_dir_is_not_contained() {
+        // root = /tmp/abc, target = /tmp/abcEvil — starts_with must not match
+        // on the string level but only on path-component boundaries.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = tmp.path();
+
+        let root = parent.join("root");
+        let sibling = parent.join("rootEvil");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        // sibling exists; is_contained must return false.
+        assert!(!is_contained(&root, &sibling));
     }
 }
 
