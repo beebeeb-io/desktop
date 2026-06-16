@@ -15,6 +15,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
+mod account;
 mod account_dto;
 mod api_client;
 mod browser_login;
@@ -64,6 +65,8 @@ use config::DesktopConfig;
 // in the OS-native credential vault for the current target.
 use keychain::{AuthVault, SecretBytes, SessionToken, platform_keychain_store};
 use runner::EngineRunner;
+
+use account::{AccountId, AccountRuntime, synthesize_single_account};
 
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
 
@@ -123,57 +126,78 @@ struct Pending2fa {
 }
 
 /// Tauri-managed shared state. Held behind a `Mutex` because the web
-/// thread (IPC handlers) and the future sync-engine task both need
-/// access. Cheap to lock — sessions change rarely.
+/// thread (IPC handlers) and the sync-engine task both need access.
+/// Cheap to lock — the registry and these flags change rarely.
+///
+/// Phase 0 multi-account refactor (decision 0800): the per-account live
+/// state (`session`, `engine`, `engine_state`, `sync_paused`,
+/// `cached_profile`, `auth_email`) moved off `AppState` onto
+/// [`AccountRuntime`]; handlers reach it through [`AppState::active_account`].
+/// At N=1 this is invisible — exactly one account is synthesized at startup.
+/// What stays on `AppState` is the genuinely process-global / login-in-flight
+/// state: `auth_present` (a process-wide "is anyone signed in" seed) and
+/// `pending_2fa` (a login challenge that has no account yet).
 pub struct AppState {
-    pub session: Mutex<Option<Session>>,
+    /// The account registry. Exactly one entry in Phase 0 (synthesized by
+    /// `synthesize_single_account` at startup). `Arc<AccountRuntime>` so
+    /// `active_account()` can hand out a shared handle that callers lock,
+    /// without ever cloning the `!Clone` `Session` inside it.
+    pub accounts: Mutex<Vec<Arc<AccountRuntime>>>,
+    /// Id of the currently-active account. `active_account()` resolves this,
+    /// falling back to the first registered account.
+    pub active_account_id: Mutex<Option<AccountId>>,
+    /// Process-wide "is a session present in the credential store" seed,
+    /// set from `keychain_session_present()` at startup and on login/logout.
+    /// Stays on `AppState` (not per-account) — it gates onboarding routing
+    /// before any account is unlocked.
     pub auth_present: Mutex<bool>,
-    pub auth_email: Mutex<Option<String>>,
     /// A password-verified login awaiting its TOTP second factor. Set by
     /// `desktop_login` when the OPAQUE finish returns `requires_2fa: true`;
     /// consumed (and cleared on success) by `desktop_login_2fa`. `None`
-    /// whenever no 2FA challenge is in flight.
+    /// whenever no 2FA challenge is in flight. Stays on `AppState`: during the
+    /// challenge there is no account yet to attach it to.
     pending_2fa: Mutex<Option<Pending2fa>>,
-    /// Active engine runner, if any. `set_session` spawns one when a
-    /// sync_root is also configured; `clear_session` aborts it.
-    pub engine: tokio::sync::Mutex<Option<EngineRunner>>,
-    /// Latest `state` field from the runner's `engine-status` events.
-    /// Updated by `attach_tray_status_listener`; read by `sync_status`
-    /// so the WebView can render the tri-state indicator (running /
-    /// stopped / error) on the settings Status page without having to
-    /// subscribe to the event stream itself for first-paint.
+}
+
+impl AppState {
+    /// Resolve the active account runtime.
     ///
-    /// Possible values match the runner's emit calls in
-    /// `runner::emit_status` (`"running"`, `"idle"`, `"syncing"`,
-    /// `"error"`, `"stopped"`). The `sync_status` handler collapses
-    /// `"idle"` and `"syncing"` to `"running"` for the WebView's
-    /// simpler tri-state expectation.
-    pub engine_state: Mutex<String>,
-    /// Runtime pause flag. Set by `tray_pause_sync` / cleared by
-    /// `tray_resume_sync`. Shared with the runner so it can skip sync
-    /// work on each tick without a lock round-trip.
-    pub sync_paused: Arc<AtomicBool>,
-    /// Account profile fetched once from `/api/v1/auth/me`. Populated by
-    /// the startup session-verification path (which already hits that
-    /// endpoint, so we cache the payload instead of discarding it) and
-    /// served by the `account_profile` IPC without a second round-trip.
-    /// `None` until the first fetch lands.
-    pub cached_profile: Mutex<Option<account_dto::AccountProfile>>,
+    /// Returns the account whose id matches `active_account_id`, falling back
+    /// to the first registered account when the id is unset or stale. Returns
+    /// `Err` only when the registry is empty (i.e. before
+    /// `synthesize_single_account` has run) — at N=1 it always resolves after
+    /// startup.
+    ///
+    /// Hands out an `Arc<AccountRuntime>`; callers lock the inner mutexes
+    /// (`acct.session.lock()`, `acct.engine.lock().await`, …). There is
+    /// deliberately NO `active_account_mut()`: interior mutability keeps the
+    /// 1:1 locking discipline and never moves the `!Clone` `Session`.
+    pub fn active_account(&self) -> Result<Arc<AccountRuntime>, String> {
+        let accounts = self
+            .accounts
+            .lock()
+            .map_err(|_| "accounts registry mutex poisoned".to_string())?;
+        if accounts.is_empty() {
+            return Err("no active account".to_string());
+        }
+        let active_id = self.active_account_id.lock().ok().and_then(|g| g.clone());
+        if let Some(id) = active_id {
+            if let Some(found) = accounts.iter().find(|a| a.id == id) {
+                return Ok(found.clone());
+            }
+        }
+        // Fallback: first registered account (the only one in Phase 0).
+        Ok(accounts[0].clone())
+    }
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            session: Mutex::new(None),
+            accounts: Mutex::new(Vec::new()),
+            active_account_id: Mutex::new(None),
             auth_present: Mutex::new(false),
-            auth_email: Mutex::new(None),
             pending_2fa: Mutex::new(None),
-            engine: tokio::sync::Mutex::new(None),
-            // Default to "stopped" — once the runner spawns and emits
-            // its first event, the listener overwrites this.
-            engine_state: Mutex::new("stopped".to_string()),
-            sync_paused: Arc::new(AtomicBool::new(false)),
-            cached_profile: Mutex::new(None),
         }
     }
 }
@@ -182,16 +206,19 @@ fn keychain_error(context: &str, error: impl fmt::Display) -> String {
     format!("{context}: {error}")
 }
 
-/// Drop the cached `/auth/me` profile from `AppState`.
+/// Drop the cached `/auth/me` profile from the active account.
 ///
 /// Called on logout (`clear_session`) and lock (`lock_vault`) so the
 /// `account_profile` IPC can never cache-hit a stale (logged-out / locked)
 /// identity. A subsequent login / unlock re-fetches and re-caches. Poisoned
 /// mutex is swallowed — clearing must never fail a logout/lock from the
 /// user's POV. Takes `&AppState` (not `State<'_, _>`) so it's unit-testable
-/// against a bare `AppState::default()`.
+/// against a synthesized `AppState`. A missing active account (registry not yet
+/// synthesized) is also a silent no-op.
 fn clear_cached_profile(state: &AppState) {
-    if let Ok(mut guard) = state.cached_profile.lock() {
+    if let Ok(acct) = state.active_account()
+        && let Ok(mut guard) = acct.cached_profile.lock()
+    {
         *guard = None;
     }
 }
@@ -334,14 +361,20 @@ fn clear_keychain_session() -> Result<(), String> {
 /// not block startup, since onboarding can recover.
 async fn restore_session_on_startup(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
+    // `synthesize_single_account` runs in `setup()` before this task is
+    // spawned, so the active account always resolves; bail defensively if not.
+    let Ok(acct) = state.active_account() else {
+        tracing::warn!("no active account during startup restore");
+        return;
+    };
 
     // Don't clobber a session already installed this run (e.g. a fresh login
     // that landed before this startup task ran).
-    if state.session.lock().map(|g| g.is_some()).unwrap_or(false) {
+    if acct.session.lock().map(|g| g.is_some()).unwrap_or(false) {
         return;
     }
 
-    let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
+    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
     let session = match load_session_from_keychain(email) {
         // Both token + master key present → vault is unlocked; resume.
         Ok(Some(session)) => session,
@@ -370,7 +403,7 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
     let master_key = session.master_key;
     let email = session.email.clone();
     {
-        match state.session.lock() {
+        match acct.session.lock() {
             Ok(mut guard) => *guard = Some(session),
             Err(_) => {
                 tracing::warn!("session mutex poisoned during startup restore");
@@ -398,7 +431,12 @@ fn set_auth_present(state: &State<'_, AppState>, present: bool) {
 }
 
 fn set_auth_email(state: &State<'_, AppState>, email: Option<String>) {
-    if let Ok(mut guard) = state.auth_email.lock() {
+    // Per-account (decision 0800): the signed-in address belongs to the active
+    // account, not the process. No active account (registry not synthesized) is
+    // a silent no-op, mirroring the old poisoned-mutex swallow.
+    if let Ok(acct) = state.active_account()
+        && let Ok(mut guard) = acct.auth_email.lock()
+    {
         *guard = email;
     }
 }
@@ -411,12 +449,15 @@ async fn start_engine_if_possible(
 ) {
     if let Some(cfg) = DesktopConfig::load().ok() {
         let Some(root) = cfg.sync_root else { return };
+        // The engine + pause flag are per-account (decision 0800). No active
+        // account → nothing to start.
+        let Ok(acct) = state.active_account() else { return };
         // Rehydrate the persisted pause state before spawning so a
         // restart-while-paused stays paused (the in-memory AtomicBool
         // always defaults to false; desktop.toml is the source of truth).
-        state.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
-        let pause_flag = state.sync_paused.clone();
-        let mut engine_slot = state.engine.lock().await;
+        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        let pause_flag = acct.sync_paused.clone();
+        let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             prev.abort().await;
         }
@@ -646,8 +687,11 @@ async fn desktop_login(
 
     let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
     // Cache the profile we just fetched so the `account_profile` IPC can serve
-    // the Account page immediately without re-hitting `/auth/me`.
-    if let Ok(mut guard) = state.cached_profile.lock() {
+    // the Account page immediately without re-hitting `/auth/me`. The cache is
+    // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
+    if let Ok(acct) = state.active_account()
+        && let Ok(mut guard) = acct.cached_profile.lock()
+    {
         *guard = Some(profile);
     }
 
@@ -728,9 +772,12 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
         .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
         .to_string();
 
-    // Same post-finish setup as `desktop_login`'s no-2FA success path.
+    // Same post-finish setup as `desktop_login`'s no-2FA success path. The
+    // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
     let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    if let Ok(mut guard) = state.cached_profile.lock() {
+    if let Ok(acct) = state.active_account()
+        && let Ok(mut guard) = acct.cached_profile.lock()
+    {
         *guard = Some(profile);
     }
 
@@ -763,7 +810,8 @@ async fn desktop_unlock_with_recovery_phrase(
     state: State<'_, AppState>,
     recovery_phrase: String,
 ) -> Result<(), String> {
-    let existing = state
+    let acct = state.active_account()?;
+    let existing = acct
         .session
         .lock()
         .map_err(|_| "session mutex poisoned".to_string())?
@@ -775,7 +823,7 @@ async fn desktop_unlock_with_recovery_phrase(
     }
 
     let token = load_session_token_from_keychain()?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
-    let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
+    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
     let recovery_phrase = normalize_recovery_phrase_input(&recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
         .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
@@ -794,7 +842,7 @@ async fn desktop_unlock_with_recovery_phrase(
     }
 
     {
-        let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
             token: token.clone(),
             master_key,
@@ -926,7 +974,8 @@ pub(crate) async fn apply_session(
     let token_clone = token.clone();
 
     {
-        let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let acct = state.active_account()?;
+        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
             token,
             master_key,
@@ -950,9 +999,10 @@ pub(crate) async fn apply_session(
 /// the macro's async-with-state contract.
 #[tauri::command]
 async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
+    let acct = state.active_account()?;
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
-    let mut engine_slot = state.engine.lock().await;
+    let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         prev.abort().await;
         tracing::info!("engine aborted on logout");
@@ -977,7 +1027,7 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
 
-    match state.session.lock() {
+    match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
             tracing::info!("session cleared via IPC");
@@ -994,7 +1044,7 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     if let Ok(mut guard) = state.pending_2fa.lock() {
         *guard = None;
     }
-    if let Ok(mut guard) = state.engine_state.lock() {
+    if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
     clear_keychain_session()?;
@@ -1009,7 +1059,8 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
 /// and upload commands stay unavailable because there is no in-memory key.
 #[tauri::command]
 async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let existing = state
+    let acct = state.active_account()?;
+    let existing = acct
         .session
         .lock()
         .map_err(|_| "session mutex poisoned".to_string())?
@@ -1020,13 +1071,13 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         return Ok(());
     }
 
-    let email = state.auth_email.lock().ok().and_then(|guard| guard.clone());
+    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
     let session =
         load_session_from_keychain(email)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let token = session.token.clone();
     let master_key = session.master_key;
     {
-        let mut guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(session);
     }
     set_auth_present(&state, true);
@@ -1040,14 +1091,15 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 /// recovery phrase.
 #[tauri::command]
 async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
-    let mut engine_slot = state.engine.lock().await;
+    let acct = state.active_account()?;
+    let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         prev.abort().await;
         tracing::info!("engine aborted on vault lock");
     }
     drop(engine_slot);
 
-    match state.session.lock() {
+    match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
             tracing::info!("vault locked; runtime session cleared");
@@ -1064,7 +1116,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     if let Ok(mut guard) = state.pending_2fa.lock() {
         *guard = None;
     }
-    if let Ok(mut guard) = state.engine_state.lock() {
+    if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
     set_auth_present(&state, keychain_session_present());
@@ -1260,16 +1312,17 @@ async fn persist_sync_root_and_start_engine(
     cfg.sync_root = Some(root.clone());
     cfg.save()?;
 
-    let session = state
+    let acct = state.active_account()?;
+    let session = acct
         .session
         .lock()
         .ok()
         .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
     if let Some((token, key)) = session {
         // Rehydrate the persisted pause state before spawning.
-        state.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
-        let pause_flag = state.sync_paused.clone();
-        let mut engine_slot = state.engine.lock().await;
+        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        let pause_flag = acct.sync_paused.clone();
+        let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             prev.abort().await;
         }
@@ -1284,7 +1337,8 @@ async fn start_engine_for_pending_finder_install(
     state: &State<'_, AppState>,
     root: PathBuf,
 ) -> Result<bool, String> {
-    let session = state
+    let acct = state.active_account()?;
+    let session = acct
         .session
         .lock()
         .map_err(|_| "session mutex poisoned".to_string())?
@@ -1298,11 +1352,11 @@ async fn start_engine_for_pending_finder_install(
     // Rehydrate the persisted pause state before spawning. Best-effort —
     // a missing/unreadable config defaults to not-paused.
     let paused = DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false);
-    state.sync_paused.store(paused, Ordering::Relaxed);
+    acct.sync_paused.store(paused, Ordering::Relaxed);
 
     let started = {
-        let pause_flag = state.sync_paused.clone();
-        let mut engine_slot = state.engine.lock().await;
+        let pause_flag = acct.sync_paused.clone();
+        let mut engine_slot = acct.engine.lock().await;
         if engine_slot.is_some() {
             false
         } else {
@@ -1328,7 +1382,8 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     if !started {
         return;
     }
-    let mut engine_slot = state.engine.lock().await;
+    let Ok(acct) = state.active_account() else { return };
+    let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         prev.abort().await;
     }
@@ -1664,13 +1719,16 @@ async fn reset_macos_integration(
         }
     }
 
-    let mut engine_slot = state.engine.lock().await;
+    // The engine + its status string are per-account (decision 0800); the
+    // `cfg`/`sync_root` reads in this handler stay on `DesktopConfig` (Group D).
+    let acct = state.active_account()?;
+    let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         prev.abort().await;
         tracing::info!("engine aborted for macOS integration reset");
     }
     drop(engine_slot);
-    if let Ok(mut guard) = state.engine_state.lock() {
+    if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
 
@@ -1799,7 +1857,10 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
 async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     use state_db::FileStatus;
 
-    let vault_unlocked = state.session.lock().map(|g| g.is_some()).unwrap_or(false);
+    // session / engine / engine_state are per-account (decision 0800);
+    // `auth_present` stays on `AppState`.
+    let acct = state.active_account()?;
+    let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
     let sync_root_path = DesktopConfig::load().ok().and_then(|c| c.sync_root);
@@ -1807,7 +1868,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     let sync_root = None::<String>;
     #[cfg(not(target_os = "macos"))]
     let sync_root = sync_root_path.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let engine_running = state.engine.lock().await.is_some();
+    let engine_running = acct.engine.lock().await.is_some();
 
     // Collapse the runner's five-state stream into the tri-state
     // string the WebView's settings pages render. `idle` and
@@ -1815,7 +1876,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     // wants a single "running" pill for either; the per-tick
     // distinction is on the engine-status event stream.
     let engine = {
-        let raw = state
+        let raw = acct
             .engine_state
             .lock()
             .map(|g| g.clone())
@@ -1913,8 +1974,9 @@ struct DesktopStorageSummary {
 /// distinguish account storage from bytes actually present on this Mac.
 #[tauri::command]
 async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopStorageSummary, String> {
+    let acct = state.active_account()?;
     let token = {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         guard
             .as_ref()
             .map(|session| session.token.clone())
@@ -2252,8 +2314,9 @@ fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEn
 
 #[tauri::command]
 async fn list_file_versions(state: State<'_, AppState>, file_id: String) -> Result<serde_json::Value, String> {
+    let acct = state.active_account()?;
     let (token, master_key) = {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(s) => (s.token.clone(), s.master_key),
             None => return Err("not signed in".into()),
@@ -2271,8 +2334,9 @@ async fn restore_file_version(
     file_id: String,
     version_id: String,
 ) -> Result<serde_json::Value, String> {
+    let acct = state.active_account()?;
     let (token, master_key) = {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(s) => (s.token.clone(), s.master_key),
             None => return Err("not signed in".into()),
@@ -2396,16 +2460,18 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
         // If a session is already loaded, start syncing immediately.
         // (Common path: WebView calls set_session before pick_sync_root,
         //  so the engine couldn't start there; it starts here instead.)
-        let session = state
+        // session / engine / sync_paused are per-account (decision 0800).
+        let acct = state.active_account()?;
+        let session = acct
             .session
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
         if let Some((token, key)) = session {
             // Rehydrate the persisted pause state before spawning.
-            state.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
-            let pause_flag = state.sync_paused.clone();
-            let mut engine_slot = state.engine.lock().await;
+            acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+            let pause_flag = acct.sync_paused.clone();
+            let mut engine_slot = acct.engine.lock().await;
             if let Some(prev) = engine_slot.take() {
                 prev.abort().await;
             }
@@ -2625,7 +2691,7 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
 /// tooltip and any open settings window update immediately.
 #[tauri::command]
 async fn tray_pause_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.sync_paused.store(true, Ordering::Relaxed);
+    state.active_account()?.sync_paused.store(true, Ordering::Relaxed);
     // Persist so the paused state survives a restart.
     let mut cfg = DesktopConfig::load()?;
     cfg.pause_sync = true;
@@ -2641,7 +2707,7 @@ async fn tray_pause_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> R
 /// `desktop.toml`. Emits an `engine-status` event with `state = "idle"`.
 #[tauri::command]
 async fn tray_resume_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.sync_paused.store(false, Ordering::Relaxed);
+    state.active_account()?.sync_paused.store(false, Ordering::Relaxed);
     let mut cfg = DesktopConfig::load()?;
     cfg.pause_sync = false;
     cfg.save()?;
@@ -3386,8 +3452,9 @@ fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 3
 async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>, String> {
     // Lift the session pieces we need without holding the mutex over any
     // async API call.
+    let acct = state.active_account()?;
     let creds = {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         guard.as_ref().map(|s| (s.token.clone(), s.master_key))
     };
     let Some((token, master_key)) = creds else {
@@ -3519,12 +3586,13 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
 /// the TS side doesn't render a noisy error banner for a known gap.
 #[tauri::command]
 fn account_email(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    let acct = state.active_account()?;
+    let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
     if let Some(email) = guard.as_ref().and_then(|s| s.email.clone()) {
         return Ok(Some(email));
     }
     drop(guard);
-    Ok(state.auth_email.lock().ok().and_then(|guard| guard.clone()))
+    Ok(acct.auth_email.lock().ok().and_then(|guard| guard.clone()))
 }
 
 // ── IPC commands: data layer (account / billing / devices / activity) ─────────
@@ -3545,7 +3613,13 @@ fn account_email(state: State<'_, AppState>) -> Result<Option<String>, String> {
 /// `!Clone`, but constructing a fresh one per call is cheap and keeps the
 /// one-authoritative-copy invariant on `Session` itself intact).
 fn api_client_from_session(state: &State<'_, AppState>) -> Result<api_client::ApiClient, String> {
-    let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    // Routing the session lookup here to the active account fixes ALL ~18
+    // `account_*` data IPCs in one place (decision 0800): each builds its client
+    // through this helper. The `master_key: [u8; 32]` copied into the client is
+    // the SAME existing pattern — a `Copy` of the key bytes, not a second
+    // authoritative `Session` — so the master-key isolation invariant holds.
+    let acct = state.active_account()?;
+    let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
     let session = guard.as_ref().ok_or_else(|| "vault is locked".to_string())?;
     Ok(api_client::ApiClient::new(
         runner::api_base_url(),
@@ -3558,15 +3632,16 @@ fn api_client_from_session(state: &State<'_, AppState>) -> Result<api_client::Ap
 /// present; otherwise fetches once and caches it. Never double-fetches.
 #[tauri::command]
 async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
+    let acct = state.active_account()?;
     {
-        let guard = state.cached_profile.lock().map_err(|_| "profile mutex poisoned".to_string())?;
+        let guard = acct.cached_profile.lock().map_err(|_| "profile mutex poisoned".to_string())?;
         if let Some(profile) = guard.as_ref() {
             return Ok(profile.clone());
         }
     }
     let api = api_client_from_session(&state)?;
     let profile = api.account_profile().await.map_err(|e| e.to_string())?;
-    if let Ok(mut guard) = state.cached_profile.lock() {
+    if let Ok(mut guard) = acct.cached_profile.lock() {
         *guard = Some(profile.clone());
     }
     Ok(profile)
@@ -3739,7 +3814,8 @@ async fn account_storage_breakdown(
 ) -> Result<account_dto::StorageBreakdown, String> {
     // Auth gate: require an unlocked session, same signal as the others.
     {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let acct = state.active_account()?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         if guard.is_none() {
             return Err("vault is locked".to_string());
         }
@@ -3802,7 +3878,8 @@ async fn desktop_file_overview(
 ) -> Result<account_dto::FileOverview, String> {
     // Auth gate: require an unlocked session, same signal as the others.
     {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let acct = state.active_account()?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         if guard.is_none() {
             return Err("vault is locked".to_string());
         }
@@ -3983,8 +4060,9 @@ async fn resolve_conflict(
     // Pull token + master_key out of the in-memory session. We
     // intentionally do NOT clone the entire Session struct — only
     // what the ApiClient needs.
+    let acct = state.active_account()?;
     let (token, master_key) = {
-        let guard = state.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(s) => (s.token.clone(), s.master_key),
             None => return Err("not signed in".into()),
@@ -4229,6 +4307,15 @@ pub fn run() {
             set_sync_mode,
         ])
         .setup(|app| {
+            // Multi-account Phase 0 (decision 0800): mint the single synthesized
+            // account into the registry that `.manage(AppState::default())`
+            // installed. MUST run before anything reads per-account state — the
+            // `auth_present` seed below, the `restore_session_on_startup` task
+            // (which lands the keychain session in `accounts[0].session`), the
+            // engine-status listener, and first-launch detection all depend on a
+            // resolvable active account. Idempotent; invisible at N=1.
+            synthesize_single_account(&app.state::<AppState>());
+
             setup_native_menu(app)?;
             setup_tray(app)?;
             // Defensive: hide windows that tauri_plugin_window_state may have
@@ -4491,14 +4578,15 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
         let files_remaining = payload.get("files_remaining").and_then(|v| v.as_u64());
         let error = payload.get("error").and_then(|v| v.as_str());
 
-        // Mirror the latest state into AppState so the `sync_status`
-        // command can return it on first paint without subscribing
-        // to the event stream itself. Failures here (poisoned mutex,
-        // state not registered yet) are non-fatal — the tray tooltip
-        // update below still runs.
+        // Mirror the latest state into the active account's `engine_state`
+        // (per-account, decision 0800) so the `sync_status` command can return
+        // it on first paint without subscribing to the event stream itself.
+        // Failures here (poisoned mutex, registry not synthesized yet) are
+        // non-fatal — the tray tooltip update below still runs.
         if !state.is_empty()
             && let Some(app_state) = app_for_listener.try_state::<AppState>()
-            && let Ok(mut guard) = app_state.engine_state.lock()
+            && let Ok(acct) = app_state.active_account()
+            && let Ok(mut guard) = acct.engine_state.lock()
         {
             *guard = state.to_string();
         }
@@ -4828,9 +4916,13 @@ mod tests {
     #[test]
     fn clear_cached_profile_drops_stale_identity() {
         let state = AppState::default();
+        // The cached profile is per-account (decision 0800) — synthesize the
+        // single account so `clear_cached_profile`/`active_account` resolve.
+        crate::account::synthesize_single_account(&state);
+        let acct = state.active_account().expect("synthesized account resolves");
         // Seed a cached profile, as login would.
         {
-            let mut guard = state.cached_profile.lock().unwrap();
+            let mut guard = acct.cached_profile.lock().unwrap();
             *guard = Some(AccountProfile {
                 user_id: "u1".into(),
                 email: "old@example.com".into(),
@@ -4843,12 +4935,12 @@ mod tests {
                 admin_user_id: None,
             });
         }
-        assert!(state.cached_profile.lock().unwrap().is_some());
+        assert!(acct.cached_profile.lock().unwrap().is_some());
 
         // Logout/lock path clears it so account_profile can't serve a stale hit.
         clear_cached_profile(&state);
         assert!(
-            state.cached_profile.lock().unwrap().is_none(),
+            acct.cached_profile.lock().unwrap().is_none(),
             "cached profile must be cleared on lock/logout"
         );
     }
