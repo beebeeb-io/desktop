@@ -53,6 +53,7 @@ import {
 } from './desktopApi'
 import UpdateBanner from './UpdateBanner'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card } from './windows/ui'
+import KnownFolderOnboarding from './windows/KnownFolderOnboarding'
 import AccountView from './windows/views/AccountView'
 import InsightsView from './windows/views/InsightsView'
 import BandwidthView from './windows/views/BandwidthView'
@@ -903,6 +904,24 @@ function FilesEmptyState() {
   )
 }
 
+// ── Known-folder backup onboarding re-open bus (task 0804) ────────────────────
+//
+// The first-run "Back up these folders?" prompt is mounted ONCE at the app root
+// (so its overlay covers the whole window). The Manage-backup panel — rendered
+// several layers deep inside FilesView — needs to RE-OPEN that same prompt when
+// the user clicks "Set up backup" after having skipped it. Rather than thread a
+// callback down through FilesView → ManageBackupCard, we fire a tiny window
+// CustomEvent the root listens for. Show-once still governs the AUTOMATIC
+// first-run appearance; this manual path bypasses it on explicit request.
+const KF_ONBOARDING_REOPEN_EVENT = 'bb:kf-onboarding-reopen'
+// Fired after the onboarding prompt enables one or more folders, so the
+// Manage-backup panel (if mounted) re-reads the now-updated backup state.
+const KF_BACKUP_CHANGED_EVENT = 'bb:kf-backup-changed'
+
+function requestKnownFolderOnboarding() {
+  window.dispatchEvent(new CustomEvent(KF_ONBOARDING_REOPEN_EVENT))
+}
+
 // ── Section: Manage backup (known-folder backup, task 0797) ───────────────────
 //
 // OneDrive-style "Manage backup": one-way mirror of the user's Windows known
@@ -1001,6 +1020,14 @@ function ManageBackupCard() {
     return () => { cancelled = true }
   }, [])
 
+  // Re-read backup state when the onboarding prompt enables folders (task 0804)
+  // so the panel reflects the change without a manual refresh.
+  useEffect(() => {
+    const onChanged = () => { void load() }
+    window.addEventListener(KF_BACKUP_CHANGED_EVENT, onChanged)
+    return () => window.removeEventListener(KF_BACKUP_CHANGED_EVENT, onChanged)
+  }, [])
+
   const toggle = async (f: KnownFolderStatus) => {
     if (f.source_path == null) return
     const next = !f.enabled
@@ -1028,12 +1055,42 @@ function ManageBackupCard() {
   if (unsupported) return null
   if (folders != null && folders.every((f) => f.source_path == null)) return null
 
+  // No folders backed up yet → offer the guided "Set up backup" prompt (task
+  // 0804). This is how a user who dismissed the first-run prompt with "Not now"
+  // can return to it: the affordance re-opens the SAME prompt (pre-checked
+  // Desktop/Documents/Pictures). Only shown when at least one folder resolves
+  // here AND none are currently backed up.
+  const noneBackedUp =
+    folders != null && folders.some((f) => f.source_path != null) && folders.every((f) => !f.enabled)
+
   return (
     <Card style={{ padding: 0, marginBottom: 14 }}>
       <div style={{ padding: '16px 18px 12px', borderBottom: `1px solid ${T.line}` }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>Manage backup</div>
-          <Chip tone="neutral">One-way</Chip>
+          {noneBackedUp ? (
+            <button
+              type="button"
+              onClick={() => requestKnownFolderOnboarding()}
+              style={{
+                padding: '5px 11px',
+                fontSize: 11.5,
+                fontFamily: T.fontSans,
+                fontWeight: 600,
+                borderRadius: 6,
+                border: `1px solid ${T.amberDeep}`,
+                background: T.amber,
+                color: T.ink,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap' as const,
+                letterSpacing: '-0.005em',
+              }}
+            >
+              Set up backup
+            </button>
+          ) : (
+            <Chip tone="neutral">One-way</Chip>
+          )}
         </div>
         <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55, marginTop: 4, maxWidth: 520 }}>
           Back up your Windows folders to your encrypted vault. Files are copied in — your
@@ -1323,6 +1380,26 @@ export default function WindowsApp() {
   // Avoid refetching billing usage every poll once we have it.
   const usageLoaded = useRef(false)
 
+  // Known-folder backup onboarding (task 0804). `mode` drives the one mounted
+  // instance: 'auto' = self-gated first-run (shows once when never seen + no
+  // folders backed up), 'forced' = a manual "Set up backup" re-open, 'closed' =
+  // not mounted. We start in 'auto'; the component self-closes (via onClose)
+  // when it's not a genuine first-run, so the overlay never flashes off-Windows
+  // or for returning users. A bumping `key` remounts it on a forced re-open so
+  // its internal load effect re-runs.
+  const [kfOnboarding, setKfOnboarding] = useState<'auto' | 'forced' | 'closed'>('auto')
+  const kfOnboardingKey = useRef(0)
+
+  // Manual re-open from the Manage-backup panel ("Set up backup").
+  useEffect(() => {
+    const onReopen = () => {
+      kfOnboardingKey.current += 1
+      setKfOnboarding('forced')
+    }
+    window.addEventListener(KF_ONBOARDING_REOPEN_EVENT, onReopen)
+    return () => window.removeEventListener(KF_ONBOARDING_REOPEN_EVENT, onReopen)
+  }, [])
+
   // Poll sync status (drives the auth gate + Home metrics).
   useEffect(() => {
     let cancelled = false
@@ -1443,6 +1520,21 @@ export default function WindowsApp() {
           inline — so any view can use them without mounting UpdateBanner). */}
       <style>{'@keyframes bb-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } } @keyframes bb-spin { to { transform: rotate(360deg); } }'}</style>
       <UpdateBanner />
+
+      {/* Known-folder backup onboarding (task 0804). Only meaningful once signed
+          in (it enables backup into the signed-in vault). 'auto' self-gates on
+          the seen flag + empty backup set inside the component; 'forced' is an
+          explicit re-open from the Manage-backup panel. */}
+      {loggedIn && kfOnboarding !== 'closed' && (
+        <KnownFolderOnboarding
+          key={kfOnboardingKey.current}
+          forced={kfOnboarding === 'forced'}
+          onClose={(enabledAny) => {
+            setKfOnboarding('closed')
+            if (enabledAny) window.dispatchEvent(new CustomEvent(KF_BACKUP_CHANGED_EVENT))
+          }}
+        />
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '232px 1fr', flex: 1, overflow: 'hidden' }}>
         {/* Sidebar */}
         <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px 0', overflow: 'auto', display: 'flex', flexDirection: 'column' }}>

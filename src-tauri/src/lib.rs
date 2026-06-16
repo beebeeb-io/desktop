@@ -2966,6 +2966,40 @@ async fn set_known_folder_backup(key: String, enabled: bool) -> Result<(), Strin
     Ok(())
 }
 
+// ── IPC commands: Task 0804 — known-folder backup first-run onboarding ─────────
+
+/// Read whether the one-time known-folder backup prompt has already been shown.
+///
+/// The frontend uses this — together with an empty `known_folder_backup` — to
+/// decide whether to AUTOMATICALLY surface the first-run "Back up these folders?"
+/// prompt on app start. `false` (the fresh-install default, and the value for an
+/// older `desktop.toml` missing the key) means "not yet seen → show it once."
+///
+/// Mirrors the other simple config reads (`get_selective_sync`): returns the
+/// plain boolean, never an error for a missing file (a missing file loads as the
+/// default config).
+#[tauri::command]
+fn get_known_folder_onboarding_seen() -> Result<bool, String> {
+    let cfg = DesktopConfig::load()?;
+    Ok(cfg.known_folder_onboarding_seen)
+}
+
+/// Mark the one-time known-folder backup prompt as shown so it never appears
+/// automatically again. Called on BOTH paths of the prompt — "Back up these
+/// folders" (after the folders are enabled + pinned) and "Not now" — because
+/// either way the user has made their first-run choice and should not be
+/// re-nagged.
+///
+/// Idempotent: setting an already-set flag is a no-op write. Load → set → save
+/// so it leaves every other field (including `known_folder_backup`, which the
+/// accept path writes via `set_known_folder_backup`) untouched.
+#[tauri::command]
+fn mark_known_folder_onboarding_seen() -> Result<(), String> {
+    let mut cfg = DesktopConfig::load()?;
+    cfg.known_folder_onboarding_seen = true;
+    cfg.save()
+}
+
 /// Resolve and dehydrate the local, unpinned files under each newly-excluded
 /// folder. Returns total bytes reclaimed. Shared by Windows (real CF
 /// dehydrate) and non-Windows (DB-only flip) via the inner cfg blocks —
@@ -4280,6 +4314,9 @@ pub fn run() {
             // Task 0797 — known-folder backup ("Manage backup")
             get_known_folder_backup,
             set_known_folder_backup,
+            // Task 0804 — known-folder backup first-run onboarding prompt
+            get_known_folder_onboarding_seen,
+            mark_known_folder_onboarding_seen,
             list_vault_folders,
             list_remote_tree,
             set_recursive_pin,

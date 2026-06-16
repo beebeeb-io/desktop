@@ -110,6 +110,12 @@ export function NavIcon({ name, size = 13, color = 'currentColor' }: { name: str
           <path d="M12 9.5 L12 13 L3 13 L3 4 L6.5 4" />
         </svg>
       )
+    case 'check':
+      return (
+        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" />
+        </svg>
+      )
     default:
       return <span style={{ display: 'block', width: s, height: s }} />
   }

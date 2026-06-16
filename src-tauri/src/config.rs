@@ -113,6 +113,24 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_backup: Vec<String>,
 
+    // ── Task 0804 — known-folder backup first-run onboarding prompt ────────
+    //
+    // The one-time "Back up these folders?" prompt (decision 0797's default-ON
+    // Desktop/Documents/Pictures) shows ONCE on first run, then never again —
+    // this flag records that the user has seen it (whether they accepted or
+    // skipped). Setting it is the ONLY thing the "Not now" path does; the
+    // accept path also writes `known_folder_backup`. It is deliberately NOT in
+    // `DesktopSettings`/`apply_settings`: a settings-page save must never flip
+    // it, and the show-once decision belongs only to the onboarding flow. The
+    // Manage-backup panel can re-open the prompt manually later, but that does
+    // not change this flag — show-once governs only the AUTOMATIC first-run
+    // appearance.
+    /// `true` once the first-run known-folder backup prompt has been shown.
+    /// Defaults `false` so a fresh install (and older configs missing the key)
+    /// surfaces the prompt exactly once.
+    #[serde(default)]
+    pub known_folder_onboarding_seen: bool,
+
     /// Last known Finder/File Provider setup status. This is persisted so
     /// a failed deferred setup remains visible after navigation or restart.
     #[serde(default)]
@@ -182,6 +200,7 @@ impl Default for DesktopConfig {
             notify_quota_warnings: true,
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
+            known_folder_onboarding_seen: false,
             finder_install_status: None,
             finder_install_last_error: None,
             finder_install_last_attempt_at: None,
@@ -432,6 +451,24 @@ mod tests {
         assert!(!cfg.known_folder_enabled("documents"));
         assert!(cfg.known_folder_enabled("pictures"));
         assert_eq!(cfg.known_folder_backup.len(), 1);
+    }
+
+    #[test]
+    fn known_folder_onboarding_seen_defaults_false_and_round_trips() {
+        // Fresh config → prompt not yet seen, so first-run shows it.
+        let cfg = DesktopConfig::default();
+        assert!(!cfg.known_folder_onboarding_seen);
+
+        // Missing key (older file) → false via #[serde(default)].
+        let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
+        assert!(!cfg.known_folder_onboarding_seen);
+
+        // Once marked, the flag survives a serialise/parse round-trip.
+        let mut cfg = DesktopConfig::default();
+        cfg.known_folder_onboarding_seen = true;
+        let s = toml::to_string_pretty(&cfg).expect("serialize");
+        let back: DesktopConfig = toml::from_str(&s).expect("parse");
+        assert!(back.known_folder_onboarding_seen);
     }
 
     #[test]

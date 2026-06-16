@@ -758,3 +758,31 @@ export function getKnownFolderBackup(): Promise<CommandResult<KnownFolderStatus[
 export function setKnownFolderBackup(key: string, enabled: boolean): Promise<CommandResult<void>> {
   return command<void>('set_known_folder_backup', { key, enabled })
 }
+
+// ── Task 0804 — known-folder backup first-run onboarding prompt ──────────────
+//
+// The one-time "Back up these folders?" prompt (decision 0797's default-ON
+// Desktop/Documents/Pictures). It surfaces AUTOMATICALLY on app start only when
+// the user hasn't seen it yet AND no folders are backed up; afterwards it's
+// reachable manually from the Manage-backup panel. The seen flag governs ONLY
+// the automatic first-run appearance.
+
+/** Whether the first-run known-folder backup prompt has already been shown. */
+export function getKnownFolderOnboardingSeen(): Promise<CommandResult<boolean>> {
+  return command<boolean>('get_known_folder_onboarding_seen')
+}
+
+/** Mark the first-run known-folder backup prompt as shown so it never appears
+ *  automatically again (called on both "Back up these folders" and "Not now"). */
+export function markKnownFolderOnboardingSeen(): Promise<CommandResult<void>> {
+  return command<void>('mark_known_folder_onboarding_seen')
+}
+
+/** Pin (or unpin) a vault folder + its descendants so they're kept always-local
+ *  (available offline). Backs the onboarding "backed-up folders stay on this PC"
+ *  promise. `item_id` is a vault folder id; the recursion is server-side in the
+ *  Rust `set_recursive_pin` command. Returns the pin-update outcome opaquely (the
+ *  caller only needs ok/err for this flow). */
+export function setRecursivePin(itemId: string, pinned: boolean): Promise<CommandResult<unknown>> {
+  return command<unknown>('set_recursive_pin', { itemId, pinned })
+}
