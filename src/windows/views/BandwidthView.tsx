@@ -40,9 +40,18 @@
  * Sibling idiom: DevicesView.tsx + AccountView.tsx.
  */
 
-import { useEffect, useState } from 'react'
-import { accountClientSessions, formatBytes, type ClientSyncSession } from '../../desktopApi'
+import { useEffect, useRef, useState } from 'react'
+import {
+  accountClientSessions,
+  formatBytes,
+  runSpeedtest,
+  getBandwidthHistory,
+  type ClientSyncSession,
+  type SpeedtestResult,
+  type BandwidthSample,
+} from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { BandwidthChart } from './BandwidthChart'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -617,6 +626,199 @@ function SessionList({ sessions }: { sessions: ClientSyncSession[] }) {
   )
 }
 
+// ── Speedtest panel ───────────────────────────────────────────────────────────
+
+type SpeedtestState =
+  | { phase: 'idle' }
+  | { phase: 'running' }
+  | { phase: 'done'; result: SpeedtestResult }
+  | { phase: 'error'; reason: string }
+
+/** Convert bytes/s to Mbps (SI decimal: 1 Mbps = 1 000 000 bps = 125 000 B/s). */
+function bpsToMbps(bps: number): string {
+  const mbps = (bps * 8) / 1_000_000
+  if (mbps < 0.01) return '0.00'
+  if (mbps < 10) return mbps.toFixed(2)
+  return mbps.toFixed(1)
+}
+
+function SpeedtestPanel() {
+  const [st, setSt] = useState<SpeedtestState>({ phase: 'idle' })
+  const runningRef = useRef(false)
+
+  const start = async () => {
+    if (runningRef.current) return
+    runningRef.current = true
+    setSt({ phase: 'running' })
+    const r = await runSpeedtest()
+    runningRef.current = false
+    if (!r.ok) {
+      setSt({ phase: 'error', reason: r.reason })
+    } else {
+      setSt({ phase: 'done', result: r.value })
+    }
+  }
+
+  const isRunning = st.phase === 'running'
+
+  return (
+    <Card style={{ padding: '18px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>Speed test</div>
+        <PrimaryBtn onClick={start} disabled={isRunning}>
+          {isRunning ? 'Running...' : 'Run speed test'}
+        </PrimaryBtn>
+      </div>
+
+      {st.phase === 'idle' && (
+        <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
+          Tests your connection to the Beebeeb API. Parity with the CLI
+          {' '}<span style={{ fontFamily: T.fontMono }}>bb speedtest</span> command:
+          5 pings + 3 × 10 MB upload + 3 × 10 MB download.
+        </div>
+      )}
+
+      {st.phase === 'running' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <Skeleton width={100} height={36} radius={6} />
+            <Skeleton width={100} height={36} radius={6} />
+            <Skeleton width={100} height={36} radius={6} />
+          </div>
+          <div style={{ fontSize: 11, fontFamily: T.fontMono, color: T.ink4 }}>
+            Running — this takes 30–90 s depending on your connection.
+          </div>
+        </div>
+      )}
+
+      {st.phase === 'error' && (
+        <div
+          style={{
+            fontSize: 11.5,
+            fontFamily: T.fontMono,
+            color: RED,
+            background: RED_BG,
+            border: `1px solid ${RED_BORDER}`,
+            borderRadius: 6,
+            padding: '8px 12px',
+            wordBreak: 'break-word' as const,
+          }}
+        >
+          {st.reason}
+        </div>
+      )}
+
+      {st.phase === 'done' && (() => {
+        const r = st.result
+        const uploadMbps = bpsToMbps(r.upload_bps)
+        const downloadMbps = bpsToMbps(r.download_bps)
+        return (
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' as const }}>
+            {/* Latency */}
+            <div
+              style={{
+                background: T.paper2,
+                border: `1px solid ${T.line}`,
+                borderRadius: 8,
+                padding: '10px 14px',
+                minWidth: 100,
+              }}
+            >
+              <div style={{ fontSize: 9.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.06em', color: T.ink4, marginBottom: 4 }}>
+                Latency
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, fontFamily: T.fontMono, color: T.ink, letterSpacing: '-0.02em' }}>
+                {r.latency.avg_ms}<span style={{ fontSize: 12, fontWeight: 400, color: T.ink3, marginLeft: 2 }}>ms</span>
+              </div>
+              <div style={{ fontSize: 10, fontFamily: T.fontMono, color: T.ink4, marginTop: 2 }}>
+                {r.latency.min_ms} / {r.latency.avg_ms} / {r.latency.max_ms} min/avg/max
+              </div>
+            </div>
+
+            {/* Upload — amber accent (primary) */}
+            <div
+              style={{
+                background: T.amberBg,
+                border: '1px solid oklch(0.86 0.07 90)',
+                borderRadius: 8,
+                padding: '10px 14px',
+                minWidth: 100,
+              }}
+            >
+              <div style={{ fontSize: 9.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.06em', color: 'oklch(0.5 0.08 72)', marginBottom: 4 }}>
+                Upload
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, fontFamily: T.fontMono, color: T.ink, letterSpacing: '-0.02em' }}>
+                {uploadMbps}<span style={{ fontSize: 12, fontWeight: 400, color: T.ink3, marginLeft: 2 }}>Mbps</span>
+              </div>
+            </div>
+
+            {/* Download — neutral */}
+            <div
+              style={{
+                background: T.paper2,
+                border: `1px solid ${T.line}`,
+                borderRadius: 8,
+                padding: '10px 14px',
+                minWidth: 100,
+              }}
+            >
+              <div style={{ fontSize: 9.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.06em', color: T.ink4, marginBottom: 4 }}>
+                Download
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, fontFamily: T.fontMono, color: T.ink, letterSpacing: '-0.02em' }}>
+                {downloadMbps}<span style={{ fontSize: 12, fontWeight: 400, color: T.ink3, marginLeft: 2 }}>Mbps</span>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+    </Card>
+  )
+}
+
+// ── Traffic chart panel ───────────────────────────────────────────────────────
+
+function TrafficChartPanel() {
+  const [samples, setSamples] = useState<BandwidthSample[]>([])
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const r = await getBandwidthHistory(20)
+      if (cancelled) return
+      if (r.ok) {
+        setSamples(r.value)
+      }
+      setLoaded(true)
+    })()
+    // Refresh every 30 s to pick up new heartbeat samples.
+    const id = window.setInterval(async () => {
+      const r = await getBandwidthHistory(20)
+      if (cancelled) return
+      if (r.ok) setSamples(r.value)
+    }, 30_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
+  return (
+    <Card style={{ padding: '18px 20px' }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 14 }}>
+        Traffic — last 20 h
+      </div>
+      {!loaded ? (
+        <Skeleton height={80} radius={6} />
+      ) : (
+        <BandwidthChart samples={samples} buckets={60} heightPx={80} />
+      )}
+    </Card>
+  )
+}
+
 // ── Async state type ──────────────────────────────────────────────────────────
 
 type LoadState =
@@ -686,6 +888,16 @@ export default function BandwidthView() {
           ) : undefined
         }
       />
+
+      {/* 20h traffic chart — always shown (local DB, no session required) */}
+      <div style={{ marginBottom: 20 }}>
+        <TrafficChartPanel />
+      </div>
+
+      {/* Speedtest panel */}
+      <div style={{ marginBottom: 20 }}>
+        <SpeedtestPanel />
+      </div>
 
       {state.phase === 'loading' && <LoadingState />}
 

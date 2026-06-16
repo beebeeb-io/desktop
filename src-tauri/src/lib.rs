@@ -4104,6 +4104,126 @@ async fn desktop_file_overview(
     Ok(overview)
 }
 
+// ── IPC commands: Bandwidth view — speedtest + history (task 0810) ───────────
+
+/// Result shape returned by [`run_speedtest`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpeedtestResult {
+    pub latency: SpeedtestLatency,
+    /// Average upload speed in bytes per second.
+    pub upload_bps: u64,
+    /// Average download speed in bytes per second.
+    pub download_bps: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpeedtestLatency {
+    pub min_ms: u64,
+    pub avg_ms: u64,
+    pub max_ms: u64,
+}
+
+/// Run a network speedtest against the Beebeeb API.
+///
+/// Parity with CLI (`repos/cli/src/commands/speedtest.rs`) and iOS
+/// (`SpeedtestScreen`): 5 latency pings + 3 × 10 MB download + 3 × 10 MB upload.
+/// Uses the authenticated session; returns `Err("vault is locked")` when none.
+#[tauri::command]
+async fn run_speedtest(state: State<'_, AppState>) -> Result<SpeedtestResult, String> {
+    let api = api_client_from_session(&state)?;
+
+    // Latency: 5 × GET /api/v1/health
+    let mut latencies: Vec<u64> = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        // Ignore errors — a failed ping still has a measurable RTT and counts
+        // as a data point; the best-effort spirit matches the CLI.
+        let _ = api.ping_health().await;
+        latencies.push(start.elapsed().as_millis() as u64);
+    }
+    let min_ms = *latencies.iter().min().unwrap_or(&0);
+    let max_ms = *latencies.iter().max().unwrap_or(&0);
+    let avg_ms = latencies.iter().sum::<u64>() / latencies.len().max(1) as u64;
+
+    // Upload: 3 × 10 MB POST /api/v1/speedtest
+    let blob = vec![0u8; 10_000_000];
+    let mut up_speeds: Vec<f64> = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        if api.speedtest_upload(&blob).await.is_ok() {
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                up_speeds.push(blob.len() as f64 / elapsed);
+            }
+        }
+    }
+    let upload_bps = if up_speeds.is_empty() {
+        0
+    } else {
+        (up_speeds.iter().sum::<f64>() / up_speeds.len() as f64) as u64
+    };
+
+    // Download: 3 × 10 MB GET /api/v1/speedtest?size=10000000
+    let mut dl_speeds: Vec<f64> = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        if let Ok(data) = api.speedtest_download(10_000_000).await {
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                dl_speeds.push(data.len() as f64 / elapsed);
+            }
+        }
+    }
+    let download_bps = if dl_speeds.is_empty() {
+        0
+    } else {
+        (dl_speeds.iter().sum::<f64>() / dl_speeds.len() as f64) as u64
+    };
+
+    Ok(SpeedtestResult {
+        latency: SpeedtestLatency { min_ms, avg_ms, max_ms },
+        upload_bps,
+        download_bps,
+    })
+}
+
+/// Return bandwidth samples from the local state DB for the traffic chart.
+///
+/// `hours` controls the window (default 20). The DB stores one sample per
+/// heartbeat beat (~20 s), so a 20-hour window returns up to ~3600 samples —
+/// the frontend downsamples to a fixed number of chart buckets for display.
+#[tauri::command]
+async fn get_bandwidth_history(
+    state: State<'_, AppState>,
+    hours: Option<u32>,
+) -> Result<Vec<state_db::BandwidthSample>, String> {
+    // Auth gate.
+    {
+        let acct = state.active_account()?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        if guard.is_none() {
+            return Err("vault is locked".to_string());
+        }
+    }
+
+    let window_hours = hours.unwrap_or(20);
+
+    let db_path = match DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
+        Some(root) => root.join(".beebeeb").join("state.db"),
+        None => return Ok(vec![]),
+    };
+    if !db_path.exists() {
+        return Ok(vec![]);
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+        db.get_bandwidth_history(window_hours).map_err(|e| format!("bandwidth history: {e}"))
+    })
+    .await
+    .map_err(|e| format!("bandwidth history task failed: {e}"))?
+}
+
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
 
 /// Internal helper that does the actual window-building work. Called
@@ -4491,6 +4611,9 @@ pub fn run() {
             set_sync_mode,
             // Task 0812 — tray flyout: click file → reveal in Explorer + open
             reveal_and_open_file,
+            // Task 0810 — Bandwidth view: speedtest + 20h traffic chart
+            run_speedtest,
+            get_bandwidth_history,
         ])
         .setup(|app| {
             // Multi-account Phase 1 (decision 0800/0808): resolve the PERSISTED

@@ -916,6 +916,61 @@ impl ApiClient {
             .await?;
         Ok(resp.json().await?)
     }
+
+    // ── Speedtest endpoints (P2 — task 0810) ─────────────────────────────────
+    //
+    // Mirrors the CLI (`repos/cli/src/commands/speedtest.rs`) and iOS
+    // (`SpeedtestScreen`) implementations exactly so results are comparable
+    // across clients.  All three use the same parameter set:
+    //   latency  — 5× GET /api/v1/health
+    //   download — 3× GET /api/v1/speedtest?size=10000000 (10 MB)
+    //   upload   — 3× POST /api/v1/speedtest with a 10 MB octet-stream body
+
+    /// `GET /api/v1/health` — used for latency measurement.  Returns `Ok(())`
+    /// when the server responds (even a non-200 counts; we only care about RTT).
+    pub async fn ping_health(&self) -> anyhow::Result<()> {
+        let url = self.url("/api/v1/health");
+        let _ = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// `GET /api/v1/speedtest?size=N` — download `size` bytes of random data.
+    /// Returns the raw bytes (length is the measurement input).
+    pub async fn speedtest_download(&self, size: u64) -> anyhow::Result<Vec<u8>> {
+        let url = format!("{}/api/v1/speedtest?size={size}", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// `POST /api/v1/speedtest` — upload `data` as a raw octet-stream and
+    /// discard the server response.  The body is random zeros; the server
+    /// sinks them and responds 204.
+    pub async fn speedtest_upload(&self, data: &[u8]) -> anyhow::Result<()> {
+        let url = self.url("/api/v1/speedtest");
+        self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

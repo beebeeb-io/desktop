@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_bridge::{CachePolicy, ConflictDetected, EngineBridge, sync_tick};
+use crate::engine_bridge::{CachePolicy, ConflictDetected, EngineBridge, WireCounters, sync_tick};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 
@@ -256,29 +256,29 @@ fn snapshot_sync_state(db: &StateDb) -> SyncSnapshot {
 
 /// Build the heartbeat body for one beat from the engine state + a DB snapshot.
 ///
-/// **Bytes/speed decision (NOT a transfer-loop instrumentation follow-up — this
-/// is a focused, honest snapshot):** `bytes_synced` / `bytes_total` are summed
-/// from the state DB's `size_bytes` column (already maintained per row), so they
-/// reflect "bytes landed locally vs total tracked" without threading an atomic
-/// counter through `hydrate_file` / `upload_version`. `speed_bps` is a rolling
-/// estimate: the positive delta of `bytes_synced` since the previous beat,
-/// divided by the elapsed interval. This is cheap and truthful at the
-/// snapshot grain. A finer-grained, true wire-speed counter (instrumenting the
-/// chunk loops in `engine_bridge`) is a deliberate FOLLOW-UP — see the report;
-/// it is intentionally out of scope here to avoid over-building.
+/// **Speed source (P1 fix — task 0810):** `speed_bps` is now derived from the
+/// *wire-byte counters* drained from the chunk loops, NOT from file-completion
+/// deltas (`bytes_synced` diff). The old approach produced `speed_bps = 0`
+/// during active transfers because mid-transfer files have status
+/// `Downloading`/`Uploading`, not `Local`, so their bytes were excluded from
+/// `bytes_synced`. The wire counters count every chunk byte as it passes through
+/// the hot path, giving a true real-time transfer speed. `bytes_synced` is
+/// retained only for cumulative progress display (files landed / total bytes).
 fn build_heartbeat(
     telemetry: &TelemetryState,
     snap: SyncSnapshot,
-    prev_bytes_synced: i64,
+    wire_up: u64,
+    wire_down: u64,
     elapsed_secs: i64,
 ) -> HeartbeatBody {
     let status = engine_state_to_heartbeat_status(&telemetry.engine_state, snap.files_in_flight);
 
-    // Rolling speed estimate: only positive deltas over a positive interval
-    // count (a snapshot that went down — e.g. an eviction — is not "negative
-    // speed", it's just no forward progress this beat).
-    let speed_bps = if elapsed_secs > 0 && snap.bytes_synced > prev_bytes_synced {
-        Some((snap.bytes_synced - prev_bytes_synced) / elapsed_secs)
+    // True wire speed: total bytes that crossed the network this beat divided
+    // by the real elapsed interval. Both counters are reset to 0 by the
+    // `drain()` call in the producer loop, so this is a per-beat delta.
+    let wire_total = wire_up.saturating_add(wire_down);
+    let speed_bps = if elapsed_secs > 0 && wire_total > 0 {
+        Some((wire_total / elapsed_secs as u64) as i64)
     } else {
         Some(0)
     };
@@ -363,21 +363,14 @@ fn spawn_heartbeat_producer(
     interval_secs: i32,
     telemetry: Arc<Mutex<TelemetryState>>,
     sync_paused: Arc<AtomicBool>,
+    wire: Arc<WireCounters>,
     mut cancel: oneshot::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs.max(MIN_HEARTBEAT_INTERVAL_SECS) as u64);
         let mut ticker = tokio::time::interval(interval);
-        // The first `tick()` completes immediately; we want the FIRST beat to
-        // fire right away (so the session shows live as soon as it's created),
-        // then every `interval` after.
-        let mut prev_bytes_synced: i64 = 0;
         // Track the WALL-CLOCK time of the last beat so the speed denominator is
-        // the real elapsed interval, not the configured one. A delayed loop
-        // (busy runtime, suspended laptop) would otherwise overstate speed by
-        // dividing a large byte delta by the nominal interval. Seeded to "now"
-        // so the first beat's delta (against prev_bytes_synced = 0) divides by a
-        // tiny elapsed → the ≥0 clamp + the floor below keep it sane.
+        // the real elapsed interval, not the configured one.
         let mut last_beat_secs = now_secs();
 
         loop {
@@ -394,6 +387,21 @@ fn spawn_heartbeat_producer(
                     let now = now_secs();
                     let elapsed_secs = beat_elapsed_secs(now, last_beat_secs);
 
+                    // Drain the wire counters ONCE per beat (swap to 0) so the
+                    // values are the delta since the last beat, not a cumulative total.
+                    let (wire_up, wire_down) = wire.drain();
+
+                    // P3 — persist the bandwidth sample to state.db for the 20h chart.
+                    // Best-effort: a write failure is not fatal; the chart may just
+                    // have a gap for that beat. `elapsed_secs` is the actual beat
+                    // period (real clock, not nominal), stored as the denominator so
+                    // the read side can reconstruct the rate.
+                    if let Err(e) = db.insert_bandwidth_sample(now, wire_up, wire_down, elapsed_secs as u32) {
+                        tracing::debug!(error = %e, "bandwidth_samples write failed; beat will be missing from chart");
+                    }
+                    // Prune samples older than ~25h (25 * 3600) to bound DB growth.
+                    let _ = db.prune_bandwidth_samples(now - 25 * 3600);
+
                     // Respect pause/lock: never report "syncing" while paused —
                     // overwrite the mapped status with a flat "paused" beat so
                     // the read side shows the user's intent, not stale activity.
@@ -409,10 +417,9 @@ fn spawn_heartbeat_producer(
                             detail: None,
                         }
                     } else {
-                        build_heartbeat(&telem, snap, prev_bytes_synced, elapsed_secs)
+                        build_heartbeat(&telem, snap, wire_up, wire_down, elapsed_secs)
                     };
 
-                    prev_bytes_synced = snap.bytes_synced;
                     last_beat_secs = now;
 
                     if let Err(e) = api.post_heartbeat(&session_id, &body).await {
@@ -576,6 +583,7 @@ async fn run(
                     interval,
                     telemetry.clone(),
                     sync_paused.clone(),
+                    bridge.wire.clone(),
                     hb_cancel_rx,
                 );
                 Some((hb_cancel_tx, handle, session_id))
@@ -1147,7 +1155,8 @@ mod tests {
             bytes_synced: 5_000,
             bytes_total: 9_000,
         };
-        let body = build_heartbeat(&telem, snap, 1_000, 20);
+        // P1 wire counters: 3000 bytes upload + 1000 bytes download over 20 s = 200 B/s.
+        let body = build_heartbeat(&telem, snap, 3_000, 1_000, 20);
         // 2 in flight → syncing, and current_file surfaces.
         assert_eq!(body.status, "syncing");
         assert_eq!(body.files_synced, Some(8));
@@ -1155,7 +1164,7 @@ mod tests {
         assert_eq!(body.bytes_synced, Some(5_000));
         assert_eq!(body.bytes_total, Some(9_000));
         assert_eq!(body.current_file.as_deref(), Some("active.bin"));
-        // Rolling speed: (5000 - 1000) / 20 = 200 B/s.
+        // Wire speed: (3000 + 1000) / 20 = 200 B/s.
         assert_eq!(body.speed_bps, Some(200));
     }
 
@@ -1174,17 +1183,18 @@ mod tests {
             bytes_synced: 9_000,
             bytes_total: 9_000,
         };
-        let body = build_heartbeat(&telem, snap, 9_000, 20);
+        // Zero wire bytes → idle beat, 0 B/s.
+        let body = build_heartbeat(&telem, snap, 0, 0, 20);
         assert_eq!(body.status, "watching");
         assert_eq!(body.current_file, None);
-        // No forward byte progress → 0 B/s, never a negative number.
+        // No wire bytes → 0 B/s.
         assert_eq!(body.speed_bps, Some(0));
     }
 
     #[test]
     fn build_heartbeat_speed_never_negative_on_regression() {
-        // A snapshot where bytes_synced dropped (e.g. cache eviction) must report
-        // 0 B/s, not a negative "speed".
+        // With wire counters there is no concept of "regression" — the counters are
+        // drained per beat so they can never go negative.  Zero wire bytes = 0 B/s.
         let telem = TelemetryState {
             engine_state: "idle".to_string(),
             current_file: None,
@@ -1196,8 +1206,29 @@ mod tests {
             bytes_synced: 100,
             bytes_total: 9_000,
         };
-        let body = build_heartbeat(&telem, snap, 5_000, 20);
+        // No wire bytes were counted this beat → 0 B/s.
+        let body = build_heartbeat(&telem, snap, 0, 0, 20);
         assert_eq!(body.speed_bps, Some(0));
+    }
+
+    #[test]
+    fn build_heartbeat_wire_speed_from_counters() {
+        // Confirm that the new wire-counter-based speed is correct.
+        // 10 000 upload + 5 000 download = 15 000 bytes over 20 s = 750 B/s.
+        let telem = TelemetryState {
+            engine_state: "syncing".to_string(),
+            current_file: None,
+        };
+        let snap = SyncSnapshot {
+            files_synced: 3,
+            files_total: 10,
+            files_in_flight: 2,
+            bytes_synced: 30_000,
+            bytes_total: 100_000,
+        };
+        let body = build_heartbeat(&telem, snap, 10_000, 5_000, 20);
+        assert_eq!(body.speed_bps, Some(750));
+        assert_eq!(body.status, "syncing");
     }
 
     #[test]
@@ -1220,7 +1251,7 @@ mod tests {
 
     #[test]
     fn build_heartbeat_speed_uses_real_elapsed_not_nominal_interval() {
-        // 4000 bytes of progress over a REAL 40s gap (e.g. a delayed loop) is
+        // 4000 wire bytes over a REAL 40s gap (e.g. a delayed loop) is
         // 100 B/s — NOT 200 B/s (which dividing by the nominal 20s would give).
         let telem = TelemetryState {
             engine_state: "idle".to_string(),
@@ -1234,7 +1265,8 @@ mod tests {
             bytes_total: 9_000,
         };
         let elapsed = beat_elapsed_secs(1_040, 1_000); // 40s real gap
-        let body = build_heartbeat(&telem, snap, 1_000, elapsed);
+        // 4000 total wire bytes over 40 s = 100 B/s.
+        let body = build_heartbeat(&telem, snap, 3_000, 1_000, elapsed);
         assert_eq!(body.speed_bps, Some(100));
     }
 

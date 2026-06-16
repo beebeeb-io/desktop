@@ -798,3 +798,45 @@ export function revealAndOpenFile(relPath: string): Promise<CommandResult<void>>
 export function setRecursivePin(itemId: string, pinned: boolean): Promise<CommandResult<unknown>> {
   return command<unknown>('set_recursive_pin', { itemId, pinned })
 }
+
+// ── Bandwidth view — speedtest + 20h traffic chart (task 0810) ───────────────
+
+export interface SpeedtestLatency {
+  min_ms: number
+  avg_ms: number
+  max_ms: number
+}
+
+/** Result of a full speedtest run (parity with CLI + iOS). */
+export interface SpeedtestResult {
+  latency: SpeedtestLatency
+  /** Average upload speed in bytes per second. */
+  upload_bps: number
+  /** Average download speed in bytes per second. */
+  download_bps: number
+}
+
+/** Run a network speedtest against the Beebeeb API (5 pings + 3×10MB up/down).
+ *  May take 30-90 s depending on connection speed. Requires an authenticated session. */
+export function runSpeedtest(): Promise<CommandResult<SpeedtestResult>> {
+  return command<SpeedtestResult>('run_speedtest')
+}
+
+/** A single bandwidth measurement point stored in the local state DB. */
+export interface BandwidthSample {
+  /** Unix timestamp (seconds) when the sample was recorded. */
+  sampled_at: number
+  /** Upload bytes transferred during `period_secs`. */
+  up_bytes: number
+  /** Download bytes transferred during `period_secs`. */
+  down_bytes: number
+  /** Duration of the measurement window in seconds (~20 s per heartbeat beat). */
+  period_secs: number
+}
+
+/** Fetch bandwidth history from the local state DB for the traffic chart.
+ *  `hours` controls the look-back window (default 20). Returns samples
+ *  oldest-first; the caller downsamples to a fixed number of chart buckets. */
+export function getBandwidthHistory(hours?: number): Promise<CommandResult<BandwidthSample[]>> {
+  return command<BandwidthSample[]>('get_bandwidth_history', { hours })
+}

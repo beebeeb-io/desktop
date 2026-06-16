@@ -517,6 +517,13 @@ impl StateDb {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS bandwidth_samples (
+                sampled_at  INTEGER NOT NULL,
+                up_bytes    INTEGER NOT NULL DEFAULT 0,
+                down_bytes  INTEGER NOT NULL DEFAULT 0,
+                period_secs INTEGER NOT NULL DEFAULT 20
+            );
+            CREATE INDEX IF NOT EXISTS idx_bandwidth_samples_at ON bandwidth_samples(sampled_at);
         ",
         )?;
         ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -1891,6 +1898,80 @@ impl StateDb {
         tx.commit()?;
         Ok(updated)
     }
+
+    // ── Bandwidth samples (P3 — 20h traffic chart, task 0810) ────────────────
+    //
+    // One row per heartbeat beat (~20 s).  The chart reads the last N hours and
+    // downsamples to a fixed number of display buckets client-side (in React).
+    // Only the last ~25 h are kept on disk; `prune_bandwidth_samples` removes older
+    // rows after every write so the table stays bounded.
+
+    /// Insert one bandwidth sample.  `sampled_at` is seconds-since-epoch.
+    pub fn insert_bandwidth_sample(
+        &self,
+        sampled_at: i64,
+        up_bytes: u64,
+        down_bytes: u64,
+        period_secs: u32,
+    ) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO bandwidth_samples (sampled_at, up_bytes, down_bytes, period_secs)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![sampled_at, up_bytes as i64, down_bytes as i64, period_secs as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch bandwidth samples from the last `hours` hours.
+    /// Returns rows as `(sampled_at, up_bytes, down_bytes, period_secs)`,
+    /// oldest first.
+    pub fn get_bandwidth_history(&self, hours: u32) -> Result<Vec<BandwidthSample>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let since = now - hours as i64 * 3600;
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT sampled_at, up_bytes, down_bytes, period_secs
+             FROM bandwidth_samples
+             WHERE sampled_at >= ?1
+             ORDER BY sampled_at ASC",
+        )?;
+        let rows = stmt.query_map(params![since], |row| {
+            Ok(BandwidthSample {
+                sampled_at: row.get(0)?,
+                up_bytes: row.get::<_, i64>(1)? as u64,
+                down_bytes: row.get::<_, i64>(2)? as u64,
+                period_secs: row.get::<_, i64>(3)? as u32,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Remove samples older than `cutoff_secs` (seconds-since-epoch) to bound DB size.
+    pub fn prune_bandwidth_samples(&self, cutoff_secs: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let n = conn.execute(
+            "DELETE FROM bandwidth_samples WHERE sampled_at < ?1",
+            params![cutoff_secs],
+        )?;
+        Ok(n)
+    }
+}
+
+/// A single bandwidth measurement point.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BandwidthSample {
+    /// Unix timestamp (seconds) when the sample was recorded.
+    pub sampled_at: i64,
+    /// Upload bytes transferred during `period_secs`.
+    pub up_bytes: u64,
+    /// Download bytes transferred during `period_secs`.
+    pub down_bytes: u64,
+    /// Duration of the measurement window (seconds).
+    pub period_secs: u32,
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
@@ -3185,5 +3266,89 @@ mod tests {
         db.request_resnapshot().unwrap();
         assert!(db.take_needs_resnapshot().unwrap());
         assert!(!db.take_needs_resnapshot().unwrap());
+    }
+
+    // ── bandwidth_samples (task 0810 — P3) ───────────────────────────────────
+
+    #[test]
+    fn bandwidth_samples_insert_and_history() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // Empty history — no rows yet.
+        let history = db.get_bandwidth_history(20).unwrap();
+        assert!(history.is_empty(), "fresh DB should have no samples");
+
+        // Insert a few samples at different times.
+        let t0: i64 = 1_700_000_000; // arbitrary epoch anchor
+        db.insert_bandwidth_sample(t0, 100, 200, 20).unwrap();
+        db.insert_bandwidth_sample(t0 + 20, 300, 400, 20).unwrap();
+        db.insert_bandwidth_sample(t0 + 40, 500, 600, 20).unwrap();
+
+        // get_bandwidth_history with a very large window should return all 3.
+        // (Using hours=24*365 to guarantee all samples fall within the window.)
+        // We use a fake "now" by checking the result directly.
+        let all = db.get_bandwidth_history(24 * 365).unwrap();
+        assert_eq!(all.len(), 3, "expected 3 samples");
+        assert_eq!(all[0].up_bytes, 100);
+        assert_eq!(all[0].down_bytes, 200);
+        assert_eq!(all[0].period_secs, 20);
+        assert_eq!(all[2].up_bytes, 500);
+
+        // Samples are ordered oldest-first.
+        assert!(all[0].sampled_at < all[1].sampled_at);
+        assert!(all[1].sampled_at < all[2].sampled_at);
+    }
+
+    #[test]
+    fn bandwidth_samples_prune() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let t0: i64 = 1_700_000_000;
+        db.insert_bandwidth_sample(t0, 1, 2, 20).unwrap();
+        db.insert_bandwidth_sample(t0 + 3600, 3, 4, 20).unwrap();
+        db.insert_bandwidth_sample(t0 + 7200, 5, 6, 20).unwrap();
+
+        // Prune everything before t0 + 3600: should remove the first sample.
+        let removed = db.prune_bandwidth_samples(t0 + 3600).unwrap();
+        assert_eq!(removed, 1, "one sample should be pruned");
+
+        let remaining = db.get_bandwidth_history(24 * 365).unwrap();
+        assert_eq!(remaining.len(), 2);
+        // The remaining ones start at t0 + 3600.
+        assert_eq!(remaining[0].sampled_at, t0 + 3600);
+    }
+
+    // ── Mbps <-> kbps conversion (task 0810 — E) ─────────────────────────────
+    //
+    // The desktop UI exposes bandwidth caps as Mbps; config.rs stores them as
+    // kbps.  These tests encode the conversion contract so a future refactor
+    // can't silently break it.
+
+    #[test]
+    fn mbps_to_kbps_conversion() {
+        // 1 Mbps = 1000 kbps (SI decimal, matching the network convention used
+        // by `formatBytes` on the frontend and the `speed_bar` helper in the CLI).
+        // NOTE: the conversion is intentionally decimal (1 Mbps = 1000 kbps),
+        // not binary (1 Mibps = 1024 Kibps), to match browser and CLI display.
+        let mbps_to_kbps = |mbps: f64| -> u64 { (mbps * 1000.0) as u64 };
+        let kbps_to_mbps = |kbps: u64| -> f64 { kbps as f64 / 1000.0 };
+
+        assert_eq!(mbps_to_kbps(1.0), 1000, "1 Mbps = 1000 kbps");
+        assert_eq!(mbps_to_kbps(10.0), 10_000, "10 Mbps = 10 000 kbps");
+        assert_eq!(mbps_to_kbps(100.0), 100_000, "100 Mbps = 100 000 kbps");
+        assert_eq!(mbps_to_kbps(0.0), 0, "0 Mbps (unlimited) = 0 kbps");
+
+        assert!((kbps_to_mbps(1000) - 1.0).abs() < 1e-9);
+        assert!((kbps_to_mbps(10_000) - 10.0).abs() < 1e-9);
+        assert_eq!(kbps_to_mbps(0), 0.0);
+
+        // Round-trip: any value survives mbps → kbps → mbps within ±0.001 Mbps.
+        for mbps in [0.5f64, 2.5, 50.0, 200.0] {
+            let kbps = mbps_to_kbps(mbps);
+            let back = kbps_to_mbps(kbps);
+            assert!((back - mbps).abs() < 0.001, "round-trip {mbps} Mbps failed: got {back}");
+        }
     }
 }

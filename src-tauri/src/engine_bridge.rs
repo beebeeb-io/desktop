@@ -32,8 +32,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use beebeeb_types::EncryptedBlob;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,50 @@ use crate::state_db::{
     FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, OperationPauseReason,
     PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE, PendingOperation, QueueDiagnostics, StateDb,
 };
+
+// ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
+//
+// Two `AtomicU64` counters track bytes actually sent/received on the wire in
+// the chunk loops (upload + download).  The heartbeat producer drains them with
+// `swap(0)` each beat so it gets the delta over the beat interval — the true
+// wire speed, not a file-completion delta.
+//
+// Both are incremented from async task context (no blocking), so `Relaxed`
+// ordering is sufficient: each counter is touched only from the engine thread,
+// and the heartbeat producer races on a separate task.  The only requirement is
+// that the swap and the add are individually atomic — a consistent view across
+// both counters simultaneously is NOT required (the heartbeat is a telemetry
+// estimate, not an accounting figure).
+
+/// Shared wire-byte counters threaded from `EngineBridge` to `runner`
+/// to the heartbeat producer. Wrapped in `Arc` so it can be cloned
+/// cheaply into the spawned heartbeat task.
+pub struct WireCounters {
+    /// Bytes written to the server in upload chunk loops (plaintext length
+    /// of each chunk before encryption — the user's data rate, not wire overhead).
+    pub upload_bytes: AtomicU64,
+    /// Bytes received from the server in download chunk loops (raw wire bytes
+    /// including the encryption envelope, which is all the client can measure
+    /// without re-decrypting — close enough for throughput display).
+    pub download_bytes: AtomicU64,
+}
+
+impl WireCounters {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            upload_bytes: AtomicU64::new(0),
+            download_bytes: AtomicU64::new(0),
+        })
+    }
+
+    /// Drain and return `(upload_bytes, download_bytes)` since the last drain.
+    /// Both counters are atomically reset to 0. Called once per heartbeat beat.
+    pub fn drain(&self) -> (u64, u64) {
+        let up = self.upload_bytes.swap(0, Ordering::Relaxed);
+        let dn = self.download_bytes.swap(0, Ordering::Relaxed);
+        (up, dn)
+    }
+}
 
 // ── Per-file state machine ────────────────────────────────────────────────────
 
@@ -103,6 +148,9 @@ impl FileSM {
 pub struct EngineBridge {
     db: Arc<StateDb>,
     api: Arc<ApiClient>,
+    /// Wire-byte counters shared with the heartbeat producer. Both are
+    /// drained (swapped to 0) once per beat; incremented by the chunk loops.
+    pub wire: Arc<WireCounters>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,7 +293,7 @@ struct SharedRootMapping {
 
 impl EngineBridge {
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
-        Self { db, api }
+        Self { db, api, wire: WireCounters::new() }
     }
 
     /// Borrow the underlying state DB so callers (e.g. [`sync_tick`])
@@ -476,6 +524,12 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
         }
         let mut buffer = vec![0u8; chunk_size];
+        // Rate-limit ceiling: read once per file, not per chunk (config is on
+        // disk but the file is fast to parse; at most one read per upload op).
+        let upload_kbps_limit = crate::config::DesktopConfig::load()
+            .map(|c| c.upload_kbps_limit)
+            .unwrap_or(0);
+
         for chunk_index in 0..chunk_count {
             let read = file.read(&mut buffer)?;
             if read == 0 {
@@ -487,9 +541,26 @@ impl EngineBridge {
             }
             let encrypted = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &buffer[..read])
                 .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
+            let chunk_start = std::time::Instant::now();
             self.api
                 .upload_session_chunk(&upload.upload_session_id, chunk_index as u32, &encrypted)
                 .await?;
+
+            // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
+            self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
+
+            // E — token-bucket pacing: if a limit is set and the chunk transferred
+            // faster than the budget allows, sleep the remainder.
+            if upload_kbps_limit > 0 {
+                let budget_secs = read as f64 / (upload_kbps_limit as f64 * 1024.0);
+                let elapsed_secs = chunk_start.elapsed().as_secs_f64();
+                if budget_secs > elapsed_secs {
+                    let sleep_ms = ((budget_secs - elapsed_secs) * 1000.0) as u64;
+                    if sleep_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    }
+                }
+            }
         }
 
         let completed = self.api.complete_upload_session(&upload.upload_session_id).await?;
@@ -1547,6 +1618,11 @@ impl EngineBridge {
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
 
+        // Rate-limit ceiling for downloads.
+        let download_kbps_limit = crate::config::DesktopConfig::load()
+            .map(|c| c.download_kbps_limit)
+            .unwrap_or(0);
+
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
         // ciphertext is always larger than plaintext anyway.
@@ -1554,10 +1630,27 @@ impl EngineBridge {
         let mut plaintext: Vec<u8> = Vec::with_capacity(approx_size);
 
         for i in 0..chunk_count {
+            let chunk_start = std::time::Instant::now();
             let chunk_bytes = self.api.download_chunk(file_id, i).await?;
+            let wire_len = chunk_bytes.len() as u64;
             let decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
             plaintext.extend_from_slice(&decrypted);
+
+            // P1 — wire-byte counter: count raw wire bytes received.
+            self.wire.download_bytes.fetch_add(wire_len, Ordering::Relaxed);
+
+            // E — token-bucket pacing for downloads.
+            if download_kbps_limit > 0 {
+                let budget_secs = wire_len as f64 / (download_kbps_limit as f64 * 1024.0);
+                let elapsed_secs = chunk_start.elapsed().as_secs_f64();
+                if budget_secs > elapsed_secs {
+                    let sleep_ms = ((budget_secs - elapsed_secs) * 1000.0) as u64;
+                    if sleep_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    }
+                }
+            }
         }
 
         // Make the destination directory if needed (OS extensions that
