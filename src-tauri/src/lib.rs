@@ -4528,10 +4528,79 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
     });
 }
 
+/// Suppress the Windows 11 DWM window outline (rounded-rect border + system
+/// shadow) on the given Tauri window, leaving only what the WebView paints.
+///
+/// The tray flyout window is frameless + transparent, yet Win11's DWM still
+/// draws a rounded border and shadow on the window *rectangle* — visible as a
+/// faint "frame" around the white card (which is inset 8px inside the window).
+/// Setting `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND` drops the
+/// rounded outline; `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE` removes the 1px DWM
+/// border line. The card's own CSS shadow then floats it instead.
+///
+/// HWND version bridge: our DIRECT `windows` dep is 0.58, but Tauri 2.x pulls
+/// `windows` 0.61, so `tray_window.hwnd()` hands back a 0.61 `HWND` — a DISTINCT
+/// type from the 0.58 `HWND` that `DwmSetWindowAttribute@0.58` wants. Both
+/// newtypes wrap `*mut c_void`, so we reconstruct the 0.58 HWND from the raw
+/// pointer (`raw.0 as _`). Any failure is logged and ignored — this is a purely
+/// cosmetic refinement, never fatal.
+#[cfg(target_os = "windows")]
+fn disable_dwm_window_frame(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let raw = match window.hwnd() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "tray frame: could not get HWND; leaving DWM default");
+            return;
+        }
+    };
+    // Bridge windows@0.61 HWND -> windows@0.58 HWND (both are *mut c_void).
+    let hwnd = HWND(raw.0 as _);
+
+    // SAFETY: `hwnd` is a live top-level window handle owned by this process.
+    // Both attributes take a value the size of their pointed-to constant; we
+    // pass the exact byte length (4) for each i32/u32 payload.
+    unsafe {
+        let pref = DWMWCP_DONOTROUND; // DWM_WINDOW_CORNER_PREFERENCE(1)
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::addr_of!(pref) as *const core::ffi::c_void,
+            std::mem::size_of_val(&pref) as u32,
+        ) {
+            tracing::warn!(error = %e, "tray frame: DWMWA_WINDOW_CORNER_PREFERENCE failed");
+        }
+
+        let border_none = DWMWA_COLOR_NONE; // 0xFFFFFFFE — suppress DWM border line
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            std::ptr::addr_of!(border_none) as *const core::ffi::c_void,
+            std::mem::size_of_val(&border_none) as u32,
+        ) {
+            tracing::warn!(error = %e, "tray frame: DWMWA_BORDER_COLOR failed");
+        }
+    }
+}
+
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // Read current autostart state so the check mark is correct on launch.
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let tray_menu = build_tray_menu(app, autostart_enabled)?;
+
+    // Windows 11 draws a rounded outline + shadow on the transparent tray
+    // flyout's window rectangle, which reads as a faint frame around the white
+    // card. Turn that off once at startup (the window is declared statically in
+    // tauri.conf.json, so it already exists here). Non-fatal cosmetic step.
+    #[cfg(target_os = "windows")]
+    if let Some(tray_window) = app.get_webview_window("tray") {
+        disable_dwm_window_frame(&tray_window);
+    }
 
     let icon = app
         .default_window_icon()

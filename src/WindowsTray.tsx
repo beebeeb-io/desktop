@@ -368,14 +368,16 @@ export default function WindowsTray() {
     <div
       style={{
         // Small inset so the card's drop shadow has room to render inside the
-        // transparent window without being clipped.
+        // transparent window without being clipped. The Win11 DWM window outline
+        // (rounded border + system shadow) is disabled in Rust
+        // (disable_dwm_window_frame), so this card is the ONLY visible surface —
+        // no border, just the white block with one soft shadow to make it float.
         position: 'absolute',
         inset: 8,
         background: T.paper,
         borderRadius: 12,
         overflow: 'hidden',
-        border: `1px solid ${T.line2}`,
-        boxShadow: '0 24px 60px -16px rgba(0,0,0,0.40)',
+        boxShadow: '0 12px 32px -12px rgba(0,0,0,0.28)',
         display: 'flex',
         flexDirection: 'column',
         fontFamily: T.fontSans,
