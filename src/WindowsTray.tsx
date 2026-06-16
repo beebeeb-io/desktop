@@ -34,6 +34,7 @@ import {
   desktopFileOverview,
   loadSyncStatus,
   openUrl,
+  revealAndOpenFile,
   type FileOverview,
   type RecentFile,
   type SyncStatus,
@@ -490,14 +491,21 @@ export default function WindowsTray() {
             const type = getFileType(name)
             const warn = WARN_STATUSES.has(file.status)
             return (
-              <div
+              <button
                 key={file.path}
+                title={`Open ${name}`}
+                onClick={() => void revealAndOpenFile(file.path)}
                 style={{
                   display: 'grid',
                   gridTemplateColumns: '30px 1fr auto',
                   alignItems: 'center',
                   gap: 10,
                   padding: '9px 14px',
+                  width: '100%',
+                  background: 'transparent',
+                  border: 'none',
+                  textAlign: 'left',
+                  cursor: 'pointer',
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.background = T.paper2
@@ -562,7 +570,7 @@ export default function WindowsTray() {
                 >
                   {relativeTime(file.modified_at)}
                 </div>
-              </div>
+              </button>
             )
           })
         )}

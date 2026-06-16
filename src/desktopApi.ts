@@ -778,6 +778,18 @@ export function markKnownFolderOnboardingSeen(): Promise<CommandResult<void>> {
   return command<void>('mark_known_folder_onboarding_seen')
 }
 
+// ── Task 0812 — tray flyout: click file → reveal in Explorer + open ──────────
+
+/**
+ * Open the folder containing a recently-changed file in Windows Explorer
+ * (with the file selected) and then open the file in its default application.
+ * `relPath` is the path as returned by `desktop_file_overview` (relative to the
+ * sync root). Windows-only — returns an error on other platforms.
+ */
+export function revealAndOpenFile(relPath: string): Promise<CommandResult<void>> {
+  return command<void>('reveal_and_open_file', { relPath })
+}
+
 /** Pin (or unpin) a vault folder + its descendants so they're kept always-local
  *  (available offline). Backs the onboarding "backed-up folders stay on this PC"
  *  promise. `item_id` is a vault folder id; the recursion is server-side in the

@@ -1910,6 +1910,58 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
     }
 }
 
+/// Open the folder containing a recently-changed file in Windows Explorer
+/// (selecting the file) and then open the file with its default application.
+///
+/// `rel_path` is the path as stored in the state DB — relative to the sync
+/// root, using the same separator convention as the DB (forward-slash or
+/// back-slash; both are normalised below). The full path is `sync_root/rel`.
+///
+/// Windows only. On other platforms this returns `Err("unsupported")` so
+/// the binary still compiles cross-platform.
+///
+/// Zero-knowledge: the file path is NOT logged — only a fixed message is.
+#[tauri::command]
+fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use tauri_plugin_opener::OpenerExt;
+
+        let sync_root = DesktopConfig::load()
+            .ok()
+            .and_then(|c| c.sync_root)
+            .ok_or_else(|| "sync root not configured".to_string())?;
+
+        // Normalise separators and resolve the full path.
+        let rel = rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let full_path = sync_root.join(&rel);
+
+        // (a) REVEAL — open Explorer selecting the file.
+        tracing::info!("reveal_and_open_file: launching Explorer");
+        std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&full_path)
+            .spawn()
+            .map_err(|e| format!("reveal in Explorer: {e}"))?;
+
+        // (b) OPEN — launch the file in its default app (fire-and-forget so
+        // cloud-only placeholder hydration doesn't block the IPC call).
+        tracing::info!("reveal_and_open_file: opening file with default app");
+        let path_str = full_path.to_string_lossy().into_owned();
+        if let Err(e) = app.opener().open_path(path_str, None::<&str>) {
+            tracing::warn!(error = %e, "reveal_and_open_file: failed to open file with default app");
+        }
+
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, rel_path);
+        Err("unsupported".to_string())
+    }
+}
+
 /// Lightweight status endpoint for the WebView's settings page.
 /// Reports whether the Rust side has a session, where the sync root
 /// is on disk, whether the engine task is currently running, and the
@@ -4437,6 +4489,8 @@ pub fn run() {
             tray_pause_sync,
             tray_resume_sync,
             set_sync_mode,
+            // Task 0812 — tray flyout: click file → reveal in Explorer + open
+            reveal_and_open_file,
         ])
         .setup(|app| {
             // Multi-account Phase 1 (decision 0800/0808): resolve the PERSISTED
