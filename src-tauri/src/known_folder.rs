@@ -3,16 +3,24 @@
 //! Decision 0797 chose **Model 2**: a one-way mirror, NOT an OS redirect. We do
 //! NOT call `SHSetKnownFolderPath` and we never move or touch the user's real
 //! Desktop / Documents / Pictures / Music / Videos / Downloads. Instead, for
-//! each folder the user opts in, we create `<sync_root>\<DisplayName>` and copy
-//! NEW or CHANGED files from the real known folder into that vault subfolder.
-//! The existing enumeration scan (`watcher::scan_loop`) then encrypts + uploads
+//! each folder the user opts in, we create
+//! `<sync_root>\Backup\<device>\<DisplayName>` and copy NEW or CHANGED files
+//! from the real known folder into that vault subfolder. `<device>` is this
+//! machine's hostname (the SAME value it registers with the server), so a
+//! multi-device account keeps each machine's backup in its own subtree. The
+//! existing enumeration scan (`watcher::scan_loop`) then encrypts + uploads
 //! whatever lands under the sync root — so the only new engine code is this
 //! source→vault copy loop. Originals stay untouched, so this coexists with
 //! OneDrive (no redirect fight).
 //!
+//! We resolve the source folders to their DEFAULT, NON-redirected user-profile
+//! location (`C:\Users\<u>\Desktop`, …) even when OneDrive Known-Folder-Move has
+//! redirected them — see [`resolve_known_folder`].
+//!
 //! ## Guarantees (v1)
 //! - **One-way only**: we ONLY read the real known folder and ONLY write into
-//!   `<sync_root>\<DisplayName>`. We never write back to the source.
+//!   `<sync_root>\Backup\<device>\<DisplayName>`. We never write back to the
+//!   source.
 //! - **No source deletes, ever**: the source is opened read-only (copy reads).
 //! - **No vault deletes (v1)**: a file removed from the source is left in the
 //!   vault copy. Mirroring deletions into the vault would, via the upload
@@ -135,6 +143,60 @@ pub fn needs_copy(decision: CopyDecision) -> bool {
     matches!(decision, CopyDecision::New | CopyDecision::Changed)
 }
 
+// ── Backup destination path (cross-platform, unit-tested everywhere) ─────────
+
+/// Sanitize a raw device name into a single safe path segment for the backup
+/// destination `<sync_root>\Backup\<device>\<DisplayName>`.
+///
+/// The device name comes from `runner::hostname_or_unknown()` — normally a tame
+/// hostname, but we never trust it to be path-safe. We collapse it to a single
+/// segment that cannot escape its parent or split into nested folders:
+///
+/// - any path separator (`/` or `\`) becomes `_` (no nesting, no traversal);
+/// - any other path-special / control char (`:`, `*`, `?`, `"`, `<`, `>`, `|`,
+///   and ASCII control bytes) becomes `_` (so the segment is a valid Windows
+///   filename);
+/// - leading/trailing dots and whitespace are trimmed (Windows strips trailing
+///   dots/spaces, and a leading dot would hide the folder);
+/// - the reserved `.`/`..` traversal names, or an empty result, fall back to
+///   the literal `"device"`.
+///
+/// Pure + total: no I/O, no panics. Unit-tested on every platform.
+pub fn sanitize_device_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        let mapped = match ch {
+            '/' | '\\' => '_',
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        };
+        out.push(mapped);
+    }
+    // Trim leading/trailing dots and whitespace (a leading '.' would hide the
+    // folder; trailing dots/spaces are stripped by the Windows filesystem and
+    // would otherwise create a name that doesn't round-trip).
+    let trimmed = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "device".to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Build the vault destination root for one known folder:
+/// `<sync_root>\Backup\<sanitized_device>\<display_name>`.
+///
+/// Factored cross-platform (pure `Path` joins) so the path layout — and the
+/// device-name sanitization feeding it — is unit-testable without Windows. The
+/// Windows mirror loop calls this with `runner::hostname_or_unknown()` as
+/// `device_name`; the same value this device registers with the server.
+pub fn backup_dest_root(sync_root: &Path, device_name: &str, display_name: &str) -> std::path::PathBuf {
+    sync_root
+        .join("Backup")
+        .join(sanitize_device_segment(device_name))
+        .join(display_name)
+}
+
 /// Read a `FileStat` from a path, mapping any error (missing file, permission)
 /// to `None`. Cross-platform; used by the Windows mirror loop and by tests.
 pub fn stat_path(path: &Path) -> Option<FileStat> {
@@ -162,7 +224,8 @@ mod windows_impl {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
         FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music,
-        FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+        FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT_PATH, KF_FLAG_DONT_VERIFY,
+        SHGetKnownFolderPath,
     };
     use windows::core::GUID;
 
@@ -180,24 +243,41 @@ mod windows_impl {
         }
     }
 
-    /// Resolve a known folder's real absolute path on this machine via
+    /// Resolve a known folder's DEFAULT user-profile path on this machine via
     /// `SHGetKnownFolderPath`. Returns `None` for an unknown key or if the
     /// shell call fails (e.g. the folder is not provisioned for this user).
+    ///
+    /// **Default (non-redirected) location, by design (founder fix).** We pass
+    /// `KF_FLAG_DEFAULT_PATH` (NOT `KF_FLAG_DEFAULT`) so the call returns the
+    /// known folder's DEFAULT location *ignoring* any OneDrive Known-Folder-Move
+    /// redirection. With plain `KF_FLAG_DEFAULT`, an account with OneDrive KFM
+    /// enabled resolves Desktop/Documents/Pictures to
+    /// `C:\Users\<u>\OneDrive - <org>\Desktop` etc.; `KF_FLAG_DEFAULT_PATH`
+    /// resolves the un-redirected `C:\Users\<u>\Desktop`. This stays
+    /// localization-safe — it is still the known-folder API resolving the right
+    /// per-user path, NOT a hard-coded `"Desktop"` string. We OR in
+    /// `KF_FLAG_DONT_VERIFY` so the call still returns the default path on a
+    /// machine where that directory does not physically exist (without it the
+    /// shell verifies existence and can fail). The flag pair is a no-op for the
+    /// never-redirected Music/Videos/Downloads, so all six folders use it
+    /// uniformly.
     ///
     /// Memory: `SHGetKnownFolderPath` allocates the path string with
     /// `CoTaskMemAlloc`; we copy it into a Rust `String` and then `CoTaskMemFree`
     /// the original, so nothing leaks.
     pub fn resolve_known_folder(key: &str) -> Option<PathBuf> {
         let rfid = folder_id_for(key)?;
-        // SAFETY: `rfid` is a valid &GUID; KF_FLAG_DEFAULT + the null
-        // (`HANDLE::default()`) access token are the documented "current user,
-        // default behaviour" arguments. A null token means "the current user's
-        // folder" — exactly what we want. On success the out-param holds a
+        // SAFETY: `rfid` is a valid &GUID; `KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY`
+        // is a valid `KNOWN_FOLDER_FLAG` bitset (`BitOr` is implemented), and the
+        // null (`HANDLE::default()`) access token is the documented "current
+        // user" argument — exactly what we want. On success the out-param holds a
         // CoTaskMem-allocated NUL-terminated wide string we own and must free
         // with CoTaskMemFree. (We pass an explicit `HANDLE::default()` rather
         // than a bare `None` so the `P0: Param<HANDLE>` type is unambiguous.)
         unsafe {
-            let pwstr = SHGetKnownFolderPath(&rfid, KF_FLAG_DEFAULT, HANDLE::default()).ok()?;
+            let pwstr =
+                SHGetKnownFolderPath(&rfid, KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY, HANDLE::default())
+                    .ok()?;
             if pwstr.is_null() {
                 return None;
             }
@@ -231,19 +311,32 @@ mod windows_impl {
     }
 
     /// Mirror every enabled known folder into the sync root. One-way:
-    /// source → `<sync_root>\<DisplayName>`. Best-effort + idempotent — a
-    /// per-file error logs (count only) and the pass continues.
+    /// source → `<sync_root>\Backup\<device>\<DisplayName>`. Best-effort +
+    /// idempotent — a per-file error logs (count only) and the pass continues.
+    ///
+    /// `<device>` is `runner::hostname_or_unknown()` (the SAME value this device
+    /// registers with the server) sanitized to one safe path segment, so a
+    /// multi-device account keeps each machine's backup in its own subtree under
+    /// `Backup/`.
     ///
     /// Safety invariants enforced here:
-    /// - We only ever WRITE under `<sync_root>\<DisplayName>` (`dest_root`),
-    ///   which is built from the trusted sync root + a hard-coded display name.
+    /// - We only ever WRITE under `<sync_root>\Backup\<device>\<DisplayName>`
+    ///   (`dest_root`), built from the trusted sync root + the literal `Backup`
+    ///   segment + a sanitized single-segment device name + a hard-coded display
+    ///   name. None of those components can traverse out of the sync root.
     /// - We never write to, rename, or delete anything under the SOURCE.
     /// - We refuse to mirror a source that resolves to (or under) the sync root
-    ///   itself, which would be a copy-into-itself loop.
+    ///   itself, which would be a copy-into-itself loop. This also covers a
+    ///   source that somehow resolves under `<sync_root>\Backup\...` — it is
+    ///   under the sync root, so the same guard refuses it.
     pub fn mirror_enabled_known_folders(sync_root: &Path, enabled_keys: &[String]) {
         if enabled_keys.is_empty() {
             return;
         }
+        // Resolve the device name ONCE per pass: the SAME hostname this device
+        // registers with the server, sanitized inside `backup_dest_root` to a
+        // single safe path segment.
+        let device_name = crate::runner::hostname_or_unknown();
         let mut total = MirrorStats::default();
         for key in enabled_keys {
             let Some(kf) = known_folder_by_key(key) else {
@@ -254,12 +347,14 @@ mod windows_impl {
                 continue;
             };
             // Refuse a self-referential mirror (source inside the sync root, or
-            // the sync root inside the source) — either would recurse.
+            // the sync root inside the source) — either would recurse. A source
+            // under `<sync_root>\Backup\...` is under `sync_root`, so this guard
+            // also refuses backing up the backup.
             if source.starts_with(sync_root) || sync_root.starts_with(&source) {
                 tracing::warn!(folder = %kf.key, "known-folder backup: source overlaps sync root; skipping");
                 continue;
             }
-            let dest_root = sync_root.join(kf.display_name);
+            let dest_root = backup_dest_root(sync_root, &device_name, kf.display_name);
             if let Err(e) = std::fs::create_dir_all(&dest_root) {
                 tracing::warn!(folder = %kf.key, error = %e, "known-folder backup: could not create vault folder");
                 total.errors += 1;
@@ -492,6 +587,92 @@ mod tests {
             classify_copy(at_cap, Some(at_cap), cap),
             CopyDecision::TooLarge
         );
+    }
+
+    // ── Backup destination path + device-name sanitization ───────────────────
+    //
+    // The Win32 source resolver (`resolve_known_folder`) is `cfg(windows)`-only,
+    // so it is not exercised here; the path LAYOUT and the device-name
+    // sanitization that feed the destination are cross-platform and ARE tested.
+
+    #[test]
+    fn dest_root_builds_backup_device_folder() {
+        // `<sync_root>/Backup/<device>/<DisplayName>`, in that order.
+        let sync_root = Path::new("/sync");
+        let dest = backup_dest_root(sync_root, "my-laptop", "Documents");
+        // Compare component-wise so the test is separator-agnostic across OSes.
+        let comps: Vec<_> = dest
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert!(comps.iter().any(|c| c == "Backup"), "must contain a Backup segment: {comps:?}");
+        // The tail is …/Backup/my-laptop/Documents.
+        let n = comps.len();
+        assert_eq!(comps[n - 3], "Backup");
+        assert_eq!(comps[n - 2], "my-laptop");
+        assert_eq!(comps[n - 1], "Documents");
+    }
+
+    #[test]
+    fn dest_root_sanitizes_device_into_one_segment() {
+        // A device name carrying separators / traversal must NOT add nesting or
+        // escape upward — it collapses to a single sanitized segment.
+        let dest = backup_dest_root(Path::new("/sync"), "../../evil\\name", "Pictures");
+        let comps: Vec<_> = dest
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let n = comps.len();
+        // Still exactly Backup / <one device segment> / Pictures.
+        assert_eq!(comps[n - 3], "Backup");
+        assert_eq!(comps[n - 1], "Pictures");
+        let device_seg = &comps[n - 2];
+        assert!(!device_seg.contains('/'), "no '/' in device segment: {device_seg}");
+        assert!(!device_seg.contains('\\'), "no '\\\\' in device segment: {device_seg}");
+        assert_ne!(device_seg, "..", "device segment must never be the traversal token");
+        // Each separator became '_', so the traversal `../../` flattens to
+        // `.._.._` (no real `..` component survives); the leading dots are then
+        // trimmed and the tail `evil\name` becomes `evil_name`, yielding the
+        // single inert segment `_.._evil_name` — it cannot walk up or split into
+        // nested dirs.
+        assert_eq!(device_seg, "_.._evil_name");
+        assert!(!device_seg.contains(std::path::MAIN_SEPARATOR), "single inert segment");
+    }
+
+    #[test]
+    fn sanitize_replaces_separators_and_path_specials() {
+        assert_eq!(sanitize_device_segment("a/b\\c"), "a_b_c");
+        // Windows-reserved filename chars all map to '_'.
+        assert_eq!(sanitize_device_segment("a:b*c?d\"e<f>g|h"), "a_b_c_d_e_f_g_h");
+        // A plain hostname is preserved verbatim.
+        assert_eq!(sanitize_device_segment("Guus-PC"), "Guus-PC");
+    }
+
+    #[test]
+    fn sanitize_strips_control_chars() {
+        // A NUL / control byte (e.g. from a corrupt hostname) becomes '_'.
+        let raw = "host\u{0}name\u{1f}";
+        // Trailing control char is mapped to '_' (not whitespace), so it stays.
+        assert_eq!(sanitize_device_segment(raw), "host_name_");
+    }
+
+    #[test]
+    fn sanitize_trims_leading_trailing_dots_and_spaces() {
+        // Leading dot would hide the folder; trailing dots/spaces are stripped
+        // by Windows anyway.
+        assert_eq!(sanitize_device_segment("  .hidden.  "), "hidden");
+        assert_eq!(sanitize_device_segment("name..."), "name");
+        assert_eq!(sanitize_device_segment("...name"), "name");
+    }
+
+    #[test]
+    fn sanitize_falls_back_to_device_on_empty_or_traversal() {
+        assert_eq!(sanitize_device_segment(""), "device");
+        assert_eq!(sanitize_device_segment("   "), "device");
+        assert_eq!(sanitize_device_segment("."), "device");
+        assert_eq!(sanitize_device_segment(".."), "device");
+        // A name that is ONLY dots/spaces trims to empty → fallback.
+        assert_eq!(sanitize_device_segment(". . ."), "device");
     }
 
     #[test]
