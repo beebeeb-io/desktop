@@ -16,8 +16,8 @@
 //! - `CF_CALLBACK_PARAMETERS.FetchData` carries the byte range Windows
 //!   wants: `RequiredFileOffset` / `RequiredLength` (we MUST satisfy at
 //!   least this) plus an `Optional*` hint we may over-serve. We hydrate
-//!   the whole file via `EngineBridge::hydrate_file` (decrypt to a temp
-//!   path) and then splice the required range back with
+//!   the whole file via `EngineBridge::hydrate_file_to_memory` (decrypt
+//!   entirely in memory) and then splice the required range back with
 //!   `CfExecute(TRANSFER_DATA)`.
 //!
 //! ## Threading
@@ -40,10 +40,9 @@
 //!
 //! ## Security
 //!
-//! `hydrate_file` writes *decrypted user plaintext* to a temp path. We
-//! read it back, transfer it, then remove the temp file promptly so
-//! decrypted bytes don't linger in `%TEMP%`. We never log plaintext,
-//! keys, or tokens.
+//! Decrypted plaintext is NEVER written to disk. `hydrate_file_to_memory`
+//! decrypts entirely in memory and returns a [`zeroize::Zeroizing`] buffer
+//! that overwrites itself on drop. We never log plaintext, keys, or tokens.
 
 #![cfg(target_os = "windows")]
 
@@ -170,29 +169,19 @@ pub unsafe extern "system" fn fetch_data_callback(
         }
     };
 
-    // Hydration writes the whole decrypted plaintext to a temp path. We
-    // splice the required range back into the placeholder below, then
-    // remove the temp file so decrypted user data doesn't linger.
-    let dest_path = std::env::temp_dir().join(&file_id);
-
-    let res = handle.block_on(async { bridge.hydrate_file(&file_id, &dest_path).await });
-    if let Err(e) = res {
-        // Do NOT log the error's inner content at info+ if it could carry
-        // decrypted bytes; hydrate_file errors are status strings only.
-        tracing::warn!(file_id = %file_id, error = %e, "hydrate_file failed for Cloud Files callback");
-        secure_remove_temp(&dest_path);
-        unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
-        return;
-    }
-
-    // Read the plaintext back into memory. (See REPORT: this round-trips
-    // through %TEMP%; a future improvement is to stream from hydrate_file
-    // in-memory and skip the temp file entirely.)
-    let mut plaintext = match std::fs::read(&dest_path) {
-        Ok(buf) => buf,
+    // Decrypt the whole file entirely in memory — plaintext is NEVER written
+    // to disk. Zero-knowledge requirement: the Cloud Files runtime will receive
+    // the bytes via CfExecute(TRANSFER_DATA) and write them into the placeholder
+    // itself; we must not leave a copy in %TEMP% or anywhere else on disk.
+    // The Zeroizing wrapper ensures the buffer is wiped on drop (normal, early
+    // return, or panic unwind) without any explicit scrubbing call here.
+    let buf = handle.block_on(async { bridge.hydrate_file_to_memory(&file_id).await });
+    let buf = match buf {
+        Ok(b) => b,
         Err(e) => {
-            tracing::warn!(file_id = %file_id, error = %e, "could not read hydrated temp file");
-            secure_remove_temp(&dest_path);
+            // Do NOT log the error's inner content at info+ if it could carry
+            // decrypted bytes; hydrate_file_to_memory errors are status strings only.
+            tracing::warn!(file_id = %file_id, error = %e, "hydrate_file_to_memory failed for Cloud Files callback");
             unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
@@ -209,8 +198,8 @@ pub unsafe extern "system" fn fetch_data_callback(
     //
     // RESOLVE-OR-ERROR (task 0783) — never silently fail:
     //
-    //   Tier-1 (resolve): hydrate_file decrypted successfully, so the bytes
-    //   are AES-256-GCM AUTHENTICATED — `plaintext.len()` is GROUND TRUTH.
+    //   Tier-1 (resolve): hydrate_file_to_memory decrypted successfully, so the
+    //   bytes are AES-256-GCM AUTHENTICATED — `buf.len()` is GROUND TRUTH.
     //   We cannot resize the placeholder DURING this fetch (the file is in-use
     //   by the active transfer; CfUpdatePlaceholder would return
     //   ERROR_CLOUD_FILE_IN_USE), so we fail THIS fetch cleanly, then correct
@@ -226,19 +215,18 @@ pub unsafe extern "system" fn fetch_data_callback(
     //   rather than a green check on a file that won't open. The failed
     //   transfer (below) already surfaces an error on this open.
     if let SizeDecision::ResolveTo { corrected_size } =
-        decide_size_action(plaintext.len() as i64, file_size)
+        decide_size_action(buf.len() as i64, file_size)
     {
         tracing::warn!(
             file_id = %file_id,
-            plaintext_len = plaintext.len(),
+            plaintext_len = buf.len(),
             file_size,
             "hydrated size != placeholder size; resolving to the decrypted (authenticated) length"
         );
 
-        // Scrub + remove the decrypted plaintext now — the resolution path
-        // below works from the size only, never the bytes.
-        zero_bytes(&mut plaintext);
-        secure_remove_temp(&dest_path);
+        // Drop `buf` here — the resolution path works from the size only,
+        // never the bytes. The Zeroizing drop wipes the allocation.
+        drop(buf);
 
         // Fail THIS fetch cleanly first: the file must not be mid-hydration
         // when we resize, and Explorer must stop spinning on this open.
@@ -251,22 +239,22 @@ pub unsafe extern "system" fn fetch_data_callback(
         return;
     }
 
-    // Splice the required range back into the placeholder.
+    // Splice the required range back into the placeholder. `buf` is kept alive
+    // here so the data is valid for every CfExecute call inside transfer_range.
     let transfer_ok = unsafe {
         transfer_range(
             connection_key,
             transfer_key,
             request_key,
-            &plaintext,
+            &buf,
             required_offset,
             required_length,
         )
     };
 
-    // Zero the in-memory plaintext copy before dropping (it's decrypted
-    // user data) and remove the temp file.
-    zero_bytes(&mut plaintext);
-    secure_remove_temp(&dest_path);
+    // Drop `buf` now — transfer_range has consumed all bytes it needs.
+    // The Zeroizing wrapper wipes the plaintext allocation on drop.
+    drop(buf);
 
     match transfer_ok {
         Ok(()) => {
@@ -277,7 +265,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             // CF_HYDRATION_POLICY_PARTIAL a request may cover just a
             // range; marking the file fully in-sync after a partial
             // transfer would be a lie and could suppress later fetches.
-            // (hydrate_file always decrypts the whole file to disk, so a
+            // (hydrate_file_to_memory always decrypts the whole file, so a
             // [0, file_size) required range means the file is now fully
             // present.) A failure here doesn't undo the transfer, so we
             // only log.
@@ -394,10 +382,10 @@ unsafe fn resolve_size_mismatch(
         Ok(()) => {
             // The placeholder is now an in-sync, cloud-only stub at the correct
             // size — no plaintext bytes were delivered to it (this fetch was
-            // failed). `hydrate_file` had optimistically flipped the row to
-            // `Local` + cached the (now-deleted) %TEMP% path, so flip it back to
-            // `CloudOnly` to match on-disk reality. The next open fires a fresh,
-            // aligned FETCH_DATA that hydrates successfully.
+            // failed). `hydrate_file_to_memory` had optimistically flipped the row
+            // to `Local`, so flip it back to `CloudOnly` to match on-disk reality.
+            // The next open fires a fresh, aligned FETCH_DATA that hydrates
+            // successfully.
             let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::CloudOnly);
             tracing::info!(file_id = %file_id, "resolved size mismatch; placeholder resized to decrypted length");
         }
@@ -411,6 +399,10 @@ unsafe fn resolve_size_mismatch(
         }
     }
 }
+
+// NOTE: `zero_bytes` and `secure_remove_temp` have been removed. The hydration
+// path now uses `Zeroizing<Vec<u8>>` (automatic wipe on drop) and never writes
+// plaintext to disk, so neither function is needed.
 
 /// Reconstruct the on-disk placeholder path for `file_id` from the state DB:
 /// `<sync_root>/<entry.path>` using the SAME mapping `populate_placeholders`
@@ -878,27 +870,6 @@ fn wide_to_vec(ptr: *const u16) -> Option<Vec<u16>> {
     Some(out)
 }
 
-/// Best-effort overwrite of a byte buffer with zeros. `plaintext` is
-/// decrypted user data; we scrub it before the Vec is freed. Uses a
-/// volatile write so the compiler can't elide it.
-fn zero_bytes(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        // SAFETY: `b` is a valid, aligned, writable u8.
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-}
-
-/// Remove the decrypted-plaintext temp file. Best-effort: a leftover
-/// decrypted file in %TEMP% is a privacy risk, so we always attempt
-/// removal and only debug-log a failure (e.g. another handle still open).
-fn secure_remove_temp(path: &std::path::Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        // Don't surface the path content beyond debug; it's a temp file
-        // name (the file_id UUID), not sensitive on its own, but keep
-        // noise low.
-        tracing::debug!(error = %e, "could not remove hydrated temp file");
-    }
-}
 
 #[cfg(test)]
 mod tests {

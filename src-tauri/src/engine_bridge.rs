@@ -36,6 +36,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use zeroize::{Zeroize, Zeroizing};
+
 use beebeeb_types::EncryptedBlob;
 use serde::{Deserialize, Serialize};
 
@@ -1552,8 +1554,10 @@ impl EngineBridge {
     }
 
     /// Download `file_id` from the vault, decrypt, write to `dest_path`.
-    /// Called by an OS extension when a cloud-only placeholder is first
-    /// opened (Tasks 5-7) and by `bb pull`-style flows we may add later.
+    /// Called by the Linux FUSE driver, the IPC socket, and conflict-resolution
+    /// paths where the decrypted file must land on disk (sync root or a caller-
+    /// chosen path). Status transitions: `Downloading` → `Local` on success,
+    /// `Error` on failure.
     ///
     /// Steps mirror `repos/cli/src/commands/pull.rs::pull_single_file`:
     ///
@@ -1573,14 +1577,32 @@ impl EngineBridge {
     ///
     /// On any error the status is flipped to `Error` so the overlay can
     /// render a problem indicator, then the error is bubbled.
+    ///
+    /// **Windows Cloud Files callers must use [`Self::hydrate_file_to_memory`]
+    /// instead** — that variant never writes plaintext to disk, satisfying the
+    /// zero-knowledge requirement for on-demand CF hydration.
     pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
         // RAII-style: any early return below the status flip should
         // leave the file in `Error`, not `Downloading`. We do that by
         // wrapping the body in an inner async fn whose Err branch we
         // catch.
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate(file_id, dest_path).await {
-            Ok(()) => {
+        match self.do_hydrate(file_id).await {
+            Ok(mut buf) => {
+                // Write the decrypted bytes to disk (this is the intentional
+                // disk-writing path — sync root / conflict resolution / FUSE).
+                // Make the destination directory if needed.
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
+                }
+                let write_result = std::fs::write(dest_path, &*buf)
+                    .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                // Zeroize the in-memory copy now that it is on disk (or on
+                // error) so the allocation does not linger with plaintext.
+                buf.zeroize();
+                write_result?;
+
                 self.db.set_status(file_id, FileStatus::Local)?;
                 let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
                 self.db
@@ -1597,7 +1619,61 @@ impl EngineBridge {
         }
     }
 
-    async fn do_hydrate(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
+    /// Download `file_id` from the vault, decrypt, and return the plaintext
+    /// **in memory only** — it is NEVER written to disk.
+    ///
+    /// This is the Windows Cloud Files hydration path. The Cloud Files runtime
+    /// calls `fetch_data_callback` on a filter-driver thread and expects us to
+    /// deliver bytes via `CfExecute(TRANSFER_DATA)`; there is no requirement to
+    /// materialise the plaintext as a file. Writing to `%TEMP%` would expose
+    /// decrypted user data on disk, violating the zero-knowledge contract.
+    ///
+    /// The returned [`Zeroizing`] wrapper overwrites the buffer with zeros on
+    /// drop, so plaintext is wiped from memory as soon as the caller is done
+    /// with it — even if an early `return` or `?` is taken. Intermediate
+    /// per-chunk decrypted buffers are also explicitly zeroized after being
+    /// copied into the accumulator (see [`Self::do_hydrate`]).
+    ///
+    /// Status transitions: `Downloading` → `Local` on success, `Error` on
+    /// failure. The `cache_path` recorded in state_db is `""` (empty) because
+    /// the bytes live inside the CF placeholder in the sync root, not at a
+    /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
+    /// the real on-disk path from `path` + sync root (see state_db comment).
+    #[cfg(target_os = "windows")]
+    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        self.db.set_status(file_id, FileStatus::Downloading)?;
+        match self.do_hydrate(file_id).await {
+            Ok(buf) => {
+                self.db.set_status(file_id, FileStatus::Local)?;
+                // cache_path is empty: on Windows CF the hydrated bytes live
+                // INSIDE the placeholder (the CF runtime writes them there after
+                // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
+                // file. Byte count is still recorded for smart-cache accounting.
+                self.db
+                    .mark_cached(file_id, "", buf.len() as i64, now_secs())?;
+                let _ = self.enforce_smart_cache(CachePolicy::default());
+                Ok(buf)
+            }
+            Err(e) => {
+                let _ = self.db.set_status(file_id, FileStatus::Error);
+                Err(e)
+            }
+        }
+    }
+
+    /// Core download + decrypt loop. Returns the full plaintext in a
+    /// [`Zeroizing`] wrapper so the allocation is wiped on drop regardless of
+    /// which exit path is taken (normal return, early `?`, or a panic unwind).
+    ///
+    /// Intermediate per-chunk buffers from `decrypt_downloaded_chunk` are
+    /// explicitly zeroized after being copied into the accumulator, so at most
+    /// one extra chunk's worth of plaintext is live in memory at any time.
+    ///
+    /// This function deliberately does NOT write anything to disk. Callers that
+    /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
+    /// handle that themselves so the disk-write decision stays at the call site,
+    /// not buried inside the crypto loop.
+    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -1626,16 +1702,22 @@ impl EngineBridge {
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
         // ciphertext is always larger than plaintext anyway.
+        // Use Zeroizing so that if we bail mid-loop (network error,
+        // decrypt error) the partial plaintext is still wiped.
         let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let mut plaintext: Vec<u8> = Vec::with_capacity(approx_size);
+        let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size));
 
         for i in 0..chunk_count {
             let chunk_start = std::time::Instant::now();
             let chunk_bytes = self.api.download_chunk(file_id, i).await?;
             let wire_len = chunk_bytes.len() as u64;
-            let decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
+            // Decrypt into a temporary buffer, copy into the accumulator,
+            // then zeroize the temporary. This limits live plaintext to
+            // the accumulator + one chunk at any moment.
+            let mut decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
-            plaintext.extend_from_slice(&decrypted);
+            acc.extend_from_slice(&decrypted);
+            decrypted.zeroize();
 
             // P1 — wire-byte counter: count raw wire bytes received.
             self.wire.download_bytes.fetch_add(wire_len, Ordering::Relaxed);
@@ -1653,16 +1735,7 @@ impl EngineBridge {
             }
         }
 
-        // Make the destination directory if needed (OS extensions that
-        // hand us a per-file cache path will already have created it,
-        // but a generic mirror layout might not).
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
-        }
-        std::fs::write(dest_path, &plaintext).map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()))?;
-
-        Ok(())
+        Ok(acc)
     }
 
     /// Apply a "Keep Mine" resolution: the local copy stays as-is,
