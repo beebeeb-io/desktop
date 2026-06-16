@@ -763,6 +763,16 @@ async fn run(
                         #[cfg(target_os = "windows")]
                         crate::windows_cf::reconcile_placeholder_state(&sync_root);
 
+                        // Stamp every DB-Local file's placeholder in-sync so
+                        // Explorer shows the green ✓ overlay. Runs after
+                        // reconcile (which may have just flipped rows to Local)
+                        // and after refresh (so newly-minted placeholders exist
+                        // on disk). Idempotent — CfSetInSyncState on an already-
+                        // in-sync placeholder is a Windows no-op. Bounded at
+                        // MAX_IN_SYNC_STAMPS_PER_PASS files per tick.
+                        #[cfg(target_os = "windows")]
+                        crate::windows_cf::stamp_local_files_in_sync(&sync_root);
+
                         emit_status(&app, "idle", Some(&sync_root), None);
                         // Feed the heartbeat producer the post-tick state. It
                         // promotes this to "syncing" itself when the DB snapshot

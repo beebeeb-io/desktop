@@ -1054,6 +1054,140 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
     }
 }
 
+/// Maximum number of `CfSetInSyncState` calls issued in a single
+/// [`stamp_local_files_in_sync`] pass. Mirrors the style of
+/// `watcher::MAX_NEW_UPLOADS_PER_SCAN` (256) and the runner comment for
+/// `known_folder::MAX_MIRROR_FILES_PER_PASS` — bounded so a vault with many
+/// Local files doesn't block the tick loop. Remaining files are stamped on
+/// the next tick (the call is idempotent: `CfSetInSyncState` on an already-
+/// in-sync placeholder is a Windows no-op).
+const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
+
+/// Stamp every DB-`Local` file whose on-disk Cloud Files placeholder is NOT
+/// yet marked in-sync, so Explorer shows the green ✓ overlay for those files.
+///
+/// ## Why this is needed
+///
+/// `CfSetInSyncState(IN_SYNC)` currently fires only from `fetch_data_callback`
+/// when a single FETCH_DATA request covers the WHOLE file
+/// (`required_offset == 0 && required_length >= file_size`). Under
+/// `CF_HYDRATION_POLICY_PARTIAL` that condition rarely holds — Windows often
+/// issues partial-range requests — so files that ARE fully local (status=Local
+/// in the DB) may never receive the ✓ overlay. Additionally, the upload path
+/// (`upload_version` / modify) transitions the DB row to `Local` but does not
+/// call `CfSetInSyncState`, so freshly-uploaded files also miss the overlay.
+///
+/// This pass drives the built-in CF overlay from DB truth: if a row is `Local`
+/// the file IS fully synced, so we stamp it in-sync regardless of how it got
+/// there. `CfSetInSyncState` on an already-in-sync placeholder is a documented
+/// Windows no-op, making the pass idempotent and safe to run every tick.
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only aggregate counts. Paths may appear at
+/// `debug` level (matching the `mark_in_sync` sibling in `callbacks.rs`).
+///
+/// ## Bounded
+///
+/// At most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files are stamped per call. Any
+/// remaining Local files are stamped on subsequent ticks.
+#[cfg(target_os = "windows")]
+pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
+    // All CF symbols (CfOpenFileWithOplock, CfSetInSyncState, CfCloseHandle,
+    // CF_IN_SYNC_STATE_IN_SYNC, CF_OPEN_FILE_FLAG_NONE, CF_SET_IN_SYNC_FLAG_NONE)
+    // and PCWSTR are in scope via the module-level
+    //   use windows::Win32::Storage::CloudFilters::*;
+    //   use windows::core::*;
+    // globs — no local re-import needed.
+
+    let Some(bridge) = bridge() else {
+        tracing::debug!("stamp_local_files_in_sync called before bridge was set; skipping");
+        return;
+    };
+
+    let entries = match bridge.db().list_by_status(crate::state_db::FileStatus::Local) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, "stamp_local_files_in_sync: could not list Local files");
+            return;
+        }
+    };
+
+    let mut stamped: usize = 0;
+    let mut errors: usize = 0;
+
+    for entry in entries.iter().take(MAX_IN_SYNC_STAMPS_PER_PASS) {
+        // Directory placeholders are managed separately (pin/hydration semantics
+        // for folders differ); stamp only leaf files, consistent with how
+        // `populate_placeholders` mints file placeholders.
+        if entry.is_dir() {
+            continue;
+        }
+
+        // Map the server-relative '/'-joined path onto the on-disk placeholder
+        // path — the same safe-join that `populate_placeholders` and
+        // `reconcile_placeholder_state` use.
+        let rel = entry.path.trim_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        // Skip placeholders that don't exist on disk yet. They will be
+        // minted by `refresh_placeholders` (which runs before this pass) and
+        // will be stamped on the next tick once they appear.
+        if !local_path.exists() {
+            continue;
+        }
+
+        // Build the NUL-terminated UTF-16 path string that `CfOpenFileWithOplock`
+        // expects — identical to `db_placeholder_path` in callbacks.rs.
+        let path_wide: Vec<u16> = local_path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .collect();
+
+        // Mirror the `mark_in_sync` pattern from callbacks.rs exactly:
+        //   CfOpenFileWithOplock → CfSetInSyncState(IN_SYNC) → CfCloseHandle.
+        // Handle is ALWAYS closed before the next iteration — via the Ok and
+        // Err branches — so there is no handle leak on error.
+        //
+        // SAFETY: `path_wide` is a NUL-terminated wide string kept alive for
+        // the duration of the unsafe block. The CF handle returned by
+        // CfOpenFileWithOplock is closed by CfCloseHandle before return.
+        // CfSetInSyncState on an already-in-sync placeholder is a no-op.
+        let handle = match unsafe {
+            CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE)
+        } {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!(error = %e, "stamp_local_files_in_sync: CfOpenFileWithOplock failed");
+                errors += 1;
+                continue;
+            }
+        };
+
+        if let Err(e) = unsafe {
+            CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)
+        } {
+            tracing::debug!(error = %e, "stamp_local_files_in_sync: CfSetInSyncState failed");
+            errors += 1;
+        } else {
+            stamped += 1;
+        }
+
+        // Close the handle on ALL paths (including the CfSetInSyncState error
+        // branch above — the handle is still open and must be released).
+        unsafe { CfCloseHandle(handle) };
+    }
+
+    if stamped > 0 || errors > 0 {
+        // Zero-knowledge: counts only, never a path.
+        tracing::debug!(stamped, errors, "stamp_local_files_in_sync");
+    }
+}
+
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
 /// into Explorer for every file currently marked `CloudOnly`. Returns the
 /// number of placeholders successfully created (already-existing ones are
