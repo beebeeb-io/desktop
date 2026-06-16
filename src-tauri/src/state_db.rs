@@ -266,6 +266,21 @@ impl OperationKind {
     }
 }
 
+/// A row removed by [`StateDb::prune_absent`] (task 0806). Carries the minimum
+/// needed to locate and delete the row's on-disk Cloud Files placeholder on
+/// Windows: the `file_id` (for logging / dedupe), the server-relative `path`
+/// (joined onto the sync root the same way `populate_placeholders` builds it),
+/// and `is_dir` (a folder placeholder is removed with `remove_dir_all`, a file
+/// with `remove_file`). Previously `prune_absent` returned only `Vec<String>`
+/// (file_ids), which the snapshot reconcile path could LOG but not act on — so
+/// the placeholder lingered in Explorer (the ghost-file bug).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunedRow {
+    pub file_id: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
 /// One row in the `files` table.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -642,6 +657,84 @@ impl StateDb {
         Ok(())
     }
 
+    /// Delete the row `file_id` AND — when it is a FOLDER — its whole descendant
+    /// subtree by PATH-PREFIX, returning every removed row as a [`PrunedRow`]
+    /// ordered CHILDREN-BEFORE-PARENT (deepest path first, then the root last).
+    /// Task 0806: the OPS reconcile path (`apply_sync_op` for `file_trash` /
+    /// `file_delete`) uses this so a remotely-trashed FOLDER also prunes its
+    /// orphaned children (the server trash is NOT recursive — task 0807 — so a
+    /// `file_trash` op for a folder is the ONLY signal its children are gone) and
+    /// so the Windows caller can remove each on-disk placeholder, leaves first.
+    ///
+    /// The descendant match is the same metacharacter-safe `substr(path,…) = R || '/'`
+    /// prefix equality used by [`Self::prune_absent`] and
+    /// [`Self::cloud_only_file_descendants`] — `parent_id` is universally empty on
+    /// live rows, so the hierarchy is path-based. A FILE row (or an unknown id)
+    /// simply removes the single row. Returns an empty vec if the id is unknown.
+    /// One transaction so a concurrent reader never sees a half-pruned subtree.
+    pub fn delete_file_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+
+        // Look up the row to delete (its path + kind drives the subtree prune).
+        let root: Option<PrunedRow> = {
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut rows = stmt.query(params![file_id])?;
+            if let Some(row) = rows.next()? {
+                Some(PrunedRow {
+                    file_id: row.get(0)?,
+                    path: row.get(1)?,
+                    is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                })
+            } else {
+                None
+            }
+        };
+        let Some(root) = root else {
+            tx.rollback()?;
+            return Ok(Vec::new());
+        };
+
+        let mut removed: Vec<PrunedRow> = Vec::new();
+        if root.is_dir {
+            // Normalize BOTH ends (`trim_matches`), matching `placeholder_path_under`
+            // / `safe_join_under_root`: a folder row can be stored leading-slash-
+            // first (`/docs`) on the degraded-decrypt path while its children are
+            // ALWAYS stored leading-slash-free (`docs/a.txt`). Trimming only the
+            // trailing slash would make the prefix `/docs/` miss `docs/a.txt` and
+            // orphan the children (task 0806 review, high). The descendant match
+            // also `ltrim`s the stored path so a mixed-form child in either shape
+            // is caught.
+            let root_path = root.path.trim_matches('/').to_string();
+            if !root_path.is_empty() {
+                let descendants: Vec<PrunedRow> = {
+                    let mut dstmt = tx.prepare(
+                        "SELECT file_id, path, item_kind FROM files
+                         WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                         ORDER BY length(path) DESC, path DESC",
+                    )?;
+                    let drows = dstmt.query_map(params![root_path], |r| {
+                        Ok(PrunedRow {
+                            file_id: r.get(0)?,
+                            path: r.get(1)?,
+                            is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                        })
+                    })?;
+                    drows.collect::<Result<Vec<_>>>()?
+                };
+                for d in descendants {
+                    tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
+                    removed.push(d);
+                }
+            }
+        }
+
+        tx.execute("DELETE FROM files WHERE file_id = ?1", params![root.file_id])?;
+        removed.push(root);
+        tx.commit()?;
+        Ok(removed)
+    }
+
     // ── /sync delta-engine cursor + prune (task 0789) ──────────────────────────
     //
     // The `sync_state` kv table holds the `/sync/ops` cursor (the highest
@@ -725,8 +818,27 @@ impl StateDb {
     /// Reconcile a fresh `/sync/snapshot` against the local mirror: delete every
     /// OWN-tree row whose `file_id` is NOT in `seen_file_ids` (the snapshot is
     /// authoritative for the user's non-trashed tree, so an absent row was
-    /// deleted/trashed server-side). Returns the deleted file_ids so the caller
-    /// can drop their placeholders + cache.
+    /// deleted/trashed server-side). Returns the deleted rows as [`PrunedRow`]s
+    /// (file_id + path + is_dir) so the caller can locate and remove each row's
+    /// on-disk Cloud Files placeholder + cache — NOT just the bare file_ids
+    /// (task 0806: the snapshot path used to only LOG the pruned ids, leaving the
+    /// placeholder ghosting in Explorer).
+    ///
+    /// ## Orphan-subtree removal (no recursive server trash — task 0807)
+    ///
+    /// The server's trash is NOT recursive: trashing a FOLDER removes only the
+    /// folder node from the snapshot; its CHILDREN remain present in `seen`. So a
+    /// pruned folder's descendants are NOT caught by the snapshot-absence test
+    /// above — they'd be left orphaned (rows + placeholders pointing at a deleted
+    /// parent). For every pruned FOLDER row we therefore additionally remove its
+    /// DESCENDANTS by PATH-PREFIX (the hierarchy is path-based — `parent_id` is
+    /// universally empty on live rows, see [`Self::cloud_only_file_descendants`]),
+    /// using the same metacharacter-safe `substr(path,…) = R || '/'` prefix
+    /// equality. Descendants are returned in the result too, ordered
+    /// CHILDREN-BEFORE-PARENTS (deepest path first) so the Windows caller can
+    /// remove leaf placeholders before their containing directory placeholder.
+    /// Descendants are removed even if they appear in `seen` (an orphan whose
+    /// trashed parent is gone is itself gone).
     ///
     /// ## What is intentionally NEVER pruned
     ///
@@ -775,16 +887,18 @@ impl StateDb {
         &self,
         seen_file_ids: &HashSet<String>,
         snapshot_fetched_at: i64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<PrunedRow>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
         // Candidate set: own-tree rows that are NOT pending an upload/op, not
         // mid-upload, and NOT stamped at/after the snapshot fetch time (a row a
         // recent local completion just touched can't be contradicted by an older
-        // snapshot). Everything else is off-limits per the doc above.
-        let candidates: Vec<String> = {
+        // snapshot). Everything else is off-limits per the doc above. We now also
+        // pull `path` + `item_kind` so the caller can locate the on-disk
+        // placeholder and (for a folder) we can prune its orphaned descendants.
+        let candidates: Vec<PrunedRow> = {
             let mut stmt = tx.prepare(
-                "SELECT file_id FROM files
+                "SELECT file_id, path, item_kind FROM files
                  WHERE namespace = 'my_files'
                    AND status != 'uploading'
                    AND remote_updated_at < ?1
@@ -792,7 +906,13 @@ impl StateDb {
                        SELECT file_id FROM operation_queue WHERE file_id IS NOT NULL
                    )",
             )?;
-            let rows = stmt.query_map(params![snapshot_fetched_at], |row| row.get::<_, String>(0))?;
+            let rows = stmt.query_map(params![snapshot_fetched_at], |row| {
+                Ok(PrunedRow {
+                    file_id: row.get(0)?,
+                    path: row.get(1)?,
+                    is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                })
+            })?;
             rows.collect::<Result<Vec<_>>>()?
         };
 
@@ -809,13 +929,69 @@ impl StateDb {
             return Ok(Vec::new());
         }
 
-        let mut pruned = Vec::new();
-        for file_id in candidates {
-            if seen_file_ids.contains(&file_id) {
+        // Track everything removed (directly absent + orphaned descendants) so we
+        // never delete or return a row twice (a pruned folder and an
+        // independently-absent child both reaching the descendant sweep).
+        let mut removed_ids: HashSet<String> = HashSet::new();
+        let mut pruned: Vec<PrunedRow> = Vec::new();
+
+        for row in candidates {
+            if seen_file_ids.contains(&row.file_id) {
                 continue;
             }
-            tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
-            pruned.push(file_id);
+            if !removed_ids.insert(row.file_id.clone()) {
+                continue; // already removed as a descendant of an earlier folder
+            }
+
+            // ORPHAN SUBTREE (task 0806/0807): a trashed FOLDER leaves its children
+            // in the snapshot (no recursive server trash), so they won't be caught
+            // by the absence test. Remove the folder's descendants by PATH-PREFIX
+            // FIRST (children-before-parent) and emit them ahead of the folder so
+            // the Windows caller removes leaf placeholders before the directory.
+            if row.is_dir {
+                // `trim_matches` (both ends), matching `placeholder_path_under`:
+                // a folder stored leading-slash-first (`/docs`, degraded-decrypt
+                // path) has children stored leading-slash-free (`docs/a.txt`), so
+                // trimming only the trailing slash would orphan them (task 0806
+                // review, high). The match `ltrim`s the stored path so a child in
+                // either shape is caught.
+                let root_path = row.path.trim_matches('/').to_string();
+                if !root_path.is_empty() {
+                    let descendants: Vec<PrunedRow> = {
+                        // Strict descendants: `substr(ltrim(path,'/'),1,len(R)+1)
+                        // = R || '/'` — metacharacter-safe prefix equality (NOT
+                        // `LIKE`), the same machinery as `cloud_only_file_descendants`.
+                        // Excludes the root row itself. Deepest-first so children
+                        // precede their parent dirs in the returned order. Descendants
+                        // with a pending op / mid-upload are NOT excluded here: their
+                        // parent is gone server-side, so the orphan must go too —
+                        // any stale queued op against it is moot.
+                        let mut dstmt = tx.prepare(
+                            "SELECT file_id, path, item_kind FROM files
+                             WHERE namespace = 'my_files'
+                               AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                             ORDER BY length(path) DESC, path DESC",
+                        )?;
+                        let drows = dstmt.query_map(params![root_path], |r| {
+                            Ok(PrunedRow {
+                                file_id: r.get(0)?,
+                                path: r.get(1)?,
+                                is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            })
+                        })?;
+                        drows.collect::<Result<Vec<_>>>()?
+                    };
+                    for d in descendants {
+                        if removed_ids.insert(d.file_id.clone()) {
+                            tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
+                            pruned.push(d);
+                        }
+                    }
+                }
+            }
+
+            tx.execute("DELETE FROM files WHERE file_id = ?1", params![row.file_id])?;
+            pruned.push(row);
         }
         tx.commit()?;
         Ok(pruned)
@@ -2483,7 +2659,10 @@ mod tests {
         let seen: HashSet<String> = ["kept".to_string()].into_iter().collect();
         let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
 
-        assert_eq!(pruned, vec!["stale".to_string()]);
+        assert_eq!(
+            pruned.iter().map(|r| r.file_id.clone()).collect::<Vec<_>>(),
+            vec!["stale".to_string()]
+        );
         assert!(db.get_file("stale").unwrap().is_none());
     }
 
@@ -2578,7 +2757,10 @@ mod tests {
         let seen: HashSet<String> = ["still-here".to_string()].into_iter().collect();
         let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
 
-        assert_eq!(pruned, vec!["trashed-gone".to_string()]);
+        assert_eq!(
+            pruned.iter().map(|r| r.file_id.clone()).collect::<Vec<_>>(),
+            vec!["trashed-gone".to_string()]
+        );
         assert!(
             db.get_file("trashed-gone").unwrap().is_none(),
             "an op-less Trashing row absent from the snapshot must be pruned (final convergence)"
@@ -2632,7 +2814,10 @@ mod tests {
         let seen: HashSet<String> = ["something-else".to_string()].into_iter().collect();
         let pruned = db.prune_absent(&seen, fetched_at).unwrap();
 
-        assert_eq!(pruned, vec!["old-deleted".to_string()]);
+        assert_eq!(
+            pruned.iter().map(|r| r.file_id.clone()).collect::<Vec<_>>(),
+            vec!["old-deleted".to_string()]
+        );
         assert!(
             db.get_file("just-uploaded").unwrap().is_some(),
             "row stamped at/after snapshot fetch survives (upload re-key window)"
@@ -2666,6 +2851,189 @@ mod tests {
         let pruned = db.prune_absent(&HashSet::new(), FAR_FUTURE).unwrap();
         assert!(pruned.is_empty());
         assert!(db.get_file("uploading-only").unwrap().is_some());
+    }
+
+    // ── orphan-subtree + delete_file_subtree coverage (task 0806) ──────────────
+
+    /// Seed an own-tree row at an explicit `path` with a given kind, so the
+    /// path-prefix orphan logic can be exercised (a folder + its descendants).
+    fn seed_own_at(db: &StateDb, file_id: &str, path: &str, is_dir: bool) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: if is_dir { ItemKind::Folder } else { ItemKind::File },
+        })
+        .unwrap();
+        // upsert_file does NOT persist item_kind (it's owned by the contract row),
+        // so a folder must have its kind stamped via the contract state.
+        if is_dir {
+            db.set_file_contract_state(&FileContractState {
+                file_id: file_id.into(),
+                namespace: Namespace::MyFiles,
+                parent_id: None,
+                shared_root_id: None,
+                share_id: None,
+                permission_bits: 0,
+                item_kind: ItemKind::Folder,
+                content_type: None,
+                current_version: 0,
+                current_object_version_id: None,
+                local_base_version: 0,
+                local_hash: None,
+                cache_path: None,
+                cache_bytes: 0,
+                pin_state: PinState::Inherit,
+                inherited_pin_state: PinState::Inherit,
+                last_sync_at: 0,
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn prune_absent_removes_orphaned_descendants_of_a_trashed_folder() {
+        // task 0806/0807: the server trash is NOT recursive, so trashing a FOLDER
+        // drops only the folder from the snapshot; its CHILDREN remain in `seen`.
+        // prune_absent must still remove those orphans by PATH-PREFIX, ordered
+        // children-before-parent.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_at(&db, "folder", "docs", true);
+        seed_own_at(&db, "child", "docs/a.txt", false);
+        seed_own_at(&db, "subfolder", "docs/sub", true);
+        seed_own_at(&db, "grandchild", "docs/sub/b.txt", false);
+        // A sibling that is NOT under the folder must survive.
+        seed_own_at(&db, "outside", "top.txt", false);
+
+        // Snapshot still lists the children + the sibling but NOT the folder.
+        let seen: HashSet<String> = ["child", "subfolder", "grandchild", "outside"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+
+        let ids: HashSet<String> = pruned.iter().map(|r| r.file_id.clone()).collect();
+        assert!(ids.contains("folder"), "the trashed folder is pruned");
+        assert!(ids.contains("child"), "orphaned child pruned by path-prefix");
+        assert!(ids.contains("subfolder"), "orphaned subfolder pruned");
+        assert!(ids.contains("grandchild"), "orphaned grandchild pruned");
+        assert!(!ids.contains("outside"), "a non-descendant sibling is NOT pruned");
+
+        // Children precede their parent folder in the returned order (so the
+        // Windows caller removes leaf placeholders before the directory).
+        let pos = |id: &str| pruned.iter().position(|r| r.file_id == id).unwrap();
+        assert!(pos("grandchild") < pos("subfolder"), "grandchild before its subfolder");
+        assert!(pos("child") < pos("folder"), "child before the root folder");
+        assert!(pos("subfolder") < pos("folder"), "subfolder before the root folder");
+
+        assert!(db.get_file("folder").unwrap().is_none());
+        assert!(db.get_file("child").unwrap().is_none());
+        assert!(db.get_file("grandchild").unwrap().is_none());
+        assert!(db.get_file("outside").unwrap().is_some(), "sibling row survives");
+    }
+
+    #[test]
+    fn prune_absent_prunes_descendants_when_folder_row_has_leading_slash() {
+        // task 0806 review (high): on the degraded-decrypt path a ROOT-level folder
+        // can be stored leading-slash-first (`/docs`) while its children are ALWAYS
+        // stored leading-slash-free (`docs/a.txt`). Trimming only the trailing slash
+        // would make the prefix `/docs/` miss `docs/a.txt` → orphan leak. The match
+        // normalizes both ends, so the child is still pruned.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_at(&db, "folder", "/docs", true);
+        seed_own_at(&db, "child", "docs/a.txt", false);
+
+        // Snapshot lists the child but NOT the trashed folder.
+        let seen: HashSet<String> = ["child"].iter().map(|s| s.to_string()).collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+
+        let ids: HashSet<String> = pruned.iter().map(|r| r.file_id.clone()).collect();
+        assert!(ids.contains("folder"), "the trashed leading-slash folder is pruned");
+        assert!(
+            ids.contains("child"),
+            "leading-slash-free child of a leading-slash folder is still pruned"
+        );
+        assert!(db.get_file("child").unwrap().is_none(), "child row removed");
+    }
+
+    #[test]
+    fn delete_file_subtree_prunes_descendants_when_folder_row_has_leading_slash() {
+        // task 0806 review (high): same leading-slash mismatch on the OPS path
+        // (`apply_sync_op` file_trash). A folder stored `/docs` must still sweep its
+        // leading-slash-free child `docs/a.txt`.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_at(&db, "folder", "/docs", true);
+        seed_own_at(&db, "child", "docs/a.txt", false);
+
+        let removed = db.delete_file_subtree("folder").unwrap();
+        let ids: HashSet<String> = removed.iter().map(|r| r.file_id.clone()).collect();
+        assert!(ids.contains("folder"), "leading-slash folder removed");
+        assert!(ids.contains("child"), "leading-slash-free child swept");
+        // children-before-parent ordering still holds.
+        let pos = |id: &str| removed.iter().position(|r| r.file_id == id).unwrap();
+        assert!(pos("child") < pos("folder"), "child before its root folder");
+        assert!(db.get_file("child").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_file_subtree_removes_folder_and_descendants_children_first() {
+        // The OPS reconcile path (`apply_sync_op` file_trash for a FOLDER) calls
+        // this: the folder row + its path-prefix descendants are removed in one
+        // transaction, children-before-parent.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_at(&db, "folder", "Projects", true);
+        seed_own_at(&db, "f1", "Projects/report.txt", false);
+        seed_own_at(&db, "sub", "Projects/deep", true);
+        seed_own_at(&db, "f2", "Projects/deep/data.bin", false);
+        // A path that merely SHARES a prefix string but is not a child
+        // ("Projects2") must NOT be swept (prefix equality uses the `/` boundary).
+        seed_own_at(&db, "decoy", "Projects2/x.txt", false);
+
+        let removed = db.delete_file_subtree("folder").unwrap();
+        let ids: HashSet<String> = removed.iter().map(|r| r.file_id.clone()).collect();
+        assert_eq!(
+            ids,
+            ["folder", "f1", "sub", "f2"].iter().map(|s| s.to_string()).collect()
+        );
+        let pos = |id: &str| removed.iter().position(|r| r.file_id == id).unwrap();
+        assert!(pos("f2") < pos("sub"), "deep file before its folder");
+        assert!(pos("f1") < pos("folder"), "child file before the root folder");
+        // Root folder is LAST (deepest-first ordering then the root appended).
+        assert_eq!(removed.last().unwrap().file_id, "folder");
+
+        assert!(db.get_file("folder").unwrap().is_none());
+        assert!(db.get_file("f2").unwrap().is_none());
+        assert!(
+            db.get_file("decoy").unwrap().is_some(),
+            "a sibling sharing only a prefix STRING (Projects2) must not be swept"
+        );
+    }
+
+    #[test]
+    fn delete_file_subtree_of_a_plain_file_removes_only_that_row() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_at(&db, "lonefile", "a.txt", false);
+        seed_own_at(&db, "other", "b.txt", false);
+
+        let removed = db.delete_file_subtree("lonefile").unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].file_id, "lonefile");
+        assert!(!removed[0].is_dir);
+        assert!(db.get_file("lonefile").unwrap().is_none());
+        assert!(db.get_file("other").unwrap().is_some());
+
+        // Unknown id → empty, no-op.
+        assert!(db.delete_file_subtree("does-not-exist").unwrap().is_empty());
     }
 
     #[test]

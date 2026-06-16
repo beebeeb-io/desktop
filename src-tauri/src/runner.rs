@@ -680,7 +680,7 @@ async fn run(
                         tracing::warn!(error = %e, "shared root refresh failed");
                     }
                 }
-                match sync_tick(&*bridge).await {
+                match sync_tick(&*bridge, &sync_root).await {
                     Ok(conflicts) => {
                         // Task 10 — surface freshly detected conflicts.
                         // The engine bridge already flipped status to

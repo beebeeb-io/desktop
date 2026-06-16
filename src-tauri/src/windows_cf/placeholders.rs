@@ -186,6 +186,106 @@ pub fn create_placeholder(
     Ok(())
 }
 
+/// Remove the on-disk Cloud Files placeholder at `path` as part of reconciling a
+/// REMOTE deletion (a file/folder trashed or hard-deleted on another client) back
+/// into this client — task 0806. This is the missing half of remote-deletion
+/// reconciliation: both reconcile paths (`apply_sync_op` for `file_trash`/
+/// `file_delete` ops and `apply_snapshot`/`prune_absent` for snapshot-absence)
+/// previously deleted only the `state.db` row, leaving the placeholder visible in
+/// Explorer forever (the "ghost file" the founder reported).
+///
+/// ## NOT the local-delete path (0802)
+///
+/// This is REMOTE→local. The LOCAL→server delete (task 0802) is the opposite
+/// direction: the user deletes the on-disk placeholder in Explorer, the watcher's
+/// `handle_delete` queues a server `TrashFile` op, and the row is marked
+/// `Trashing` (the placeholder is ALREADY gone — the user removed it). Callers on
+/// this path MUST skip a `Trashing` row so we never double-handle a local delete.
+///
+/// ## Why remove FIRST, and only revert on a remove failure
+///
+/// A placeholder is a reparse point under Cloud Files control. The naive order
+/// — `CfRevertPlaceholder` (strip the reparse identity → plain file) THEN
+/// `std::fs::remove_*` — opens a resurrection window (task 0806 review,
+/// high-severity): between the revert and the remove, the entry is a PLAIN file
+/// with real (hydrated) content and NO `state.db` row. The independent scan
+/// loop (`watcher::scan_loop`, every `SCAN_INTERVAL`, no shared lock with the
+/// sync tick) would classify it as genuinely-new — filter-2
+/// (`is_cloud_placeholder`) is FALSE now that the reparse bit is gone, filter-3
+/// (`get_file_by_path`) is None because the caller already deleted the row — and
+/// re-upload it to the server, resurrecting a file the user deleted on another
+/// device. Worse, if the `remove_*` then FAILS (the file is open/locked, common
+/// on Windows under AV or an editor), the reverted plain orphan persists and the
+/// very next scan re-uploads it deterministically — a permanent re-upload trap.
+///
+/// So we `remove_*` FIRST. A placeholder removes cleanly as a plain filesystem
+/// delete (the reparse point is unlinked); on success the entry is simply gone —
+/// no window where a plain, row-less file exists on disk. We deliberately do NOT
+/// `CfRevertPlaceholder` on the success path: there is nothing left to revert.
+///
+/// On a `remove_*` failure we DO NOT revert either — reverting would strip the
+/// reparse bit and create exactly the row-less plain orphan the scan re-uploads.
+/// Instead we leave the entry AS A PLACEHOLDER (its reparse bit intact) and
+/// return `Err`. Filter-2 (`is_cloud_placeholder`) keeps excluding it from
+/// upload for as long as it sits there, so a transient lock can never resurrect
+/// the file — the worst case is a still-visible placeholder the user (or a later
+/// reconcile) evicts, never an unwanted re-upload.
+///
+/// ## Directories: children-first
+///
+/// For a directory we `remove_dir_all`, which recursively deletes children then
+/// the directory. The server has NO recursive trash (task 0807), so a trashed
+/// FOLDER leaves its children present in the snapshot; the *DB-side* orphan prune
+/// (`prune_absent` / `apply_sync_op`) removes the descendant rows, and the
+/// descendant placeholders inside this directory are swept here in one
+/// `remove_dir_all`. (The DB layer still removes each descendant ROW so its
+/// status/cursor bookkeeping is correct; the on-disk subtree is gone in one call.)
+///
+/// ## Tolerated outcomes (the end state already holds)
+///
+/// - `NotFound` — the entry is already gone (a prior tick removed it, or the
+///   user beat us to it). Desired end state → `Ok(())`.
+///
+/// ## Failure leaves a managed placeholder, never a plain orphan
+///
+/// On any other `remove_*` error the entry remains a Cloud Files placeholder
+/// (reparse bit intact). We return `Err` WITHOUT reverting, so filter-2 keeps it
+/// excluded from upload and a transient lock cannot resurrect the file.
+///
+/// ## Zero-knowledge
+///
+/// NEVER logs `path` (it can carry decrypted folder/file names) — not even at
+/// debug. Callers pass a `file_id` to log instead.
+pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Result<()> {
+    // Remove the on-disk entry FIRST. A placeholder is a reparse point and
+    // removes as an ordinary filesystem delete (children-first `remove_dir_all`
+    // for a directory, a plain unlink for a file) — there is no need to
+    // `CfRevertPlaceholder` it beforehand, and doing so would open a resurrection
+    // window (see the doc comment: a reverted-but-not-yet-removed plain file with
+    // no DB row is re-uploaded by the scan loop). A "not found" is the desired end
+    // state (already removed), so map it to Ok.
+    //
+    // On any other error we return `Err` and DELIBERATELY leave the entry as a
+    // placeholder: its reparse bit is still set, so filter-2 (`is_cloud_placeholder`)
+    // keeps excluding it from upload. We never revert here — a revert would strip
+    // the reparse bit and produce a row-less plain orphan the scan would resurrect.
+    let removed = if is_dir {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removed {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("remove placeholder (is_dir={is_dir}): {e}")),
+    }
+
+    // Zero-knowledge: never log the path (it carries decrypted names). The caller
+    // logs the file_id.
+    tracing::debug!(is_dir, "removed cloud placeholder (remote-deletion reconcile)");
+    Ok(())
+}
+
 /// Convert a freshly-uploaded **plain local file** at `path` into an
 /// in-sync Cloud Files placeholder, so Explorer shows it with the synced
 /// (green check) overlay rather than as an ordinary always-local file.

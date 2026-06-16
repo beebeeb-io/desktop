@@ -98,11 +98,75 @@
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
+
+// ── Engine-delete suppression set (task 0806) ──────────────────────────────────
+//
+// The REMOTE→local deletion reconcile (`engine_bridge` → `windows_cf::delete_placeholder`)
+// removes an on-disk CF placeholder when a file/folder was trashed/deleted on
+// another client. Removing that placeholder fires `NOTIFY_DELETE_COMPLETION`,
+// which lands here as `NotifyEvent::Delete` → `handle_delete` → a redundant server
+// `TrashFile` op. That would be wrong (the server ALREADY trashed it) and is a
+// feedback loop.
+//
+// The PRIMARY guard is ordering: the engine removes the DB ROW *before* the
+// placeholder, so `handle_delete`'s `get_file_by_path` returns `Ok(None)` and
+// queues nothing. This set is the DETERMINISTIC second guard for the window where
+// the row may not be observable yet (and to drop the event before `handle_delete`
+// runs at all): the engine registers each path it is about to delete via
+// [`suppress_engine_delete`], and the debounce loop consults [`take_engine_delete_suppressed`]
+// on every `Delete` event — a hit means "engine-originated, do not propagate".
+//
+// Mirrors the existing `in_flight` CREATE-suppression set (scan_loop) and the
+// `windows_cf::NOTIFY_TX` static: an `extern "system"` callback / a deep engine
+// call site can't thread a handle, so a process-global is the simplest hop. The
+// set is small (only paths mid-delete) and self-draining (entries are consumed on
+// the matching Delete event, or swept by [`prune_stale_engine_suppressions`]).
+static ENGINE_DELETE_SUPPRESS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+
+fn engine_delete_suppress() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+    ENGINE_DELETE_SUPPRESS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register `path` as an ENGINE-ORIGINATED delete so the watcher drops the
+/// `NOTIFY_DELETE_COMPLETION` it will fire instead of queuing a redundant server
+/// trash. Call this IMMEDIATELY BEFORE `windows_cf::delete_placeholder` on the
+/// remote-deletion reconcile path (task 0806). Idempotent; refreshes the timer.
+pub fn suppress_engine_delete(path: &Path) {
+    if let Ok(mut set) = engine_delete_suppress().lock() {
+        set.insert(path.to_path_buf(), Instant::now());
+    }
+}
+
+/// If `path` was registered by [`suppress_engine_delete`], CONSUME the entry and
+/// return `true` (the delete is engine-originated → the watcher must NOT queue a
+/// server trash). Returns `false` for a genuine user delete. Consuming on read
+/// keeps the set self-draining so a later user delete of the same path is honoured.
+fn take_engine_delete_suppressed(path: &Path) -> bool {
+    match engine_delete_suppress().lock() {
+        Ok(mut set) => set.remove(path).is_some(),
+        Err(_) => false,
+    }
+}
+
+/// Drop suppression entries older than this. A registered engine delete whose
+/// NOTIFY never arrives (revert/remove failed, or the OS coalesced the event)
+/// must not linger and swallow a genuine LATER user delete of the same path.
+const ENGINE_SUPPRESS_TTL: Duration = Duration::from_secs(30);
+
+/// Evict suppression entries older than [`ENGINE_SUPPRESS_TTL`]. Called from the
+/// debounce loop's periodic tick so the set can never grow unbounded or shadow a
+/// real user delete indefinitely.
+fn prune_stale_engine_suppressions() {
+    if let Ok(mut set) = engine_delete_suppress().lock() {
+        let now = Instant::now();
+        set.retain(|_, registered| now.duration_since(*registered) < ENGINE_SUPPRESS_TTL);
+    }
+}
 
 use crate::engine_bridge::{EngineBridge, FinderWriteOutcome};
 
@@ -248,7 +312,16 @@ async fn debounce_loop(
                         // pending close-completion for the same path so a stale
                         // settle doesn't try to upload a now-deleted file.
                         pending.remove(&path);
-                        handle_delete(&bridge, &sync_root, &path).await;
+                        // task 0806: if the ENGINE just removed this placeholder to
+                        // reconcile a REMOTE deletion, this NOTIFY is an echo of OUR
+                        // own delete — drop it (consuming the suppression entry) so we
+                        // never queue a redundant server trash. A genuine user delete
+                        // has no entry and falls through to handle_delete as before.
+                        if take_engine_delete_suppressed(&path) {
+                            tracing::debug!("upload driver: dropping engine-originated delete (remote-deletion reconcile)");
+                        } else {
+                            handle_delete(&bridge, &sync_root, &path).await;
+                        }
                     }
                     Some(NotifyEvent::Rename { source, target }) => {
                         // A rename invalidates a pending close-completion for the
@@ -262,6 +335,9 @@ async fn debounce_loop(
                 }
             }
             _ = tick.tick() => {
+                // task 0806: sweep stale engine-delete suppressions so a registered
+                // delete whose NOTIFY never arrived can't shadow a later user delete.
+                prune_stale_engine_suppressions();
                 let now = Instant::now();
                 let ready: Vec<PathBuf> = pending
                     .iter()
@@ -650,6 +726,55 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::fs;
+
+    #[test]
+    fn engine_delete_suppression_is_consumed_once() {
+        // task 0806: an engine-originated delete is registered, then the FIRST
+        // matching Delete event consumes the entry (returns true → drop it). A
+        // SECOND event for the same path is a genuine user delete (false →
+        // propagate). Use unique paths so the process-global static can't collide
+        // with another test.
+        let p = std::path::Path::new("/sync/engine-deleted-0806-unique-a.txt");
+        assert!(!take_engine_delete_suppressed(p), "unregistered path is not suppressed");
+
+        suppress_engine_delete(p);
+        assert!(take_engine_delete_suppressed(p), "first event after register is suppressed");
+        assert!(
+            !take_engine_delete_suppressed(p),
+            "suppression is consumed once — a later user delete of the same path propagates"
+        );
+    }
+
+    #[test]
+    fn engine_delete_suppression_distinguishes_paths() {
+        // Registering one path must not suppress a delete of a DIFFERENT path.
+        let registered = std::path::Path::new("/sync/engine-deleted-0806-unique-b.txt");
+        let user = std::path::Path::new("/sync/user-deleted-0806-unique-c.txt");
+        suppress_engine_delete(registered);
+        assert!(
+            !take_engine_delete_suppressed(user),
+            "a genuine user delete of an unregistered path must NOT be suppressed"
+        );
+        // The registered entry is still there (untouched by the miss above).
+        assert!(take_engine_delete_suppressed(registered));
+    }
+
+    #[test]
+    fn engine_delete_suppression_prunes_stale_entries() {
+        // A registered delete whose NOTIFY never arrives must eventually be swept
+        // so it can't shadow a later user delete. Force-insert with an OLD instant
+        // and confirm the prune evicts it.
+        let p = std::path::Path::new("/sync/engine-deleted-0806-unique-d.txt");
+        {
+            let mut set = engine_delete_suppress().lock().unwrap();
+            set.insert(p.to_path_buf(), Instant::now() - ENGINE_SUPPRESS_TTL - Duration::from_secs(1));
+        }
+        prune_stale_engine_suppressions();
+        assert!(
+            !take_engine_delete_suppressed(p),
+            "a stale suppression entry must be pruned so a later user delete propagates"
+        );
+    }
 
     /// Collect every regular file the enumeration scan's [`walk_dir`] visits,
     /// as paths relative to `root` with '/'-separators, so assertions read

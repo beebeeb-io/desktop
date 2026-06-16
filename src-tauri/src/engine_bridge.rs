@@ -2257,7 +2257,15 @@ pub struct ConflictDetected {
 ///
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
-pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDetected>> {
+pub async fn sync_tick(
+    bridge: &EngineBridge,
+    // The on-disk vault root. Needed on Windows so the deletion-reconcile paths
+    // (`apply_sync_op` / `apply_snapshot`) can locate and remove the on-disk Cloud
+    // Files placeholder of a remotely-deleted row — not just its DB row (task
+    // 0806). Unused on macOS/Linux (the OS extension owns the namespace there);
+    // `#[cfg_attr]` silences the unused warning on those builds.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+) -> anyhow::Result<Vec<ConflictDetected>> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -2306,12 +2314,12 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
         // Never bootstrapped, or a re-snapshot was explicitly requested → full
         // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
         None => {
-            bootstrap_from_snapshot(bridge, now_secs, &mut conflicts).await?;
+            bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
             return Ok(conflicts);
         }
         Some(_) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
-            bootstrap_from_snapshot(bridge, now_secs, &mut conflicts).await?;
+            bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
             return Ok(conflicts);
         }
         Some(c) => c,
@@ -2354,7 +2362,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                     server_seq = snap.seq_id,
                     "sync_tick: cursor ahead of server op-log head; re-bootstrapping from snapshot"
                 );
-                apply_snapshot(bridge, &snap, now_secs, fetched_at, &mut conflicts)?;
+                apply_snapshot(bridge, sync_root, &snap, now_secs, fetched_at, &mut conflicts)?;
             }
             Ok(_) => { /* cursor still valid, nothing to do */ }
             Err(e) => {
@@ -2367,7 +2375,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
     // Apply the delta ops in order, advancing the cursor to the max seq_id.
     let mut max_seq = cursor;
     for op in &ops.ops {
-        if let Err(e) = apply_sync_op(bridge, op, now_secs, &mut conflicts) {
+        if let Err(e) = apply_sync_op(bridge, sync_root, op, now_secs, &mut conflicts) {
             tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
         }
         max_seq = max_seq.max(op.seq_id);
@@ -2383,6 +2391,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
 /// the gap-recovery path both funnel through here so the behaviour is identical.
 async fn bootstrap_from_snapshot(
     bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> anyhow::Result<()> {
@@ -2391,7 +2400,7 @@ async fn bootstrap_from_snapshot(
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
     let snapshot = bridge.api().sync_snapshot().await?;
-    apply_snapshot(bridge, &snapshot, now_secs, fetched_at, conflicts)
+    apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)
 }
 
 /// Reconcile the local mirror against an already-fetched snapshot:
@@ -2411,6 +2420,7 @@ async fn bootstrap_from_snapshot(
 /// a synthetic `SyncSnapshot` (no HTTP).
 fn apply_snapshot(
     bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     snapshot: &crate::api_client::SyncSnapshot,
     now_secs: i64,
     snapshot_fetched_at: i64,
@@ -2462,11 +2472,51 @@ fn apply_snapshot(
     let pruned = bridge.db().prune_absent(&seen, snapshot_fetched_at)?;
     if !pruned.is_empty() {
         tracing::info!(count = pruned.len(), "sync_tick: pruned rows absent from snapshot");
+        // task 0806: removing only the DB row left the on-disk Cloud Files
+        // placeholder ghosting in Explorer. Now ALSO remove each pruned row's
+        // placeholder. `prune_absent` returns rows CHILDREN-BEFORE-PARENTS (orphan
+        // descendants of a pruned folder precede the folder), which is exactly the
+        // order placeholder removal needs (leaf files before their directory).
+        remove_pruned_placeholders(sync_root, &pruned);
     }
 
     bridge.db().set_sync_cursor(snapshot.seq_id)?;
     Ok(())
 }
+
+/// Windows: remove the on-disk Cloud Files placeholder for each row the deletion
+/// reconcile just dropped from the DB (task 0806). The DB row is ALREADY gone (the
+/// caller deleted it before calling this), so the watcher's `handle_delete` finds
+/// no row and queues no server trash; we ALSO register each path in the watcher's
+/// engine-delete suppression set so the `NOTIFY_DELETE_COMPLETION` our own remove
+/// fires is dropped deterministically rather than echoing into a redundant trash.
+///
+/// `rows` MUST be ordered children-before-parents (both `prune_absent` and
+/// `delete_file_subtree` return that order) so a directory's leaf placeholders are
+/// removed before the directory placeholder itself.
+///
+/// A row whose path can't be safely resolved under the root (empty/traversal) is
+/// skipped. Per-row failures are logged (file_id only — zero-knowledge) and never
+/// abort the sweep. No-op on macOS/Linux.
+#[cfg(target_os = "windows")]
+fn remove_pruned_placeholders(sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
+    for row in rows {
+        let Some(path) = EngineBridge::placeholder_path_under(sync_root, &row.path) else {
+            continue;
+        };
+        // Register BEFORE the remove so the NOTIFY_DELETE_COMPLETION the remove
+        // fires is already suppressed when it lands in the watcher.
+        crate::watcher::suppress_engine_delete(&path);
+        if let Err(e) = crate::windows_cf::placeholders::delete_placeholder(&path, row.is_dir) {
+            // Zero-knowledge: never log the path — only the file_id + kind.
+            tracing::warn!(file_id = %row.file_id, is_dir = row.is_dir, error = %e, "remote-deletion reconcile: placeholder removal failed");
+        }
+    }
+}
+
+/// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
+#[cfg(not(target_os = "windows"))]
+fn remove_pruned_placeholders(_sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
 
 /// Order snapshot nodes so every node appears AFTER its parent (parents-first),
 /// which lets `apply_snapshot` resolve a parent's path before its children.
@@ -2537,6 +2587,7 @@ fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_json::Value> 
 /// known yet, the op requests a re-snapshot so nesting converges next tick.
 fn apply_sync_op(
     bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     op: &crate::api_client::SyncOp,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
@@ -2549,11 +2600,30 @@ fn apply_sync_op(
 
     match op.op_type.as_str() {
         "file_trash" | "file_delete" => {
-            // Reconcile the deletion locally. Never touch a row with a pending
-            // local op (an in-flight upload that reused this id) — the queue is
-            // authoritative for those; only remove a settled cloud/synced row.
-            if bridge.db().get_file(id)?.is_some() {
-                bridge.db().delete_file(id)?;
+            // Reconcile a REMOTE deletion (another client trashed/deleted this).
+            // Look up the row first: we need its status (to NOT clobber the local
+            // 0802 delete path) and, on Windows, its path/kind to remove the
+            // on-disk placeholder — not just the DB row (task 0806).
+            match bridge.db().get_file(id)? {
+                // 0802 distinction: a `Trashing` row is the LOCAL→server delete in
+                // flight (the user already removed the on-disk placeholder; the
+                // queued TrashFile op owns this row). This op is the server echo of
+                // that very delete — let the 0802 path converge it (the TrashFile op
+                // deletes the row on success). Removing the placeholder here would be
+                // a no-op (already gone), and we must NOT re-handle it, so skip.
+                Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {}
+                Some(_) => {
+                    // Remove the row (and, for a folder, its orphaned descendants by
+                    // path-prefix — the server trash is NOT recursive, task 0807) in
+                    // one transaction, children-before-parent. The DB row is gone
+                    // BEFORE we touch the placeholder, so the watcher's handle_delete
+                    // can't queue a redundant server trash.
+                    let removed = bridge.db().delete_file_subtree(id)?;
+                    remove_pruned_placeholders(sync_root, &removed);
+                }
+                // No row: a delete for a file we never mirrored (or already
+                // pruned) — nothing to reconcile.
+                None => {}
             }
         }
         "file_restore" => {
@@ -4290,7 +4360,7 @@ mod tests {
         let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        let conflicts = sync_tick(&bridge).await.unwrap();
+        let conflicts = sync_tick(&bridge, dir.path()).await.unwrap();
         assert!(conflicts.is_empty());
 
         let requests = server.finish();
@@ -4340,7 +4410,7 @@ mod tests {
         // Re-point the bridge at the mock by rebuilding it on the same DB path.
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
         server.finish();
 
         assert!(bridge.db().get_file(kept).unwrap().is_some());
@@ -4389,7 +4459,7 @@ mod tests {
         let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
         server.finish();
 
         let row = bridge.db().get_file(trashing).unwrap();
@@ -4435,7 +4505,7 @@ mod tests {
         let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
         server.finish();
 
         assert!(bridge.db().get_file(kept).unwrap().is_some());
@@ -4482,9 +4552,9 @@ mod tests {
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
         // Tick 1: bootstrap (cursor 0 → snapshot). Tick 2: ops?since=1.
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
         assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(1));
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
 
         let requests = server.finish();
         assert_eq!(requests.len(), 2);
@@ -4524,7 +4594,7 @@ mod tests {
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
         // Must not panic / error out the runner; cursor stays put for a retry.
-        let conflicts = sync_tick(&bridge).await.unwrap();
+        let conflicts = sync_tick(&bridge, dir.path()).await.unwrap();
         assert!(conflicts.is_empty());
 
         let requests = server.finish();
@@ -4566,7 +4636,7 @@ mod tests {
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
         // Tick 1: cursor UNSET → bootstrap snapshot, stores cursor Some(0).
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
         assert_eq!(
             bridge.db().get_sync_cursor().unwrap(),
             Some(0),
@@ -4574,7 +4644,7 @@ mod tests {
         );
 
         // Tick 2: cursor Some(0) → MUST take the ops path (since=0), NOT re-bootstrap.
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
 
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
@@ -4629,8 +4699,8 @@ mod tests {
         ]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        sync_tick(&bridge).await.unwrap(); // bootstrap
-        sync_tick(&bridge).await.unwrap(); // ops
+        sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
+        sync_tick(&bridge, dir.path()).await.unwrap(); // ops
         server.finish();
 
         // Both items nested under the folder prefix, exactly as a fresh snapshot
@@ -4683,8 +4753,8 @@ mod tests {
         ]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        sync_tick(&bridge).await.unwrap(); // bootstrap
-        sync_tick(&bridge).await.unwrap(); // ops: trash + restore (deletes, schedules re-snapshot)
+        sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
+        sync_tick(&bridge, dir.path()).await.unwrap(); // ops: trash + restore (deletes, schedules re-snapshot)
         // After the ops tick, the trash removed the row and the restore could not
         // rebuild it from {id} alone — it is gone for THIS tick, but a re-snapshot
         // is pending.
@@ -4692,7 +4762,7 @@ mod tests {
             bridge.db().get_file(file).unwrap().is_none(),
             "trash removed the row; restore can't rebuild it from {{id}} alone"
         );
-        sync_tick(&bridge).await.unwrap(); // re-snapshot re-materialises the row
+        sync_tick(&bridge, dir.path()).await.unwrap(); // re-snapshot re-materialises the row
 
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
@@ -4733,7 +4803,7 @@ mod tests {
         let server = SyncMockServer::start(vec![("200 OK".into(), boot)]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
-        sync_tick(&bridge).await.unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
         server.finish();
 
         assert!(
