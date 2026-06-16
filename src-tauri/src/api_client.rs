@@ -106,6 +106,59 @@ pub struct ListFilesScope<'a> {
     pub trashed: Option<bool>,
 }
 
+// ── /sync delta engine DTOs (task 0789) ────────────────────────────────────────
+//
+// Mirror the server contract in `repos/server/.../routes/sync.rs` EXACTLY:
+//   * `GET /api/v1/sync/snapshot` → `{ seq_id, nodes: [ … ] }` — the entire
+//     non-trashed tree in ONE call, plus the latest op cursor.
+//   * `GET /api/v1/sync/ops?since={n}` → `{ ops: [ … ], since }` — every op with
+//     `seq_id > since`, oldest-first.
+//
+// The desktop replaces the per-folder full-tree `/files` re-walk (which fired
+// `1 + folders` requests/tick and never pruned server deletions) with: ONE
+// snapshot to bootstrap, then ONE ops?since per tick. Both ride
+// `send_with_retry`, so a transient 429 backs off instead of erroring.
+//
+// We keep each node's metadata as a raw `serde_json::Value` so the existing
+// `apply_metadata_file_row` / `resolve_relative_path` ingest path consumes a
+// snapshot node BYTE-FOR-BYTE the same way it consumed a `/files` row — the
+// node already carries `id`, `parent_id`, `name_encrypted`, `size_bytes`,
+// `is_folder`, `content_hash`, `version_number`, `is_trashed`, `is_starred`,
+// `updated_at` (confirmed against `sync.rs::snapshot`). `seq_id` is the cursor.
+
+/// `GET /api/v1/sync/snapshot` response. `nodes` are raw rows (same shape the
+/// ingest path already reads); `seq_id` is the latest op cursor (0 if the user
+/// has no ops yet — a brand-new vault).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncSnapshot {
+    pub seq_id: i64,
+    #[serde(default)]
+    pub nodes: Vec<serde_json::Value>,
+}
+
+/// One op from `GET /api/v1/sync/ops`. `op_type` is the server's discriminator
+/// (`file_create` / `file_update` / `folder_create` / `file_rename` /
+/// `folder_rename` / `file_move` / `folder_move` / `file_trash` /
+/// `file_restore` / `file_delete`); `payload` is the op-specific body. `seq_id`
+/// advances the cursor.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncOp {
+    pub seq_id: i64,
+    pub op_type: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+/// `GET /api/v1/sync/ops?since={n}` response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncOps {
+    #[serde(default)]
+    pub ops: Vec<SyncOp>,
+    /// Echo of the `since` the server applied (it clamps a missing value to 0).
+    #[serde(default)]
+    pub since: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DesktopUploadInitRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,6 +392,23 @@ impl ApiClient {
         let resp = self.send_with_retry(|| self.client.get(&url)).await?;
         let body: serde_json::Value = resp.json().await?;
         Ok(body["files"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// `GET /api/v1/sync/snapshot` — the ENTIRE non-trashed tree + the latest
+    /// op `seq_id`, in ONE request. The bootstrap for the delta engine (task
+    /// 0789): the runner calls this once when the local cursor is unset/0, then
+    /// switches to [`Self::sync_ops`] for incremental catch-up. Routes through
+    /// `get_typed`, so a transient 429 backs off + retries (honouring
+    /// Retry-After / x-ratelimit-reset) instead of erroring immediately.
+    pub async fn sync_snapshot(&self) -> anyhow::Result<crate::api_client::SyncSnapshot> {
+        self.get_typed("/api/v1/sync/snapshot").await
+    }
+
+    /// `GET /api/v1/sync/ops?since={seq_id}` — every op with `seq_id > since`,
+    /// oldest-first. The steady-state delta call: ONE request/tick replaces the
+    /// old `1 + folders` full-tree re-walk. Same 429 backoff as `sync_snapshot`.
+    pub async fn sync_ops(&self, since: i64) -> anyhow::Result<crate::api_client::SyncOps> {
+        self.get_typed(&format!("/api/v1/sync/ops?since={since}")).await
     }
 
     /// `GET /api/v1/files/:id` — single-file metadata. Used by

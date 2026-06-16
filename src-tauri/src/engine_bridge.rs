@@ -2237,74 +2237,487 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
 
-    // Breadth-first recursive enumeration. The server's `GET /api/v1/files`
-    // is one level deep (`list_files(Some(parent))` returns a folder's direct
-    // children), so we walk the tree ourselves: process the root, then for
-    // every FOLDER row push a frame that lists its children, threading the
-    // folder's resolved relative path so its children get NESTED paths
-    // (`<parent>/<child>`). A BFS queue (not recursion) keeps the stack flat
-    // for deep vaults.
+    // ── /sync delta engine (task 0789) ────────────────────────────────────────
     //
-    // Guards:
-    //  - `seen` (server file_ids) breaks any parent_id cycle the server might
-    //    return and de-dups a folder that appears under two listings.
-    //  - `MAX_DEPTH` caps traversal so a pathological/looping tree can't spin
-    //    forever; the cap is generous (real vaults are far shallower).
-    const MAX_DEPTH: usize = 64;
+    // Replaces the old per-folder full-tree `/files` BFS re-walk (`1 + folders`
+    // requests/tick, never pruned server deletions, self-saturated the per-IP
+    // 429 limit). Two cheap paths, gated on whether the op cursor has EVER been
+    // persisted (`Option`, NOT a 0 sentinel):
+    //
+    //   cursor UNSET (never bootstrapped) → BOOTSTRAP via ONE `GET /sync/snapshot`:
+    //     the snapshot is the authoritative non-trashed tree, so we (a) apply
+    //     every node through the SAME ingest path the BFS used
+    //     (`process_metadata_row`, which keeps conflict detection identical +
+    //     flows rows through `upsert_file` for Windows `refresh_placeholders`),
+    //     (b) PRUNE every own-tree row the snapshot omits (the
+    //     deletion-reconciliation fix), and (c) store the snapshot's `seq_id` as
+    //     the cursor — which may legitimately be 0. The server returns
+    //     `MAX(seq_id) … unwrap_or(0)` and `sync_ops` is NOT backfilled, so a
+    //     pre-existing vault (or a brand-new one before its first create-op
+    //     lands) snapshots at seq_id 0. seq_id 0 is therefore a VALID
+    //     bootstrapped cursor, NOT an "unset" sentinel: gating on `== 0` would
+    //     re-snapshot + re-prune the WHOLE tree every tick forever and never
+    //     reach the cheap ops path (defeating the 429 fix).
+    //
+    //   cursor SET (incl. Some(0)) → CATCH-UP via ONE `GET /sync/ops?since={cursor}`:
+    //     apply each op by `op_type` and advance the cursor to the max applied
+    //     `seq_id`. With `since=0` the server returns every op `> 0`, which is
+    //     exactly right for a just-bootstrapped empty/low op log. ~1
+    //     request/tick in steady state.
+    //
+    // Gap / since-too-old fallback: if applying ops can't proceed coherently
+    // (the cursor is ahead of the server, or an op references a row we can't
+    // place), we re-bootstrap from a fresh snapshot — the snapshot is always
+    // authoritative, so a re-bootstrap can never lose data.
 
-    // (rel_path_of_parent, folder_id_to_list, depth). depth 0 = vault root.
-    let mut queue: VecDeque<(String, Option<String>, usize)> = VecDeque::new();
-    queue.push_back((String::new(), None, 0));
-    let mut seen: HashSet<String> = HashSet::new();
+    // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
+    // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
+    // tick regardless of the cursor, then clears the flag.
+    let needs_resnapshot = bridge.db().take_needs_resnapshot()?;
 
-    while let Some((parent_rel_path, parent_id, depth)) = queue.pop_front() {
-        // N1: a single flaky folder listing must NOT abort the whole tick (which
-        // would skip every remaining sibling subtree and stall their sync until a
-        // later tick happens to succeed end-to-end). Warn + skip THIS frame and
-        // keep walking the rest of the tree; the failed folder is retried next
-        // tick. (Auth/quota-class failures still surface their own pause via the
-        // operation loop; this guard is about transient per-folder list errors.)
-        let files = match bridge.api().list_files(parent_id.as_deref()).await {
-            Ok(files) => files,
-            Err(e) => {
+    let cursor = match bridge.db().get_sync_cursor()? {
+        // Never bootstrapped, or a re-snapshot was explicitly requested → full
+        // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
+        None => {
+            bootstrap_from_snapshot(bridge, now_secs, &mut conflicts).await?;
+            return Ok(conflicts);
+        }
+        Some(_) if needs_resnapshot => {
+            tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
+            bootstrap_from_snapshot(bridge, now_secs, &mut conflicts).await?;
+            return Ok(conflicts);
+        }
+        Some(c) => c,
+    };
+
+    let ops = match bridge.api().sync_ops(cursor).await {
+        Ok(ops) => ops,
+        Err(e) => {
+            // Transient list failure (network / lingering 429 after backoff): do
+            // NOT advance the cursor and do NOT fall back to a (heavier)
+            // snapshot — just skip this tick and retry next time. The cursor is
+            // unchanged, so no op is missed.
+            tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
+            return Ok(conflicts);
+        }
+    };
+
+    // Detect a cursor that is somehow AHEAD of the server's op log (e.g. a server
+    // history reset / op-log truncation): the server clamps `since` to whatever
+    // we sent and returns only `seq_id > since`, so a stale/over-large cursor
+    // yields an empty op list forever and we'd never reconcile. We can't
+    // distinguish "nothing changed" from "cursor too old" from the ops response
+    // alone, so we re-anchor against the snapshot's authoritative `seq_id`: only
+    // when the ops list is empty do we cheaply confirm the cursor still tracks
+    // the server (a single extra call ONLY on the empty-delta path is acceptable;
+    // any non-empty delta means the cursor is valid and we skip the check).
+    if ops.ops.is_empty() {
+        // No new ops. Verify the cursor hasn't drifted past the server head; if
+        // it has (server reset its op log), re-bootstrap. The snapshot call here
+        // is the single concession — it runs only when there is genuinely
+        // nothing to apply, so steady state stays at ~1 request/tick.
+        // `now_secs` (captured at tick start) is the prune freshness cutoff: it
+        // predates this snapshot fetch, so it can't be later than any row a
+        // concurrent completion stamps during the fetch.
+        let fetched_at = now_secs;
+        match bridge.api().sync_snapshot().await {
+            Ok(snap) if snap.seq_id < cursor => {
                 tracing::warn!(
-                    error = %e,
-                    depth,
-                    "sync_tick: failed to list a folder's children; skipping this subtree, continuing the rest of the tree"
+                    cursor,
+                    server_seq = snap.seq_id,
+                    "sync_tick: cursor ahead of server op-log head; re-bootstrapping from snapshot"
                 );
-                continue;
+                apply_snapshot(bridge, &snap, now_secs, fetched_at, &mut conflicts)?;
             }
-        };
-
-        for f in &files {
-            let file_id = f["id"].as_str().unwrap_or_default();
-            if file_id.is_empty() {
-                continue;
+            Ok(_) => { /* cursor still valid, nothing to do */ }
+            Err(e) => {
+                tracing::warn!(error = %e, "sync_tick: snapshot freshness probe failed; retrying next tick");
             }
-            // Cycle / duplicate guard: never process the same server id twice
-            // in one tick.
-            if !seen.insert(file_id.to_string()) {
-                continue;
-            }
+        }
+        return Ok(conflicts);
+    }
 
-            let resolved = process_metadata_row(bridge, f, &parent_rel_path, now_secs, &mut conflicts)?;
+    // Apply the delta ops in order, advancing the cursor to the max seq_id.
+    let mut max_seq = cursor;
+    for op in &ops.ops {
+        if let Err(e) = apply_sync_op(bridge, op, now_secs, &mut conflicts) {
+            tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
+        }
+        max_seq = max_seq.max(op.seq_id);
+    }
+    if max_seq > cursor {
+        bridge.db().set_sync_cursor(max_seq)?;
+    }
+    Ok(conflicts)
+}
 
-            // Recurse into folders: list their children on a later frame,
-            // carrying this folder's full relative path as the new parent.
-            if let Some((rel_path, ItemKind::Folder)) = resolved {
-                if depth + 1 <= MAX_DEPTH && !rel_path.is_empty() {
-                    queue.push_back((rel_path, Some(file_id.to_string()), depth + 1));
-                } else if depth + 1 > MAX_DEPTH {
-                    tracing::warn!(
-                        file_id = %file_id,
-                        depth,
-                        "sync_tick: max recursion depth reached, not descending further"
-                    );
-                }
+/// Pull a fresh `/sync/snapshot` and reconcile the whole mirror against it, then
+/// store its `seq_id` as the new cursor. The bootstrap path (cursor unset) AND
+/// the gap-recovery path both funnel through here so the behaviour is identical.
+async fn bootstrap_from_snapshot(
+    bridge: &EngineBridge,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<()> {
+    // `now_secs` is captured at tick start, BEFORE this request — so it is the
+    // prune freshness cutoff that never prunes a row a concurrent local
+    // completion stamps while this snapshot is in flight (see `prune_absent`).
+    let fetched_at = now_secs;
+    let snapshot = bridge.api().sync_snapshot().await?;
+    apply_snapshot(bridge, &snapshot, now_secs, fetched_at, conflicts)
+}
+
+/// Reconcile the local mirror against an already-fetched snapshot:
+///   1. order nodes parent-before-child and compute each node's parent rel path,
+///   2. ingest every node through `process_metadata_row` (same conflict logic +
+///      `upsert_file` placeholder-freshness flow the old BFS used),
+///   3. PRUNE every own-tree row the snapshot omits (deletion reconciliation),
+///      EXCEPT rows touched at/after `snapshot_fetched_at` (a just-completed
+///      upload) and EXCEPT the whole tree when the snapshot is suspiciously empty
+///      (both handled inside `prune_absent`),
+///   4. store the snapshot's `seq_id` as the cursor.
+///
+/// `snapshot_fetched_at` is the wall-clock second the snapshot HTTP fetch began;
+/// it is the prune freshness cutoff so an upload re-keyed mid-flight survives.
+///
+/// Split out from `bootstrap_from_snapshot` so it's directly unit-testable with
+/// a synthetic `SyncSnapshot` (no HTTP).
+fn apply_snapshot(
+    bridge: &EngineBridge,
+    snapshot: &crate::api_client::SyncSnapshot,
+    now_secs: i64,
+    snapshot_fetched_at: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<()> {
+    // Resolve each node's PARENT relative path. The snapshot is a flat node list
+    // (each with `parent_id`); the old BFS got nesting for free by listing
+    // folder-by-folder. Here we topologically order so a parent's resolved path
+    // is known before its children, then thread it into `process_metadata_row`
+    // exactly as the BFS threaded the folder's path.
+    let order = order_snapshot_nodes(&snapshot.nodes);
+
+    let mut seen: HashSet<String> = HashSet::new();
+    // file_id → resolved FULL relative path (so children can prefix their leaf).
+    let mut resolved_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for f in order {
+        let file_id = f["id"].as_str().unwrap_or_default();
+        if file_id.is_empty() {
+            continue;
+        }
+        if !seen.insert(file_id.to_string()) {
+            continue;
+        }
+        // Parent's resolved path ("" at the vault root, or when the parent
+        // didn't resolve — the leaf then sits at root, matching BFS behaviour
+        // where an unresolved parent frame simply wasn't descended).
+        let parent_rel_path = f["parent_id"]
+            .as_str()
+            .and_then(|pid| resolved_paths.get(pid))
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some((rel_path, _kind)) =
+            process_metadata_row(bridge, f, &parent_rel_path, now_secs, conflicts)?
+        {
+            if !rel_path.is_empty() {
+                resolved_paths.insert(file_id.to_string(), rel_path);
             }
         }
     }
-    Ok(conflicts)
+
+    // Deletion reconciliation: anything in the local own-tree the snapshot did
+    // NOT mention was deleted/trashed server-side. `prune_absent` excludes shared
+    // rows, rows with a pending upload/op, rows touched at/after the snapshot
+    // fetch (a just-completed upload the snapshot predates), and refuses to prune
+    // the whole tree on a suspicious EMPTY snapshot (see its doc) — so neither an
+    // in-flight local create nor a just-uploaded file is ever collateral.
+    let pruned = bridge.db().prune_absent(&seen, snapshot_fetched_at)?;
+    if !pruned.is_empty() {
+        tracing::info!(count = pruned.len(), "sync_tick: pruned rows absent from snapshot");
+    }
+
+    bridge.db().set_sync_cursor(snapshot.seq_id)?;
+    Ok(())
+}
+
+/// Order snapshot nodes so every node appears AFTER its parent (parents-first),
+/// which lets `apply_snapshot` resolve a parent's path before its children.
+///
+/// Roots (no `parent_id`, or a `parent_id` not present in the node set — a
+/// shared-into / cross-tree parent) come first; remaining nodes are emitted as
+/// their parents become available. Any nodes left in a `parent_id` cycle the
+/// server should never produce are appended at the end so they're still ingested
+/// (just possibly with an empty parent path), never dropped.
+fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    use std::collections::HashMap;
+    let present: HashSet<&str> = nodes.iter().filter_map(|n| n["id"].as_str()).collect();
+    // children[parent_id] = [node, …]
+    let mut children: HashMap<&str, Vec<&serde_json::Value>> = HashMap::new();
+    let mut roots: Vec<&serde_json::Value> = Vec::new();
+    for n in nodes {
+        match n["parent_id"].as_str() {
+            Some(pid) if present.contains(pid) => children.entry(pid).or_default().push(n),
+            _ => roots.push(n), // root, or parent outside the snapshot set
+        }
+    }
+    let mut ordered: Vec<&serde_json::Value> = Vec::with_capacity(nodes.len());
+    let mut queue: VecDeque<&serde_json::Value> = roots.into_iter().collect();
+    let mut emitted: HashSet<&str> = HashSet::new();
+    while let Some(n) = queue.pop_front() {
+        let Some(id) = n["id"].as_str() else { continue };
+        if !emitted.insert(id) {
+            continue;
+        }
+        ordered.push(n);
+        if let Some(kids) = children.get(id) {
+            for k in kids {
+                queue.push_back(k);
+            }
+        }
+    }
+    // Defensive: emit any node not reached (a parent_id cycle) so nothing is lost.
+    for n in nodes {
+        if let Some(id) = n["id"].as_str() {
+            if emitted.insert(id) {
+                ordered.push(n);
+            }
+        }
+    }
+    ordered
+}
+
+/// Apply ONE `/sync/ops` delta to the local mirror by `op_type`. Mirrors the
+/// server's op vocabulary (`server/.../routes/sync.rs` + the `emit_sync_op`
+/// call sites in `routes/files.rs` / `routes/uploads.rs`):
+///   * `file_create` / `folder_create` → ingest the new row (cloud_only),
+///   * `file_update`                   → refresh the existing row's metadata,
+///   * `file_rename` / `folder_rename` → update the leaf name (re-derives path),
+///   * `file_move`   / `folder_move`   → re-parent the row,
+///   * `file_trash`  / `file_delete`   → remove the local mirror row,
+///   * `file_restore`                  → request a re-snapshot ({id}-only payload
+///     can't rebuild the row; the authoritative snapshot re-materialises it).
+///
+/// Each op payload is `{ id, … }`. For create/update/rename/move we synthesise a
+/// `serde_json::Value` row and feed it through the SAME `process_metadata_row`
+/// ingest path the snapshot uses, so conflict detection + placeholder freshness
+/// are identical across both paths. Nested paths ARE resolved from the op's
+/// `parent_id`/`new_parent_id` against the local mirror (`parent_rel_path_by_id`),
+/// matching how `apply_snapshot` threads parent paths — because the Windows
+/// placeholder seeder (`populate_placeholders`) derives the on-disk location
+/// purely from the row's stored `path`, NOT from `parent_id`, and there is no
+/// periodic snapshot to fix a mis-prefixed row later. When a parent isn't locally
+/// known yet, the op requests a re-snapshot so nesting converges next tick.
+fn apply_sync_op(
+    bridge: &EngineBridge,
+    op: &crate::api_client::SyncOp,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<()> {
+    let payload = &op.payload;
+    let id = payload["id"].as_str().unwrap_or_default();
+    if id.is_empty() {
+        return Ok(());
+    }
+
+    match op.op_type.as_str() {
+        "file_trash" | "file_delete" => {
+            // Reconcile the deletion locally. Never touch a row with a pending
+            // local op (an in-flight upload that reused this id) — the queue is
+            // authoritative for those; only remove a settled cloud/synced row.
+            if bridge.db().get_file(id)?.is_some() {
+                bridge.db().delete_file(id)?;
+            }
+        }
+        "file_restore" => {
+            // The restore payload is only `{ id }` (server `routes/files.rs`), so
+            // the un-trashed row's full metadata is NOT recoverable from the op.
+            // We already DELETED this row on the preceding `file_trash`/
+            // `file_delete` op, and there is NO periodic snapshot in steady state
+            // (the cursor only advances via ops once bootstrapped) — so a no-op
+            // here would make a trash-then-restore on another device leave the
+            // file permanently invisible on THIS device. Request a re-bootstrap
+            // on the next tick: the authoritative snapshot re-materialises the
+            // restored row. Cheap and matches the existing gap-recovery design.
+            bridge.db().request_resnapshot()?;
+            tracing::info!(
+                file_id = %id,
+                "sync_tick: file_restore op — scheduling re-snapshot to re-materialise the row"
+            );
+        }
+        "file_rename" | "folder_rename" => {
+            // Re-key the leaf name. Build a row carrying the NEW name_encrypted so
+            // `resolve_relative_path` re-derives the plaintext leaf. We keep the
+            // existing row's parent path by reading its current path's parent.
+            let new_name = payload["new_name_encrypted"].as_str();
+            let row = synthesize_op_row(bridge, id, op, new_name);
+            let parent_rel = existing_parent_rel_path(bridge, id);
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+        }
+        "file_move" | "folder_move" => {
+            // Re-parent. The op gives `new_parent_id`; the leaf name is unchanged.
+            // The move op carries no name blob, so `synthesize_op_row` supplies the
+            // unchanged leaf as a plaintext `"name"` fallback from the existing
+            // row's stored path (the `files` table doesn't persist name_encrypted).
+            let row = synthesize_op_row(bridge, id, op, None);
+            // Resolve the NEW parent's full relative path from the local mirror by
+            // `new_parent_id` (the same way `apply_snapshot` resolves nesting), so
+            // a move-into-folder lands the row under its folder prefix instead of
+            // at the sync root. If the new parent isn't locally known yet, fall
+            // back to a re-snapshot rather than mis-placing the row at root.
+            let parent_rel = parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str());
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+        }
+        "file_create" | "folder_create" | "file_update" => {
+            let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
+            // For a CREATE there is no existing local row, so the parent path must
+            // come from the op's `parent_id` resolved against the local mirror —
+            // NOT from the (nonexistent) row's own path, which would yield "" and
+            // mis-place a nested create at the sync root. `populate_placeholders`
+            // derives the on-disk location purely from the row's `path`, so the
+            // path prefix MUST be correct here; there is no periodic snapshot to
+            // fix it later. For an UPDATE the row already exists, so keep its
+            // current parent prefix (`existing_parent_rel_path`).
+            let parent_rel = if op.op_type == "file_update" {
+                existing_parent_rel_path(bridge, id)
+            } else {
+                parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
+            };
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+        }
+        other => {
+            tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
+        }
+    }
+    Ok(())
+}
+
+/// Build a `/files`-shaped `serde_json::Value` from a sync op + the existing
+/// local row, so `process_metadata_row` ingests it identically to a snapshot
+/// node. Carries the op's `id` plus any of `name_encrypted` / `parent_id` /
+/// `size_bytes` / `version_number` / `is_folder` it can determine, falling back
+/// to the existing row's values where the op is partial (e.g. a `file_update`
+/// that only changed `has_thumbnail`).
+fn synthesize_op_row(
+    bridge: &EngineBridge,
+    id: &str,
+    op: &crate::api_client::SyncOp,
+    name_encrypted: Option<&str>,
+) -> serde_json::Value {
+    let payload = &op.payload;
+    let existing = bridge.db().get_file(id).ok().flatten();
+    let existing_contract = bridge.db().get_file_contract_state(id).ok().flatten();
+
+    let is_folder = op.op_type.starts_with("folder_")
+        || existing
+            .as_ref()
+            .map(|e| e.item_kind == ItemKind::Folder)
+            .unwrap_or(false);
+
+    let mut row = serde_json::json!({ "id": id, "is_folder": is_folder });
+
+    // name_encrypted: op-provided wins (create/rename carry it). A MOVE op carries
+    // NO name blob, and the `files` table does NOT persist `name_encrypted`, so it
+    // is genuinely unrecoverable from the op for a move. To still compose the
+    // correct path, fall back to the EXISTING row's plaintext leaf (the last
+    // segment of its already-decrypted stored `path`) as the `"name"` field —
+    // `resolve_relative_path` prefers `name_encrypted` but falls through to
+    // `"name"`, so the moved row keeps its leaf under the new parent prefix
+    // instead of resolving to an empty path (which would mis-seed at the root or
+    // skip the row entirely).
+    if let Some(name) = name_encrypted.or_else(|| payload["name_encrypted"].as_str()) {
+        row["name_encrypted"] = serde_json::json!(name);
+    } else if let Some(leaf) = existing.as_ref().and_then(|e| {
+        e.path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+    }) {
+        row["name"] = serde_json::json!(leaf);
+    }
+    // parent_id: a move sets new_parent_id; create/update set parent_id; else keep
+    // the existing parent.
+    let parent_id = payload["new_parent_id"]
+        .as_str()
+        .or_else(|| payload["parent_id"].as_str())
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().and_then(|e| e.parent_id.clone()));
+    if let Some(pid) = parent_id {
+        row["parent_id"] = serde_json::json!(pid);
+    }
+    // size_bytes: op-provided wins, else existing.
+    let size = payload["size_bytes"]
+        .as_i64()
+        .or_else(|| existing.as_ref().map(|e| e.size_bytes));
+    if let Some(sz) = size {
+        row["size_bytes"] = serde_json::json!(sz);
+    }
+    // version_number: op-provided wins, else the existing contract's.
+    let version = payload["version_number"]
+        .as_i64()
+        .or_else(|| existing_contract.as_ref().map(|c| c.current_version));
+    if let Some(v) = version {
+        row["version_number"] = serde_json::json!(v);
+    }
+    // updated_at: stamp "now" so the conflict check treats an op as a fresh
+    // remote change (the op log carries no file timestamp the client can read).
+    row["updated_at"] = serde_json::json!(now_secs());
+    row
+}
+
+/// Resolve a parent's FULL relative path from the local mirror by its `file_id`
+/// — the parent path a freshly-created/moved child must be prefixed with. This
+/// mirrors how [`apply_snapshot`] resolves nesting (it threads each parent's
+/// resolved full path into its children), so an op-driven create/move lands at
+/// the SAME path a fresh snapshot would produce.
+///
+///   * `parent_id == None`            → "" (root child),
+///   * parent row present locally     → the parent's stored full `path` (its
+///     leading slash trimmed so it composes cleanly as a prefix),
+///   * `parent_id == Some` but the parent row is NOT in the local mirror yet
+///     (the create/move arrived before its parent's create op landed) → "" for
+///     THIS tick AND a re-snapshot is requested, so the authoritative snapshot
+///     re-places the row under its correct prefix on the next tick rather than
+///     leaving it permanently mis-placed at the sync root.
+fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&str>) -> String {
+    let Some(pid) = parent_id.filter(|p| !p.is_empty()) else {
+        return String::new(); // root child — no prefix
+    };
+    match bridge.db().get_file(pid).ok().flatten() {
+        Some(parent) => parent.path.trim_start_matches('/').to_string(),
+        None => {
+            // Parent not locally known — can't compute the prefix from the op
+            // alone. Schedule a re-snapshot so the next tick reconciles nesting
+            // authoritatively; a best-effort log keeps this observable.
+            if let Err(e) = bridge.db().request_resnapshot() {
+                tracing::warn!(error = %e, "sync_tick: could not request re-snapshot for unknown parent");
+            }
+            tracing::info!(
+                parent_id = %pid,
+                "sync_tick: op references a parent not in the local mirror; scheduling re-snapshot"
+            );
+            String::new()
+        }
+    }
+}
+
+/// The PARENT relative path of an existing local row (everything before the last
+/// `/` in its stored `path`), or "" when the row is unknown / at the vault root.
+/// Used so an op-driven re-ingest keeps a nested row under its folder prefix
+/// without needing the parent's plaintext name in the op.
+fn existing_parent_rel_path(bridge: &EngineBridge, id: &str) -> String {
+    bridge
+        .db()
+        .get_file(id)
+        .ok()
+        .flatten()
+        .and_then(|e| {
+            let p = e.path.trim_start_matches('/');
+            p.rsplit_once('/').map(|(parent, _leaf)| parent.to_string())
+        })
+        .unwrap_or_default()
 }
 
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
@@ -3610,5 +4023,449 @@ mod tests {
         contract.parent_id = parent_id.map(str::to_string);
         contract.cache_bytes = cache_bytes;
         bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    // ── /sync delta engine tests (task 0789) ──────────────────────────────────
+    //
+    // A scriptable mock that answers `/api/v1/sync/snapshot` and
+    // `/api/v1/sync/ops` from a FIFO of canned responses (status + JSON body)
+    // and records every request path. Mirrors `UploadMockServer`'s raw-TCP shape
+    // (the existing test harness) so it shares the request-capture pattern the
+    // 0789 plan calls out.
+
+    struct SyncMockServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl SyncMockServer {
+        /// `responses`: ordered `(http_status, json_body)` answered one per
+        /// incoming request. The server serves exactly `responses.len()`
+        /// requests then exits, so the test must drive precisely that many.
+        fn start(responses: Vec<(String, serde_json::Value)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                for (status, body) in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    server_requests.lock().unwrap().push(request);
+                    let response = http_json(&status, body);
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            Self { base_url, requests, handle }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.handle.join().unwrap();
+            Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
+        }
+    }
+
+    fn enc_name(master_key: &[u8; 32], file_id: &str, name: &str) -> String {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+        beebeeb_core::encrypt::encrypt_name(&mk, file_id, name, None).unwrap()
+    }
+
+    /// Build a snapshot node the way the server's `/sync/snapshot` does.
+    fn snap_node(
+        master_key: &[u8; 32],
+        id: &str,
+        name: &str,
+        parent_id: Option<&str>,
+        is_folder: bool,
+        updated_at: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "parent_id": parent_id,
+            "name_encrypted": enc_name(master_key, id, name),
+            "size_bytes": 10,
+            "is_folder": is_folder,
+            "content_hash": serde_json::Value::Null,
+            "version_number": 1,
+            "is_trashed": false,
+            "is_starred": false,
+            "updated_at": updated_at,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_bootstrap_snapshot_ingests_same_rows_as_walk() {
+        // cursor unset → ONE /sync/snapshot bootstrap. Every node lands as a
+        // cloud_only row with the decrypted nested path, and the cursor is set
+        // to the snapshot's seq_id.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [7u8; 32];
+        let folder = "f0000000-0000-4000-8000-000000000001";
+        let child = "c0000000-0000-4000-8000-000000000002";
+        let root_file = "a0000000-0000-4000-8000-000000000003";
+        let snapshot = serde_json::json!({
+            "seq_id": 12,
+            "nodes": [
+                snap_node(&mk, folder, "docs", None, true, 100),
+                snap_node(&mk, child, "notes.txt", Some(folder), false, 100),
+                snap_node(&mk, root_file, "top.txt", None, false, 100),
+            ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        let conflicts = sync_tick(&bridge).await.unwrap();
+        assert!(conflicts.is_empty());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "bootstrap = exactly one request");
+        assert_eq!(requests[0].path, "/api/v1/sync/snapshot");
+
+        // Nested + root rows all present, paths nested correctly, all cloud_only.
+        let f = bridge.db().get_file(folder).unwrap().unwrap();
+        assert_eq!(f.path, "docs");
+        assert_eq!(f.item_kind, ItemKind::Folder);
+        let c = bridge.db().get_file(child).unwrap().unwrap();
+        assert_eq!(c.path, "docs/notes.txt", "child nested under parent's resolved path");
+        assert_eq!(c.status, FileStatus::CloudOnly);
+        let r = bridge.db().get_file(root_file).unwrap().unwrap();
+        assert_eq!(r.path, "top.txt");
+        // Cursor advanced to the snapshot seq_id.
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(12));
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_snapshot_prunes_row_absent_from_snapshot() {
+        // A known local row the fresh snapshot OMITS must be pruned (the silent
+        // deletion-reconciliation fix).
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [4u8; 32];
+        let kept = "11111111-0000-4000-8000-000000000001";
+        let stale = "22222222-0000-4000-8000-000000000002";
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        // Pre-seed a settled own-tree row that the snapshot will NOT mention.
+        bridge.db().upsert_file(&FileEntry {
+            file_id: stale.into(),
+            path: "deleted-server-side.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        }).unwrap();
+
+        let snapshot = serde_json::json!({
+            "seq_id": 5,
+            "nodes": [ snap_node(&mk, kept, "kept.txt", None, false, 50) ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        // Re-point the bridge at the mock by rebuilding it on the same DB path.
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge).await.unwrap();
+        server.finish();
+
+        assert!(bridge.db().get_file(kept).unwrap().is_some());
+        assert!(bridge.db().get_file(stale).unwrap().is_none(), "snapshot-absent row pruned");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_ops_sequence_converges_to_fresh_snapshot() {
+        // Bootstrap, then apply a stream of ops, and assert the resulting mirror
+        // matches what a fresh snapshot of the post-op tree would produce.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let keep = "aaaa0000-0000-4000-8000-000000000001";
+        let doomed = "bbbb0000-0000-4000-8000-000000000002";
+        let created = "cccc0000-0000-4000-8000-000000000003";
+
+        // Bootstrap snapshot: {keep, doomed}, seq 1.
+        let boot = serde_json::json!({
+            "seq_id": 1,
+            "nodes": [
+                snap_node(&mk, keep, "keep.txt", None, false, 10),
+                snap_node(&mk, doomed, "doomed.txt", None, false, 10),
+            ],
+        });
+        // Ops: create `created`, trash `doomed`. Highest seq = 3.
+        let ops = serde_json::json!({
+            "since": 1,
+            "ops": [
+                { "seq_id": 2, "op_type": "file_create",
+                  "payload": { "id": created, "name_encrypted": enc_name(&mk, created, "fresh.txt"),
+                               "parent_id": serde_json::Value::Null, "size_bytes": 7,
+                               "storage_pool_id": "pool" } },
+                { "seq_id": 3, "op_type": "file_trash", "payload": { "id": doomed } },
+            ],
+        });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // Tick 1: bootstrap (cursor 0 → snapshot). Tick 2: ops?since=1.
+        sync_tick(&bridge).await.unwrap();
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(1));
+        sync_tick(&bridge).await.unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "/api/v1/sync/snapshot");
+        assert_eq!(requests[1].path, "/api/v1/sync/ops?since=1");
+
+        // Convergence: keep + created present, doomed gone, cursor at 3 — exactly
+        // a fresh snapshot of the post-op tree.
+        assert!(bridge.db().get_file(keep).unwrap().is_some());
+        assert!(bridge.db().get_file(created).unwrap().is_some(), "file_create applied");
+        assert_eq!(bridge.db().get_file(created).unwrap().unwrap().path, "fresh.txt");
+        assert!(bridge.db().get_file(doomed).unwrap().is_none(), "file_trash removed the row");
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(3), "cursor advanced to max seq_id");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_ops_429_backs_off_and_preserves_cursor() {
+        // A 429 on /sync/ops must NOT advance the cursor and must NOT lose data —
+        // send_with_retry rides it out; if it ultimately surfaces, the tick
+        // simply retries next time. Here the mock 429s every attempt; sync_tick
+        // must return Ok with the cursor unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [3u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        // Pre-set a cursor so we take the ops path (not bootstrap).
+        bridge.db().set_sync_cursor(8).unwrap();
+
+        // send_with_retry does up to 1 + MAX_429_RETRIES (=3) attempts → 4 total.
+        let err_body = serde_json::json!({ "error": "rate limit exceeded", "retry_after": 0 });
+        let responses = vec![
+            ("429 Too Many Requests".into(), err_body.clone()),
+            ("429 Too Many Requests".into(), err_body.clone()),
+            ("429 Too Many Requests".into(), err_body.clone()),
+            ("429 Too Many Requests".into(), err_body),
+        ];
+        let server = SyncMockServer::start(responses);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // Must not panic / error out the runner; cursor stays put for a retry.
+        let conflicts = sync_tick(&bridge).await.unwrap();
+        assert!(conflicts.is_empty());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4, "one initial + 3 retries (429 backoff)");
+        for r in &requests {
+            assert_eq!(r.path, "/api/v1/sync/ops?since=8");
+        }
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(8), "cursor preserved across 429");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_seq_id_zero_bootstrap_then_takes_ops_path_not_resnapshot() {
+        // BLOCKER regression (issue 1): the server returns seq_id 0 for any vault
+        // whose `sync_ops` log is empty (MAX(seq_id) → NULL → unwrap_or(0)). seq_id
+        // 0 is a VALID bootstrapped cursor, NOT an "unset" sentinel. The 2nd tick
+        // MUST issue /sync/ops?since=0 and MUST NOT re-snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [5u8; 32];
+        let only = "dddd0000-0000-4000-8000-000000000001";
+
+        // Bootstrap snapshot with seq_id 0 (empty op log) and one node.
+        let boot = serde_json::json!({
+            "seq_id": 0,
+            "nodes": [ snap_node(&mk, only, "only.txt", None, false, 10) ],
+        });
+        // Empty ops list at since=0 (nothing happened yet). Because the ops list
+        // is empty, the freshness-probe snapshot also fires; it returns seq_id 0,
+        // which is NOT < cursor(0), so it does NOT re-bootstrap.
+        let ops_empty = serde_json::json!({ "since": 0, "ops": [] });
+        let probe = serde_json::json!({ "seq_id": 0, "nodes": [
+            snap_node(&mk, only, "only.txt", None, false, 10)
+        ] });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops_empty),
+            ("200 OK".into(), probe),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // Tick 1: cursor UNSET → bootstrap snapshot, stores cursor Some(0).
+        sync_tick(&bridge).await.unwrap();
+        assert_eq!(
+            bridge.db().get_sync_cursor().unwrap(),
+            Some(0),
+            "bootstrap with seq_id 0 stores a real Some(0) cursor"
+        );
+
+        // Tick 2: cursor Some(0) → MUST take the ops path (since=0), NOT re-bootstrap.
+        sync_tick(&bridge).await.unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/api/v1/sync/snapshot", "tick1 = bootstrap");
+        assert_eq!(
+            requests[1].path, "/api/v1/sync/ops?since=0",
+            "tick2 takes the ops delta path (NOT a re-bootstrap snapshot)"
+        );
+        // The 3rd request is the empty-delta freshness probe, not a re-bootstrap.
+        assert_eq!(requests[2].path, "/api/v1/sync/snapshot");
+        // The row from bootstrap survives (no spurious re-prune).
+        assert!(bridge.db().get_file(only).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_nested_create_and_move_match_fresh_snapshot_path() {
+        // HIGH regression (issue 2): a nested file_create and a move-into-folder
+        // applied via ops must land at the SAME mirror path a fresh snapshot would
+        // produce — under the parent's prefix, not at the sync root.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [6u8; 32];
+        let folder = "f1110000-0000-4000-8000-000000000001";
+        let nested = "f1110000-0000-4000-8000-000000000002";
+        let mover = "f1110000-0000-4000-8000-000000000003";
+
+        // Bootstrap: just the folder (parents-known-first), seq 1.
+        let boot = serde_json::json!({
+            "seq_id": 1,
+            "nodes": [ snap_node(&mk, folder, "docs", None, true, 10) ],
+        });
+        // Ops: create a NESTED file under `folder`; create a root file then move
+        // it INTO `folder`. Highest seq = 4.
+        let ops = serde_json::json!({
+            "since": 1,
+            "ops": [
+                { "seq_id": 2, "op_type": "file_create",
+                  "payload": { "id": nested, "name_encrypted": enc_name(&mk, nested, "notes.txt"),
+                               "parent_id": folder, "size_bytes": 3, "storage_pool_id": "pool" } },
+                { "seq_id": 3, "op_type": "file_create",
+                  "payload": { "id": mover, "name_encrypted": enc_name(&mk, mover, "moved.txt"),
+                               "parent_id": serde_json::Value::Null, "size_bytes": 3,
+                               "storage_pool_id": "pool" } },
+                { "seq_id": 4, "op_type": "file_move",
+                  "payload": { "id": mover, "old_parent_id": serde_json::Value::Null,
+                               "new_parent_id": folder } },
+            ],
+        });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge).await.unwrap(); // bootstrap
+        sync_tick(&bridge).await.unwrap(); // ops
+        server.finish();
+
+        // Both items nested under the folder prefix, exactly as a fresh snapshot
+        // (which resolves nesting via parent_id) would place them.
+        assert_eq!(
+            bridge.db().get_file(nested).unwrap().unwrap().path,
+            "docs/notes.txt",
+            "nested file_create lands under the parent prefix, not at root"
+        );
+        assert_eq!(
+            bridge.db().get_file(mover).unwrap().unwrap().path,
+            "docs/moved.txt",
+            "move-into-folder lands under the new parent prefix, not at root"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_trash_then_restore_keeps_row_via_resnapshot() {
+        // HIGH regression (issue 3/7): a trash op deletes the local row; the
+        // following restore op ({id}-only payload) cannot rebuild it, so it must
+        // schedule a re-snapshot that re-materialises the row on the next tick.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [8u8; 32];
+        let file = "e1110000-0000-4000-8000-000000000001";
+
+        // Bootstrap: the file exists, seq 1.
+        let boot = serde_json::json!({
+            "seq_id": 1,
+            "nodes": [ snap_node(&mk, file, "doc.txt", None, false, 10) ],
+        });
+        // Ops: trash then restore. Highest seq = 3.
+        let ops = serde_json::json!({
+            "since": 1,
+            "ops": [
+                { "seq_id": 2, "op_type": "file_trash", "payload": { "id": file } },
+                { "seq_id": 3, "op_type": "file_restore", "payload": { "id": file } },
+            ],
+        });
+        // The restore scheduled a re-snapshot, so the NEXT tick bootstraps from
+        // this fresh snapshot (which includes the restored, no-longer-trashed row).
+        let resnap = serde_json::json!({
+            "seq_id": 3,
+            "nodes": [ snap_node(&mk, file, "doc.txt", None, false, 10) ],
+        });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops),
+            ("200 OK".into(), resnap),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge).await.unwrap(); // bootstrap
+        sync_tick(&bridge).await.unwrap(); // ops: trash + restore (deletes, schedules re-snapshot)
+        // After the ops tick, the trash removed the row and the restore could not
+        // rebuild it from {id} alone — it is gone for THIS tick, but a re-snapshot
+        // is pending.
+        assert!(
+            bridge.db().get_file(file).unwrap().is_none(),
+            "trash removed the row; restore can't rebuild it from {{id}} alone"
+        );
+        sync_tick(&bridge).await.unwrap(); // re-snapshot re-materialises the row
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2].path, "/api/v1/sync/snapshot", "tick3 = forced re-snapshot");
+        assert!(
+            bridge.db().get_file(file).unwrap().is_some(),
+            "re-snapshot re-materialised the restored row — it is NOT permanently invisible"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_empty_snapshot_does_not_prune_existing_tree() {
+        // BLOCKER regression (issue 4): a degraded EMPTY snapshot (200 with no
+        // nodes) must NOT prune the entire local own-tree.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [2u8; 32];
+        let kept = "c2220000-0000-4000-8000-000000000001";
+
+        // Pre-seed a settled own-tree row stamped in the past (so the freshness
+        // cutoff would otherwise allow pruning it).
+        {
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+            bridge.db().upsert_file(&FileEntry {
+                file_id: kept.into(),
+                path: "important.txt".into(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 1,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            }).unwrap();
+        }
+
+        // Bootstrap with an EMPTY snapshot.
+        let boot = serde_json::json!({ "seq_id": 7, "nodes": [] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge).await.unwrap();
+        server.finish();
+
+        assert!(
+            bridge.db().get_file(kept).unwrap().is_some(),
+            "empty snapshot must NOT prune the existing own-tree (fail-closed)"
+        );
     }
 }

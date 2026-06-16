@@ -473,6 +473,10 @@ impl StateDb {
                 updated_at INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_operation_queue_due ON operation_queue(next_retry_at, created_at);
+            CREATE TABLE IF NOT EXISTS sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         ",
         )?;
         ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -620,6 +624,185 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
         Ok(())
+    }
+
+    // ── /sync delta-engine cursor + prune (task 0789) ──────────────────────────
+    //
+    // The `sync_state` kv table holds the `/sync/ops` cursor (the highest
+    // `seq_id` we have applied). On boot the cursor is unset → the engine pulls
+    // a full `/sync/snapshot` (authoritative tree + seq_id), then advances the
+    // cursor by `seq_id` as it applies each delta op. This replaces the old
+    // per-tick full-tree `/files` re-walk and is what fixes the silent
+    // deletion-reconciliation bug (the snapshot path prunes server-deleted
+    // rows; the ops path applies trash/delete ops).
+
+    const SYNC_CURSOR_KEY: &'static str = "sync_ops_cursor";
+    const NEEDS_RESNAPSHOT_KEY: &'static str = "sync_needs_resnapshot";
+
+    /// Read the persisted `/sync/ops` cursor (highest applied `seq_id`).
+    /// `Ok(None)` when unset (fresh DB / never bootstrapped) — the caller treats
+    /// that as "needs a full snapshot". A stored-but-unparseable value is also
+    /// reported as `None` (forces a safe re-bootstrap rather than a panic).
+    pub fn get_sync_cursor(&self) -> Result<Option<i64>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                params![Self::SYNC_CURSOR_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(raw.and_then(|s| s.parse::<i64>().ok()))
+    }
+
+    /// Persist the `/sync/ops` cursor (highest applied `seq_id`). Stored as TEXT
+    /// so the kv table stays type-agnostic; idempotent upsert on the fixed key.
+    pub fn set_sync_cursor(&self, seq_id: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![Self::SYNC_CURSOR_KEY, seq_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Mark that the next `sync_tick` must re-bootstrap from a fresh
+    /// `/sync/snapshot` regardless of the cursor. Used by gap-recovery cases the
+    /// delta path cannot reconcile from the op alone — notably `file_restore`,
+    /// whose op payload is only `{ id }`, so the row it un-trashes cannot be
+    /// rebuilt without the authoritative snapshot. Persisted so the request
+    /// survives a restart between ticks; idempotent.
+    pub fn request_resnapshot(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = '1'",
+            params![Self::NEEDS_RESNAPSHOT_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically read-and-clear the "needs re-snapshot" flag. Returns `true`
+    /// exactly once per [`Self::request_resnapshot`] call, so the bootstrap runs
+    /// on the very next tick and not on every subsequent tick. The DELETE in the
+    /// same locked critical section makes the take-and-clear race-free against a
+    /// concurrent `request_resnapshot`.
+    pub fn take_needs_resnapshot(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let present: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                params![Self::NEEDS_RESNAPSHOT_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if present.is_some() {
+            conn.execute(
+                "DELETE FROM sync_state WHERE key = ?1",
+                params![Self::NEEDS_RESNAPSHOT_KEY],
+            )?;
+        }
+        Ok(present.is_some())
+    }
+
+    /// Reconcile a fresh `/sync/snapshot` against the local mirror: delete every
+    /// OWN-tree row whose `file_id` is NOT in `seen_file_ids` (the snapshot is
+    /// authoritative for the user's non-trashed tree, so an absent row was
+    /// deleted/trashed server-side). Returns the deleted file_ids so the caller
+    /// can drop their placeholders + cache.
+    ///
+    /// ## What is intentionally NEVER pruned
+    ///
+    /// 1. **Shared rows** (`namespace != 'my_files'`). The snapshot only returns
+    ///    the user's OWN tree; shared-with-me content has its own purge path
+    ///    ([`Self::purge_revoked_shared_content`]). Pruning here would wrongly
+    ///    nuke every shared file on the first snapshot.
+    /// 2. **Rows with a pending operation** (`file_id` present in
+    ///    `operation_queue`). A locally-created-but-not-yet-uploaded file lives
+    ///    in the mirror under a CLIENT-minted UUID (re-keyed to the server id by
+    ///    `finalize_local_upload_placeholder` only AFTER the upload completes),
+    ///    and is referenced by its `operation_queue` row. That client UUID is
+    ///    NOT in the server snapshot's `seen` set, so without this guard the very
+    ///    next snapshot would delete the user's in-flight upload. The
+    ///    `operation_queue` join is the authoritative "do not touch" signal.
+    /// 3. **Rows still `uploading`** — belt-and-suspenders for the same in-flight
+    ///    case, in the narrow window where the queue row was already consumed but
+    ///    the re-key hasn't landed.
+    ///
+    /// 4. **Rows stamped at/after `snapshot_fetched_at`** — a row whose
+    ///    `remote_updated_at >= snapshot_fetched_at` was touched locally (e.g. a
+    ///    just-completed upload re-keyed to the server id via
+    ///    `apply_completed_upload`, which stamps `remote_updated_at = now`) AT OR
+    ///    AFTER the snapshot was taken, so the server snapshot legitimately
+    ///    predates it and CANNOT be authoritative about its existence. Pruning it
+    ///    would delete a freshly-uploaded file whenever the server snapshot lags
+    ///    the upload by a tick. The re-keyed server row is `Local` and no longer
+    ///    has an `operation_queue` entry (the queue row is keyed on the old client
+    ///    UUID and removed by `process_due_operations`), so guards (2)/(3) miss
+    ///    it — this freshness cutoff is what protects it.
+    ///
+    /// ## Empty-snapshot safety
+    ///
+    /// An EMPTY `seen` set against a NON-empty prunable own-tree is treated as a
+    /// suspicious/degraded snapshot (server bug, degraded replica, a future
+    /// paginated response with no `has_more` contract) and is REFUSED — we return
+    /// `Ok(vec![])` without deleting anything. Refusing costs at worst a stale row
+    /// for one tick; wrongly pruning on a spurious empty snapshot destroys the
+    /// user's whole tree in one transaction. A genuinely-emptied vault converges
+    /// the moment the next non-empty snapshot (or the per-row trash/delete ops)
+    /// arrives, so this fail-closed choice loses no correctness, only immediacy.
+    ///
+    /// Done in ONE transaction so a concurrent reader never sees a half-pruned
+    /// tree.
+    pub fn prune_absent(
+        &self,
+        seen_file_ids: &HashSet<String>,
+        snapshot_fetched_at: i64,
+    ) -> Result<Vec<String>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        // Candidate set: own-tree rows that are NOT pending an upload/op, not
+        // mid-upload, and NOT stamped at/after the snapshot fetch time (a row a
+        // recent local completion just touched can't be contradicted by an older
+        // snapshot). Everything else is off-limits per the doc above.
+        let candidates: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT file_id FROM files
+                 WHERE namespace = 'my_files'
+                   AND status != 'uploading'
+                   AND remote_updated_at < ?1
+                   AND file_id NOT IN (
+                       SELECT file_id FROM operation_queue WHERE file_id IS NOT NULL
+                   )",
+            )?;
+            let rows = stmt.query_map(params![snapshot_fetched_at], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        // Empty-snapshot guard: if the snapshot says "nothing exists" but we DO
+        // have prunable own-tree rows, the snapshot is almost certainly degraded
+        // (empty 200, replica lag, or an unannounced pagination cut). Fail closed
+        // — refuse to prune the entire tree on a single suspicious empty list.
+        if seen_file_ids.is_empty() && !candidates.is_empty() {
+            tx.rollback()?;
+            tracing::warn!(
+                local_prunable = candidates.len(),
+                "prune_absent: refusing to prune — empty snapshot against a non-empty own-tree (suspected degraded snapshot)"
+            );
+            return Ok(Vec::new());
+        }
+
+        let mut pruned = Vec::new();
+        for file_id in candidates {
+            if seen_file_ids.contains(&file_id) {
+                continue;
+            }
+            tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+            pruned.push(file_id);
+        }
+        tx.commit()?;
+        Ok(pruned)
     }
 
     /// Update just the `status` column for a known file. No-op if
@@ -2187,5 +2370,171 @@ mod tests {
         contract.parent_id = parent_id.map(str::to_string);
         contract.cache_bytes = cache_bytes;
         db.set_file_contract_state(&contract).unwrap();
+    }
+
+    // ── prune_absent direct unit coverage (issues 4/5/6) ──────────────────────
+
+    /// Insert a settled own-tree row with an explicit `remote_updated_at`.
+    fn seed_own_row(db: &StateDb, file_id: &str, status: FileStatus, remote_updated_at: i64) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: format!("{file_id}.txt"),
+            status,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    }
+
+    const FAR_FUTURE: i64 = 4_000_000_000; // > any realistic remote_updated_at
+
+    #[test]
+    fn prune_absent_deletes_settled_cloud_only_row_absent_from_snapshot() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "stale", FileStatus::CloudOnly, 10);
+
+        let seen: HashSet<String> = ["kept".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+
+        assert_eq!(pruned, vec!["stale".to_string()]);
+        assert!(db.get_file("stale").unwrap().is_none());
+    }
+
+    #[test]
+    fn prune_absent_keeps_row_with_pending_operation() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // A locally-created-but-not-yet-uploaded file under its client UUID.
+        seed_own_row(&db, "in-flight", FileStatus::CloudOnly, 10);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("in-flight".into()),
+            parent_id: None,
+            target_path: Some("/in-flight.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+
+        // Empty snapshot can't see the client UUID; the operation_queue join must
+        // keep it (and the empty-snapshot guard also protects it — assert it
+        // survives regardless).
+        let pruned = db.prune_absent(&HashSet::new(), FAR_FUTURE).unwrap();
+        assert!(pruned.is_empty());
+        assert!(db.get_file("in-flight").unwrap().is_some(), "pending-op row never pruned");
+    }
+
+    #[test]
+    fn prune_absent_keeps_uploading_row() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "uploading-row", FileStatus::Uploading, 10);
+
+        let seen: HashSet<String> = ["other".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+        assert!(pruned.is_empty());
+        assert!(db.get_file("uploading-row").unwrap().is_some(), "uploading row never pruned");
+    }
+
+    #[test]
+    fn prune_absent_keeps_shared_with_me_row_absent_from_snapshot() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // A shared-with-me row (namespace != my_files) absent from the OWN-tree
+        // snapshot must survive — shared content has its own purge path.
+        seed_contract_row(&db, "shared", "/Shared with me/x.txt", None, FileStatus::CloudOnly, 0);
+        let mut c = db.get_file_contract_state("shared").unwrap().unwrap();
+        c.namespace = Namespace::SharedWithMe;
+        c.shared_root_id = Some("shared".into());
+        db.set_file_contract_state(&c).unwrap();
+
+        // Own-tree snapshot does not mention the shared row.
+        let seen: HashSet<String> = ["my-own".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+        assert!(pruned.is_empty());
+        assert!(db.get_file("shared").unwrap().is_some(), "shared-with-me row never pruned by own-tree snapshot");
+    }
+
+    #[test]
+    fn prune_absent_keeps_row_touched_at_or_after_snapshot_fetch() {
+        // Issue 5: a just-completed upload re-keyed to the server id is `Local`
+        // with `remote_updated_at = now` and NO operation_queue row. A snapshot
+        // taken before the completion must NOT prune it.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let fetched_at = 1_000_000;
+        // Row stamped AT the fetch instant (the boundary) — must be protected.
+        seed_own_row(&db, "just-uploaded", FileStatus::Local, fetched_at);
+        // A genuinely older settled row that the snapshot omits — must be pruned.
+        seed_own_row(&db, "old-deleted", FileStatus::CloudOnly, fetched_at - 100);
+
+        let seen: HashSet<String> = ["something-else".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, fetched_at).unwrap();
+
+        assert_eq!(pruned, vec!["old-deleted".to_string()]);
+        assert!(
+            db.get_file("just-uploaded").unwrap().is_some(),
+            "row stamped at/after snapshot fetch survives (upload re-key window)"
+        );
+    }
+
+    #[test]
+    fn prune_absent_refuses_empty_snapshot_against_non_empty_tree() {
+        // Issue 4: an empty `seen` set against a non-empty prunable own-tree is a
+        // suspected degraded snapshot — refuse to prune anything.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "a", FileStatus::CloudOnly, 10);
+        seed_own_row(&db, "b", FileStatus::CloudOnly, 10);
+
+        let pruned = db.prune_absent(&HashSet::new(), FAR_FUTURE).unwrap();
+        assert!(pruned.is_empty(), "empty snapshot must not prune (fail-closed)");
+        assert!(db.get_file("a").unwrap().is_some());
+        assert!(db.get_file("b").unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_absent_empty_snapshot_with_only_protected_rows_is_a_noop() {
+        // Empty snapshot is allowed to proceed when there are NO prunable
+        // candidates (only protected rows): nothing is deleted, no false refusal
+        // signal needed. Here the only own-tree row is uploading (protected).
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "uploading-only", FileStatus::Uploading, 10);
+
+        let pruned = db.prune_absent(&HashSet::new(), FAR_FUTURE).unwrap();
+        assert!(pruned.is_empty());
+        assert!(db.get_file("uploading-only").unwrap().is_some());
+    }
+
+    #[test]
+    fn needs_resnapshot_flag_is_take_once() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // Unset → false.
+        assert!(!db.take_needs_resnapshot().unwrap());
+        // Set → next take returns true, then clears.
+        db.request_resnapshot().unwrap();
+        assert!(db.take_needs_resnapshot().unwrap(), "first take sees the request");
+        assert!(!db.take_needs_resnapshot().unwrap(), "flag cleared after one take");
+        // Idempotent set.
+        db.request_resnapshot().unwrap();
+        db.request_resnapshot().unwrap();
+        assert!(db.take_needs_resnapshot().unwrap());
+        assert!(!db.take_needs_resnapshot().unwrap());
     }
 }
