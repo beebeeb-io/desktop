@@ -1923,15 +1923,10 @@ impl StateDb {
         Ok(())
     }
 
-    /// Fetch bandwidth samples from the last `hours` hours.
-    /// Returns rows as `(sampled_at, up_bytes, down_bytes, period_secs)`,
-    /// oldest first.
-    pub fn get_bandwidth_history(&self, hours: u32) -> Result<Vec<BandwidthSample>> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let since = now - hours as i64 * 3600;
+    /// Fetch bandwidth samples with `sampled_at >= since_secs`, oldest first.
+    /// Deterministic (no wall-clock read) — used by callers that already have a
+    /// cutoff and by tests.
+    pub fn get_bandwidth_history_since(&self, since_secs: i64) -> Result<Vec<BandwidthSample>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT sampled_at, up_bytes, down_bytes, period_secs
@@ -1939,7 +1934,7 @@ impl StateDb {
              WHERE sampled_at >= ?1
              ORDER BY sampled_at ASC",
         )?;
-        let rows = stmt.query_map(params![since], |row| {
+        let rows = stmt.query_map(params![since_secs], |row| {
             Ok(BandwidthSample {
                 sampled_at: row.get(0)?,
                 up_bytes: row.get::<_, i64>(1)? as u64,
@@ -1948,6 +1943,15 @@ impl StateDb {
             })
         })?;
         rows.collect()
+    }
+
+    /// Fetch bandwidth samples from the last `hours` hours (oldest first).
+    pub fn get_bandwidth_history(&self, hours: u32) -> Result<Vec<BandwidthSample>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.get_bandwidth_history_since(now - hours as i64 * 3600)
     }
 
     /// Remove samples older than `cutoff_secs` (seconds-since-epoch) to bound DB size.
@@ -3285,10 +3289,9 @@ mod tests {
         db.insert_bandwidth_sample(t0 + 20, 300, 400, 20).unwrap();
         db.insert_bandwidth_sample(t0 + 40, 500, 600, 20).unwrap();
 
-        // get_bandwidth_history with a very large window should return all 3.
-        // (Using hours=24*365 to guarantee all samples fall within the window.)
-        // We use a fake "now" by checking the result directly.
-        let all = db.get_bandwidth_history(24 * 365).unwrap();
+        // get_bandwidth_history_since(0) returns all rows regardless of wall clock,
+        // making this test time-independent.
+        let all = db.get_bandwidth_history_since(0).unwrap();
         assert_eq!(all.len(), 3, "expected 3 samples");
         assert_eq!(all[0].up_bytes, 100);
         assert_eq!(all[0].down_bytes, 200);
@@ -3314,7 +3317,7 @@ mod tests {
         let removed = db.prune_bandwidth_samples(t0 + 3600).unwrap();
         assert_eq!(removed, 1, "one sample should be pruned");
 
-        let remaining = db.get_bandwidth_history(24 * 365).unwrap();
+        let remaining = db.get_bandwidth_history_since(0).unwrap();
         assert_eq!(remaining.len(), 2);
         // The remaining ones start at t0 + 3600.
         assert_eq!(remaining[0].sampled_at, t0 + 3600);
