@@ -349,7 +349,34 @@ impl EngineBridge {
                     .file_id
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("trash operation missing file_id"))?;
+                // Server-authoritative deletion (task 0802). `trash_file` calls
+                // `.error_for_status()`, so an `Ok` here means the server returned
+                // HTTP 2xx for `DELETE /files/{id}` (it set `is_trashed=TRUE` and
+                // emitted a `file_trash` sync op).
+                //
+                // We deliberately DO NOT delete the local row here. The row was
+                // parked in `Trashing` by `watcher::handle_delete`; we KEEP it in
+                // `Trashing` as the durable hidden-locally marker. Returning `Ok`
+                // makes `process_due_operations` REMOVE this op — so the
+                // `Trashing` status (not the op) is now what protects the row.
+                //
+                // Why not delete now: deleting + a same-tick / replica-lagged
+                // `/sync/snapshot` that still lists the (just-trashed) file would
+                // re-insert a FRESH `CloudOnly` row and re-mint the placeholder —
+                // the "deleted file comes back" race. Instead we let convergence
+                // happen authoritatively: while the snapshot still lists the file
+                // the `Trashing` guard in `process_metadata_row` preserves it; once
+                // the trash propagates the file is ABSENT from the snapshot and
+                // `prune_absent` removes the (now op-less) `Trashing` row. If the
+                // `file_trash` op echo arrives first, `apply_sync_op` deletes the
+                // row directly — either path converges.
                 self.api.trash_file(file_id).await?;
+                // Zero-knowledge: log the file_id (an opaque server id) only —
+                // NEVER the path. Lets the lead confirm the 2xx in the trace.
+                tracing::info!(
+                    file_id = %file_id,
+                    "trash op: server DELETE /files/{{id}} returned 2xx — keeping row Trashing, dropping op"
+                );
                 Ok(())
             }
             OperationKind::RestoreFile => {
@@ -2758,6 +2785,22 @@ fn process_metadata_row(
     };
 
     match bridge.db().get_file(file_id)? {
+        // (0) Locally-deleted, server-trash pending (task 0802). The row is in
+        // `Trashing` because the user deleted the file and the `TrashFile` op has
+        // already succeeded (op removed) OR is still in flight. A `/sync/snapshot`
+        // that STILL lists this file is just propagation lag — the server has set
+        // `is_trashed=TRUE` but the snapshot read hasn't caught up. We MUST NOT
+        // re-materialise the row: neither re-insert it nor flip it back to
+        // `CloudOnly`, which would re-mint the placeholder (the "deleted file comes
+        // back" race). Keep it EXACTLY as-is (`Trashing`, no placeholder). When the
+        // trash finally propagates the file drops out of the snapshot and
+        // `prune_absent` removes the row; if the `file_trash` op echo arrives first
+        // `apply_sync_op` deletes it. Either way it converges WITHOUT resurrecting.
+        Some(entry) if entry.status == FileStatus::Trashing => {
+            // Still report path/kind so a (rare) trashing folder's independent
+            // children continue to enumerate; do NOT touch this row's status.
+            Ok(Some((entry.path, entry.item_kind)))
+        }
         None => {
             // (1) New to us — insert as cloud_only. base = remote.
             apply(bridge)
@@ -3210,6 +3253,138 @@ mod tests {
         assert_eq!(queued[0].kind, OperationKind::TrashFile);
         assert_eq!(queued[0].base_version, Some(9));
         assert!(queued[0].payload_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_trash_calls_api_and_keeps_row_trashing() {
+        // task 0802 (server-authoritative deletion): a locally-deleted file is
+        // parked in `Trashing` and its `TrashFile` op enqueued. Processing that op
+        // must (a) issue the server trash DELETE and (b) on success DROP THE OP but
+        // KEEP the row in `Trashing`. The `Trashing` status — not the op — is now
+        // the durable hidden-locally marker; convergence (row removal) happens
+        // authoritatively once the trash propagates out of `/sync/snapshot`
+        // (`prune_absent`) or the `file_trash` op echo arrives (`apply_sync_op`).
+        // Deleting the row HERE is what caused the "deleted file comes back" race
+        // (a same-tick lagged snapshot would re-insert it as CloudOnly).
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![("200 OK".into(), serde_json::json!({ "ok": true }))]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+
+        // Row in the post-local-delete `Trashing` state + a queued trash op.
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-1".into(),
+                path: "doomed.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 5,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-trash-1".into(),
+                kind: OperationKind::TrashFile,
+                file_id: Some("server-file-1".into()),
+                parent_id: None,
+                target_path: None,
+                metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 0,
+                last_error: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-trash-1".to_string()]);
+        assert!(outcome.retried_op_ids.is_empty());
+
+        // The op is gone (success removes it) but the row REMAINS in `Trashing` —
+        // the durable marker. The seeder only re-mints `CloudOnly`, so a `Trashing`
+        // row never re-creates the placeholder; the row itself is removed later by
+        // prune/op-echo once the server trash propagates.
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+        let row = bridge.db.get_file("server-file-1").unwrap();
+        assert!(row.is_some(), "trash op must KEEP the row on success (not delete it)");
+        assert_eq!(
+            row.unwrap().status,
+            FileStatus::Trashing,
+            "row stays Trashing after a successful trash — the durable hidden-locally marker"
+        );
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "DELETE");
+        assert_eq!(requests[0].path, "/api/v1/files/server-file-1");
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_trash_retries_and_keeps_row_on_server_error() {
+        // If the server trash fails, the op must be retried (not dropped) and the
+        // row must be PRESERVED — recoverable rather than lost. (The row is left
+        // in `Trashing`, so the placeholder still does not reappear meanwhile.)
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![(
+            "500 Internal Server Error".into(),
+            serde_json::json!({ "error": "boom" }),
+        )]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-2".into(),
+                path: "doomed2.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 5,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-trash-2".into(),
+                kind: OperationKind::TrashFile,
+                file_id: Some("server-file-2".into()),
+                parent_id: None,
+                target_path: None,
+                metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 0,
+                last_error: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert!(outcome.completed_op_ids.is_empty());
+        assert_eq!(outcome.retried_op_ids, vec!["op-trash-2".to_string()]);
+        // Row preserved (still Trashing) so a future retry can complete and the
+        // file is recoverable from the server in the meantime.
+        let row = bridge.db.get_file("server-file-2").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Trashing);
+
+        let _ = server.finish();
     }
 
     #[test]
@@ -4170,6 +4345,104 @@ mod tests {
 
         assert!(bridge.db().get_file(kept).unwrap().is_some());
         assert!(bridge.db().get_file(stale).unwrap().is_none(), "snapshot-absent row pruned");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_snapshot_window_does_not_resurrect_trashing_row() {
+        // task 0802 — THE WINDOW (the bug this fix closes). A file was just
+        // locally deleted: its row is `Trashing`, its `TrashFile` op already
+        // SUCCEEDED (so the op is gone). On the very next tick the server's
+        // `/sync/snapshot` read is replica-lagged / same-second and STILL lists
+        // the (now-trashed) file. The OLD code's None/insert arm re-inserted a
+        // FRESH `CloudOnly` row here and re-minted the placeholder — the "deleted
+        // file comes back" bug. The fix: `process_metadata_row`'s `Trashing` guard
+        // preserves the row untouched, and `prune_absent` does NOT remove it while
+        // it's still listed. Assert: row stays `Trashing`, never `CloudOnly`.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [7u8; 32];
+        let trashing = "33333333-0000-4000-8000-000000000003";
+        // First bridge only to create the DB file; rebuilt below against the mock.
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        // Pre-seed the post-local-delete state: Trashing row, NO pending op.
+        bridge
+            .db()
+            .upsert_file(&FileEntry {
+                file_id: trashing.into(),
+                path: "doomed.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 10,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 10,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        // Snapshot STILL lists the trashed file (propagation lag) — exactly the
+        // race window. (is_trashed flag on the node is irrelevant: the lagged
+        // snapshot is what the engine sees.)
+        let snapshot = serde_json::json!({
+            "seq_id": 9,
+            "nodes": [ snap_node(&mk, trashing, "doomed.txt", None, false, 10) ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge).await.unwrap();
+        server.finish();
+
+        let row = bridge.db().get_file(trashing).unwrap();
+        assert!(row.is_some(), "Trashing row must NOT be pruned while still listed in the snapshot");
+        assert_eq!(
+            row.unwrap().status,
+            FileStatus::Trashing,
+            "a snapshot still listing a Trashing file must NOT resurrect it to CloudOnly (the bug)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_snapshot_absent_prunes_trashing_row_after_propagation() {
+        // task 0802 — CONVERGENCE end-to-end: once the trash propagates the file
+        // is ABSENT from the snapshot, and the op-less `Trashing` row is pruned —
+        // final convergence with the (already-removed) on-disk placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [7u8; 32];
+        let trashing = "44444444-0000-4000-8000-000000000004";
+        let kept = "55555555-0000-4000-8000-000000000005";
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        bridge
+            .db()
+            .upsert_file(&FileEntry {
+                file_id: trashing.into(),
+                path: "doomed.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 10,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 10,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        // Snapshot no longer lists the trashed file (propagation complete); it
+        // lists an unrelated row so the empty-snapshot guard doesn't trip.
+        let snapshot = serde_json::json!({
+            "seq_id": 9,
+            "nodes": [ snap_node(&mk, kept, "kept.txt", None, false, 10) ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge).await.unwrap();
+        server.finish();
+
+        assert!(bridge.db().get_file(kept).unwrap().is_some());
+        assert!(
+            bridge.db().get_file(trashing).unwrap().is_none(),
+            "an op-less Trashing row absent from the snapshot must be pruned (convergence)"
+        );
     }
 
     #[tokio::test]

@@ -544,6 +544,16 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
     match bridge.db().get_file_by_path(&rel) {
         Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
             Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+                // CRITICAL (task 0802): mark the row `Trashing` so the Windows
+                // placeholder seeder (`populate_placeholders`, which only mints
+                // for `CloudOnly`) does NOT re-create the on-disk placeholder
+                // the user just deleted before the queued TrashFile op
+                // round-trips. The TrashFile op deletes this row on success; a
+                // permanent trash failure leaves it `Trashing` (recoverable —
+                // the file still exists on the server) rather than reappearing.
+                if let Err(e) = bridge.db().set_status(&entry.file_id, crate::state_db::FileStatus::Trashing) {
+                    tracing::warn!(error = %e, "upload driver: could not mark row trashing after local delete");
+                }
                 tracing::info!(op_id = %op_id, "upload driver: queued server delete for locally-removed file");
             }
             Ok(FinderWriteOutcome::Ignored { .. }) => {}

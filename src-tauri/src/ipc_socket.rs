@@ -540,9 +540,13 @@ fn file_entry_payload_without_contract(
 
 fn capabilities_for_status(status: &crate::state_db::FileStatus) -> u32 {
     match status {
+        // `Trashing` (a locally-deleted file whose server-trash is pending) gets
+        // no write/rename/delete caps — the item is on its way out; it is grouped
+        // with the other read-only terminal states.
         crate::state_db::FileStatus::CloudOnly
         | crate::state_db::FileStatus::Downloading
-        | crate::state_db::FileStatus::Error => CAP_READ,
+        | crate::state_db::FileStatus::Error
+        | crate::state_db::FileStatus::Trashing => CAP_READ,
         crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
         crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
             CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
@@ -558,6 +562,7 @@ fn file_status_string(status: &crate::state_db::FileStatus) -> &'static str {
         crate::state_db::FileStatus::Uploading => "uploading",
         crate::state_db::FileStatus::Conflict => "conflict",
         crate::state_db::FileStatus::Error => "error",
+        crate::state_db::FileStatus::Trashing => "trashing",
     }
 }
 

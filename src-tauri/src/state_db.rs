@@ -35,6 +35,16 @@ pub enum FileStatus {
     Uploading,
     Conflict,
     Error,
+    /// A locally-deleted file whose server-trash is still pending. The on-disk
+    /// placeholder is already gone (the user deleted it); the row is kept ONLY
+    /// so the queued `TrashFile` op stays coherent with it and so the Windows
+    /// placeholder seeder (`populate_placeholders`, which only mints for
+    /// `CloudOnly`) does NOT re-create the disk placeholder before the trash
+    /// round-trips — the "deleted file comes back" bug (task 0802). The
+    /// `TrashFile` op deletes this row on success; if the trash permanently
+    /// fails the row stays `Trashing` (recoverable — the file still exists on
+    /// the server) rather than reappearing on disk.
+    Trashing,
 }
 
 impl FileStatus {
@@ -46,6 +56,7 @@ impl FileStatus {
             FileStatus::Uploading => "uploading",
             FileStatus::Conflict => "conflict",
             FileStatus::Error => "error",
+            FileStatus::Trashing => "trashing",
         }
     }
     fn from_str(s: &str) -> Self {
@@ -55,6 +66,7 @@ impl FileStatus {
             "local" => FileStatus::Local,
             "uploading" => FileStatus::Uploading,
             "conflict" => FileStatus::Conflict,
+            "trashing" => FileStatus::Trashing,
             _ => FileStatus::Error,
         }
     }
@@ -186,11 +198,15 @@ pub fn decode_os_state(attrs: u32, current_status: FileStatus) -> (Option<FileSt
                 Some(FileStatus::Local)
             }
         }
-        // Engine-owned: leave it alone.
+        // Engine-owned: leave it alone. `Trashing` (a locally-deleted file whose
+        // server-trash is pending) is included here so a native attribute
+        // snapshot can never flip it back to `CloudOnly`/`Local` and re-seed the
+        // placeholder we just removed.
         FileStatus::Uploading
         | FileStatus::Downloading
         | FileStatus::Conflict
-        | FileStatus::Error => None,
+        | FileStatus::Error
+        | FileStatus::Trashing => None,
     };
 
     let pin = if attrs & FILE_ATTRIBUTE_PINNED != 0 {
@@ -1851,11 +1867,14 @@ mod tests {
         assert_eq!(pin, None);
 
         // Engine-owned statuses are NEVER touched, regardless of attrs.
+        // `Trashing` is included so a native attribute snapshot can't flip a
+        // locally-deleted-but-not-yet-trashed file back to a seedable state.
         for owned in [
             FileStatus::Uploading,
             FileStatus::Downloading,
             FileStatus::Conflict,
             FileStatus::Error,
+            FileStatus::Trashing,
         ] {
             let (status, _) = decode_os_state(RECALL, owned.clone());
             assert_eq!(status, None, "{owned:?} must be left alone");
@@ -1874,6 +1893,69 @@ mod tests {
         let (status, pin) = decode_os_state(RECALL, FileStatus::Uploading);
         assert_eq!(status, None);
         assert_eq!(pin, None);
+    }
+
+    #[test]
+    fn trashing_status_round_trips_and_is_not_seeded_as_cloud_only() {
+        // task 0802: the `Trashing` status (a locally-deleted file awaiting its
+        // server-trash) must (a) round-trip through the string codec the DB uses
+        // and (b) be EXCLUDED from `list_by_status(CloudOnly)` — the exact query
+        // the Windows placeholder seeder (`populate_placeholders`) walks. If a
+        // `Trashing` row leaked into that list the placeholder would be re-minted
+        // and the deleted file would reappear on disk.
+        assert_eq!(FileStatus::Trashing.as_str(), "trashing");
+        assert_eq!(FileStatus::from_str("trashing"), FileStatus::Trashing);
+
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // One cloud-only row (would be seeded) and one trashing row (must NOT be).
+        db.upsert_file(&FileEntry {
+            file_id: "cloud-1".into(),
+            path: "/keep.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "trash-1".into(),
+            path: "/gone.txt".into(),
+            status: FileStatus::Trashing,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+
+        // Persisted status survives a reload (string codec round-trip).
+        assert_eq!(db.get_file("trash-1").unwrap().unwrap().status, FileStatus::Trashing);
+
+        // The seeder's source list contains ONLY the cloud-only row.
+        let cloud_only = db.list_by_status(FileStatus::CloudOnly).unwrap();
+        assert_eq!(cloud_only.len(), 1);
+        assert_eq!(cloud_only[0].file_id, "cloud-1");
+        assert!(
+            !cloud_only.iter().any(|e| e.file_id == "trash-1"),
+            "a Trashing row must never be returned for CloudOnly seeding"
+        );
+
+        // The transition `watcher::handle_delete` performs after enqueuing the
+        // trash op: flip a CloudOnly row to Trashing → it drops out of the seed
+        // list, so the just-removed placeholder is not re-created.
+        db.set_status("cloud-1", FileStatus::Trashing).unwrap();
+        assert_eq!(db.get_file("cloud-1").unwrap().unwrap().status, FileStatus::Trashing);
+        assert!(
+            db.list_by_status(FileStatus::CloudOnly).unwrap().is_empty(),
+            "after handle_delete marks the row Trashing, nothing remains to seed"
+        );
     }
 
     #[test]
@@ -2436,6 +2518,71 @@ mod tests {
         let pruned = db.prune_absent(&HashSet::new(), FAR_FUTURE).unwrap();
         assert!(pruned.is_empty());
         assert!(db.get_file("in-flight").unwrap().is_some(), "pending-op row never pruned");
+    }
+
+    #[test]
+    fn prune_absent_keeps_trashing_row_with_pending_trash_op_present_in_snapshot() {
+        // task 0802: a locally-deleted file is `Trashing` with its TrashFile op
+        // still IN FLIGHT (not yet succeeded), and is STILL PRESENT in the
+        // snapshot. prune must not remove it — the `operation_queue` join protects
+        // a row with a pending op — so the trash op is left to complete. (Once it
+        // succeeds the op is dropped and the row stays `Trashing`; convergence then
+        // happens via snapshot-absence — see the `..._absent_from_snapshot` test.)
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "trashing", FileStatus::Trashing, 10);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-trash".into(),
+            kind: OperationKind::TrashFile,
+            file_id: Some("trashing".into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+
+        // Snapshot still lists the file (server-side trash not yet applied).
+        let seen: HashSet<String> = ["trashing".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+        assert!(pruned.is_empty());
+        assert!(
+            db.get_file("trashing").unwrap().is_some(),
+            "a Trashing row with a pending trash op must survive prune"
+        );
+    }
+
+    #[test]
+    fn prune_absent_deletes_trashing_row_absent_from_snapshot_after_op_cleared() {
+        // task 0802 — CONVERGENCE: the server-authoritative path. After
+        // `api.trash_file` succeeds the TrashFile op is REMOVED (the `Trashing`
+        // status, not the op, is now the durable marker). Later the trash finally
+        // propagates and the file is ABSENT from `/sync/snapshot`. At that point
+        // the op-less `Trashing` row MUST be pruned — there is no `operation_queue`
+        // row to protect it and `prune_absent` has no blanket "skip Trashing" rule
+        // — giving final convergence with the (already-removed) on-disk placeholder.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // Trashing row, NO pending op (op was dropped on a successful trash).
+        seed_own_row(&db, "trashed-gone", FileStatus::Trashing, 10);
+
+        // Snapshot no longer lists the file (server trash has propagated).
+        let seen: HashSet<String> = ["still-here".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+
+        assert_eq!(pruned, vec!["trashed-gone".to_string()]);
+        assert!(
+            db.get_file("trashed-gone").unwrap().is_none(),
+            "an op-less Trashing row absent from the snapshot must be pruned (final convergence)"
+        );
     }
 
     #[test]
