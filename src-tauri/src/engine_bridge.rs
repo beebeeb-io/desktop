@@ -1647,6 +1647,7 @@ fn now_secs() -> i64 {
 fn apply_metadata_file_row(
     db: &StateDb,
     f: &serde_json::Value,
+    decrypted_name: Option<&str>,
     namespace: Namespace,
     shared_root_id: Option<String>,
     share_id: Option<String>,
@@ -1661,8 +1662,15 @@ fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let path = f["path"]
-        .as_str()
+    // The display name stored in `files.path` (read crypto-free by the File
+    // Provider via `filename_from_path`). Task 0809: prefer the name decrypted
+    // from `name_encrypted` on sync — previously this only ever saw the row's
+    // plaintext `path`/`name`, which the zero-knowledge server never sends, so
+    // every synced row stored a blank name. Fall back to any plaintext the row
+    // carries, then empty (the existing placeholder behaviour for undecryptable).
+    let path = decrypted_name
+        .filter(|n| !n.is_empty())
+        .or_else(|| f["path"].as_str())
         .or_else(|| f["display_path"].as_str())
         .or_else(|| f["name"].as_str())
         .unwrap_or("")
@@ -1786,6 +1794,28 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
 
+    // Decrypt every name ONCE per sync (task 0809), then read-many from the map
+    // below. `core::decrypt_names` tries both UUID key-derivation forms (string
+    // for web/mobile-origin, binary for desktop/cli-origin) and unwraps the
+    // name/mime envelope, so cross-origin vault names resolve correctly — unlike
+    // the old binary-only `try_decrypt_name`. file_id -> plaintext display name.
+    let names: std::collections::HashMap<String, String> = {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(*bridge.api().master_key());
+        let items: Vec<(uuid::Uuid, &str)> = files
+            .iter()
+            .filter_map(|f| {
+                let uuid = uuid::Uuid::parse_str(f["id"].as_str()?).ok()?;
+                Some((uuid, f["name_encrypted"].as_str()?))
+            })
+            .collect();
+        let decrypted = beebeeb_core::encrypt::decrypt_names(&mk, &items);
+        items
+            .iter()
+            .zip(decrypted)
+            .filter_map(|((uuid, _), res)| res.ok().map(|(name, _mime)| (uuid.to_string(), name)))
+            .collect()
+    };
+
     for f in &files {
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
@@ -1800,6 +1830,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                 apply_metadata_file_row(
                     bridge.db(),
                     f,
+                    names.get(file_id).map(String::as_str),
                     Namespace::MyFiles,
                     None,
                     None,
@@ -1845,6 +1876,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                     apply_metadata_file_row(
                         bridge.db(),
                         f,
+                        names.get(file_id).map(String::as_str),
                         Namespace::MyFiles,
                         None,
                         None,
@@ -1887,6 +1919,7 @@ pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDete
                     apply_metadata_file_row(
                         bridge.db(),
                         f,
+                        names.get(file_id).map(String::as_str),
                         Namespace::MyFiles,
                         None,
                         None,
@@ -2388,6 +2421,7 @@ mod tests {
         let entry = apply_metadata_file_row(
             &db,
             &metadata,
+            Some("spec.docx"),
             Namespace::MyFiles,
             None,
             None,
@@ -2399,6 +2433,9 @@ mod tests {
 
         assert_eq!(entry.status, FileStatus::CloudOnly);
         assert_eq!(entry.remote_updated_at, 1234);
+        // Task 0809: the decrypted name is stored in `files.path` (the display
+        // name the File Provider reads crypto-free), winning over the row's plaintext.
+        assert_eq!(entry.path, "spec.docx");
         let contract = db.get_file_contract_state("file-1").unwrap().unwrap();
         assert_eq!(contract.namespace, Namespace::MyFiles);
         assert_eq!(contract.parent_id.as_deref(), Some("folder-1"));
