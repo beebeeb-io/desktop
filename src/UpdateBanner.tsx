@@ -70,14 +70,44 @@ export default function UpdateBanner() {
   const handleInstall = async () => {
     setInstallState('installing')
     setInstallError(null)
-    const result = await command<void>('install_update')
-    if (result.ok) {
-      // The Rust side calls app.restart() — this branch may never execute.
-      // If we somehow reach it, keep showing the installing state.
-      return
+
+    // Race the invoke against a 30-second timeout so a CDN stall or a Rust
+    // hang never leaves the banner stuck on "Installing…" forever.
+    //
+    // Happy path: app.restart() kills the process before either the timer or
+    // the invoke resolves, so neither branch fires — the timeout is harmless.
+    // The 30s window is far longer than a normal install→restart sequence, so
+    // a successful install will never spuriously hit the timeout.
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<'timeout'>((resolve) => {
+      timeoutId = setTimeout(() => resolve('timeout'), 30_000)
+    })
+
+    try {
+      const raceResult = await Promise.race([
+        command<void>('install_update'),
+        timeoutPromise,
+      ])
+
+      if (raceResult === 'timeout') {
+        setInstallState('error')
+        setInstallError('Install timed out — try again.')
+        return
+      }
+
+      // raceResult is the command result (the invoke settled before the timer).
+      // Clear the timer so it can't fire after we've already handled the result.
+      clearTimeout(timeoutId)
+      if (raceResult.ok) {
+        // The Rust side calls app.restart() — this branch may never execute.
+        // If we somehow reach it, keep showing the installing state.
+        return
+      }
+      setInstallState('error')
+      setInstallError(raceResult.reason)
+    } finally {
+      clearTimeout(timeoutId)
     }
-    setInstallState('error')
-    setInstallError(result.reason)
   }
 
   if (!update || dismissed) return null

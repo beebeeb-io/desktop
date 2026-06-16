@@ -1015,6 +1015,7 @@ export default function WindowsSettings() {
         gridTemplateColumns: '240px 1fr',
         flex: 1,
         overflow: 'hidden',
+        minHeight: 0,
       }}>
       {/* Sidebar */}
       <div style={{
