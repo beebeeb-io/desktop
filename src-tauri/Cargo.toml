@@ -63,13 +63,17 @@ urlencoding = "2"
 # before feeding it to beebeeb_core::kdf::derive_master_key.
 base64 = "0.22"
 
-# Sync engine + crypto from the core repo. Path deps so we build against
-# the local checkout; `[patch."https://github.com/beebeeb-io/core"]`
-# keeps git-dep references inside sub-crates pointing at the same tree
-# (mirrors the pattern in repos/cli/Cargo.toml).
-beebeeb-sync = { path = "../../core/beebeeb-sync" }
-beebeeb-core = { path = "../../core/beebeeb-core" }
-beebeeb-types = { path = "../../core/beebeeb-types" }
+# Sync engine + crypto from the core repo, pinned to a git REV for
+# reproducible builds (task 0815). A relative `path` dep resolved wrong from a
+# /tmp worktree and silently linked a stale local checkout; the rev pin gives a
+# deterministic core (45a612c = task 0806's `decrypt_names` + the 4-arg
+# `client_login_finish`). The core sub-crates reference each other by
+# workspace-relative path, so no `[patch]` is needed when built as a git dep.
+# Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
+# repos/cli) — never commit a path patch here.
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -99,11 +103,6 @@ windows = { version = "0.58", features = [
 
 [dev-dependencies]
 tempfile = "3"
-
-[patch."https://github.com/beebeeb-io/core"]
-beebeeb-core = { path = "../../core/beebeeb-core" }
-beebeeb-sync = { path = "../../core/beebeeb-sync" }
-beebeeb-types = { path = "../../core/beebeeb-types" }
 
 [features]
 default = ["custom-protocol"]

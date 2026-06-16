@@ -309,12 +309,22 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         .get("server_state")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "No server_state in login start response".to_string())?;
+    // Dual-KSF login (task 0815): the server forwards the account's OPAQUE KSF
+    // version (0 = legacy Identity, 1 = Argon2id) in the login-start response.
+    // The client must finish under the matching CipherSuite, so thread it into
+    // client_login_finish — mirrors web/iOS and the server's own call shape in
+    // beebeeb-api/tests/api_integration.rs (`as u32` from the JSON number).
+    let ksf_version = start_body
+        .get("ksf_version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "No ksf_version in login start response".to_string())? as u32;
     let server_message_bytes =
         decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
     let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
         &login_start.state,
         password.as_bytes(),
         &server_message_bytes,
+        ksf_version,
     )
     .map_err(|e| format!("Invalid email or password ({e})"))?;
 
