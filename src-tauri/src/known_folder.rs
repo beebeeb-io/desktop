@@ -4,7 +4,7 @@
 //! NOT call `SHSetKnownFolderPath` and we never move or touch the user's real
 //! Desktop / Documents / Pictures / Music / Videos / Downloads. Instead, for
 //! each folder the user opts in, we create
-//! `<sync_root>\Backup\<device>\<DisplayName>` and copy NEW or CHANGED files
+//! `<sync_root>\Backups\<device>\<DisplayName>` and copy NEW or CHANGED files
 //! from the real known folder into that vault subfolder. `<device>` is this
 //! machine's hostname (the SAME value it registers with the server), so a
 //! multi-device account keeps each machine's backup in its own subtree. The
@@ -19,7 +19,7 @@
 //!
 //! ## Guarantees (v1)
 //! - **One-way only**: we ONLY read the real known folder and ONLY write into
-//!   `<sync_root>\Backup\<device>\<DisplayName>`. We never write back to the
+//!   `<sync_root>\Backups\<device>\<DisplayName>`. We never write back to the
 //!   source.
 //! - **No source deletes, ever**: the source is opened read-only (copy reads).
 //! - **No vault deletes (v1)**: a file removed from the source is left in the
@@ -56,6 +56,22 @@ use std::path::Path;
 /// task report so the cap is visible, not silent.
 pub const MAX_MIRROR_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Max NEW/CHANGED files the mirror may COPY in a single pass, across ALL enabled
+/// folders combined (task 0811 review fix for the disk-copy overload).
+///
+/// [`MAX_MIRROR_FILE_BYTES`] caps one FILE and `MAX_MIRROR_DEPTH` caps recursion,
+/// but neither bounds the TOTAL copy VOLUME of a pass: the first pass after
+/// enabling a big folder (e.g. Music, 5,344 files) would otherwise `std::fs::copy`
+/// the entire changed set at once — the disk flood that pinned the founder's
+/// machine (42 GB across 5 folders before it crashed). This budget stops a pass
+/// once it has copied this many files; the mtime+size classifier makes the walk
+/// idempotent, so un-copied files are simply picked up next pass — the same
+/// "ramp up gradually" shape as the per-scan upload cap
+/// (`watcher::MAX_NEW_UPLOADS_PER_SCAN`). Matched to that upload cap so disk-copy
+/// and enqueue stay in step (copy ≈ enqueue per pass, no runaway backlog on
+/// either side).
+pub const MAX_MIRROR_FILES_PER_PASS: usize = 256;
+
 /// A backupable Windows known folder.
 ///
 /// `key` is the stable identifier persisted in `desktop.toml`
@@ -88,6 +104,69 @@ pub const KNOWN_FOLDERS: &[KnownFolder] = &[
 /// stale entry in a hand-edited config).
 pub fn known_folder_by_key(key: &str) -> Option<&'static KnownFolder> {
     KNOWN_FOLDERS.iter().find(|f| f.key == key)
+}
+
+/// Reverse of the catalog: resolve a known folder's stable `key` from the
+/// `display_name` segment the mirror writes into the vault path. `None` for a
+/// name that is not one of the catalog display names.
+fn known_folder_by_display_name(display_name: &str) -> Option<&'static KnownFolder> {
+    KNOWN_FOLDERS.iter().find(|f| f.display_name == display_name)
+}
+
+/// Decide which known-folder backup (if any) a queued upload/folder op belongs
+/// to, from its server-relative `rel_path` (the `/`-joined key the upload path
+/// stores and threads as `target_path`). Backup files live under
+/// `Backups/<device>/<DisplayName>/<subdirs…>`; we match that exact prefix shape
+/// AND require segment 2 to equal `expected_device` (the sanitized device
+/// segment THIS machine's mirror writes — see [`sanitize_device_segment`]), then
+/// reverse-map `<DisplayName>` to its catalog key. Returns the key (e.g.
+/// `"music"`) for a backup-originated path, or `None` for any normal (non-backup)
+/// path.
+///
+/// **Device check (task 0811 review fix).** Without it, ANY vault path of shape
+/// `Backups/<anySegment>/<CatalogDisplayName>/…` matched — so a user who manually
+/// created e.g. `Backups/Foo/Documents/notes.txt` in their own vault would have
+/// that upload tagged `documents`, and disabling the Documents known-folder
+/// backup would then PURGE their unrelated pending upload. Pinning segment 2 to
+/// this device's own sanitized name (the only value the mirror ever writes)
+/// eliminates that false-positive: a user folder under a different second
+/// segment no longer collides, and a path that happens to reuse the real device
+/// name AND a catalog display name is the mirror's own subtree anyway.
+///
+/// Tagging at the path layer (not threaded through every enqueue call site) keeps
+/// the change surgical: every backup op already carries its full `rel_path`, and
+/// the catalog is the single source of truth for which display names are ours.
+///
+/// Pure + total: a leading `/` is tolerated; case-sensitive segment compares
+/// (the mirror writes exact catalog display names + a fixed device segment).
+/// Unit-tested on every platform.
+pub fn backup_source_key_for_rel_path(rel_path: &str, expected_device: &str) -> Option<String> {
+    let mut segments = rel_path.trim_start_matches('/').split('/');
+    // Segment 1 must be the literal `Backups` root the mirror writes under.
+    if segments.next()? != "Backups" {
+        return None;
+    }
+    // Segment 2 must be THIS device's sanitized name — the only value the mirror
+    // writes. Rejecting any other segment is what prevents a user's own
+    // `Backups/<other>/<CatalogName>/…` file from being mis-tagged (and then
+    // wrongly purged on a folder disable).
+    if segments.next()? != expected_device {
+        return None;
+    }
+    let display_name = segments.next()?;
+    // Segment 4+ (the file or its subdirs) must exist — a path that stops at the
+    // display-name folder itself is the folder root, still ours to tag.
+    known_folder_by_display_name(display_name).map(|kf| kf.key.to_string())
+}
+
+/// Convenience wrapper over [`backup_source_key_for_rel_path`] that resolves
+/// `expected_device` from this machine's hostname (the SAME value the mirror
+/// writes under `Backups/<device>/…`), sanitized to a single segment. Use this at
+/// op-enqueue and purge-decision sites; the explicit-device form stays pure for
+/// unit tests.
+pub fn backup_source_key_for_this_device(rel_path: &str) -> Option<String> {
+    let device = sanitize_device_segment(&crate::runner::hostname_or_unknown());
+    backup_source_key_for_rel_path(rel_path, &device)
 }
 
 // ── Pure diff classifier (cross-platform, unit-tested everywhere) ────────────
@@ -146,7 +225,7 @@ pub fn needs_copy(decision: CopyDecision) -> bool {
 // ── Backup destination path (cross-platform, unit-tested everywhere) ─────────
 
 /// Sanitize a raw device name into a single safe path segment for the backup
-/// destination `<sync_root>\Backup\<device>\<DisplayName>`.
+/// destination `<sync_root>\Backups\<device>\<DisplayName>`.
 ///
 /// The device name comes from `runner::hostname_or_unknown()` — normally a tame
 /// hostname, but we never trust it to be path-safe. We collapse it to a single
@@ -184,7 +263,7 @@ pub fn sanitize_device_segment(raw: &str) -> String {
 }
 
 /// Build the vault destination root for one known folder:
-/// `<sync_root>\Backup\<sanitized_device>\<display_name>`.
+/// `<sync_root>\Backups\<sanitized_device>\<display_name>`.
 ///
 /// Factored cross-platform (pure `Path` joins) so the path layout — and the
 /// device-name sanitization feeding it — is unit-testable without Windows. The
@@ -192,7 +271,7 @@ pub fn sanitize_device_segment(raw: &str) -> String {
 /// `device_name`; the same value this device registers with the server.
 pub fn backup_dest_root(sync_root: &Path, device_name: &str, display_name: &str) -> std::path::PathBuf {
     sync_root
-        .join("Backup")
+        .join("Backups")
         .join(sanitize_device_segment(device_name))
         .join(display_name)
 }
@@ -311,23 +390,23 @@ mod windows_impl {
     }
 
     /// Mirror every enabled known folder into the sync root. One-way:
-    /// source → `<sync_root>\Backup\<device>\<DisplayName>`. Best-effort +
+    /// source → `<sync_root>\Backups\<device>\<DisplayName>`. Best-effort +
     /// idempotent — a per-file error logs (count only) and the pass continues.
     ///
     /// `<device>` is `runner::hostname_or_unknown()` (the SAME value this device
     /// registers with the server) sanitized to one safe path segment, so a
     /// multi-device account keeps each machine's backup in its own subtree under
-    /// `Backup/`.
+    /// `Backups/`.
     ///
     /// Safety invariants enforced here:
-    /// - We only ever WRITE under `<sync_root>\Backup\<device>\<DisplayName>`
-    ///   (`dest_root`), built from the trusted sync root + the literal `Backup`
+    /// - We only ever WRITE under `<sync_root>\Backups\<device>\<DisplayName>`
+    ///   (`dest_root`), built from the trusted sync root + the literal `Backups`
     ///   segment + a sanitized single-segment device name + a hard-coded display
     ///   name. None of those components can traverse out of the sync root.
     /// - We never write to, rename, or delete anything under the SOURCE.
     /// - We refuse to mirror a source that resolves to (or under) the sync root
     ///   itself, which would be a copy-into-itself loop. This also covers a
-    ///   source that somehow resolves under `<sync_root>\Backup\...` — it is
+    ///   source that somehow resolves under `<sync_root>\Backups\...` — it is
     ///   under the sync root, so the same guard refuses it.
     pub fn mirror_enabled_known_folders(sync_root: &Path, enabled_keys: &[String]) {
         if enabled_keys.is_empty() {
@@ -338,7 +417,16 @@ mod windows_impl {
         // single safe path segment.
         let device_name = crate::runner::hostname_or_unknown();
         let mut total = MirrorStats::default();
+        // Per-pass copy budget shared across ALL enabled folders: once this many
+        // files have been copied this pass we stop, and the next pass resumes the
+        // remainder (the mtime+size classifier makes the walk idempotent). This is
+        // what bounds the total disk-copy volume of a pass — see
+        // [`MAX_MIRROR_FILES_PER_PASS`].
+        let mut budget = MAX_MIRROR_FILES_PER_PASS;
         for key in enabled_keys {
+            if budget == 0 {
+                break; // pass budget exhausted — resume next tick
+            }
             let Some(kf) = known_folder_by_key(key) else {
                 continue;
             };
@@ -348,7 +436,7 @@ mod windows_impl {
             };
             // Refuse a self-referential mirror (source inside the sync root, or
             // the sync root inside the source) — either would recurse. A source
-            // under `<sync_root>\Backup\...` is under `sync_root`, so this guard
+            // under `<sync_root>\Backups\...` is under `sync_root`, so this guard
             // also refuses backing up the backup.
             if source.starts_with(sync_root) || sync_root.starts_with(&source) {
                 tracing::warn!(folder = %kf.key, "known-folder backup: source overlaps sync root; skipping");
@@ -360,7 +448,7 @@ mod windows_impl {
                 total.errors += 1;
                 continue;
             }
-            let stats = mirror_one_folder(&source, &dest_root);
+            let stats = mirror_one_folder(&source, &dest_root, &mut budget);
             total.add(stats);
         }
 
@@ -370,6 +458,7 @@ mod windows_impl {
                 copied_new = total.copied_new,
                 copied_changed = total.copied_changed,
                 skipped_too_large = total.skipped_too_large,
+                budget_exhausted = (budget == 0),
                 errors = total.errors,
                 "known-folder backup mirror pass complete"
             );
@@ -386,9 +475,9 @@ mod windows_impl {
     /// each file, and copies New/Changed ones. Pure `std::fs` so it never needs
     /// the Cloud Files API — the file simply appears under the sync root and the
     /// enumeration scan picks it up.
-    fn mirror_one_folder(source: &Path, dest_root: &Path) -> MirrorStats {
+    fn mirror_one_folder(source: &Path, dest_root: &Path, budget: &mut usize) -> MirrorStats {
         let mut stats = MirrorStats::default();
-        walk_and_mirror(source, source, dest_root, 0, &mut stats);
+        walk_and_mirror(source, source, dest_root, 0, &mut stats, budget);
         stats
     }
 
@@ -396,8 +485,24 @@ mod windows_impl {
     /// pathological tree can't blow the stack or stall a tick forever.
     const MAX_MIRROR_DEPTH: usize = 64;
 
-    fn walk_and_mirror(src_root: &Path, src_dir: &Path, dest_root: &Path, depth: usize, stats: &mut MirrorStats) {
+    /// `budget` is the remaining per-PASS copy allowance shared across all
+    /// folders (see [`MAX_MIRROR_FILES_PER_PASS`]). It is decremented on each
+    /// New/Changed copy; when it reaches `0` the walk stops copying and unwinds —
+    /// the next pass resumes the remainder (the mtime+size classifier keeps the
+    /// walk idempotent, so nothing is lost).
+    fn walk_and_mirror(
+        src_root: &Path,
+        src_dir: &Path,
+        dest_root: &Path,
+        depth: usize,
+        stats: &mut MirrorStats,
+        budget: &mut usize,
+    ) {
         if depth > MAX_MIRROR_DEPTH {
+            return;
+        }
+        // Pass budget already spent — stop here; resume next pass.
+        if *budget == 0 {
             return;
         }
         let entries = match std::fs::read_dir(src_dir) {
@@ -409,6 +514,11 @@ mod windows_impl {
             }
         };
         for entry in entries.flatten() {
+            // Stop the moment the pass budget is spent — leave the rest for the
+            // next pass rather than continuing to scan/copy.
+            if *budget == 0 {
+                return;
+            }
             let src_path = entry.path();
             // file_type() avoids a follow; we skip symlinks so the mirror can't
             // be walked out of the source tree via a link.
@@ -432,7 +542,7 @@ mod windows_impl {
                     stats.errors += 1;
                     continue;
                 }
-                walk_and_mirror(src_root, &src_path, dest_root, depth + 1, stats);
+                walk_and_mirror(src_root, &src_path, dest_root, depth + 1, stats, budget);
                 continue;
             }
             if !ft.is_file() {
@@ -451,6 +561,10 @@ mod windows_impl {
                     // copy can only ever write inside the vault folder.
                     match copy_preserving_mtime(&src_path, &dest_path) {
                         Ok(()) => {
+                            // Spend one unit of the per-pass copy budget. Only a
+                            // real byte copy counts — Skip/TooLarge/errors don't,
+                            // so an all-unchanged pass walks the whole tree freely.
+                            *budget -= 1;
                             if is_new {
                                 stats.copied_new += 1;
                             } else {
@@ -544,6 +658,71 @@ mod tests {
     }
 
     #[test]
+    fn backup_source_key_maps_vault_paths_to_origin_key() {
+        // A nested backup file under THIS device resolves to its catalog key.
+        assert_eq!(
+            backup_source_key_for_rel_path("Backups/Legion/Music/Artist/Album/song.mp3", "Legion").as_deref(),
+            Some("music")
+        );
+        // The display-name folder root itself is still tagged.
+        assert_eq!(
+            backup_source_key_for_rel_path("Backups/Legion/Pictures", "Legion").as_deref(),
+            Some("pictures")
+        );
+        // A leading slash is tolerated.
+        assert_eq!(
+            backup_source_key_for_rel_path("/Backups/My-PC/Documents/cv.pdf", "My-PC").as_deref(),
+            Some("documents")
+        );
+    }
+
+    #[test]
+    fn backup_source_key_rejects_non_backup_paths() {
+        // A normal top-level user file.
+        assert_eq!(backup_source_key_for_rel_path("report.pdf", "Legion"), None);
+        // A user folder that merely happens to be named `Backups` but doesn't
+        // match the device/display-name shape (display name isn't a catalog one).
+        assert_eq!(backup_source_key_for_rel_path("Backups/Legion/Holiday/pic.jpg", "Legion"), None);
+        // `Backups` with too few segments to identify a folder.
+        assert_eq!(backup_source_key_for_rel_path("Backups/Legion", "Legion"), None);
+        assert_eq!(backup_source_key_for_rel_path("Backups", "Legion"), None);
+        // A different first segment.
+        assert_eq!(backup_source_key_for_rel_path("Documents/Music/song.mp3", "Legion"), None);
+    }
+
+    #[test]
+    fn backup_source_key_requires_this_devices_segment() {
+        // Review fix: a user-created `Backups/<other>/<CatalogName>/…` path under a
+        // DIFFERENT device segment must NOT be tagged — otherwise disabling that
+        // catalog folder would purge the user's unrelated upload. Only the real
+        // device segment this machine's mirror writes qualifies.
+        assert_eq!(
+            backup_source_key_for_rel_path("Backups/SomeoneElse/Documents/notes.txt", "Legion"),
+            None
+        );
+        // Same path WITH the matching device segment is the mirror's own subtree
+        // and IS tagged.
+        assert_eq!(
+            backup_source_key_for_rel_path("Backups/Legion/Documents/notes.txt", "Legion").as_deref(),
+            Some("documents")
+        );
+    }
+
+    #[test]
+    fn mirror_per_pass_budget_is_a_positive_bound() {
+        // The per-pass copy budget must be a real, finite bound (>0) so a pass is
+        // always bounded but still makes progress. Matched to the upload-side cap
+        // (256) so disk-copy and enqueue ramp in step — keep them equal if either
+        // changes. (The walk that consumes it is Windows-only; this guards the
+        // constant the runner doc-comment relies on.)
+        assert!(MAX_MIRROR_FILES_PER_PASS > 0, "budget must make progress");
+        assert_eq!(
+            MAX_MIRROR_FILES_PER_PASS, 256,
+            "keep matched to watcher::MAX_NEW_UPLOADS_PER_SCAN"
+        );
+    }
+
+    #[test]
     fn classify_new_when_no_dest() {
         let src = FileStat { size: 100, mtime_secs: 1_700_000_000 };
         assert_eq!(classify_copy(src, None, MAX_MIRROR_FILE_BYTES), CopyDecision::New);
@@ -597,7 +776,7 @@ mod tests {
 
     #[test]
     fn dest_root_builds_backup_device_folder() {
-        // `<sync_root>/Backup/<device>/<DisplayName>`, in that order.
+        // `<sync_root>/Backups/<device>/<DisplayName>`, in that order.
         let sync_root = Path::new("/sync");
         let dest = backup_dest_root(sync_root, "my-laptop", "Documents");
         // Compare component-wise so the test is separator-agnostic across OSes.
@@ -605,10 +784,10 @@ mod tests {
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect();
-        assert!(comps.iter().any(|c| c == "Backup"), "must contain a Backup segment: {comps:?}");
-        // The tail is …/Backup/my-laptop/Documents.
+        assert!(comps.iter().any(|c| c == "Backups"), "must contain a Backups segment: {comps:?}");
+        // The tail is …/Backups/my-laptop/Documents.
         let n = comps.len();
-        assert_eq!(comps[n - 3], "Backup");
+        assert_eq!(comps[n - 3], "Backups");
         assert_eq!(comps[n - 2], "my-laptop");
         assert_eq!(comps[n - 1], "Documents");
     }
@@ -623,8 +802,8 @@ mod tests {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect();
         let n = comps.len();
-        // Still exactly Backup / <one device segment> / Pictures.
-        assert_eq!(comps[n - 3], "Backup");
+        // Still exactly Backups / <one device segment> / Pictures.
+        assert_eq!(comps[n - 3], "Backups");
         assert_eq!(comps[n - 1], "Pictures");
         let device_seg = &comps[n - 2];
         assert!(!device_seg.contains('/'), "no '/' in device segment: {device_seg}");

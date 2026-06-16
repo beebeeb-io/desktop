@@ -203,6 +203,20 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(8);
 /// any real layout while still finite.
 const MAX_SCAN_DEPTH: usize = 64;
 
+/// Max NEW file uploads a single scan pass may enqueue (task 0811 throttle).
+///
+/// A first enable of a large known folder (e.g. Music, 5,344 files) would
+/// otherwise enqueue thousands of `upload_version` ops in ONE pass, flooding the
+/// queue and the upload workers and pinning the machine — exactly the overload
+/// the founder hit. Bounding new enqueues per pass spreads the work across scans
+/// (one pass every `SCAN_INTERVAL`), so backup ramps up gradually instead of
+/// thundering. The on-disk mirror already caps its copy volume per pass; this is
+/// the matching cap on the upload side. Files not enqueued this pass are simply
+/// picked up by the next one (the walk re-sees them — nothing is lost). Folder
+/// scaffolding is NOT counted against this cap: folders are cheap metadata ops
+/// and must keep pace with their files so parents always exist first.
+const MAX_NEW_UPLOADS_PER_SCAN: usize = 256;
+
 /// An event delivered by a Windows Cloud Files NOTIFY callback. Push-only from
 /// the callback side ([`crate::windows_cf::callbacks`]); consumed by
 /// [`debounce_loop`].
@@ -432,22 +446,89 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
     let mut seen_on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut dispatched = 0usize;
 
-    walk_dir(sync_root, sync_root, 0, &mut |file_path| {
-        seen_on_disk.insert(file_path.to_path_buf());
+    // Live known-folder-backup gate (task 0811 review fix for the disable race).
+    // The mirror copies files onto disk, but it can be racing a DISABLE: a file
+    // mirrored while enabled is still on disk after the user disables that folder
+    // and the disable purges the queue. Without a gate the very next scan would
+    // re-classify those orphaned vault files as NEW (no DB row) and re-enqueue the
+    // whole backlog — uploads outliving the disable. We resolve the live enabled
+    // set ONCE per pass (cheap config read) and skip dispatch/scaffold for any
+    // backup-originated path whose folder is no longer enabled. A `None` config
+    // (read failure) is treated as "nothing disabled" — fail-open keeps a normal
+    // user's uploads flowing; the purge already removed the in-flight backlog.
+    let enabled_backup_keys: Option<std::collections::HashSet<String>> =
+        crate::config::DesktopConfig::load()
+            .ok()
+            .map(|cfg| cfg.known_folder_backup.iter().cloned().collect());
 
-        // Already dispatched this lifetime and not yet reflected as a DB row?
-        // Skip the redundant classify/convert. classify_local_path would also
-        // reject it once the row lands, but this avoids the work + repeated
-        // CfConvertToPlaceholder churn in the meantime.
-        if in_flight.contains(file_path) {
-            return;
+    // `true` if `rel`-derived path belongs to a backup folder that is currently
+    // DISABLED (so its mirrored-but-orphaned files must not be (re)enqueued).
+    let backup_disabled = |path: &std::path::Path| -> bool {
+        let Some(keys) = enabled_backup_keys.as_ref() else {
+            return false; // config unreadable → fail-open
+        };
+        match crate::engine_bridge::relative_db_path(sync_root, path)
+            .as_deref()
+            .and_then(crate::known_folder::backup_source_key_for_this_device)
+        {
+            Some(key) => !keys.contains(&key),
+            None => false, // not a backup path → never gated
         }
+    };
 
-        if dispatch_local_create(bridge, sync_root, file_path, "scan") {
-            in_flight.insert(file_path.to_path_buf());
-            dispatched += 1;
-        }
-    });
+    walk_dir(
+        sync_root,
+        sync_root,
+        0,
+        // on_dir (PRE-ORDER, parents before children): scaffold a server vault
+        // folder for every directory that has no row yet, so a nested file
+        // dispatched just after resolves THIS folder as its parent and the server
+        // vault mirrors the on-disk `Backup/<device>/<folder>/<sub>` hierarchy
+        // (task 0811 — without this, nested files uploaded FLAT to the root).
+        // Idempotent: `ensure_local_folder` returns the existing id on later scans.
+        &mut |dir_path| {
+            // Don't scaffold (enqueue CreateFolder for) a disabled backup folder's
+            // subtree — same disable-race gate as files.
+            if backup_disabled(dir_path) {
+                return;
+            }
+            bridge.ensure_local_folder(sync_root, dir_path);
+        },
+        &mut |file_path| {
+            seen_on_disk.insert(file_path.to_path_buf());
+
+            // Already dispatched this lifetime and not yet reflected as a DB row?
+            // Skip the redundant classify/convert. classify_local_path would also
+            // reject it once the row lands, but this avoids the work + repeated
+            // CfConvertToPlaceholder churn in the meantime.
+            if in_flight.contains(file_path) {
+                return;
+            }
+
+            // Disable-race gate (task 0811 review fix): a file the mirror copied
+            // while its folder was enabled is still on disk after a disable+purge.
+            // Skip it so the purge is final — the persisted config flip means it
+            // never re-enqueues, even across restarts. (When the user re-enables,
+            // the key returns to the set and the next scan picks it back up.)
+            if backup_disabled(file_path) {
+                return;
+            }
+
+            // Throttle (task 0811): cap NEW enqueues per pass so a first enable of
+            // a huge folder ramps up gradually instead of flooding the queue. Keep
+            // walking (so `seen_on_disk` stays complete for the prune below and
+            // parent folders keep getting scaffolded) but stop dispatching files —
+            // the next pass picks up the remainder.
+            if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
+                return;
+            }
+
+            if dispatch_local_create(bridge, sync_root, file_path, "scan") {
+                in_flight.insert(file_path.to_path_buf());
+                dispatched += 1;
+            }
+        },
+    );
 
     // Prune in-flight entries whose files are gone (deleted, renamed, or the
     // upload finished and the placeholder no longer matches a plain file we'd
@@ -475,6 +556,7 @@ fn walk_dir(
     sync_root: &std::path::Path,
     dir: &std::path::Path,
     depth: usize,
+    on_dir: &mut dyn FnMut(&std::path::Path),
     on_file: &mut dyn FnMut(&std::path::Path),
 ) {
     if depth > MAX_SCAN_DEPTH {
@@ -527,7 +609,10 @@ fn walk_dir(
             continue;
         }
         if ft.is_dir() {
-            walk_dir(sync_root, &path, depth + 1, on_file);
+            // PRE-ORDER: ensure this directory's vault folder exists BEFORE we
+            // descend, so a nested child resolves its parent (task 0811).
+            on_dir(&path);
+            walk_dir(sync_root, &path, depth + 1, on_dir, on_file);
         } else if ft.is_file() {
             on_file(&path);
         }
@@ -781,7 +866,7 @@ mod tests {
     /// naturally regardless of platform separator.
     fn walked_rel(root: &std::path::Path) -> HashSet<String> {
         let mut found: HashSet<String> = HashSet::new();
-        walk_dir(root, root, 0, &mut |p| {
+        walk_dir(root, root, 0, &mut |_dir| {}, &mut |p| {
             let rel = p.strip_prefix(root).unwrap();
             let joined = rel
                 .components()

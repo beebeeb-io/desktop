@@ -400,6 +400,11 @@ pub struct PendingOperation {
     pub max_attempts: i64,
     pub next_retry_at: i64,
     pub last_error: Option<String>,
+    /// Origin known-folder key (task 0811) when this op was enqueued by the
+    /// known-folder backup mirror/upload (e.g. `"music"`); `None` for every
+    /// normal user-initiated op. Disabling a folder's backup deletes exactly the
+    /// queue rows carrying its key — see [`StateDb::purge_backup_source_ops`].
+    pub backup_source_key: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -500,6 +505,10 @@ impl StateDb {
                 last_error TEXT,
                 last_error_class TEXT,
                 paused_reason TEXT,
+                -- Origin known-folder key (task 0811) for backup-originated ops.
+                -- NULL for every normal (non-backup) op. Disabling a known-folder
+                -- backup purges exactly its tagged ops so nothing resumes on boot.
+                backup_source_key TEXT,
                 created_at INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
             );
@@ -535,11 +544,15 @@ impl StateDb {
         ensure_column(&conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "operation_queue", "last_error_class", "TEXT")?;
         ensure_column(&conn, "operation_queue", "paused_reason", "TEXT")?;
+        // Task 0811: additive backup-origin tag. Existing rows migrate to NULL
+        // (untagged → treated as normal ops, never purged by a folder disable).
+        ensure_column(&conn, "operation_queue", "backup_source_key", "TEXT")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
             ",
         )?;
         Ok(Self(Mutex::new(conn)))
@@ -1328,8 +1341,8 @@ impl StateDb {
             "INSERT INTO operation_queue (
                 op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                 base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                last_error, last_error_class, paused_reason, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15)
+                last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
              ON CONFLICT(op_id) DO UPDATE SET
                 kind = excluded.kind,
                 file_id = excluded.file_id,
@@ -1345,6 +1358,7 @@ impl StateDb {
                 last_error = excluded.last_error,
                 last_error_class = excluded.last_error_class,
                 paused_reason = excluded.paused_reason,
+                backup_source_key = excluded.backup_source_key,
                 updated_at = excluded.updated_at",
             params![
                 op.op_id,
@@ -1360,6 +1374,7 @@ impl StateDb {
                 op.max_attempts,
                 op.next_retry_at,
                 op.last_error,
+                op.backup_source_key,
                 op.created_at,
                 op.updated_at
             ],
@@ -1372,7 +1387,7 @@ impl StateDb {
         let mut stmt = conn.prepare(
             "SELECT op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                    last_error, created_at, updated_at
+                    last_error, backup_source_key, created_at, updated_at
              FROM operation_queue
              WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL
              ORDER BY created_at ASC",
@@ -1392,8 +1407,9 @@ impl StateDb {
                 max_attempts: row.get(10)?,
                 next_retry_at: row.get(11)?,
                 last_error: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                backup_source_key: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })?;
         rows.collect()
@@ -1408,7 +1424,7 @@ impl StateDb {
         let mut stmt = conn.prepare(
             "SELECT op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                    last_error, created_at, updated_at
+                    last_error, backup_source_key, created_at, updated_at
              FROM operation_queue
              WHERE last_error IS NOT NULL
                 OR kind IN ('upload_version', 'restore_version')
@@ -1429,11 +1445,29 @@ impl StateDb {
                 max_attempts: row.get(10)?,
                 next_retry_at: row.get(11)?,
                 last_error: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                backup_source_key: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Delete every queued operation tagged with the given backup origin
+    /// `source_key` (task 0811). Called when a known-folder backup is disabled:
+    /// it stops that folder's pending uploads immediately AND prevents them from
+    /// resuming on the next boot (they no longer exist in the durable queue).
+    ///
+    /// Surgical by design: rows with a `NULL` `backup_source_key` (every normal,
+    /// user-initiated op) and rows tagged with a DIFFERENT folder's key are never
+    /// touched. Returns the number of rows deleted (for the disable log).
+    pub fn purge_backup_source_ops(&self, source_key: &str) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let deleted = conn.execute(
+            "DELETE FROM operation_queue WHERE backup_source_key = ?1",
+            params![source_key],
+        )?;
+        Ok(deleted)
     }
 
     pub fn record_operation_attempt(
@@ -2384,6 +2418,7 @@ mod tests {
             max_attempts: 5,
             next_retry_at: 0,
             last_error: None,
+            backup_source_key: None,
             created_at: 100,
             updated_at: 100,
         };
@@ -2399,6 +2434,102 @@ mod tests {
 
         db.remove_operation("op-1").unwrap();
         assert!(db.list_due_operations(999).unwrap().is_empty());
+    }
+
+    /// Task 0811: disabling a known-folder backup purges EXACTLY its tagged ops.
+    /// A normal (untagged) op and a DIFFERENT folder's tagged op must survive,
+    /// and the surviving ops must keep their tag through an enqueue→read round
+    /// trip (so a later disable of the other folder still finds them).
+    #[test]
+    fn test_purge_backup_source_ops_is_surgical() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let mk = |op_id: &str, key: Option<&str>| PendingOperation {
+            op_id: op_id.into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some(format!("file-{op_id}")),
+            parent_id: None,
+            target_path: Some(format!("/{op_id}.bin")),
+            metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+            payload_path: Some("/tmp/payload".into()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: key.map(str::to_string),
+            created_at: 100,
+            updated_at: 100,
+        };
+
+        // Two ops for `music`, one for `pictures`, one normal (untagged).
+        db.enqueue_operation(&mk("music-1", Some("music"))).unwrap();
+        db.enqueue_operation(&mk("music-2", Some("music"))).unwrap();
+        db.enqueue_operation(&mk("pics-1", Some("pictures"))).unwrap();
+        db.enqueue_operation(&mk("normal-1", None)).unwrap();
+
+        // The tag survives the enqueue→read round trip.
+        let due = db.list_due_operations(999).unwrap();
+        assert_eq!(due.len(), 4);
+        let music_2 = due.iter().find(|o| o.op_id == "music-2").unwrap();
+        assert_eq!(music_2.backup_source_key.as_deref(), Some("music"));
+        let normal = due.iter().find(|o| o.op_id == "normal-1").unwrap();
+        assert_eq!(normal.backup_source_key, None);
+
+        // Disabling `music` purges exactly its two ops.
+        let purged = db.purge_backup_source_ops("music").unwrap();
+        assert_eq!(purged, 2, "both music ops purged");
+
+        let remaining = db.list_due_operations(999).unwrap();
+        let ids: std::collections::HashSet<&str> = remaining.iter().map(|o| o.op_id.as_str()).collect();
+        assert_eq!(remaining.len(), 2, "only the pictures op + the normal op remain");
+        assert!(ids.contains("pics-1"), "other folder's op untouched");
+        assert!(ids.contains("normal-1"), "non-backup op untouched");
+        assert!(!ids.contains("music-1") && !ids.contains("music-2"), "music ops gone");
+
+        // Purging a key with no rows is a harmless no-op.
+        assert_eq!(db.purge_backup_source_ops("videos").unwrap(), 0);
+    }
+
+    /// Task 0811: a tagged op survives a DB close/reopen with its tag intact
+    /// (the column is durable), so a disable AFTER a restart still purges it —
+    /// the whole point of tagging at insertion rather than in memory.
+    #[test]
+    fn test_backup_source_key_survives_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let db = StateDb::open(&path).unwrap();
+            db.enqueue_operation(&PendingOperation {
+                op_id: "music-boot".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("file-boot".into()),
+                parent_id: None,
+                target_path: Some("/Backup/Dev/Music/a.mp3".into()),
+                metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+                payload_path: Some("/tmp/payload".into()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: Some("music".into()),
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+        }
+        // Reopen (simulates an app restart) and confirm the tag persisted, then
+        // a disable purges it.
+        let reopened = StateDb::open(&path).unwrap();
+        let due = reopened.list_due_operations(999).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].backup_source_key.as_deref(), Some("music"));
+        assert_eq!(reopened.purge_backup_source_ops("music").unwrap(), 1);
+        assert!(reopened.list_due_operations(999).unwrap().is_empty());
     }
 
     #[test]
@@ -2420,6 +2551,7 @@ mod tests {
             max_attempts: 5,
             next_retry_at: 0,
             last_error: None,
+            backup_source_key: None,
             created_at: 100,
             updated_at: 100,
         })
@@ -2686,6 +2818,7 @@ mod tests {
             max_attempts: 5,
             next_retry_at: 0,
             last_error: None,
+            backup_source_key: None,
             created_at: 0,
             updated_at: 0,
         })
@@ -2724,6 +2857,7 @@ mod tests {
             max_attempts: 25,
             next_retry_at: 0,
             last_error: None,
+            backup_source_key: None,
             created_at: 0,
             updated_at: 0,
         })

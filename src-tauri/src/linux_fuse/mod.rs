@@ -104,9 +104,12 @@ impl Filesystem for BeebeebFS {
         if entry.status == FileStatus::CloudOnly {
             let bridge = self.bridge.clone();
             let file_id = entry.file_id.clone();
+            // Clone the path into the hydrate future so `cache_path` stays owned
+            // here for the `std::fs::read` below (the future moves what it borrows).
+            let hydrate_path = cache_path.clone();
             let result = self
                 .rt
-                .block_on(async move { bridge.hydrate_file(&file_id, &cache_path).await });
+                .block_on(async move { bridge.hydrate_file(&file_id, &hydrate_path).await });
             if result.is_err() {
                 reply.error(libc::EIO);
                 return;

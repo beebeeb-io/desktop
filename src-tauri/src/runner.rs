@@ -55,11 +55,24 @@ use crate::state_db::{FileStatus, StateDb};
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Known-folder backup (task 0797): run the source→vault mirror every Nth sync
-/// tick. With a 30s `TICK_INTERVAL` that is ~5 minutes — frequent enough that a
-/// file dropped in Desktop/Documents reaches the vault within minutes, slow
-/// enough that the recursive known-folder walk is negligible. Windows-only.
+/// tick. With a 30s `TICK_INTERVAL` that is ~60s. Lowered from 10 (~5 min) to 2
+/// for task 0811: the enable IPC no longer mirrors inline (it returned to the
+/// daemon to stop the "Setting up…" hang), so backup must START on its own
+/// SHORTLY after enable — a ~60s cadence does that without a 5-minute wait. This
+/// is safe because BOTH ends are now bounded PER PASS:
+/// - the disk-copy side caps the NUMBER OF FILES it copies per pass across all
+///   enabled folders (`known_folder::MAX_MIRROR_FILES_PER_PASS`) — so a first
+///   enable of a 5,000-file folder copies in batches across ticks, never the
+///   whole set at once (the disk flood that pinned the founder's machine). The
+///   per-file 4 GiB cap and depth-64 guard are separate, narrower bounds; the
+///   per-pass FILE budget is what bounds total copy VOLUME.
+/// - the upload scan caps NEW enqueues per pass
+///   (`watcher::MAX_NEW_UPLOADS_PER_SCAN`).
+/// Both caps are matched, so disk-copy and enqueue ramp up in step and a frequent
+/// pass can no longer thunder even on a first enable of a 5,000-file folder.
+/// Windows-only.
 #[cfg(target_os = "windows")]
-const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 10;
+const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 
 /// Subdirectory inside the sync root where the daemon keeps its
 /// SQLite state DB. Hidden by leading dot so it doesn't pollute the

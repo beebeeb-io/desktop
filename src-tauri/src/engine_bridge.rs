@@ -702,7 +702,11 @@ impl EngineBridge {
         }
 
         let parent_contract = self.ensure_shared_parent_allows_write(target.parent_id.as_deref())?;
-        let file_id = uuid::Uuid::new_v4().to_string();
+        // Honour a caller-supplied id (task 0811 folder scaffolding writes the
+        // local row under a known id and needs the server CreateFolder to reuse
+        // it — the server accepts a client `folder_id`). The file path and the
+        // legacy IPC always pass `None`, getting a fresh uuid as before.
+        let file_id = target.file_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // Full server-relative key for this item: the FULL nested path when the
         // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
         // legacy IPC). This is stored as the row's `path` AND threaded as the
@@ -713,6 +717,29 @@ impl EngineBridge {
         match target.kind {
             FinderWriteItemKind::Folder => {
                 let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                // Write the local folder row + contract synchronously, the same
+                // way the File branch writes its `Uploading` row, so a nested
+                // child dispatched later in the SAME scan resolves this folder as
+                // its parent (`resolve_parent_id_for` reads `files.item_kind`)
+                // without waiting for a server `/sync` round-trip. `Local` =
+                // present on disk, server CreateFolder op pending in the queue.
+                self.db.upsert_file(&FileEntry {
+                    file_id: file_id.clone(),
+                    path: rel_path.clone(),
+                    status: FileStatus::Local,
+                    size_bytes: 0,
+                    modified_at: now_secs(),
+                    content_hash: None,
+                    remote_updated_at: 0,
+                    // Not persisted by upsert_file; the contract update owns these.
+                    parent_id: None,
+                    item_kind: ItemKind::Folder,
+                })?;
+                if let Some(mut contract) = self.db.get_file_contract_state(&file_id)? {
+                    contract.item_kind = ItemKind::Folder;
+                    contract.parent_id = target.parent_id.clone();
+                    self.db.set_file_contract_state(&contract)?;
+                }
                 let mut payload = serde_json::json!({
                     "operation": "create_folder",
                     "name_encrypted": metadata,
@@ -1010,6 +1037,91 @@ impl EngineBridge {
         }
     }
 
+    /// Ensure the on-disk DIRECTORY at `path` (under `sync_root`) has a server
+    /// vault folder, returning its `file_id`. This is the folder-hierarchy half
+    /// of the local-create pipeline (task 0811): the enumeration scan only
+    /// uploaded *files*, so a freshly-mirrored nested tree
+    /// (`Backup/<device>/<folder>/<sub>/file`) had no folder rows — every nested
+    /// file's `resolve_parent_id_for` missed and the file uploaded FLAT to the
+    /// vault root. Scaffolding the folder first (parents before children, which
+    /// the top-down walk already guarantees) gives each child a real parent to
+    /// attach to, so the server vault mirrors the on-disk hierarchy.
+    ///
+    /// Idempotent + parent-aware:
+    /// - If a DB row already exists for this directory's relative key, returns its
+    ///   `file_id` (a folder row, or `None` if it is somehow a file row).
+    /// - Otherwise mints a client folder id, writes a local `Folder` row + contract
+    ///   IMMEDIATELY (so a child file dispatched later in the SAME scan resolves
+    ///   this parent without waiting for a server round-trip), and enqueues a
+    ///   `CreateFolder` op carrying that same id — the server honours the
+    ///   client-supplied `folder_id`, so the local row and the server folder share
+    ///   one id and the parent linkage is consistent.
+    ///
+    /// The op's `target_path` is the folder's relative key, so a backup folder is
+    /// auto-tagged with its origin key (Part C) and purged on disable. Returns
+    /// `None` for the sync root itself, a non-directory, or on a DB error
+    /// (fail-closed: the file then uploads at the root rather than mis-parenting).
+    pub fn ensure_local_folder(&self, sync_root: &Path, path: &Path) -> Option<String> {
+        // Root itself has no server folder.
+        if path == sync_root {
+            return None;
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => {}
+            _ => return None,
+        }
+        if path_is_engine_internal(sync_root, path) {
+            return None;
+        }
+        let name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        if is_ignored_finder_name(&name) {
+            return None;
+        }
+        let rel = relative_db_path(sync_root, path)?;
+
+        // Already known? Return the existing folder id (idempotent across scans).
+        match self.db.get_file_by_path(&rel) {
+            Ok(Some(entry)) if entry.is_dir() => return Some(entry.file_id),
+            Ok(Some(_)) => return None, // a file row at a dir path — never mis-parent
+            Ok(None) => { /* mint below */ }
+            Err(e) => {
+                tracing::warn!(error = %e, "ensure_local_folder: DB lookup failed; skipping");
+                return None;
+            }
+        }
+
+        // Parent linkage: resolve THIS directory's parent dir to its folder id
+        // (None at the Backup root level — a top-level folder under the vault).
+        let parent_id = self.resolve_parent_id_for(sync_root, path);
+        let folder_id = uuid::Uuid::new_v4().to_string();
+
+        // Delegate the row write + contract + CreateFolder enqueue to the one
+        // shared create path, carrying our pre-minted id (which the server
+        // honours) so the local row and the server folder share an id. The
+        // `rel`-path `target_path` auto-tags a backup folder with its origin key.
+        let target = FinderWriteTarget {
+            file_id: Some(folder_id.clone()),
+            parent_id,
+            filename: name,
+            rel_path: Some(rel),
+            kind: FinderWriteItemKind::Folder,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        };
+        match self.queue_finder_create(target) {
+            Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+                tracing::info!(op_id = %op_id, folder_id = %folder_id, "upload driver: scaffolded vault folder for nested upload");
+                Some(folder_id)
+            }
+            Ok(FinderWriteOutcome::Ignored { .. }) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "ensure_local_folder: failed to scaffold vault folder");
+                None
+            }
+        }
+    }
+
     /// Apply a pin ("available offline") toggle to `file_id` and its subtree.
     ///
     /// `sync_root` is the on-disk root of the vault — needed on Windows to
@@ -1214,6 +1326,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error,
+            backup_source_key: None,
             created_at: now,
             updated_at: now,
         };
@@ -1234,6 +1347,17 @@ impl EngineBridge {
     ) -> anyhow::Result<FinderWriteOutcome> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
+        // Task 0811: tag known-folder backup ops with their origin key (derived
+        // from the server-relative path the upload threads as `target_path`), so
+        // disabling that folder can purge exactly its queued ops. `None` for any
+        // normal user upload — those are never purged by a folder disable. The
+        // `_this_device` form pins segment 2 to THIS machine's sanitized device
+        // name (the only value the mirror writes), so a user's own
+        // `Backup/<other>/<CatalogName>/…` file is never mis-tagged + wrongly
+        // purged (review fix).
+        let backup_source_key = target_path
+            .as_deref()
+            .and_then(crate::known_folder::backup_source_key_for_this_device);
         let op = PendingOperation {
             op_id: op_id.clone(),
             kind: kind.clone(),
@@ -1248,6 +1372,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error: Some("queued from Finder; upload worker not yet attached".to_string()),
+            backup_source_key,
             created_at: now,
             updated_at: now,
         };
@@ -1282,6 +1407,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error: Some("queued recursive pin state; hydration worker not yet attached".to_string()),
+            backup_source_key: None,
             created_at: now,
             updated_at: now,
         };
@@ -1310,6 +1436,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error: Some("queued pinned content hydration; transfer worker not yet attached".to_string()),
+            backup_source_key: None,
             created_at: now,
             updated_at: now,
         };
@@ -3371,6 +3498,7 @@ mod tests {
                 max_attempts: 25,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -3441,6 +3569,7 @@ mod tests {
                 max_attempts: 25,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -3838,6 +3967,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -3869,6 +3999,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -3924,6 +4055,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -4008,6 +4140,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -4145,6 +4278,7 @@ mod tests {
                 max_attempts: 3,
                 next_retry_at: 100,
                 last_error: Some("quota exceeded".into()),
+                backup_source_key: None,
                 created_at: 101,
                 updated_at: 101,
             })
@@ -4165,6 +4299,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 100,
                 last_error: Some("403 forbidden: permission denied".into()),
+                backup_source_key: None,
                 created_at: 102,
                 updated_at: 102,
             })
@@ -4185,6 +4320,7 @@ mod tests {
                 max_attempts: 25,
                 next_retry_at: 100,
                 last_error: Some("stale base version rejected".into()),
+                backup_source_key: None,
                 created_at: 103,
                 updated_at: 103,
             })
