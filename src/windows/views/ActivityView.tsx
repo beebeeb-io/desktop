@@ -106,6 +106,38 @@ function humanizeType(type: string): string {
   return raw.charAt(0).toUpperCase() + raw.slice(1)
 }
 
+// Returns true iff every comma-separated segment looks like a UUID v4 hex string.
+// Used to suppress raw UUIDs that the server sets as event subjects (zero-knowledge
+// events where the server never sees filenames).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+function looksLikeId(s: string): boolean {
+  const parts = s.split(',').map(p => p.trim()).filter(Boolean)
+  return parts.length > 0 && parts.every(p => UUID_RE.test(p))
+}
+
+// Clean human-readable labels for event types where the subject is always an ID
+// or where the subject is empty. file.trash.bulk is handled inline (needs count).
+const TYPE_LABELS: Record<string, string> = {
+  'file.trash':      'Moved an item to trash',
+  'file.downloaded': 'Downloaded an item',
+  'auth.logout':     'Signed out',
+  'user.logout':     'Signed out',
+}
+
+// Derives the title to display for a timeline event, never rendering a raw UUID.
+// Priority: (1) known type labels; (2) file.trash.bulk with count; (3) any
+// non-UUID subject; (4) humanized type name as catch-all.
+function displayTitle(ev: ActivityFeedEvent): string {
+  if (ev.type === 'file.trash.bulk') {
+    const n = (ev.subject ?? '').split(',').map(s => s.trim()).filter(Boolean).length
+    return n === 1 ? 'Moved an item to trash' : `Moved ${n} items to trash`
+  }
+  if (ev.type in TYPE_LABELS) return TYPE_LABELS[ev.type]
+  const subj = ev.subject?.trim()
+  if (subj && !looksLikeId(subj)) return subj
+  return humanizeType(ev.type)
+}
+
 // ── Shared state shells ──────────────────────────────────────────────────────
 
 const RED = 'oklch(0.5 0.18 25)'
@@ -257,7 +289,7 @@ function TimelineSection() {
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, color: T.ink, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
-                    {ev.subject?.trim() || humanizeType(ev.type)}
+                    {displayTitle(ev)}
                   </div>
                   {(ev.details || ev.where) && (
                     <div style={{ fontSize: 11, color: T.ink3, marginTop: 2, lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
@@ -391,7 +423,7 @@ function NotificationsSection() {
             />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: n.read ? 400 : 600, color: T.ink, lineHeight: 1.4 }}>
-                {n.title?.trim() || humanizeType(n.type)}
+                {n.title && !looksLikeId(n.title) ? n.title : humanizeType(n.type)}
               </div>
               {n.body && (
                 <div style={{ fontSize: 11.5, color: T.ink3, marginTop: 3, lineHeight: 1.55 }}>{n.body}</div>
