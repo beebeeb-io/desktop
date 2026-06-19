@@ -1738,6 +1738,83 @@ impl EngineBridge {
         Ok(acc)
     }
 
+    /// Fetch the encrypted server thumbnail for `file_id`, decrypt it **in
+    /// memory only**, and return the decoded image bytes (WebP / JPEG / PNG)
+    /// inside a [`Zeroizing`] wrapper.
+    ///
+    /// This is the read path for the Windows Explorer `IThumbnailProvider`
+    /// (task 0823). It mirrors [`Self::do_hydrate`]'s per-file-key derivation but
+    /// hits `GET /files/:id/thumbnail/{variant}` instead of the chunk range and
+    /// reuses the **existing** encrypted thumbnail the original uploading client
+    /// generated (a downscaled still for images, a poster frame for video). The
+    /// Windows side never regenerates a thumbnail and never decodes the original
+    /// media — it just decrypts this small blob.
+    ///
+    /// ## Wire envelope (NOT the chunk envelope)
+    ///
+    /// Thumbnails are stored in the **raw** `nonce(12) || AES-256-GCM(ct+tag)`
+    /// envelope the web/mobile clients write (`thumbnail.ts encryptThumbnailBlob`):
+    /// a 12-byte random nonce followed by the AES-256-GCM ciphertext+tag, keyed
+    /// directly by the per-file key, with no AAD and no JSON. This differs from
+    /// file *chunks* (which are the `EncryptedBlob` JSON / `decrypt_chunk_raw`
+    /// frame), so this path decrypts the blob directly rather than going through
+    /// [`decrypt_downloaded_chunk`].
+    ///
+    /// ## Zero-knowledge
+    ///
+    /// The decrypted bytes live ONLY in the returned `Zeroizing<Vec<u8>>`, which
+    /// is wiped on drop (normal return, `?`, or panic unwind). Nothing is written
+    /// to disk — the caller decodes straight to an in-memory `HBITMAP` and the
+    /// shell's own thumbnail cache holds the *derivative* bitmap, exactly the
+    /// same privacy posture as the web client's decrypted-thumbnail cache.
+    ///
+    /// `variant` is `small` / `medium` / `large`. Any error (no thumbnail for
+    /// this file, network failure, decrypt failure) bubbles as `Err` so the
+    /// caller can fall back to the file-type icon — it is never reported as a
+    /// success with empty bytes.
+    #[cfg(target_os = "windows")]
+    pub async fn fetch_thumbnail_to_memory(
+        &self,
+        file_id: &str,
+        variant: &str,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+        // Validate the id shape up front (same guard as do_hydrate).
+        let _file_uuid: uuid::Uuid = file_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
+
+        // Pull the encrypted thumbnail blob. A 404 (no thumbnail) is an Err here
+        // and the COM caller maps it to the type-icon fallback.
+        let blob = self.api.download_thumbnail(file_id, variant).await?;
+        if blob.len() < 12 + 16 {
+            // Must hold at least a 12-byte nonce + 16-byte GCM tag.
+            anyhow::bail!("thumbnail blob too short ({} bytes)", blob.len());
+        }
+
+        // Derive the per-file key (MasterKey::from_bytes zeroizes the array on
+        // drop; we copy from the borrow exactly like do_hydrate).
+        let mk_bytes: [u8; 32] = *self.api.master_key();
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+
+        // Split nonce || ciphertext+tag and AES-256-GCM decrypt with no AAD.
+        let (nonce_bytes, ciphertext) = blob.split_at(12);
+        let cipher = Aes256Gcm::new_from_slice(file_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("init thumbnail cipher: {e}"))?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            // The error type carries no plaintext; a generic message avoids
+            // leaking anything about the ciphertext.
+            .map_err(|_| anyhow::anyhow!("thumbnail decrypt failed (bad key or corrupt blob)"))?;
+
+        // Hand the decoded image bytes back wrapped so they are wiped on drop.
+        Ok(Zeroizing::new(plaintext))
+    }
+
     /// Apply a "Keep Mine" resolution: the local copy stays as-is,
     /// status flips to `Local`, and `remote_updated_at` is bumped to
     /// `max(now, prev + 1)` so the next [`sync_tick`] doesn't see the

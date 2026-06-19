@@ -295,6 +295,21 @@ impl ApiClient {
         )
     }
 
+    /// Full URL of an encrypted thumbnail variant
+    /// (`GET /api/v1/files/:id/thumbnail/{variant}`). `variant` is one of
+    /// `small` / `medium` / `large`; the server maps each to a reserved sentinel
+    /// chunk index. The returned body is the *encrypted* thumbnail blob in the
+    /// raw `nonce(12) || AES-256-GCM(ciphertext+tag)` envelope the web/mobile
+    /// clients uploaded — decryption is the caller's job.
+    pub fn thumbnail_url(&self, file_id: &str, variant: &str) -> String {
+        format!(
+            "{}/api/v1/files/{}/thumbnail/{}",
+            self.base_url,
+            encode(file_id),
+            variant
+        )
+    }
+
     pub fn upload_init_url(&self) -> String {
         self.url("/api/v1/uploads/init")
     }
@@ -432,6 +447,32 @@ impl ApiClient {
         let resp = self
             .client
             .get(&self.chunk_url(file_id, chunk_idx))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// `GET /api/v1/files/:id/thumbnail/{variant}` — returns the raw *encrypted*
+    /// thumbnail blob for the given variant (`small`/`medium`/`large`).
+    ///
+    /// The body is the same `nonce(12) || AES-256-GCM(ciphertext+tag)` envelope
+    /// the web/mobile/CLI clients uploaded at file-upload time (a poster frame
+    /// for video, a downscaled still for images). Decryption with the per-file
+    /// key is the caller's job (see `EngineBridge::fetch_thumbnail_to_memory`).
+    ///
+    /// A `404` (no thumbnail for this file / variant) surfaces as an `Err` via
+    /// `error_for_status`; the caller treats any error as "no thumbnail" and lets
+    /// Explorer fall back to the file-type icon.
+    pub async fn download_thumbnail(
+        &self,
+        file_id: &str,
+        variant: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(self.thumbnail_url(file_id, variant))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?

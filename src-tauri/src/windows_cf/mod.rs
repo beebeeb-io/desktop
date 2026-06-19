@@ -51,6 +51,7 @@
 pub mod callbacks;
 pub mod placeholders;
 pub mod status_ui;
+pub mod thumbnail_provider;
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -631,6 +632,12 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
     // unregister below. Inverse of `register_status_ui_for_sync_root`.
     status_ui::unregister_status_ui_source(&id);
 
+    // Tear down the media thumbnail-provider registration (revoke the COM class
+    // object + remove the per-extension ShellEx associations + our CLSID subtree).
+    // Best-effort and self-contained; logs its own failures, never blocks the
+    // shell unregister. Inverse of `register_thumbnail_provider_for_sync_root`.
+    thumbnail_provider::unregister_thumbnail_provider();
+
     StorageProviderSyncRootManager::Unregister(&id_h)
         .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
     tracing::info!(
@@ -645,6 +652,70 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
 /// process. A re-login re-runs [`connect_root`], but the class object + its STA
 /// apartment must persist for the whole process lifetime, so we never respawn.
 static STATUS_UI_THREAD: OnceLock<()> = OnceLock::new();
+
+/// Guard so the dedicated thumbnail-provider COM thread is spawned at most once
+/// per process. Same reasoning as [`STATUS_UI_THREAD`]: `CoRegisterClassObject`
+/// keeps the class object alive only while the registering thread's COM apartment
+/// lives, so we register on one long-lived STA thread that parks for the process
+/// lifetime.
+static THUMBNAIL_PROVIDER_THREAD: OnceLock<()> = OnceLock::new();
+
+/// Stand up the Explorer **media thumbnail provider** (task 0823) so cloud-only
+/// image/video placeholders show real tiles instead of generic type icons. The
+/// handler fetches + decrypts the EXISTING encrypted server thumbnail in memory
+/// and hands Explorer an `HBITMAP`; it never hydrates the whole file and never
+/// writes plaintext to disk. PURELY ADDITIVE on top of [`register_shell_sync_root`].
+///
+/// Why a dedicated STA thread: identical to [`register_status_ui_for_sync_root`]
+/// — `CoRegisterClassObject` ties the class object's lifetime to the registering
+/// thread's COM apartment, so a transient tokio worker is the wrong home. We spawn
+/// one long-lived STA thread that initializes COM, registers the class object +
+/// the per-extension registry associations, and parks for the process lifetime.
+///
+/// Spawned at most once per process (guarded by [`THUMBNAIL_PROVIDER_THREAD`]); a
+/// re-login reuses the existing registration. Best-effort: any failure is logged
+/// inside the thread and never propagated — missing thumbnails only cost the
+/// tiles; overlays, the Status column, the flyout and hydration are unaffected.
+pub fn register_thumbnail_provider_for_sync_root() {
+    if THUMBNAIL_PROVIDER_THREAD.get().is_some() {
+        return;
+    }
+    let _ = THUMBNAIL_PROVIDER_THREAD.set(());
+
+    let spawned = std::thread::Builder::new()
+        .name("beebeeb-thumbnail-provider".to_string())
+        .spawn(move || {
+            use windows::Win32::System::Com::{
+                COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+            };
+            // SAFETY: standard COM init for this dedicated thread. S_FALSE
+            // (already initialized) is non-error. Balanced with CoUninitialize on
+            // the failure early-exit only.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if hr.is_err() {
+                tracing::warn!(hr = ?hr, "thumbnail-provider thread: CoInitializeEx failed; tiles disabled");
+                return;
+            }
+
+            if let Err(e) = thumbnail_provider::register_thumbnail_provider() {
+                tracing::warn!(error = %e, "thumbnail provider registration failed; media tiles absent (overlays/column/flyout/hydration unaffected)");
+                // SAFETY: balance the CoInitializeEx above before exiting.
+                unsafe { CoUninitialize() };
+                return;
+            }
+
+            tracing::info!("thumbnail provider registered; parking COM thread for process lifetime");
+            // Park forever: keep the apartment + class object alive for the
+            // process lifetime (process exit tears it down;
+            // `unregister_thumbnail_provider` revokes the cookie on sign-out).
+            loop {
+                std::thread::park();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not spawn thumbnail-provider thread; media tiles disabled");
+    }
+}
 
 /// Stand up the OneDrive-style Explorer breadcrumb **status flyout** for
 /// `sync_root` (clicking "Beebeeb" in the path-bar → synced state + storage bar
@@ -862,6 +933,14 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // re-logins (spawns at most once per process). Failures are logged inside the
     // thread, so this call is infallible from connect_root's perspective.
     register_status_ui_for_sync_root(sync_root);
+
+    // Stand up the Explorer media THUMBNAIL provider (task 0823) so cloud-only
+    // image/video placeholders render real tiles (fetch + decrypt the existing
+    // encrypted server thumbnail in memory; never hydrate the whole file; never
+    // write plaintext to disk). PURELY ADDITIVE: a dedicated STA COM thread,
+    // independent of the Win32/shell registrations, the callbacks, and hydration.
+    // Idempotent across re-logins; failures are logged inside the thread.
+    register_thumbnail_provider_for_sync_root();
 
     // Connect the in-process fetch callback exactly once per process. Without
     // this, Windows shows placeholders but never asks us to hydrate them — and,

@@ -246,7 +246,30 @@ windows = { version = "0.58", features = [
     # system shadow drawn by DWM on its window rectangle; we turn both off so the
     # only visible surface is the React card (see lib.rs disable_dwm_window_frame).
     "Win32_Graphics_Dwm",
+
+    # ── Explorer media THUMBNAILS (windows_cf::thumbnail_provider, task 0823) ──
+    # An in-proc `IThumbnailProvider` COM handler returns an `HBITMAP` for a
+    # cloud-only media placeholder by fetching + decrypting the EXISTING encrypted
+    # server thumbnail in memory (no whole-file hydration, no regeneration). The
+    # interfaces + helpers it needs:
+    #   - Win32_UI_Shell (already enabled above): `IThumbnailProvider`(+_Impl) and
+    #     the `WTS_ALPHATYPE` enum (`WTSAT_ARGB`) for the GetThumbnail signature;
+    #     `IInitializeWithItem`(+_Impl), `IShellItem`, `SIGDN_FILESYSPATH` for
+    #     mapping the shell item to the on-disk path to file_id via the CF state DB
+    #     (all four live directly under Win32::UI::Shell in windows-0.58, not the
+    #     PropertiesSystem submodule).
+    #   - Win32_Graphics_Gdi: `CreateDIBSection` / `HBITMAP` / `BITMAPINFO` to
+    #     build the 32-bit top-down ARGB bitmap Explorer renders, plus
+    #     `DeleteObject` for the error-path cleanup.
+    "Win32_Graphics_Gdi",
 ] }
+
+# Pure-Rust image decoding for the Explorer thumbnail provider (task 0823):
+# decodes the decrypted server thumbnail (WebP from web, JPEG/PNG from other
+# clients) to RGBA8 entirely in memory, so we never pull in GDI+/WIC COM just to
+# turn a small blob into pixels. Windows-only — it is dead weight on macOS/Linux
+# where there is no IThumbnailProvider. Default features cover WebP/JPEG/PNG/GIF.
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
 
 # Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`
 # macro used in `windows_cf/status_ui.rs` (the Explorer breadcrumb status flyout).
