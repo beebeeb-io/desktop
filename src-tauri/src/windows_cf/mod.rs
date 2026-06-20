@@ -717,12 +717,52 @@ pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
                 return;
             }
 
-            tracing::info!("thumbnail provider registered; parking COM thread for process lifetime");
-            // Park forever: keep the apartment + class object alive for the
-            // process lifetime (process exit tears it down;
-            // `unregister_thumbnail_provider` revokes the cookie on sign-out).
+            tracing::info!("thumbnail provider registered; running STA message pump for process lifetime");
+            // ★ RUN A MESSAGE PUMP — do NOT park(). This thread is an STA
+            // (`COINIT_APARTMENTTHREADED`) that registered the class object via
+            // `CoRegisterClassObject(CLSCTX_LOCAL_SERVER)`. COM delivers every
+            // cross-apartment / cross-PROCESS activation and method call to an STA
+            // as a window message dispatched to the apartment's hidden message
+            // window. A thread blocked in `std::thread::park()` never pumps, so the
+            // class object is registered but UNREACHABLE: the shell's thumbnail
+            // host resolves our binding + CLSID, then its `CoCreateInstance`
+            // (`IThumbnailProvider`) HANGS waiting on a message queue that is never
+            // serviced → no `Initialize`/`GetThumbnail`, silent type-icon fallback.
+            //
+            // Task 0823 diagnosis (ProcMon + a cross-process `CoCreateInstance`
+            // probe, 2026-06-20) proved exactly this: with the HKLM binding fix in
+            // place the shell read the binding + our CLSID, but never activated the
+            // object and never spawned/connected our server — and an external
+            // `CoCreateInstance(CLSCTX_LOCAL_SERVER)` of our CLSID hung indefinitely
+            // against this parked thread. Pumping messages is the missing half.
+            //
+            // `GetMessageW` blocks until a message arrives (no busy-wait) and
+            // returns 0 only on `WM_QUIT` — which we never post — so this loop runs
+            // for the process lifetime, keeping the apartment live and servicing COM
+            // activations. Process exit tears the apartment down;
+            // `unregister_thumbnail_provider` revokes the class-object cookie on
+            // sign-out.
+            //
+            // SAFETY: standard STA message pump. `MSG` is a plain out-param;
+            // `GetMessageW(None, 0, 0)` retrieves messages for any window on THIS
+            // thread (the hidden COM message window). `TranslateMessage`/
+            // `DispatchMessageW` are the documented dispatch pair.
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+            };
+            let mut msg = MSG::default();
             loop {
-                std::thread::park();
+                let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+                // 0 == WM_QUIT (never posted here), -1 == error: stop pumping rather
+                // than spin. The apartment stays alive until process exit either way.
+                if ret.0 <= 0 {
+                    tracing::warn!(ret = ret.0, "thumbnail-provider message pump ended");
+                    break;
+                }
+                unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
         });
     if let Err(e) = spawned {

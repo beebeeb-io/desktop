@@ -67,8 +67,8 @@ use windows::Win32::System::Com::{
     IClassFactory_Impl, REGCLS_MULTIPLEUSE,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteKeyValueW, RegSetValueExW, RegDeleteTreeW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegSetValueExW, RegDeleteTreeW,
 };
 use windows::Win32::UI::Shell::{
     IInitializeWithItem, IInitializeWithItem_Impl, IShellItem, IThumbnailProvider,
@@ -462,18 +462,34 @@ pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("write thumbnail CLSID LocalServer32: {e}"))?;
 
     // 3. Bind the CLSID to the sync root: set `ThumbnailProvider = {clsid}` under
-    //    the SyncRootManager key the WinRT shell registration created. This is the
-    //    cloud-files thumbnail binding (sibling to the status-UI factory value).
+    //    the SyncRootManager key the WinRT shell registration created.
+    //
+    //    ★ HIVE: this binding MUST go in HKLM, not HKCU. A ProcMon trace of the
+    //    render (task 0823 diagnosis, 2026-06-20) proved the shell reads
+    //    `…\SyncRootManager\<id>\ThumbnailProvider` EXCLUSIVELY from HKLM
+    //    (Explorer.EXE / RuntimeBroker / SearchProtocolHost all queried the HKLM
+    //    path; a value written to HKCU was NAME NOT FOUND to them and never read).
+    //    OneDrive's working binding lives in HKLM for exactly this reason. The HKLM
+    //    sync-root key was created by the WinRT `StorageProviderSyncRootManager::
+    //    Register` and its ACL grants BUILTIN\Users `SetValue` (and the interactive
+    //    user FullControl), so writing this single value needs NO elevation —
+    //    verified live (a non-admin RegSetValue into the HKLM key succeeded and the
+    //    shell then read + resolved our CLSID).
+    //
+    //    NOTE: the CLSID's `LocalServer32` (step 2) stays in HKCU\Software\Classes\
+    //    CLSID — the shell reads the *server* registration from HKCU just fine (it
+    //    does the same for OneDrive's handler). Only the *binding* value must be in
+    //    HKLM where the cloud-files thumbnail lookup reads it.
     let sync_root_key = format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}"
     );
     write_string_value(
-        HKEY_CURRENT_USER,
+        HKEY_LOCAL_MACHINE,
         &sync_root_key,
         Some("ThumbnailProvider"),
         &clsid_str,
     )
-    .map_err(|e| anyhow::anyhow!("bind ThumbnailProvider under sync-root key: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("bind ThumbnailProvider under sync-root key (HKLM): {e}"))?;
 
     tracing::info!(
         shell_id,
@@ -502,10 +518,12 @@ pub fn unregister_thumbnail_provider(shell_id: &str) {
     );
     let sync_root_key_h = HSTRING::from(sync_root_key);
     let value_h = HSTRING::from("ThumbnailProvider");
-    // SAFETY: removes a single named value under HKCU; both wide strings outlive
-    // the call.
+    // SAFETY: removes a single named value under HKLM (the hive register writes it
+    // to — see register_thumbnail_provider step 3); both wide strings outlive the
+    // call. The HKLM sync-root key ACL grants the interactive user delete rights on
+    // its own values, so this needs no elevation.
     let rc = unsafe {
-        RegDeleteKeyValueW(HKEY_CURRENT_USER, &sync_root_key_h, PCWSTR(value_h.as_ptr()))
+        RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, &sync_root_key_h, PCWSTR(value_h.as_ptr()))
     };
     if rc != ERROR_SUCCESS {
         tracing::debug!(rc = ?rc, "remove ThumbnailProvider binding (may already be gone)");

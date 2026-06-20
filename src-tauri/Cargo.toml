@@ -258,7 +258,17 @@ windows = { version = "0.58", features = [
     #     `SIGDN_FILESYSPATH` (all under Win32::UI::Shell in windows-0.58).
     #   - Win32_Graphics_Gdi: `CreateDIBSection` / `HBITMAP` / `BITMAPINFO` /
     #     `DeleteObject` to build the 32-bit top-down ARGB bitmap Explorer renders.
+    #   - Win32_UI_WindowsAndMessaging: `GetMessageW` / `TranslateMessage` /
+    #     `DispatchMessageW` / `MSG` for the STA message pump the thumbnail-provider
+    #     COM thread MUST run (task 0823 diagnosis 2026-06-20). The class object is
+    #     registered with `CoRegisterClassObject(CLSCTX_LOCAL_SERVER)` on a
+    #     single-threaded apartment; COM delivers the shell's cross-process
+    #     `IThumbnailProvider` activation + method calls to that apartment as window
+    #     messages, so the thread must pump messages rather than `park()` — without
+    #     pumping the object is registered but unreachable and `GetThumbnail` never
+    #     fires (the shell's CoCreateInstance hangs on an unserviced message queue).
     "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # Pure-Rust image decoding for the Explorer thumbnail provider (task 0823):
