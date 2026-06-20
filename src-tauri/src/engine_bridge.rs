@@ -2991,9 +2991,26 @@ fn apply_sync_op(
                     let removed = bridge.db().delete_file_subtree(id)?;
                     remove_pruned_placeholders(sync_root, &removed);
                 }
-                // No row: a delete for a file we never mirrored (or already
-                // pruned) — nothing to reconcile.
-                None => {}
+                // No row for the folder itself — the folder was absent from
+                // this desktop's snapshot (already trashed when the snapshot
+                // ran), but its CHILDREN may have been ingested and stored with
+                // `parent_id = id`.  Sweep those orphaned children by
+                // `parent_id` so they don't linger as ghost placeholders in
+                // Explorer (task 0828).  The sweep is scoped strictly to
+                // descendants of `id` and is a no-op when none are found.
+                None => {
+                    let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
+                    if !orphans.is_empty() {
+                        tracing::info!(
+                            folder_id = %id,
+                            count = orphans.len(),
+                            "sync_tick: trashed folder had no local row but \
+                             {} orphaned child(ren) — pruned (task 0828)",
+                            orphans.len()
+                        );
+                        remove_pruned_placeholders(sync_root, &orphans);
+                    }
+                }
             }
         }
         "file_restore" => {

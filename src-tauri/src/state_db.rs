@@ -755,6 +755,124 @@ impl StateDb {
         Ok(removed)
     }
 
+    /// Sweep and delete every descendant of `folder_id` from the DB when the
+    /// folder's OWN row is ABSENT (the "ghost children" bug, task 0828).
+    ///
+    /// ## When is this needed?
+    ///
+    /// `delete_file_subtree` (used by the normal `file_trash`/`file_delete`
+    /// reconcile path) first looks up the folder's own row to obtain its `path`,
+    /// then prunes descendants via a PATH-PREFIX query.  When the folder row is
+    /// absent — because the folder was already trashed on the server when this
+    /// desktop's snapshot was taken, so the snapshot excluded it, but its
+    /// CHILDREN were already ingested (stored with bare leaf-name paths) — there
+    /// is no path to start from, so `delete_file_subtree` returns an empty vec
+    /// and the children are never removed.  They then show as permanent ghost
+    /// placeholders in Explorer.
+    ///
+    /// ## How this fixes it
+    ///
+    /// The snapshot ingest path (`apply_metadata_file_row`) calls
+    /// `set_file_contract_state` right after `upsert_file`, which writes the
+    /// server's `parent_id` into `files.parent_id`.  So even when the parent
+    /// FOLDER row is absent, its children carry `files.parent_id = folder_id`
+    /// and can be found by a direct column scan — which is exactly what this
+    /// function does.
+    ///
+    /// For any found child that is itself a folder we additionally remove its
+    /// descendants via the same PATH-PREFIX sweep `delete_file_subtree` uses,
+    /// so multi-level subtrees are fully pruned.
+    ///
+    /// All removals happen in a SINGLE transaction so a concurrent reader
+    /// never sees a half-pruned subtree.  Returns the removed rows ordered
+    /// CHILDREN-BEFORE-PARENTS (deepest path first) so the Windows caller can
+    /// remove leaf placeholders before their containing directory placeholder.
+    /// Returns an empty vec if no children are found (idempotent).
+    ///
+    /// ## Scope guarantee
+    ///
+    /// Only rows whose `parent_id` column equals `folder_id` (and their
+    /// path-prefix descendants) are ever touched.  No broader match is possible:
+    /// the query is `WHERE parent_id = ?1` with a single bound parameter.
+    pub fn delete_orphaned_children_of_absent_folder(
+        &self,
+        folder_id: &str,
+    ) -> Result<Vec<PrunedRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+
+        // Find every direct child whose parent_id matches the absent folder.
+        // Using `parent_id` (not path-prefix) because we have no path to start
+        // from — that is precisely the condition that triggered this call.
+        let direct_children: Vec<PrunedRow> = {
+            let mut stmt = tx.prepare(
+                "SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![folder_id], |r| {
+                Ok(PrunedRow {
+                    file_id: r.get(0)?,
+                    path: r.get(1)?,
+                    is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        if direct_children.is_empty() {
+            tx.rollback()?;
+            return Ok(Vec::new());
+        }
+
+        // For the children-before-parents ordering we collect: deep descendants
+        // first (for each child folder, via path-prefix), then the direct
+        // children themselves (folders after their leaves).
+        let mut removed: Vec<PrunedRow> = Vec::new();
+
+        for child in &direct_children {
+            if child.is_dir {
+                // Remove the folder's descendants first (children-before-parent
+                // ordering within this subtree).  Mirror the path-prefix sweep
+                // in `delete_file_subtree`.
+                let child_path = child.path.trim_matches('/').to_string();
+                if !child_path.is_empty() {
+                    let descendants: Vec<PrunedRow> = {
+                        let mut dstmt = tx.prepare(
+                            "SELECT file_id, path, item_kind FROM files
+                             WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                             ORDER BY length(path) DESC, path DESC",
+                        )?;
+                        let drows = dstmt.query_map(params![child_path], |r| {
+                            Ok(PrunedRow {
+                                file_id: r.get(0)?,
+                                path: r.get(1)?,
+                                is_dir: ItemKind::from_str(&r.get::<_, String>(2)?)
+                                    == ItemKind::Folder,
+                            })
+                        })?;
+                        drows.collect::<Result<Vec<_>>>()?
+                    };
+                    for d in descendants {
+                        tx.execute(
+                            "DELETE FROM files WHERE file_id = ?1",
+                            params![d.file_id],
+                        )?;
+                        removed.push(d);
+                    }
+                }
+            }
+        }
+
+        // Delete the direct children and append them last (after their own
+        // descendants) to maintain children-before-parent ordering.
+        for child in direct_children {
+            tx.execute("DELETE FROM files WHERE file_id = ?1", params![child.file_id])?;
+            removed.push(child);
+        }
+
+        tx.commit()?;
+        Ok(removed)
+    }
+
     // ── /sync delta-engine cursor + prune (task 0789) ──────────────────────────
     //
     // The `sync_state` kv table holds the `/sync/ops` cursor (the highest
@@ -3353,5 +3471,141 @@ mod tests {
             let back = kbps_to_mbps(kbps);
             assert!((back - mbps).abs() < 0.001, "round-trip {mbps} Mbps failed: got {back}");
         }
+    }
+
+    // ── task 0828 regression: orphaned children of an absent folder ───────────
+    //
+    // Scenario: a folder was already trashed on the server when the desktop's
+    // snapshot ran, so the snapshot excluded the folder row.  The folder's
+    // CHILDREN were ingested by a prior snapshot and stored with
+    // `parent_id = <folder_id>` via `set_file_contract_state`.  When the
+    // desktop later receives a `file_trash` sync op for the folder,
+    // `get_file(folder_id)` returns `None` — the old `None => {}` no-op left
+    // the children as permanent ghost rows.
+    //
+    // `delete_orphaned_children_of_absent_folder` must sweep and remove ALL
+    // descendant rows even when the folder row itself is absent.
+
+    #[test]
+    fn orphaned_children_of_absent_folder_are_swept() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // Seed two direct children of an absent folder ("folder-gone").
+        // `set_file_contract_state` writes `parent_id` into `files`, so we
+        // simulate what the snapshot ingest path does: upsert the file row,
+        // then call set_file_contract_state to write parent_id.
+        let seed = |file_id: &str, path: &str, parent_id: &str, is_folder: bool| {
+            let kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
+            db.upsert_file(&FileEntry {
+                file_id: file_id.to_string(),
+                path: path.to_string(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 0,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None, // upsert_file ignores this field
+                item_kind: kind.clone(),
+            })
+            .unwrap();
+            db.set_file_contract_state(&FileContractState {
+                file_id: file_id.to_string(),
+                namespace: Namespace::MyFiles,
+                parent_id: Some(parent_id.to_string()),
+                shared_root_id: None,
+                share_id: None,
+                permission_bits: PERMISSION_READ,
+                item_kind: kind,
+                content_type: None,
+                current_version: 1,
+                current_object_version_id: None,
+                local_base_version: 0,
+                local_hash: None,
+                cache_path: None,
+                cache_bytes: 0,
+                pin_state: PinState::Inherit,
+                inherited_pin_state: PinState::Unpinned,
+                last_sync_at: 0,
+            })
+            .unwrap();
+        };
+
+        // Two direct children of the absent folder.
+        seed("child-file-1", "docs/report.pdf", "folder-gone", false);
+        seed("child-file-2", "docs/notes.txt", "folder-gone", false);
+        // A sub-folder child (also orphaned) and ITS child, so we test
+        // recursive path-prefix sweep for nested orphans.
+        seed("child-folder", "docs/sub", "folder-gone", true);
+        seed("grandchild", "docs/sub/deep.txt", "child-folder", false);
+
+        // Verify the folder row itself is absent.
+        assert!(
+            db.get_file("folder-gone").unwrap().is_none(),
+            "folder-gone must not exist (mimics the bug condition)"
+        );
+
+        // All four rows exist before the sweep.
+        assert!(db.get_file("child-file-1").unwrap().is_some());
+        assert!(db.get_file("child-file-2").unwrap().is_some());
+        assert!(db.get_file("child-folder").unwrap().is_some());
+        assert!(db.get_file("grandchild").unwrap().is_some());
+
+        // Execute the fix: sweep orphaned children of the absent folder.
+        let removed = db
+            .delete_orphaned_children_of_absent_folder("folder-gone")
+            .unwrap();
+
+        // All four rows must be gone.
+        assert!(
+            db.get_file("child-file-1").unwrap().is_none(),
+            "child-file-1 should be removed"
+        );
+        assert!(
+            db.get_file("child-file-2").unwrap().is_none(),
+            "child-file-2 should be removed"
+        );
+        assert!(
+            db.get_file("child-folder").unwrap().is_none(),
+            "child-folder should be removed"
+        );
+        assert!(
+            db.get_file("grandchild").unwrap().is_none(),
+            "grandchild should be removed (nested path-prefix sweep)"
+        );
+
+        // The returned PrunedRow vec must contain all four (order may vary, but
+        // the grandchild must precede the child-folder it lives under — that is
+        // the children-before-parent contract the Windows placeholder remover
+        // depends on).
+        assert_eq!(removed.len(), 4, "should have removed exactly 4 rows");
+        let ids: Vec<&str> = removed.iter().map(|r| r.file_id.as_str()).collect();
+        assert!(ids.contains(&"child-file-1"));
+        assert!(ids.contains(&"child-file-2"));
+        assert!(ids.contains(&"child-folder"));
+        assert!(ids.contains(&"grandchild"));
+
+        let grandchild_pos = ids.iter().position(|&id| id == "grandchild").unwrap();
+        let child_folder_pos = ids.iter().position(|&id| id == "child-folder").unwrap();
+        assert!(
+            grandchild_pos < child_folder_pos,
+            "grandchild ({grandchild_pos}) must appear before child-folder ({child_folder_pos}) \
+             so the Windows placeholder remover can remove leaf-before-dir"
+        );
+    }
+
+    #[test]
+    fn orphaned_children_sweep_is_noop_when_no_children() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // No rows in the DB at all — the sweep must be a safe no-op.
+        let removed = db
+            .delete_orphaned_children_of_absent_folder("nonexistent-folder")
+            .unwrap();
+        assert!(
+            removed.is_empty(),
+            "no children → should return empty vec"
+        );
     }
 }
