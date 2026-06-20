@@ -633,10 +633,11 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
     status_ui::unregister_status_ui_source(&id);
 
     // Tear down the media thumbnail-provider registration (revoke the COM class
-    // object + remove the per-extension ShellEx associations + our CLSID subtree).
-    // Best-effort and self-contained; logs its own failures, never blocks the
-    // shell unregister. Inverse of `register_thumbnail_provider_for_sync_root`.
-    thumbnail_provider::unregister_thumbnail_provider();
+    // object + remove the `ThumbnailProvider` binding under the sync-root key +
+    // the CLSID subtree), while the sync-root key still exists. Best-effort and
+    // self-contained; logs its own failures, never blocks the shell unregister.
+    // Inverse of `register_thumbnail_provider_for_sync_root`.
+    thumbnail_provider::unregister_thumbnail_provider(&id);
 
     StorageProviderSyncRootManager::Unregister(&id_h)
         .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
@@ -661,25 +662,37 @@ static STATUS_UI_THREAD: OnceLock<()> = OnceLock::new();
 static THUMBNAIL_PROVIDER_THREAD: OnceLock<()> = OnceLock::new();
 
 /// Stand up the Explorer **media thumbnail provider** (task 0823) so cloud-only
-/// image/video placeholders show real tiles instead of generic type icons. The
-/// handler fetches + decrypts the EXISTING encrypted server thumbnail in memory
-/// and hands Explorer an `HBITMAP`; it never hydrates the whole file and never
-/// writes plaintext to disk. PURELY ADDITIVE on top of [`register_shell_sync_root`].
+/// image/video placeholders show real tiles instead of generic type icons.
 ///
-/// Why a dedicated STA thread: identical to [`register_status_ui_for_sync_root`]
-/// — `CoRegisterClassObject` ties the class object's lifetime to the registering
-/// thread's COM apartment, so a transient tokio worker is the wrong home. We spawn
-/// one long-lived STA thread that initializes COM, registers the class object +
-/// the per-extension registry associations, and parks for the process lifetime.
+/// ## The cloud-files binding (what the earlier attempts got wrong)
 ///
-/// Spawned at most once per process (guarded by [`THUMBNAIL_PROVIDER_THREAD`]); a
-/// re-login reuses the existing registration. Best-effort: any failure is logged
-/// inside the thread and never propagated — missing thumbnails only cost the
-/// tiles; overlays, the Status column, the flyout and hydration are unaffected.
-pub fn register_thumbnail_provider_for_sync_root() {
+/// `IThumbnailProvider` for placeholders is NOT registered via the generic
+/// per-extension `SystemFileAssociations\.ext\ShellEx` path (the Cloud Filter
+/// suppresses that for dehydrated files), nor as an InprocServer32 DLL (same
+/// suppression). The shell honors a **cloud-files thumbnail provider bound to the
+/// sync root** — for an unpackaged app that binding is the registry value
+/// `ThumbnailProvider = {clsid}` under the SyncRootManager key, with the handler
+/// as a normal in-process `LocalServer32` COM server. This is the SAME shape as
+/// the status-UI handler ([`register_status_ui_for_sync_root`]) and lets the
+/// provider reach the in-process [`EngineBridge`] directly. See
+/// `thumbnail_provider` module docs for the OneDrive/Nextcloud confirmation.
+///
+/// Why a dedicated STA thread: `CoRegisterClassObject` ties the class object's
+/// lifetime to the registering thread's COM apartment, so we spawn one long-lived
+/// STA thread that initializes COM, registers the class object + the registry
+/// binding, and parks for the process lifetime.
+///
+/// `shell_id` is the same `Beebeeb!<hash>` id [`shell_sync_root_id`] mints, so the
+/// `ThumbnailProvider` value lands under the exact SyncRootManager key the WinRT
+/// shell registration created. Spawned at most once per process (guarded by
+/// [`THUMBNAIL_PROVIDER_THREAD`]). Best-effort: any failure is logged inside the
+/// thread — missing thumbnails only cost the tiles; overlays, the Status column,
+/// the flyout, and hydration are unaffected.
+pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
     if THUMBNAIL_PROVIDER_THREAD.get().is_some() {
         return;
     }
+    let shell_id = shell_sync_root_id(sync_root);
     let _ = THUMBNAIL_PROVIDER_THREAD.set(());
 
     let spawned = std::thread::Builder::new()
@@ -697,7 +710,7 @@ pub fn register_thumbnail_provider_for_sync_root() {
                 return;
             }
 
-            if let Err(e) = thumbnail_provider::register_thumbnail_provider() {
+            if let Err(e) = thumbnail_provider::register_thumbnail_provider(&shell_id) {
                 tracing::warn!(error = %e, "thumbnail provider registration failed; media tiles absent (overlays/column/flyout/hydration unaffected)");
                 // SAFETY: balance the CoInitializeEx above before exiting.
                 unsafe { CoUninitialize() };
@@ -935,12 +948,14 @@ pub fn connect_root(sync_root: &std::path::Path) {
     register_status_ui_for_sync_root(sync_root);
 
     // Stand up the Explorer media THUMBNAIL provider (task 0823) so cloud-only
-    // image/video placeholders render real tiles (fetch + decrypt the existing
-    // encrypted server thumbnail in memory; never hydrate the whole file; never
-    // write plaintext to disk). PURELY ADDITIVE: a dedicated STA COM thread,
+    // image/video placeholders render real tiles. An in-process IThumbnailProvider
+    // COM server (LocalServer32), bound to the sync root via the cloud-files
+    // `ThumbnailProvider` SyncRootManager value, fetches + decrypts the existing
+    // encrypted server thumbnail in memory (never hydrates the whole file, never
+    // writes plaintext to disk). PURELY ADDITIVE: a dedicated STA COM thread,
     // independent of the Win32/shell registrations, the callbacks, and hydration.
     // Idempotent across re-logins; failures are logged inside the thread.
-    register_thumbnail_provider_for_sync_root();
+    register_thumbnail_provider_for_sync_root(sync_root);
 
     // Connect the in-process fetch callback exactly once per process. Without
     // this, Windows shows placeholders but never asks us to hydrate them — and,

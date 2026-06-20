@@ -248,27 +248,23 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dwm",
 
     # ── Explorer media THUMBNAILS (windows_cf::thumbnail_provider, task 0823) ──
-    # An in-proc `IThumbnailProvider` COM handler returns an `HBITMAP` for a
-    # cloud-only media placeholder by fetching + decrypting the EXISTING encrypted
-    # server thumbnail in memory (no whole-file hydration, no regeneration). The
-    # interfaces + helpers it needs:
-    #   - Win32_UI_Shell (already enabled above): `IThumbnailProvider`(+_Impl) and
-    #     the `WTS_ALPHATYPE` enum (`WTSAT_ARGB`) for the GetThumbnail signature;
-    #     `IInitializeWithItem`(+_Impl), `IShellItem`, `SIGDN_FILESYSPATH` for
-    #     mapping the shell item to the on-disk path to file_id via the CF state DB
-    #     (all four live directly under Win32::UI::Shell in windows-0.58, not the
-    #     PropertiesSystem submodule).
-    #   - Win32_Graphics_Gdi: `CreateDIBSection` / `HBITMAP` / `BITMAPINFO` to
-    #     build the 32-bit top-down ARGB bitmap Explorer renders, plus
-    #     `DeleteObject` for the error-path cleanup.
+    # An in-process `IThumbnailProvider` COM server (CoRegisterClassObject +
+    # LocalServer32, bound to the sync root via the `ThumbnailProvider` value under
+    # the SyncRootManager key — the cloud-files registry binding the shell honors
+    # for placeholder thumbnails, confirmed against OneDrive + Nextcloud). It runs
+    # in THIS process, so it reaches the in-process EngineBridge directly. Needs:
+    #   - Win32_UI_Shell (already enabled above): `IThumbnailProvider`(+_Impl),
+    #     `WTS_ALPHATYPE`/`WTSAT_ARGB`, `IInitializeWithItem`(+_Impl), `IShellItem`,
+    #     `SIGDN_FILESYSPATH` (all under Win32::UI::Shell in windows-0.58).
+    #   - Win32_Graphics_Gdi: `CreateDIBSection` / `HBITMAP` / `BITMAPINFO` /
+    #     `DeleteObject` to build the 32-bit top-down ARGB bitmap Explorer renders.
     "Win32_Graphics_Gdi",
 ] }
 
 # Pure-Rust image decoding for the Explorer thumbnail provider (task 0823):
 # decodes the decrypted server thumbnail (WebP from web, JPEG/PNG from other
-# clients) to RGBA8 entirely in memory, so we never pull in GDI+/WIC COM just to
-# turn a small blob into pixels. Windows-only — it is dead weight on macOS/Linux
-# where there is no IThumbnailProvider. Default features cover WebP/JPEG/PNG/GIF.
+# clients) to RGBA8 in memory, so we never pull in GDI+/WIC COM just to turn a
+# small blob into pixels. Default features cover WebP/JPEG/PNG/GIF/BMP.
 image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
 
 # Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`
