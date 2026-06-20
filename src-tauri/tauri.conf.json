@@ -5,7 +5,7 @@
   "identifier": "io.beebeeb.app",
   "build": {
     "beforeBuildCommand": "bun run build",
-    "beforeBundleCommand": "scripts/prepare-macos-provisioning-profiles.sh && scripts/build-fileprovider-extension.sh",
+    "beforeBundleCommand": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('scripts/prepare-macos-provisioning-profiles.sh && scripts/build-fileprovider-extension.sh',{stdio:'inherit'})}\"",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -22,6 +22,61 @@
         "visible": false,
         "center": true,
         "decorations": true
+      },
+      {
+        "label": "tray",
+        "title": "Beebeeb",
+        "url": "index.html?window=tray",
+        "width": 400,
+        "height": 390,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": false
+      },
+      {
+        "label": "windows-settings",
+        "title": "Beebeeb — Settings",
+        "url": "index.html?window=settings&platform=windows",
+        "width": 1000,
+        "height": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "decorations": true,
+        "minWidth": 780,
+        "minHeight": 520
+      },
+      {
+        "label": "windows-onboarding",
+        "title": "Welcome to Beebeeb",
+        "url": "index.html?window=onboarding&platform=windows",
+        "width": 720,
+        "height": 540,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "decorations": true
+      },
+      {
+        "label": "main-app",
+        "title": "Beebeeb",
+        "url": "index.html?window=main-app&platform=windows",
+        "width": 1100,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "decorations": true,
+        "minWidth": 880,
+        "minHeight": 560
       }
     ],
     "security": {

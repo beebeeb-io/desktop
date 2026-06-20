@@ -1,3 +1,10 @@
+//! Unix-domain-socket IPC between the desktop daemon and the macOS File
+//! Provider extension (and the Linux FUSE mount). Unix sockets do not
+//! exist on Windows, where the Cloud Files callback runs in-process
+//! (see `crate::windows_cf`), so the whole module is gated to `unix`.
+
+#![cfg(unix)]
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -203,6 +210,11 @@ async fn handle_connection(
                     file_id: None,
                     parent_id: normalize_parent_id(parent_id),
                     filename,
+                    // OS-extension IPC supplies the leaf name only; keep the
+                    // leaf-as-path fallback (queue_finder_create defaults
+                    // rel_path → filename). The macOS/Linux extensions thread
+                    // their own nesting via parent_id, not a relative path.
+                    rel_path: None,
                     kind: parse_write_kind(&kind),
                     contents_path,
                     content_type,
@@ -223,6 +235,8 @@ async fn handle_connection(
                     file_id: Some(file_id),
                     parent_id: normalize_parent_id(parent_id),
                     filename,
+                    // Modify is metadata/version only; no new-file path key.
+                    rel_path: None,
                     kind: parse_write_kind(&kind),
                     contents_path,
                     content_type,
@@ -234,13 +248,24 @@ async fn handle_connection(
                 file_id,
                 base_version_identifier,
             } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
-            IpcRequest::SetRecursivePin { file_id, pinned } => match bridge.set_recursive_pin(&file_id, pinned) {
-                Ok(outcome) => IpcResponse::PinUpdated {
-                    changed_item_ids: outcome.changed_item_ids,
-                    hydrate_operations: outcome.hydrate_operations,
-                },
-                Err(e) => IpcResponse::Error { message: e.to_string() },
-            },
+            IpcRequest::SetRecursivePin { file_id, pinned } => {
+                // `set_recursive_pin` takes `sync_root` for the Windows pin-state
+                // path; this module is `#![cfg(unix)]`, so it is never compiled on
+                // Windows and the parameter is unused here. Resolve the real root
+                // from config so the call is honest; fall back to the engine-internal
+                // dir if unavailable (the value is never dereferenced on unix).
+                let sync_root = crate::config::DesktopConfig::load()
+                    .ok()
+                    .and_then(|cfg| cfg.sync_root)
+                    .unwrap_or_default();
+                match bridge.set_recursive_pin(&sync_root, &file_id, pinned) {
+                    Ok(outcome) => IpcResponse::PinUpdated {
+                        changed_item_ids: outcome.changed_item_ids,
+                        hydrate_operations: outcome.hydrate_operations,
+                    },
+                    Err(e) => IpcResponse::Error { message: e.to_string() },
+                }
+            }
             IpcRequest::RecordOpenedFile {
                 file_id,
                 cache_path,
@@ -515,9 +540,13 @@ fn file_entry_payload_without_contract(
 
 fn capabilities_for_status(status: &crate::state_db::FileStatus) -> u32 {
     match status {
+        // `Trashing` (a locally-deleted file whose server-trash is pending) gets
+        // no write/rename/delete caps — the item is on its way out; it is grouped
+        // with the other read-only terminal states.
         crate::state_db::FileStatus::CloudOnly
         | crate::state_db::FileStatus::Downloading
-        | crate::state_db::FileStatus::Error => CAP_READ,
+        | crate::state_db::FileStatus::Error
+        | crate::state_db::FileStatus::Trashing => CAP_READ,
         crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
         crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
             CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
@@ -533,6 +562,7 @@ fn file_status_string(status: &crate::state_db::FileStatus) -> &'static str {
         crate::state_db::FileStatus::Uploading => "uploading",
         crate::state_db::FileStatus::Conflict => "conflict",
         crate::state_db::FileStatus::Error => "error",
+        crate::state_db::FileStatus::Trashing => "trashing",
     }
 }
 
@@ -591,6 +621,8 @@ mod tests {
             modified_at: 1,
             content_hash: None,
             remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
         })
         .unwrap();
         let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();

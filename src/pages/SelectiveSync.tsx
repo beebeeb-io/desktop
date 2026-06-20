@@ -130,6 +130,6 @@ function flatten(items: VaultItem[], prefix = ''): VaultItem[] {
 function updateItem(items: VaultItem[], id: string, patch: Partial<VaultItem>): VaultItem[] {
   return items.map((item) => {
     if (item.id === id) return { ...item, ...patch }
-    return { ...item, children: item.children ? updateItem(item.children, id, patch) : undefined }
+    return { ...item, children: item.children ? updateItem(item.children, id, patch) : [] }
   })
 }

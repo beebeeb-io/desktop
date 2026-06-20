@@ -62,6 +62,65 @@ urlencoding = "2"
 # The web client passes salt as standard base64; desktop_login decodes it
 # before feeding it to beebeeb_core::kdf::derive_master_key.
 base64 = "0.22"
+# Filesystem watcher for the sync-root upload trigger (task 0780). On
+# Windows this drives the cross-platform recommended watcher
+# (ReadDirectoryChanges) so a file dropped in the sync root is detected and
+# fed into the existing encrypted upload path — the Windows equivalent of
+# the macOS/Linux IPC `QueueFinderCreate` flow. `notify` is the de-facto
+# cross-platform Rust file-watching crate; we use the recommended-watcher
+# (`RecommendedWatcher` + `notify::recommended_watcher`) and debounce
+# ourselves in `watcher.rs`. Pinned to "8" to match `beebeeb-sync`'s
+# `notify = "8"` so there is a SINGLE notify version in the dependency tree.
+notify = "8"
+# Zeroize the in-memory `Session` (master key + session token) on drop —
+# lock_vault / clear_session / process exit must not leave key material in
+# freed heap/stack. `derive` enables `#[derive(ZeroizeOnDrop)]`. Pinned to "1"
+# and already present transitively via beebeeb-core (zeroize 1.8.x), so this
+# adds no new tree entry — it only promotes it to a direct dep we can derive on.
+zeroize = { version = "1", features = ["derive"] }
+
+# ── Browser-based device-code login handoff (browser_login.rs) ───────────────
+# The crypto + WS deps below mirror repos/cli/Cargo.toml exactly so the
+# desktop handoff is byte-for-byte interoperable with `bb login` and the
+# server's cli_auth.rs contract (P-256 ECDH + HKDF-SHA256 "beebeeb-cli-auth-v1"
+# + AES-256-GCM). `tokio-tungstenite` uses rustls (not native-tls) to avoid
+# pulling OpenSSL into the bundle.
+#
+# We deliberately use BUNDLED Mozilla roots (`webpki-roots`) rather than the
+# Windows certificate store (`rustls-tls-native-roots`). On Windows the native
+# cert-store path was the cause of the desktop "Sign in with browser" handoff
+# hanging forever on "Connecting": loading the Windows root store could stall /
+# fail, and there was no timeout. api.beebeeb.io serves a public-CA
+# (Let's Encrypt-class) cert that the bundled Mozilla roots validate, so the
+# bundled set is sufficient AND deterministic across machines. The
+# `rustls-tls-webpki-roots` feature also exposes `connect_async_tls_with_config`
+# + `Connector` (it enables the `__rustls-tls` feature gate). `browser_login.rs`
+# builds an explicit rustls `ClientConfig` from `webpki_roots::TLS_SERVER_ROOTS`
+# and passes it as `Connector::Rustls`.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Bundled Mozilla CA roots for the sign-in WebSocket TLS (see above). Version
+# pinned to match the copy `tokio-tungstenite 0.24` pulls in, so there is a
+# single `webpki-roots` in the tree. The re-exported `TLS_SERVER_ROOTS` is a
+# `&[rustls_pki_types::TrustAnchor]`, which slots straight into rustls 0.23's
+# `RootCertStore { roots }`.
+webpki-roots = "0.26"
+# We construct the rustls `ClientConfig` ourselves in browser_login.rs via
+# `builder_with_provider(...)` (rustls cannot auto-pick a process-default
+# provider when more than one is in the tree — `ClientConfig::builder()` would
+# PANIC at runtime). We pass the **`ring`** provider explicitly: `aws_lc_rs`
+# vendors a C library whose runtime init stalled the TLS handshake on some
+# Windows machines, freezing sign-in forever on "Connecting". `ring` is the
+# pure-Rust-friendly provider (no vendored-C init), already in the dependency
+# tree (rustls/reqwest pull it). We enable both features here so the module is
+# present at this crate regardless of cross-crate feature unification, but the
+# connector code uses `rustls::crypto::ring::default_provider()`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
 
 # Sync engine + crypto from the core repo, pinned to a git REV for
 # reproducible builds (task 0815). A relative `path` dep resolved wrong from a
@@ -91,15 +150,149 @@ libc = "0.2"
 #     CF_CALLBACK_INFO and friends.
 #   - Win32_Storage_FileSystem: FILE_BASIC_INFO struct used inside
 #     CF_FS_METADATA when minting a placeholder.
-#   - Win32_Foundation: PCWSTR / HRESULT / HANDLE.
+#   - Win32_Foundation: PCWSTR / HRESULT / HANDLE / GetLastError /
+#     ERROR_NOT_FOUND (used by the Credential Manager store too).
 #   - Win32_System_Com: GUID type used for the provider id.
+#   - Win32_Security_Credentials: CredWriteW / CredReadW / CredDeleteW /
+#     CredFree, CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_ENTERPRISE —
+#     backing for WindowsCredentialStore (keychain.rs), the
+#     Credential-Manager parallel to the macOS Keychain store.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_Security_Credentials",
+    # CF_CALLBACK_INFO embeds a *CORRELATION_VECTOR, so the struct itself is
+    # gated behind this feature in windows 0.58 — without it the type is
+    # absent and callbacks.rs fails to resolve CF_CALLBACK_INFO.
+    "Win32_System_CorrelationVector",
+    # OpenProcess / GetExitCodeProcess for the .beebeeb-sync.lock liveness
+    # probe (lockfile.rs) — the Windows equivalent of libc::kill(pid, 0).
+    "Win32_System_Threading",
+    # `OVERLAPPED` lives in `Win32::System::IO`. In windows 0.58 the
+    # `CfConvertToPlaceholder` and `CfDehydratePlaceholder` bindings are
+    # themselves `#[cfg(feature = "Win32_System_IO")]`-gated because their
+    # signatures take an `Option<*mut OVERLAPPED>` — so without this feature
+    # those two functions DO NOT EXIST in the generated bindings. We need
+    # `CfConvertToPlaceholder` to flip a freshly-uploaded local file into an
+    # in-sync placeholder (task 0780) and `CfDehydratePlaceholder` to reclaim
+    # bytes from inside a placeholder on "Free up space" (task 0781). We only
+    # ever pass `None` for the overlapped arg (synchronous calls), but the
+    # type must still resolve for the function to compile.
+    "Win32_System_IO",
+    # ── WinRT Explorer SHELL registration (task: OneDrive-class shell entry) ──
+    # `register_sync_root` above registers the sync root with the Cloud Files
+    # PLATFORM (Win32 CfRegisterSyncRoot) — that drives placeholders + hydration
+    # but writes NO Explorer shell metadata, so Explorer shows no Status column,
+    # no overlays, no sidebar entry, no "Free up space" menu. The WinRT
+    # `StorageProviderSyncRootManager::Register(StorageProviderSyncRootInfo)`
+    # call (windows_cf::register_shell_sync_root) writes the SyncRootManager shell
+    # entry + CLSID namespace tree + nav-pane mount in one call. These features
+    # expose that API surface (verified present in windows-0.58 on disk):
+    #   - Storage_Provider: StorageProviderSyncRootManager / …SyncRootInfo /
+    #     StorageProviderItemPropertyDefinition + the policy enums.
+    #   - Storage: StorageFolder::GetFolderFromPathAsync (Path = a StorageFolder).
+    #   - Foundation / Foundation_Collections: IAsyncOperation::get() +
+    #     the IVector<…> for the Status-column property definitions.
+    #   - Storage_Streams: the IBuffer type for StorageProviderSyncRootInfo.Context
+    #     (its setter is `#[cfg(feature = "Storage_Streams")]`-gated in 0.58).
+    #   - Security_Cryptography: CryptographicBuffer::CreateFromByteArray to build
+    #     the opaque Context IBuffer from the Id bytes without hand-rolling a
+    #     DataWriter.
+    "Storage_Provider",
+    "Storage",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+    "Security_Cryptography",
+    # ── OneDrive-style Explorer breadcrumb STATUS FLYOUT (windows_cf::status_ui) ──
+    # The flyout that opens when the user clicks "Beebeeb" in the Explorer
+    # path-bar is driven by a cloud-provider-implemented WinRT status UI source
+    # (IStorageProviderStatusUISource[Factory], StorageProviderStatusUI/QuotaUI/
+    # UICommand). To IMPLEMENT (not just call) those WinRT interfaces in Rust we
+    # need the `implement` feature, which gates the generated `*_Impl` traits and
+    # the `#[windows::core::implement]` macro (re-exported from windows-implement).
+    "implement",
+    # We register the status-UI source factory the way the Microsoft CloudMirror
+    # sample does, adapted for an UNPACKAGED Win32 app: a COM IClassFactory handed
+    # to `CoRegisterClassObject(CLSID, …, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)`,
+    # plus a registry binding tying the CLSID to our sync root. These features
+    # expose those APIs:
+    #   - Win32_System_Com (already enabled above): CoRegisterClassObject /
+    #     CoRevokeClassObject / IClassFactory(+_Impl) / CLSCTX_LOCAL_SERVER /
+    #     REGCLS_MULTIPLEUSE.
+    #   - Win32_System_Registry: RegCreateKeyExW / RegSetValueExW / RegCloseKey /
+    #     RegDeleteKeyValueW / RegDeleteTreeW to write the CLSID LocalServer32 key
+    #     and the `StorageProviderStatusUISourceFactory` value under the
+    #     SyncRootManager sync-root key.
+    #   - Win32_Security: in windows-0.58 `RegCreateKeyExW` is itself
+    #     `#[cfg(feature = "Win32_Security")]`-gated because its signature takes an
+    #     `Option<*const SECURITY_ATTRIBUTES>` — without this feature that function
+    #     DOES NOT EXIST in the generated bindings (we always pass None).
+    "Win32_System_Registry",
+    "Win32_Security",
+    # ── Known-folder backup ("Manage backup", task 0797) ──────────────────────
+    # `SHGetKnownFolderPath` + the `FOLDERID_*` GUID constants (FOLDERID_Desktop,
+    # _Documents, _Pictures, _Music, _Videos, _Downloads) and KF_FLAG_DEFAULT live
+    # in `Win32::UI::Shell`. `known_folder.rs` resolves each enabled folder's real
+    # path with it, then one-way mirrors its contents into the sync root (the
+    # existing scan uploads them). `Win32_UI_Shell_Common` carries the shared
+    # shell types `Win32_UI_Shell` re-exports.
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+
+    # ── Tray flyout: suppress the Win11 DWM window outline (task: tray frame) ──
+    # `DwmSetWindowAttribute` + `DWMWA_WINDOW_CORNER_PREFERENCE` / `DWMWCP_DONOTROUND`
+    # / `DWMWA_BORDER_COLOR` / `DWMWA_COLOR_NONE` live in `Win32::Graphics::Dwm`.
+    # The transparent, frameless "tray" flyout window still gets a rounded border +
+    # system shadow drawn by DWM on its window rectangle; we turn both off so the
+    # only visible surface is the React card (see lib.rs disable_dwm_window_frame).
+    "Win32_Graphics_Dwm",
+
+    # ── Explorer media THUMBNAILS (windows_cf::thumbnail_provider, task 0823) ──
+    # An in-process `IThumbnailProvider` COM server (CoRegisterClassObject +
+    # LocalServer32, bound to the sync root via the `ThumbnailProvider` value under
+    # the SyncRootManager key — the cloud-files registry binding the shell honors
+    # for placeholder thumbnails, confirmed against OneDrive + Nextcloud). It runs
+    # in THIS process, so it reaches the in-process EngineBridge directly. Needs:
+    #   - Win32_UI_Shell (already enabled above): `IThumbnailProvider`(+_Impl),
+    #     `WTS_ALPHATYPE`/`WTSAT_ARGB`, `IInitializeWithItem`(+_Impl), `IShellItem`,
+    #     `SIGDN_FILESYSPATH` (all under Win32::UI::Shell in windows-0.58).
+    #   - Win32_Graphics_Gdi: `CreateDIBSection` / `HBITMAP` / `BITMAPINFO` /
+    #     `DeleteObject` to build the 32-bit top-down ARGB bitmap Explorer renders.
+    #   - Win32_UI_WindowsAndMessaging: `GetMessageW` / `TranslateMessage` /
+    #     `DispatchMessageW` / `MSG` for the STA message pump the thumbnail-provider
+    #     COM thread MUST run (task 0823 diagnosis 2026-06-20). The class object is
+    #     registered with `CoRegisterClassObject(CLSCTX_LOCAL_SERVER)` on a
+    #     single-threaded apartment; COM delivers the shell's cross-process
+    #     `IThumbnailProvider` activation + method calls to that apartment as window
+    #     messages, so the thread must pump messages rather than `park()` — without
+    #     pumping the object is registered but unreachable and `GetThumbnail` never
+    #     fires (the shell's CoCreateInstance hangs on an unserviced message queue).
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Pure-Rust image decoding for the Explorer thumbnail provider (task 0823):
+# decodes the decrypted server thumbnail (WebP from web, JPEG/PNG from other
+# clients) to RGBA8 in memory, so we never pull in GDI+/WIC COM just to turn a
+# small blob into pixels. Default features cover WebP/JPEG/PNG/GIF/BMP.
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
+
+# Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`
+# macro used in `windows_cf/status_ui.rs` (the Explorer breadcrumb status flyout).
+# The macro expands to code that references the `windows_core` crate BY NAME
+# (`::windows_core::…` paths in the generated vtables / IUnknown impls), so
+# `windows-core` must be a DIRECT dependency even though the umbrella `windows`
+# crate already re-exports it as `windows::core`. Without this the build fails
+# with `error[E0433]: cannot find 'windows_core' in the crate root` on every
+# `#[implement(...)]` type. Pinned to the SAME version the `windows = "0.58"`
+# crate depends on (windows-0.58.0 → windows-core 0.58.0) — a version mismatch
+# would make the macro-generated `windows_core` types distinct from the ones the
+# `windows` crate's interfaces expect (type-identity errors).
+windows-core = "0.58"
 
 [dev-dependencies]
 tempfile = "3"

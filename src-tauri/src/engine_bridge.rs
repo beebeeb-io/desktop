@@ -29,10 +29,14 @@
 //! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
 //! was a stub returning `anyhow::Err`.
 
+use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use zeroize::{Zeroize, Zeroizing};
 
 use beebeeb_types::EncryptedBlob;
 use serde::{Deserialize, Serialize};
@@ -43,6 +47,50 @@ use crate::state_db::{
     FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, OperationPauseReason,
     PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE, PendingOperation, QueueDiagnostics, StateDb,
 };
+
+// ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
+//
+// Two `AtomicU64` counters track bytes actually sent/received on the wire in
+// the chunk loops (upload + download).  The heartbeat producer drains them with
+// `swap(0)` each beat so it gets the delta over the beat interval — the true
+// wire speed, not a file-completion delta.
+//
+// Both are incremented from async task context (no blocking), so `Relaxed`
+// ordering is sufficient: each counter is touched only from the engine thread,
+// and the heartbeat producer races on a separate task.  The only requirement is
+// that the swap and the add are individually atomic — a consistent view across
+// both counters simultaneously is NOT required (the heartbeat is a telemetry
+// estimate, not an accounting figure).
+
+/// Shared wire-byte counters threaded from `EngineBridge` to `runner`
+/// to the heartbeat producer. Wrapped in `Arc` so it can be cloned
+/// cheaply into the spawned heartbeat task.
+pub struct WireCounters {
+    /// Bytes written to the server in upload chunk loops (plaintext length
+    /// of each chunk before encryption — the user's data rate, not wire overhead).
+    pub upload_bytes: AtomicU64,
+    /// Bytes received from the server in download chunk loops (raw wire bytes
+    /// including the encryption envelope, which is all the client can measure
+    /// without re-decrypting — close enough for throughput display).
+    pub download_bytes: AtomicU64,
+}
+
+impl WireCounters {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            upload_bytes: AtomicU64::new(0),
+            download_bytes: AtomicU64::new(0),
+        })
+    }
+
+    /// Drain and return `(upload_bytes, download_bytes)` since the last drain.
+    /// Both counters are atomically reset to 0. Called once per heartbeat beat.
+    pub fn drain(&self) -> (u64, u64) {
+        let up = self.upload_bytes.swap(0, Ordering::Relaxed);
+        let dn = self.download_bytes.swap(0, Ordering::Relaxed);
+        (up, dn)
+    }
+}
 
 // ── Per-file state machine ────────────────────────────────────────────────────
 
@@ -102,6 +150,9 @@ impl FileSM {
 pub struct EngineBridge {
     db: Arc<StateDb>,
     api: Arc<ApiClient>,
+    /// Wire-byte counters shared with the heartbeat producer. Both are
+    /// drained (swapped to 0) once per beat; incremented by the chunk loops.
+    pub wire: Arc<WireCounters>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +166,23 @@ pub struct FinderWriteTarget {
     pub file_id: Option<String>,
     pub parent_id: Option<String>,
     pub filename: String,
+    /// Full server-relative, '/'-joined path of this item under the sync root
+    /// (e.g. `docs/a.txt` for a nested file, `a.txt` at the root). When `None`,
+    /// the path defaults to the leaf `filename` — the legacy top-level behaviour.
+    ///
+    /// **Why this exists (task 0780 nested correctness):** the local-create path
+    /// stores this as the row's `path` and threads it through as the upload's
+    /// `target_path`, so (a) `classify_local_path`'s "already a known server
+    /// file?" filter (which queries the FULL relative key) matches a nested
+    /// file's row immediately, (b) `finalize_local_upload_placeholder` joins
+    /// `sync_root + rel_path` to find the file on disk and re-stamp it in-sync,
+    /// and (c) a local delete looks up the full key and trashes it on the server.
+    /// Without it, nested rows were keyed by the leaf only and all three broke
+    /// until the next `sync_tick` re-keyed them. Top-level is unaffected (leaf ==
+    /// full key). The OS-extension IPC paths that don't supply it keep the leaf
+    /// fallback.
+    #[serde(default)]
+    pub rel_path: Option<String>,
     pub kind: FinderWriteItemKind,
     pub contents_path: Option<String>,
     pub content_type: Option<String>,
@@ -227,7 +295,7 @@ struct SharedRootMapping {
 
 impl EngineBridge {
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
-        Self { db, api }
+        Self { db, api, wire: WireCounters::new() }
     }
 
     /// Borrow the underlying state DB so callers (e.g. [`sync_tick`])
@@ -331,7 +399,34 @@ impl EngineBridge {
                     .file_id
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("trash operation missing file_id"))?;
+                // Server-authoritative deletion (task 0802). `trash_file` calls
+                // `.error_for_status()`, so an `Ok` here means the server returned
+                // HTTP 2xx for `DELETE /files/{id}` (it set `is_trashed=TRUE` and
+                // emitted a `file_trash` sync op).
+                //
+                // We deliberately DO NOT delete the local row here. The row was
+                // parked in `Trashing` by `watcher::handle_delete`; we KEEP it in
+                // `Trashing` as the durable hidden-locally marker. Returning `Ok`
+                // makes `process_due_operations` REMOVE this op — so the
+                // `Trashing` status (not the op) is now what protects the row.
+                //
+                // Why not delete now: deleting + a same-tick / replica-lagged
+                // `/sync/snapshot` that still lists the (just-trashed) file would
+                // re-insert a FRESH `CloudOnly` row and re-mint the placeholder —
+                // the "deleted file comes back" race. Instead we let convergence
+                // happen authoritatively: while the snapshot still lists the file
+                // the `Trashing` guard in `process_metadata_row` preserves it; once
+                // the trash propagates the file is ABSENT from the snapshot and
+                // `prune_absent` removes the (now op-less) `Trashing` row. If the
+                // `file_trash` op echo arrives first, `apply_sync_op` deletes the
+                // row directly — either path converges.
                 self.api.trash_file(file_id).await?;
+                // Zero-knowledge: log the file_id (an opaque server id) only —
+                // NEVER the path. Lets the lead confirm the 2xx in the trace.
+                tracing::info!(
+                    file_id = %file_id,
+                    "trash op: server DELETE /files/{{id}} returned 2xx — keeping row Trashing, dropping op"
+                );
                 Ok(())
             }
             OperationKind::RestoreFile => {
@@ -355,11 +450,11 @@ impl EngineBridge {
                 self.api.restore_version(file_id, version_id).await?;
                 Ok(())
             }
-            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op).await,
+            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op, sync_root).await,
         }
     }
 
-    async fn upload_version(&self, op: &PendingOperation) -> anyhow::Result<()> {
+    async fn upload_version(&self, op: &PendingOperation, sync_root: &Path) -> anyhow::Result<()> {
         let local_file_id = op
             .file_id
             .as_deref()
@@ -431,6 +526,12 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
         }
         let mut buffer = vec![0u8; chunk_size];
+        // Rate-limit ceiling: read once per file, not per chunk (config is on
+        // disk but the file is fast to parse; at most one read per upload op).
+        let upload_kbps_limit = crate::config::DesktopConfig::load()
+            .map(|c| c.upload_kbps_limit)
+            .unwrap_or(0);
+
         for chunk_index in 0..chunk_count {
             let read = file.read(&mut buffer)?;
             if read == 0 {
@@ -442,9 +543,26 @@ impl EngineBridge {
             }
             let encrypted = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &buffer[..read])
                 .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
+            let chunk_start = std::time::Instant::now();
             self.api
                 .upload_session_chunk(&upload.upload_session_id, chunk_index as u32, &encrypted)
                 .await?;
+
+            // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
+            self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
+
+            // E — token-bucket pacing: if a limit is set and the chunk transferred
+            // faster than the budget allows, sleep the remainder.
+            if upload_kbps_limit > 0 {
+                let budget_secs = read as f64 / (upload_kbps_limit as f64 * 1024.0);
+                let elapsed_secs = chunk_start.elapsed().as_secs_f64();
+                if budget_secs > elapsed_secs {
+                    let sleep_ms = ((budget_secs - elapsed_secs) * 1000.0) as u64;
+                    if sleep_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    }
+                }
+            }
         }
 
         let completed = self.api.complete_upload_session(&upload.upload_session_id).await?;
@@ -462,7 +580,53 @@ impl EngineBridge {
                 tracing::warn!(path = %payload_path.display(), error = %e, "failed to remove staged upload payload");
             }
         }
+
+        // Windows Cloud Files (task 0780): the file the user dropped in the
+        // sync root is, at this point, a PLAIN local file — Explorer shows it
+        // as always-local, and (worse) it has no Cloud Files identity, so it
+        // can never be dehydrated by "Free up space" or re-hydrated on demand.
+        // Convert it IN PLACE into an in-sync placeholder carrying the server
+        // file_id, so it shows the synced overlay and round-trips through the
+        // same fetch/dehydrate machinery as a downloaded file. Keyed on a
+        // `create_file` op with a `target_path` (the happy path: a brand-new
+        // user file). Best-effort — a failure here leaves a working local file,
+        // it just won't show the synced overlay until the next reconcile.
+        #[cfg(target_os = "windows")]
+        self.finalize_local_upload_placeholder(op, &server_file_id, sync_root);
+
         Ok(())
+    }
+
+    /// Convert a freshly-uploaded NEW local file (still a plain file on disk)
+    /// into an in-sync Cloud Files placeholder. Windows-only, best-effort.
+    /// Only runs for `create_file` operations that carry a `target_path` — the
+    /// happy path of task 0780. Modify-as-new-version is a deferred follow-up
+    /// and is intentionally not converted here.
+    #[cfg(target_os = "windows")]
+    fn finalize_local_upload_placeholder(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path) {
+        let Some(metadata) = op.metadata_json.as_deref() else {
+            return;
+        };
+        let is_create = serde_json::from_str::<serde_json::Value>(metadata)
+            .map(|m| m["operation"].as_str() == Some("create_file"))
+            .unwrap_or(false);
+        if !is_create {
+            return;
+        }
+        let Some(target_path) = op.target_path.as_deref() else {
+            return;
+        };
+        let on_disk = sync_root.join(target_path.trim_start_matches('/').replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !on_disk.is_file() {
+            // The user moved/deleted it between drop and upload — nothing to
+            // convert; the placeholder seeder will mint a cloud-only stub on a
+            // later tick from the server row instead.
+            return;
+        }
+        if let Err(e) = crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&on_disk, server_file_id) {
+            // Zero-knowledge: log the file_id only, never the path/filename.
+            tracing::warn!(file_id = %server_file_id, error = %e, "could not convert uploaded file to in-sync placeholder");
+        }
     }
 
     fn apply_completed_upload(
@@ -484,6 +648,10 @@ impl EngineBridge {
             modified_at: now,
             content_hash: None,
             remote_updated_at: now,
+            // parent_id/item_kind are not written by upsert_file — the
+            // contract update below owns them. These are inert defaults.
+            parent_id: op.parent_id.clone(),
+            item_kind: ItemKind::File,
         });
         entry.file_id = server_file_id.to_string();
         if let Some(target_path) = op.target_path.as_ref() {
@@ -552,6 +720,10 @@ impl EngineBridge {
                 modified_at: root.approved_at.unwrap_or(now),
                 content_hash: None,
                 remote_updated_at: root.approved_at.unwrap_or(0),
+                // upsert_file does not persist these; the contract update
+                // just below sets the authoritative parent_id/item_kind.
+                parent_id: None,
+                item_kind: if root.is_folder { ItemKind::Folder } else { ItemKind::File },
             })?;
 
             let mut contract = self
@@ -603,10 +775,44 @@ impl EngineBridge {
         }
 
         let parent_contract = self.ensure_shared_parent_allows_write(target.parent_id.as_deref())?;
-        let file_id = uuid::Uuid::new_v4().to_string();
+        // Honour a caller-supplied id (task 0811 folder scaffolding writes the
+        // local row under a known id and needs the server CreateFolder to reuse
+        // it — the server accepts a client `folder_id`). The file path and the
+        // legacy IPC always pass `None`, getting a fresh uuid as before.
+        let file_id = target.file_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Full server-relative key for this item: the FULL nested path when the
+        // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
+        // legacy IPC). This is stored as the row's `path` AND threaded as the
+        // upload's `target_path`, so filter-3, finalize, and delete all key off
+        // the same path. `clone` because `filename` is still needed for the
+        // server `name` (always the leaf).
+        let rel_path = target.rel_path.clone().unwrap_or_else(|| target.filename.clone());
         match target.kind {
             FinderWriteItemKind::Folder => {
                 let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                // Write the local folder row + contract synchronously, the same
+                // way the File branch writes its `Uploading` row, so a nested
+                // child dispatched later in the SAME scan resolves this folder as
+                // its parent (`resolve_parent_id_for` reads `files.item_kind`)
+                // without waiting for a server `/sync` round-trip. `Local` =
+                // present on disk, server CreateFolder op pending in the queue.
+                self.db.upsert_file(&FileEntry {
+                    file_id: file_id.clone(),
+                    path: rel_path.clone(),
+                    status: FileStatus::Local,
+                    size_bytes: 0,
+                    modified_at: now_secs(),
+                    content_hash: None,
+                    remote_updated_at: 0,
+                    // Not persisted by upsert_file; the contract update owns these.
+                    parent_id: None,
+                    item_kind: ItemKind::Folder,
+                })?;
+                if let Some(mut contract) = self.db.get_file_contract_state(&file_id)? {
+                    contract.item_kind = ItemKind::Folder;
+                    contract.parent_id = target.parent_id.clone();
+                    self.db.set_file_contract_state(&contract)?;
+                }
                 let mut payload = serde_json::json!({
                     "operation": "create_folder",
                     "name_encrypted": metadata,
@@ -616,7 +822,7 @@ impl EngineBridge {
                     OperationKind::CreateFolder,
                     Some(file_id),
                     target.parent_id,
-                    Some(target.filename),
+                    Some(rel_path),
                     payload,
                     None,
                     None,
@@ -638,12 +844,19 @@ impl EngineBridge {
                     encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
                 self.db.upsert_file(&FileEntry {
                     file_id: file_id.clone(),
-                    path: target.filename.clone(),
+                    // FULL relative key (e.g. `docs/a.txt`), so a nested file's
+                    // row is found by `get_file_by_path(full_key)` immediately —
+                    // not keyed by the leaf, which classify_local_path's filter-3
+                    // would miss for a nested file → spurious re-upload.
+                    path: rel_path.clone(),
                     status: FileStatus::Uploading,
                     size_bytes,
                     modified_at: now_secs(),
                     content_hash: None,
                     remote_updated_at: 0,
+                    // Not persisted by upsert_file; contract owns these.
+                    parent_id: None,
+                    item_kind: ItemKind::File,
                 })?;
                 let mut payload = serde_json::json!({
                     "operation": "create_file",
@@ -656,7 +869,10 @@ impl EngineBridge {
                     OperationKind::UploadVersion,
                     Some(file_id),
                     target.parent_id,
-                    Some(target.filename),
+                    // target_path = the FULL relative key, so
+                    // finalize_local_upload_placeholder joins sync_root + this
+                    // and finds the nested file on disk to re-stamp it in-sync.
+                    Some(rel_path),
                     payload,
                     Some(staged_path),
                     None,
@@ -767,12 +983,324 @@ impl EngineBridge {
         )
     }
 
-    pub fn set_recursive_pin(&self, file_id: &str, pinned: bool) -> anyhow::Result<PinUpdateOutcome> {
+    /// Single, parent-aware classifier shared by every local-write trigger
+    /// (the retired `notify` watcher *and* the Windows Cloud Files NOTIFY
+    /// callbacks). Given an absolute on-disk `path` under `sync_root`, it
+    /// decides whether `path` is a *genuinely-new* user file that should be
+    /// uploaded, and if so returns a ready-to-queue [`FinderWriteTarget`] with
+    /// `parent_id` resolved from the path's parent directory.
+    ///
+    /// It runs the three feedback-loop filters, in order, so a download / a
+    /// hydration / an engine-internal write is NEVER mistaken for a new upload:
+    ///
+    /// 1. **Engine-internal paths + OS junk** — anything under `<root>/.beebeeb/`,
+    ///    the `<root>/.beebeeb-sync.lock`, any `.beebeeb` path component, and the
+    ///    ignored-name set ([`is_ignored_finder_name`]: `.tmp`, `~$…`, `.DS_Store`,
+    ///    …). These are writes the engine itself (or the OS) makes constantly.
+    /// 2. **Cloud Files placeholders** (Windows only) — a reparse point under the
+    ///    sync root is something WE minted (placeholder seed or post-upload
+    ///    convert). Hydration fills a placeholder's data stream WITHOUT clearing
+    ///    its reparse-point attribute, so a hydration-write still trips this guard
+    ///    and never re-uploads. Checked via
+    ///    [`crate::windows_cf::placeholders::is_cloud_placeholder`].
+    /// 3. **Already a known server file** (authoritative) — look the path up in
+    ///    the state DB. A row means the file already lives on the server
+    ///    (cloud-only / downloading / local / uploading), so a write to it is a
+    ///    hydration or a re-download, NOT a new creation. Only a path with NO DB
+    ///    row survives.
+    ///
+    /// `parent_id` resolution (nested uploads): for a survivor at
+    /// `<parent_dir>/<name>`, the parent directory's server folder id is looked
+    /// up by its server-relative path. A root-level file resolves to `None`; a
+    /// nested file resolves to `Some(<parent folder file_id>)` so the upload
+    /// lands in the right server folder. If the parent directory has no DB row
+    /// yet (its folder placeholder hasn't reconciled), `parent_id` falls back to
+    /// `None` rather than guessing — the file uploads to the root and a later
+    /// tick can reconcile, which is strictly safer than attaching it to the
+    /// wrong parent.
+    ///
+    /// Returns `None` when `path` is not a regular file, is filtered out, or the
+    /// DB lookup fails (fail-closed: a lookup error skips the upload rather than
+    /// risk a spurious one). Cross-platform so it type-checks everywhere; only
+    /// the Windows triggers call it.
+    pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
+        // The file may have been deleted/renamed during a debounce window — if
+        // it is no longer a regular file there is nothing to upload.
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_file() => {}
+            _ => return None,
+        }
+
+        // Filter 1 — engine-internal paths + OS junk.
+        if path_is_engine_internal(sync_root, path) {
+            return None;
+        }
+        let file_name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        if is_ignored_finder_name(&file_name) {
+            return None;
+        }
+
+        // Filter 2 — Cloud Files placeholders are engine-owned (Windows only). A
+        // reparse point under the sync root is a placeholder we minted or
+        // converted; the hydration write that fills it does NOT turn it back into
+        // a plain file, so we must never treat a placeholder write as a new
+        // upload.
+        #[cfg(target_os = "windows")]
+        if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
+            return None;
+        }
+
+        // Filter 3 (authoritative) — already a known server file?
+        let rel = relative_db_path(sync_root, path)?;
+        match self.db.get_file_by_path(&rel) {
+            Ok(Some(_existing)) => {
+                tracing::trace!("classify_local_path: skipping write to already-tracked server file");
+                return None;
+            }
+            Ok(None) => { /* genuinely new — fall through */ }
+            Err(e) => {
+                tracing::warn!(error = %e, "classify_local_path: state DB lookup failed; skipping to be safe");
+                return None;
+            }
+        }
+
+        // parent_id resolution: a survivor at `<parent_dir>/<name>`. If the parent
+        // directory maps to a known server FOLDER row, attach the new file to it;
+        // otherwise upload at the root (None). We never attach to a row that isn't
+        // a folder.
+        let parent_id = self.resolve_parent_id_for(sync_root, path);
+
+        Some(FinderWriteTarget {
+            file_id: None,
+            parent_id,
+            filename: file_name.clone(),
+            // The FULL '/'-joined relative key (e.g. `docs/a.txt`), so the row is
+            // stored + the upload's target_path is threaded under the same key
+            // that filter-3, finalize, and delete all query. `rel` was computed
+            // above for the filter-3 lookup; reuse it verbatim.
+            rel_path: Some(rel),
+            kind: FinderWriteItemKind::File,
+            contents_path: Some(path.to_string_lossy().into_owned()),
+            content_type: beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string),
+            base_version_identifier: None,
+        })
+    }
+
+    /// Resolve the server folder id of `path`'s immediate parent directory, for
+    /// nested uploads. Returns `None` for a root-level file (parent == sync root)
+    /// or when the parent directory has no known server FOLDER row yet. The
+    /// parent's server-relative key is built in the same '/'-joined shape the
+    /// state DB stores, then looked up via [`StateDb::get_file_by_path`]; a hit
+    /// that is a folder yields its `file_id`.
+    ///
+    /// `pub(crate)` so the upload driver's rename handler can resolve the NEW
+    /// parent of a moved file through the exact same logic.
+    pub(crate) fn resolve_parent_id_for(&self, sync_root: &Path, path: &Path) -> Option<String> {
+        let parent_dir = path.parent()?;
+        // Root-level file: parent IS the sync root → no server parent.
+        if parent_dir == sync_root {
+            return None;
+        }
+        let parent_rel = relative_db_path(sync_root, parent_dir)?;
+        match self.db.get_file_by_path(&parent_rel) {
+            Ok(Some(entry)) if entry.is_dir() => Some(entry.file_id),
+            // No row, or a row that is somehow a file (shouldn't happen for a
+            // directory path) → upload at the root rather than mis-parent.
+            _ => None,
+        }
+    }
+
+    /// Ensure the on-disk DIRECTORY at `path` (under `sync_root`) has a server
+    /// vault folder, returning its `file_id`. This is the folder-hierarchy half
+    /// of the local-create pipeline (task 0811): the enumeration scan only
+    /// uploaded *files*, so a freshly-mirrored nested tree
+    /// (`Backup/<device>/<folder>/<sub>/file`) had no folder rows — every nested
+    /// file's `resolve_parent_id_for` missed and the file uploaded FLAT to the
+    /// vault root. Scaffolding the folder first (parents before children, which
+    /// the top-down walk already guarantees) gives each child a real parent to
+    /// attach to, so the server vault mirrors the on-disk hierarchy.
+    ///
+    /// Idempotent + parent-aware:
+    /// - If a DB row already exists for this directory's relative key, returns its
+    ///   `file_id` (a folder row, or `None` if it is somehow a file row).
+    /// - Otherwise mints a client folder id, writes a local `Folder` row + contract
+    ///   IMMEDIATELY (so a child file dispatched later in the SAME scan resolves
+    ///   this parent without waiting for a server round-trip), and enqueues a
+    ///   `CreateFolder` op carrying that same id — the server honours the
+    ///   client-supplied `folder_id`, so the local row and the server folder share
+    ///   one id and the parent linkage is consistent.
+    ///
+    /// The op's `target_path` is the folder's relative key, so a backup folder is
+    /// auto-tagged with its origin key (Part C) and purged on disable. Returns
+    /// `None` for the sync root itself, a non-directory, or on a DB error
+    /// (fail-closed: the file then uploads at the root rather than mis-parenting).
+    pub fn ensure_local_folder(&self, sync_root: &Path, path: &Path) -> Option<String> {
+        // Root itself has no server folder.
+        if path == sync_root {
+            return None;
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => {}
+            _ => return None,
+        }
+        if path_is_engine_internal(sync_root, path) {
+            return None;
+        }
+        let name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        if is_ignored_finder_name(&name) {
+            return None;
+        }
+        let rel = relative_db_path(sync_root, path)?;
+
+        // Already known? Return the existing folder id (idempotent across scans).
+        match self.db.get_file_by_path(&rel) {
+            Ok(Some(entry)) if entry.is_dir() => return Some(entry.file_id),
+            Ok(Some(_)) => return None, // a file row at a dir path — never mis-parent
+            Ok(None) => { /* mint below */ }
+            Err(e) => {
+                tracing::warn!(error = %e, "ensure_local_folder: DB lookup failed; skipping");
+                return None;
+            }
+        }
+
+        // Parent linkage: resolve THIS directory's parent dir to its folder id
+        // (None at the Backup root level — a top-level folder under the vault).
+        let parent_id = self.resolve_parent_id_for(sync_root, path);
+        let folder_id = uuid::Uuid::new_v4().to_string();
+
+        // Delegate the row write + contract + CreateFolder enqueue to the one
+        // shared create path, carrying our pre-minted id (which the server
+        // honours) so the local row and the server folder share an id. The
+        // `rel`-path `target_path` auto-tags a backup folder with its origin key.
+        let target = FinderWriteTarget {
+            file_id: Some(folder_id.clone()),
+            parent_id,
+            filename: name,
+            rel_path: Some(rel),
+            kind: FinderWriteItemKind::Folder,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        };
+        match self.queue_finder_create(target) {
+            Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+                tracing::info!(op_id = %op_id, folder_id = %folder_id, "upload driver: scaffolded vault folder for nested upload");
+                Some(folder_id)
+            }
+            Ok(FinderWriteOutcome::Ignored { .. }) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "ensure_local_folder: failed to scaffold vault folder");
+                None
+            }
+        }
+    }
+
+    /// Apply a pin ("available offline") toggle to `file_id` and its subtree.
+    ///
+    /// `sync_root` is the on-disk root of the vault — needed on Windows to
+    /// resolve each affected DB row to its placeholder path and set the OS-level
+    /// pin state. It is unused on macOS/Linux (the `#[cfg]` below silences the
+    /// warning) but threaded in unconditionally to keep one signature.
+    ///
+    /// Three things happen on a pin change:
+    /// 1. **DB** — `db.set_recursive_pin` flips the `pin_state` column for the
+    ///    whole subtree and returns the ids whose state actually changed.
+    /// 2. **Server** — `enqueue_pin_tree_operation` propagates the pin so OTHER
+    ///    devices learn about it. Always runs (every platform).
+    /// 3. **OS hydration** —
+    ///    - **Windows**: `CfSetPinState` is the OS contract. A pinned placeholder
+    ///      is hydrated by Windows via the normal FETCH_DATA path AND is exempt
+    ///      from auto-dehydration, so it stays resident. We therefore do NOT
+    ///      enqueue our own out-of-band hydrate ops (the old DB-only model did,
+    ///      because Windows was never told about the pin — that loop is dropped on
+    ///      Windows). New children inherit the parent pin via CF_PIN_STATE_INHERIT.
+    ///    - **macOS/Linux**: there is no CF pin primitive, so we keep enqueuing an
+    ///      explicit hydrate op per newly-pinned cloud-only file to materialise it.
+    pub fn set_recursive_pin(
+        &self,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+        file_id: &str,
+        pinned: bool,
+    ) -> anyhow::Result<PinUpdateOutcome> {
         let now = now_secs();
         let changed_item_ids = self.db.set_recursive_pin(file_id, pinned, now)?;
+        // Mutated only on the non-Windows hydrate-enqueue path below; on Windows
+        // the OS (CfSetPinState) drives hydration, so this stays 0.
+        #[cfg_attr(target_os = "windows", allow(unused_mut))]
         let mut hydrate_operations = 0usize;
 
         self.enqueue_pin_tree_operation(file_id, pinned, now)?;
+
+        #[cfg(target_os = "windows")]
+        {
+            // OS-level pin: tell Windows the actual "available offline" state so a
+            // pinned file is kept resident (no auto-dehydration) and an unpinned
+            // one becomes reclaim-eligible again. We pin/unpin only the TOP item
+            // the user toggled, with RECURSE when it is a directory — the
+            // recursive flag stamps existing descendants in one call and
+            // CF_PIN_STATE_INHERIT covers descendants created later — rather than
+            // issuing a per-row CfSetPinState for every changed id.
+            if let Some(top) = self.db.get_file(file_id)? {
+                if let Some(path) = Self::placeholder_path_under(sync_root, &top.path) {
+                    let recurse = top.is_dir();
+                    if let Err(e) = crate::windows_cf::placeholders::set_pin_state(&path, pinned, recurse) {
+                        // Zero-knowledge: never log the path. A pin-state failure
+                        // must not abort the DB+server pin that already succeeded;
+                        // surface it as a log line and continue.
+                        tracing::warn!(file_id = %file_id, pinned, recurse, error = %e, "CfSetPinState failed for pin toggle");
+                    }
+                }
+
+                // Proactive hydrate. CfSetPinState(PINNED) marks the subtree
+                // pinned but Windows does NOT eagerly download a not-yet-opened
+                // placeholder — a pinned-but-unopened file stays cloud-only
+                // (RECALL_ON_DATA_ACCESS) until something reads it. So "available
+                // offline" is only real once we force the download. Collect the
+                // cloud-only file descendants (the toggled item itself if it is a
+                // cloud-only file, or every cloud-only file under it if a folder)
+                // and CfHydratePlaceholder each. We only ever hydrate on pin, not
+                // unpin (unpinning just makes files reclaim-eligible again).
+                if pinned {
+                    match self.db.cloud_only_file_descendants(file_id) {
+                        Ok(entries) if !entries.is_empty() => {
+                            // Resolve placeholder paths the SAME way the pin does,
+                            // dropping any that fail the containment guard.
+                            let paths: Vec<PathBuf> = entries
+                                .iter()
+                                .filter_map(|e| Self::placeholder_path_under(sync_root, &e.path))
+                                .collect();
+                            // CfHydratePlaceholder BLOCKS until each file's bytes
+                            // are on disk, and a folder may hold many/large files,
+                            // so run the whole sweep OFF the IPC thread — set_recursive_pin
+                            // returns immediately while hydration proceeds in the
+                            // background. A per-file failure is logged and never
+                            // aborts the rest of the sweep.
+                            let total = paths.len();
+                            std::thread::spawn(move || {
+                                tracing::debug!(count = total, "proactive pin hydrate: starting");
+                                let mut ok = 0usize;
+                                for path in &paths {
+                                    match crate::windows_cf::placeholders::hydrate_placeholder(path) {
+                                        Ok(()) => ok += 1,
+                                        // Zero-knowledge: never log the path.
+                                        Err(e) => tracing::warn!(error = %e, "proactive pin hydrate: file failed"),
+                                    }
+                                }
+                                tracing::debug!(hydrated = ok, total, "proactive pin hydrate: finished");
+                            });
+                        }
+                        Ok(_) => {} // nothing cloud-only to hydrate
+                        Err(e) => {
+                            // A query failure must not abort the DB+server pin that
+                            // already succeeded; log and continue.
+                            tracing::warn!(file_id = %file_id, error = %e, "proactive pin hydrate: descendant query failed");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
         if pinned {
             for changed_id in &changed_item_ids {
                 let Some(entry) = self.db.get_file(changed_id)? else {
@@ -795,6 +1323,29 @@ impl EngineBridge {
             changed_item_ids,
             hydrate_operations,
         })
+    }
+
+    /// Map a server-relative, '/'-joined DB key (`FileEntry::path`) to its
+    /// on-disk placeholder path under `sync_root`, rejecting empty/traversal
+    /// keys. Mirrors `windows_cf::callbacks::safe_join_under_root` (kept private
+    /// there) so the pin path resolution uses the same containment guard as the
+    /// fetch fallback. Returns `None` for an empty key or any `.`/`..`/empty
+    /// segment, or if the join escapes the root.
+    #[cfg(target_os = "windows")]
+    fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
+        let rel = rel_path.trim_matches('/');
+        if rel.is_empty() {
+            return None;
+        }
+        if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+            return None;
+        }
+        let native_rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let candidate = sync_root.join(&native_rel);
+        if !candidate.starts_with(sync_root) {
+            return None;
+        }
+        Some(candidate)
     }
 
     pub fn record_smart_cache_open(
@@ -848,6 +1399,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error,
+            backup_source_key: None,
             created_at: now,
             updated_at: now,
         };
@@ -868,6 +1420,17 @@ impl EngineBridge {
     ) -> anyhow::Result<FinderWriteOutcome> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
+        // Task 0811: tag known-folder backup ops with their origin key (derived
+        // from the server-relative path the upload threads as `target_path`), so
+        // disabling that folder can purge exactly its queued ops. `None` for any
+        // normal user upload — those are never purged by a folder disable. The
+        // `_this_device` form pins segment 2 to THIS machine's sanitized device
+        // name (the only value the mirror writes), so a user's own
+        // `Backup/<other>/<CatalogName>/…` file is never mis-tagged + wrongly
+        // purged (review fix).
+        let backup_source_key = target_path
+            .as_deref()
+            .and_then(crate::known_folder::backup_source_key_for_this_device);
         let op = PendingOperation {
             op_id: op_id.clone(),
             kind: kind.clone(),
@@ -882,6 +1445,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error: Some("queued from Finder; upload worker not yet attached".to_string()),
+            backup_source_key,
             created_at: now,
             updated_at: now,
         };
@@ -916,6 +1480,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error: Some("queued recursive pin state; hydration worker not yet attached".to_string()),
+            backup_source_key: None,
             created_at: now,
             updated_at: now,
         };
@@ -944,6 +1509,7 @@ impl EngineBridge {
             max_attempts: 25,
             next_retry_at: now,
             last_error: Some("queued pinned content hydration; transfer worker not yet attached".to_string()),
+            backup_source_key: None,
             created_at: now,
             updated_at: now,
         };
@@ -988,8 +1554,10 @@ impl EngineBridge {
     }
 
     /// Download `file_id` from the vault, decrypt, write to `dest_path`.
-    /// Called by an OS extension when a cloud-only placeholder is first
-    /// opened (Tasks 5-7) and by `bb pull`-style flows we may add later.
+    /// Called by the Linux FUSE driver, the IPC socket, and conflict-resolution
+    /// paths where the decrypted file must land on disk (sync root or a caller-
+    /// chosen path). Status transitions: `Downloading` → `Local` on success,
+    /// `Error` on failure.
     ///
     /// Steps mirror `repos/cli/src/commands/pull.rs::pull_single_file`:
     ///
@@ -1009,14 +1577,32 @@ impl EngineBridge {
     ///
     /// On any error the status is flipped to `Error` so the overlay can
     /// render a problem indicator, then the error is bubbled.
+    ///
+    /// **Windows Cloud Files callers must use [`Self::hydrate_file_to_memory`]
+    /// instead** — that variant never writes plaintext to disk, satisfying the
+    /// zero-knowledge requirement for on-demand CF hydration.
     pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
         // RAII-style: any early return below the status flip should
         // leave the file in `Error`, not `Downloading`. We do that by
         // wrapping the body in an inner async fn whose Err branch we
         // catch.
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate(file_id, dest_path).await {
-            Ok(()) => {
+        match self.do_hydrate(file_id).await {
+            Ok(mut buf) => {
+                // Write the decrypted bytes to disk (this is the intentional
+                // disk-writing path — sync root / conflict resolution / FUSE).
+                // Make the destination directory if needed.
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
+                }
+                let write_result = std::fs::write(dest_path, &*buf)
+                    .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                // Zeroize the in-memory copy now that it is on disk (or on
+                // error) so the allocation does not linger with plaintext.
+                buf.zeroize();
+                write_result?;
+
                 self.db.set_status(file_id, FileStatus::Local)?;
                 let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
                 self.db
@@ -1033,7 +1619,61 @@ impl EngineBridge {
         }
     }
 
-    async fn do_hydrate(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
+    /// Download `file_id` from the vault, decrypt, and return the plaintext
+    /// **in memory only** — it is NEVER written to disk.
+    ///
+    /// This is the Windows Cloud Files hydration path. The Cloud Files runtime
+    /// calls `fetch_data_callback` on a filter-driver thread and expects us to
+    /// deliver bytes via `CfExecute(TRANSFER_DATA)`; there is no requirement to
+    /// materialise the plaintext as a file. Writing to `%TEMP%` would expose
+    /// decrypted user data on disk, violating the zero-knowledge contract.
+    ///
+    /// The returned [`Zeroizing`] wrapper overwrites the buffer with zeros on
+    /// drop, so plaintext is wiped from memory as soon as the caller is done
+    /// with it — even if an early `return` or `?` is taken. Intermediate
+    /// per-chunk decrypted buffers are also explicitly zeroized after being
+    /// copied into the accumulator (see [`Self::do_hydrate`]).
+    ///
+    /// Status transitions: `Downloading` → `Local` on success, `Error` on
+    /// failure. The `cache_path` recorded in state_db is `""` (empty) because
+    /// the bytes live inside the CF placeholder in the sync root, not at a
+    /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
+    /// the real on-disk path from `path` + sync root (see state_db comment).
+    #[cfg(target_os = "windows")]
+    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        self.db.set_status(file_id, FileStatus::Downloading)?;
+        match self.do_hydrate(file_id).await {
+            Ok(buf) => {
+                self.db.set_status(file_id, FileStatus::Local)?;
+                // cache_path is empty: on Windows CF the hydrated bytes live
+                // INSIDE the placeholder (the CF runtime writes them there after
+                // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
+                // file. Byte count is still recorded for smart-cache accounting.
+                self.db
+                    .mark_cached(file_id, "", buf.len() as i64, now_secs())?;
+                let _ = self.enforce_smart_cache(CachePolicy::default());
+                Ok(buf)
+            }
+            Err(e) => {
+                let _ = self.db.set_status(file_id, FileStatus::Error);
+                Err(e)
+            }
+        }
+    }
+
+    /// Core download + decrypt loop. Returns the full plaintext in a
+    /// [`Zeroizing`] wrapper so the allocation is wiped on drop regardless of
+    /// which exit path is taken (normal return, early `?`, or a panic unwind).
+    ///
+    /// Intermediate per-chunk buffers from `decrypt_downloaded_chunk` are
+    /// explicitly zeroized after being copied into the accumulator, so at most
+    /// one extra chunk's worth of plaintext is live in memory at any time.
+    ///
+    /// This function deliberately does NOT write anything to disk. Callers that
+    /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
+    /// handle that themselves so the disk-write decision stays at the call site,
+    /// not buried inside the crypto loop.
+    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -1054,29 +1694,125 @@ impl EngineBridge {
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
 
+        // Rate-limit ceiling for downloads.
+        let download_kbps_limit = crate::config::DesktopConfig::load()
+            .map(|c| c.download_kbps_limit)
+            .unwrap_or(0);
+
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
         // ciphertext is always larger than plaintext anyway.
+        // Use Zeroizing so that if we bail mid-loop (network error,
+        // decrypt error) the partial plaintext is still wiped.
         let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let mut plaintext: Vec<u8> = Vec::with_capacity(approx_size);
+        let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size));
 
         for i in 0..chunk_count {
+            let chunk_start = std::time::Instant::now();
             let chunk_bytes = self.api.download_chunk(file_id, i).await?;
-            let decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
+            let wire_len = chunk_bytes.len() as u64;
+            // Decrypt into a temporary buffer, copy into the accumulator,
+            // then zeroize the temporary. This limits live plaintext to
+            // the accumulator + one chunk at any moment.
+            let mut decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
-            plaintext.extend_from_slice(&decrypted);
+            acc.extend_from_slice(&decrypted);
+            decrypted.zeroize();
+
+            // P1 — wire-byte counter: count raw wire bytes received.
+            self.wire.download_bytes.fetch_add(wire_len, Ordering::Relaxed);
+
+            // E — token-bucket pacing for downloads.
+            if download_kbps_limit > 0 {
+                let budget_secs = wire_len as f64 / (download_kbps_limit as f64 * 1024.0);
+                let elapsed_secs = chunk_start.elapsed().as_secs_f64();
+                if budget_secs > elapsed_secs {
+                    let sleep_ms = ((budget_secs - elapsed_secs) * 1000.0) as u64;
+                    if sleep_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    }
+                }
+            }
         }
 
-        // Make the destination directory if needed (OS extensions that
-        // hand us a per-file cache path will already have created it,
-        // but a generic mirror layout might not).
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
-        }
-        std::fs::write(dest_path, &plaintext).map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()))?;
+        Ok(acc)
+    }
 
-        Ok(())
+    /// Fetch the encrypted server thumbnail for `file_id`, decrypt it **in
+    /// memory only**, and return the decoded image bytes (WebP / JPEG / PNG)
+    /// inside a [`Zeroizing`] wrapper.
+    ///
+    /// This is the read path for the Windows Explorer `IThumbnailProvider`
+    /// (task 0823). It mirrors [`Self::do_hydrate`]'s per-file-key derivation but
+    /// hits `GET /files/:id/thumbnail/{variant}` instead of the chunk range and
+    /// reuses the **existing** encrypted thumbnail the original uploading client
+    /// generated (a downscaled still for images, a poster frame for video). The
+    /// Windows side never regenerates a thumbnail and never decodes the original
+    /// media — it just decrypts this small blob.
+    ///
+    /// ## Wire envelope (NOT the chunk envelope)
+    ///
+    /// Thumbnails are stored in the **raw** `nonce(12) || AES-256-GCM(ct+tag)`
+    /// envelope the web/mobile clients write (`thumbnail.ts encryptThumbnailBlob`):
+    /// a 12-byte random nonce followed by the AES-256-GCM ciphertext+tag, keyed
+    /// directly by the per-file key, with no AAD and no JSON. This differs from
+    /// file *chunks* (which are the `EncryptedBlob` JSON / `decrypt_chunk_raw`
+    /// frame), so this path decrypts the blob directly rather than going through
+    /// [`decrypt_downloaded_chunk`].
+    ///
+    /// ## Zero-knowledge
+    ///
+    /// The decrypted bytes live ONLY in the returned `Zeroizing<Vec<u8>>`, which
+    /// is wiped on drop (normal return, `?`, or panic unwind). Nothing is written
+    /// to disk — the caller decodes straight to an in-memory `HBITMAP` and the
+    /// shell's own thumbnail cache holds the *derivative* bitmap, exactly the
+    /// same privacy posture as the web client's decrypted-thumbnail cache.
+    ///
+    /// `variant` is `small` / `medium` / `large`. Any error (no thumbnail for
+    /// this file, network failure, decrypt failure) bubbles as `Err` so the
+    /// caller can fall back to the file-type icon — it is never reported as a
+    /// success with empty bytes.
+    #[cfg(target_os = "windows")]
+    pub async fn fetch_thumbnail_to_memory(
+        &self,
+        file_id: &str,
+        variant: &str,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+        // Validate the id shape up front (same guard as do_hydrate).
+        let _file_uuid: uuid::Uuid = file_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
+
+        // Pull the encrypted thumbnail blob. A 404 (no thumbnail) is an Err here
+        // and the COM caller maps it to the type-icon fallback.
+        let blob = self.api.download_thumbnail(file_id, variant).await?;
+        if blob.len() < 12 + 16 {
+            // Must hold at least a 12-byte nonce + 16-byte GCM tag.
+            anyhow::bail!("thumbnail blob too short ({} bytes)", blob.len());
+        }
+
+        // Derive the per-file key (MasterKey::from_bytes zeroizes the array on
+        // drop; we copy from the borrow exactly like do_hydrate).
+        let mk_bytes: [u8; 32] = *self.api.master_key();
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+
+        // Split nonce || ciphertext+tag and AES-256-GCM decrypt with no AAD.
+        let (nonce_bytes, ciphertext) = blob.split_at(12);
+        let cipher = Aes256Gcm::new_from_slice(file_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("init thumbnail cipher: {e}"))?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            // The error type carries no plaintext; a generic message avoids
+            // leaking anything about the ciphertext.
+            .map_err(|_| anyhow::anyhow!("thumbnail decrypt failed (bad key or corrupt blob)"))?;
+
+        // Hand the decoded image bytes back wrapped so they are wiped on drop.
+        Ok(Zeroizing::new(plaintext))
     }
 
     /// Apply a "Keep Mine" resolution: the local copy stays as-is,
@@ -1205,6 +1941,51 @@ impl EngineBridge {
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
         Ok(conflict_name)
     }
+}
+
+/// Name of the per-sync-root state directory (mirrors `runner::STATE_DIR`).
+const SYNC_STATE_DIR: &str = ".beebeeb";
+/// Name of the cross-process lock file the engine writes at the sync root.
+const SYNC_LOCK_FILE: &str = ".beebeeb-sync.lock";
+
+/// True if `path` is something the engine itself writes (so it must never be
+/// fed back as a user upload): the `<sync_root>/.beebeeb-sync.lock`, anything
+/// inside `<sync_root>/.beebeeb/`, or any path component named `.beebeeb`
+/// (defense in depth for a nested-root layout).
+///
+/// Shared by [`EngineBridge::classify_local_path`] (filter 1) so the retired
+/// `notify` path and the Windows Cloud Files NOTIFY callbacks run ONE identical
+/// engine-internal check.
+pub(crate) fn path_is_engine_internal(sync_root: &Path, path: &Path) -> bool {
+    let state_dir = sync_root.join(SYNC_STATE_DIR);
+    let lock = sync_root.join(SYNC_LOCK_FILE);
+    if path == lock || path.starts_with(&state_dir) {
+        return true;
+    }
+    path.components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some(SYNC_STATE_DIR)))
+}
+
+/// Map an absolute on-disk path under `sync_root` to the server-relative,
+/// '/'-separated, leading-slash-free key the state DB stores in `files.path`
+/// (the same shape [`crate::state_db::StateDb::get_file_by_path`] expects, and
+/// the same the nested-enumeration sweep writes). Returns `None` if `path` is
+/// not under `sync_root` or resolves to the empty (root) key.
+///
+/// Shared by [`EngineBridge::classify_local_path`] and
+/// [`EngineBridge::resolve_parent_id_for`] so the DB lookup key is computed in
+/// exactly one place.
+pub(crate) fn relative_db_path(sync_root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(sync_root).ok()?;
+    let mut out = String::new();
+    for (i, comp) in rel.components().enumerate() {
+        let part = comp.as_os_str().to_str()?;
+        if i > 0 {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub fn is_ignored_finder_name(name: &str) -> bool {
@@ -1644,15 +2425,69 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Resolve the plaintext relative path for a server file row.
+///
+/// This is an **E2EE** product: the `GET /api/v1/files` listing returns the
+/// filename only as the encrypted `name_encrypted` blob — there is NO
+/// plaintext `path`/`display_path`/`name` field on the wire (confirmed in
+/// `server/.../routes/files.rs::list_files`). The desktop must therefore
+/// decrypt the name itself, with the unlocked master key, before it can
+/// place a placeholder or compute a hydration destination.
+///
+/// Decryption goes through the **shared core primitive**
+/// [`beebeeb_core::encrypt::decrypt_name`] — the exact same path the CLI
+/// (`repos/cli/src/crypto::decrypt_name`) and the desktop SelectiveSync page
+/// ([`crate::try_decrypt_name`]) use, so every client decrypts identically.
+/// The per-file key is HKDF-derived in core (`derive_file_key(master_key,
+/// file_id)`); the `MasterKey` zeroizes on drop. We never log the plaintext
+/// name here.
+///
+/// `sync_tick` lists only the vault root (`list_files(None)` is one level —
+/// the server endpoint is non-recursive), so a decrypted name IS the file's
+/// relative path under the sync root. When nested traversal is added, this is
+/// the single place that must compose `<parent rel path>/<name>`.
+///
+/// Fallback order (keeps legacy/test rows that DO carry a plaintext path
+/// working, and degrades safely if a blob is missing/garbled):
+///   1. decrypt `name_encrypted` (the canonical zero-knowledge path)
+///   2. a plaintext `path`/`display_path`/`name` field if the server ever
+///      surfaces one (older rows / test fixtures)
+///   3. empty string — caller skips placeholder seeding for the row
+fn resolve_relative_path(f: &serde_json::Value, file_id: &str, master_key: &[u8; 32]) -> String {
+    if let Some(name_enc) = f["name_encrypted"].as_str() {
+        let mk_bytes: [u8; 32] = *master_key;
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        if let Ok(name) = beebeeb_core::encrypt::decrypt_name(&mk, file_id, name_enc) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        // Decryption failed (wrong key, garbled blob, legacy envelope) —
+        // fall through to any plaintext field rather than abort the sweep.
+    }
+    f["path"]
+        .as_str()
+        .or_else(|| f["display_path"].as_str())
+        .or_else(|| f["name"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn apply_metadata_file_row(
     db: &StateDb,
     f: &serde_json::Value,
-    decrypted_name: Option<&str>,
     namespace: Namespace,
     shared_root_id: Option<String>,
     share_id: Option<String>,
     permission_bits: i64,
     now: i64,
+    master_key: &[u8; 32],
+    // Server-relative path of the PARENT directory ("" at the vault root).
+    // The decrypted leaf name is composed under it so nested files/folders
+    // get a full `<parent>/<leaf>` path that round-trips with the upload
+    // watcher's `relative_db_path` (also '/'-joined, no leading slash).
+    parent_rel_path: &str,
 ) -> anyhow::Result<Option<FileEntry>> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
@@ -1662,34 +2497,20 @@ fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    // The display name stored in `files.path` (read crypto-free by the File
-    // Provider via `filename_from_path`). Task 0809: prefer the name decrypted
-    // from `name_encrypted` on sync — previously this only ever saw the row's
-    // plaintext `path`/`name`, which the zero-knowledge server never sends, so
-    // every synced row stored a blank name. Fall back to any plaintext the row
-    // carries, then empty (the existing placeholder behaviour for undecryptable).
-    let path = decrypted_name
-        .filter(|n| !n.is_empty())
-        .or_else(|| f["path"].as_str())
-        .or_else(|| f["display_path"].as_str())
-        .or_else(|| f["name"].as_str())
-        .unwrap_or("")
-        .to_string();
+    let leaf = resolve_relative_path(f, file_id, master_key);
+    // Compose the nested path. An empty leaf means the name didn't decrypt;
+    // keep it empty so the placeholder seeder skips the row (and retries next
+    // tick) rather than seeding a bare parent dir. A leaf that already carries
+    // a leading slash (legacy plaintext-`path` fallback) is normalised.
+    let path = if parent_rel_path.is_empty() || leaf.is_empty() {
+        leaf
+    } else {
+        format!("{}/{}", parent_rel_path.trim_end_matches('/'), leaf.trim_start_matches('/'))
+    };
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
         .unwrap_or(FileStatus::CloudOnly);
-
-    let entry = FileEntry {
-        file_id: file_id.to_string(),
-        path,
-        status,
-        size_bytes: size,
-        modified_at: remote_updated,
-        content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
-        remote_updated_at: remote_updated,
-    };
-    db.upsert_file(&entry)?;
 
     let item_kind = if f["is_folder"].as_bool().unwrap_or(false)
         || f["kind"].as_str() == Some("folder")
@@ -1699,6 +2520,26 @@ fn apply_metadata_file_row(
     } else {
         ItemKind::File
     };
+    let server_parent_id = f["parent_id"].as_str().map(str::to_string);
+
+    let entry = FileEntry {
+        file_id: file_id.to_string(),
+        path,
+        status,
+        size_bytes: size,
+        modified_at: remote_updated,
+        content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
+        remote_updated_at: remote_updated,
+        // NOTE: parent_id/item_kind are NOT persisted by upsert_file — the
+        // `set_file_contract_state` call at the end of this fn writes the
+        // authoritative `files.parent_id` / `files.item_kind` columns. These
+        // struct fields exist so the in-memory `FileEntry` returned to callers
+        // (notably the windows_cf placeholder seeder reading via list_by_status)
+        // carries the correct folder/parent classification.
+        parent_id: server_parent_id.clone(),
+        item_kind: item_kind.clone(),
+    };
+    db.upsert_file(&entry)?;
     let mut contract = db
         .get_file_contract_state(file_id)?
         .unwrap_or_else(|| FileContractState {
@@ -1721,7 +2562,7 @@ fn apply_metadata_file_row(
             last_sync_at: now,
         });
     contract.namespace = namespace;
-    contract.parent_id = f["parent_id"].as_str().map(str::to_string);
+    contract.parent_id = server_parent_id;
     contract.shared_root_id = shared_root_id;
     contract.share_id = share_id;
     contract.permission_bits = permission_bits;
@@ -1786,152 +2627,712 @@ pub struct ConflictDetected {
 ///
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
-pub async fn sync_tick(bridge: &EngineBridge) -> anyhow::Result<Vec<ConflictDetected>> {
-    let files = bridge.api().list_files(None).await?;
+pub async fn sync_tick(
+    bridge: &EngineBridge,
+    // The on-disk vault root. Needed on Windows so the deletion-reconcile paths
+    // (`apply_sync_op` / `apply_snapshot`) can locate and remove the on-disk Cloud
+    // Files placeholder of a remotely-deleted row — not just its DB row (task
+    // 0806). Unused on macOS/Linux (the OS extension owns the namespace there);
+    // `#[cfg_attr]` silences the unused warning on those builds.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+) -> anyhow::Result<Vec<ConflictDetected>> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
 
-    // Decrypt every name ONCE per sync (task 0809), then read-many from the map
-    // below. `core::decrypt_names` tries both UUID key-derivation forms (string
-    // for web/mobile-origin, binary for desktop/cli-origin) and unwraps the
-    // name/mime envelope, so cross-origin vault names resolve correctly — unlike
-    // the old binary-only `try_decrypt_name`. file_id -> plaintext display name.
-    let names: std::collections::HashMap<String, String> = {
-        let mk = beebeeb_core::kdf::MasterKey::from_bytes(*bridge.api().master_key());
-        let items: Vec<(uuid::Uuid, &str)> = files
-            .iter()
-            .filter_map(|f| {
-                let uuid = uuid::Uuid::parse_str(f["id"].as_str()?).ok()?;
-                Some((uuid, f["name_encrypted"].as_str()?))
-            })
-            .collect();
-        let decrypted = beebeeb_core::encrypt::decrypt_names(&mk, &items);
-        items
-            .iter()
-            .zip(decrypted)
-            .filter_map(|((uuid, _), res)| res.ok().map(|(name, _mime)| (uuid.to_string(), name)))
-            .collect()
+    // ── /sync delta engine (task 0789) ────────────────────────────────────────
+    //
+    // Replaces the old per-folder full-tree `/files` BFS re-walk (`1 + folders`
+    // requests/tick, never pruned server deletions, self-saturated the per-IP
+    // 429 limit). Two cheap paths, gated on whether the op cursor has EVER been
+    // persisted (`Option`, NOT a 0 sentinel):
+    //
+    //   cursor UNSET (never bootstrapped) → BOOTSTRAP via ONE `GET /sync/snapshot`:
+    //     the snapshot is the authoritative non-trashed tree, so we (a) apply
+    //     every node through the SAME ingest path the BFS used
+    //     (`process_metadata_row`, which keeps conflict detection identical +
+    //     flows rows through `upsert_file` for Windows `refresh_placeholders`),
+    //     (b) PRUNE every own-tree row the snapshot omits (the
+    //     deletion-reconciliation fix), and (c) store the snapshot's `seq_id` as
+    //     the cursor — which may legitimately be 0. The server returns
+    //     `MAX(seq_id) … unwrap_or(0)` and `sync_ops` is NOT backfilled, so a
+    //     pre-existing vault (or a brand-new one before its first create-op
+    //     lands) snapshots at seq_id 0. seq_id 0 is therefore a VALID
+    //     bootstrapped cursor, NOT an "unset" sentinel: gating on `== 0` would
+    //     re-snapshot + re-prune the WHOLE tree every tick forever and never
+    //     reach the cheap ops path (defeating the 429 fix).
+    //
+    //   cursor SET (incl. Some(0)) → CATCH-UP via ONE `GET /sync/ops?since={cursor}`:
+    //     apply each op by `op_type` and advance the cursor to the max applied
+    //     `seq_id`. With `since=0` the server returns every op `> 0`, which is
+    //     exactly right for a just-bootstrapped empty/low op log. ~1
+    //     request/tick in steady state.
+    //
+    // Gap / since-too-old fallback: if applying ops can't proceed coherently
+    // (the cursor is ahead of the server, or an op references a row we can't
+    // place), we re-bootstrap from a fresh snapshot — the snapshot is always
+    // authoritative, so a re-bootstrap can never lose data.
+
+    // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
+    // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
+    // tick regardless of the cursor, then clears the flag.
+    let needs_resnapshot = bridge.db().take_needs_resnapshot()?;
+
+    let cursor = match bridge.db().get_sync_cursor()? {
+        // Never bootstrapped, or a re-snapshot was explicitly requested → full
+        // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
+        None => {
+            bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            return Ok(conflicts);
+        }
+        Some(_) if needs_resnapshot => {
+            tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
+            bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            return Ok(conflicts);
+        }
+        Some(c) => c,
     };
 
-    for f in &files {
+    let ops = match bridge.api().sync_ops(cursor).await {
+        Ok(ops) => ops,
+        Err(e) => {
+            // Transient list failure (network / lingering 429 after backoff): do
+            // NOT advance the cursor and do NOT fall back to a (heavier)
+            // snapshot — just skip this tick and retry next time. The cursor is
+            // unchanged, so no op is missed.
+            tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
+            return Ok(conflicts);
+        }
+    };
+
+    // Detect a cursor that is somehow AHEAD of the server's op log (e.g. a server
+    // history reset / op-log truncation): the server clamps `since` to whatever
+    // we sent and returns only `seq_id > since`, so a stale/over-large cursor
+    // yields an empty op list forever and we'd never reconcile. We can't
+    // distinguish "nothing changed" from "cursor too old" from the ops response
+    // alone, so we re-anchor against the snapshot's authoritative `seq_id`: only
+    // when the ops list is empty do we cheaply confirm the cursor still tracks
+    // the server (a single extra call ONLY on the empty-delta path is acceptable;
+    // any non-empty delta means the cursor is valid and we skip the check).
+    if ops.ops.is_empty() {
+        // No new ops. Verify the cursor hasn't drifted past the server head; if
+        // it has (server reset its op log), re-bootstrap. The snapshot call here
+        // is the single concession — it runs only when there is genuinely
+        // nothing to apply, so steady state stays at ~1 request/tick.
+        // `now_secs` (captured at tick start) is the prune freshness cutoff: it
+        // predates this snapshot fetch, so it can't be later than any row a
+        // concurrent completion stamps during the fetch.
+        let fetched_at = now_secs;
+        match bridge.api().sync_snapshot().await {
+            Ok(snap) if snap.seq_id < cursor => {
+                tracing::warn!(
+                    cursor,
+                    server_seq = snap.seq_id,
+                    "sync_tick: cursor ahead of server op-log head; re-bootstrapping from snapshot"
+                );
+                apply_snapshot(bridge, sync_root, &snap, now_secs, fetched_at, &mut conflicts)?;
+            }
+            Ok(_) => { /* cursor still valid, nothing to do */ }
+            Err(e) => {
+                tracing::warn!(error = %e, "sync_tick: snapshot freshness probe failed; retrying next tick");
+            }
+        }
+        return Ok(conflicts);
+    }
+
+    // Apply the delta ops in order, advancing the cursor to the max seq_id.
+    let mut max_seq = cursor;
+    for op in &ops.ops {
+        if let Err(e) = apply_sync_op(bridge, sync_root, op, now_secs, &mut conflicts) {
+            tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
+        }
+        max_seq = max_seq.max(op.seq_id);
+    }
+    if max_seq > cursor {
+        bridge.db().set_sync_cursor(max_seq)?;
+    }
+    Ok(conflicts)
+}
+
+/// Pull a fresh `/sync/snapshot` and reconcile the whole mirror against it, then
+/// store its `seq_id` as the new cursor. The bootstrap path (cursor unset) AND
+/// the gap-recovery path both funnel through here so the behaviour is identical.
+async fn bootstrap_from_snapshot(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<()> {
+    // `now_secs` is captured at tick start, BEFORE this request — so it is the
+    // prune freshness cutoff that never prunes a row a concurrent local
+    // completion stamps while this snapshot is in flight (see `prune_absent`).
+    let fetched_at = now_secs;
+    let snapshot = bridge.api().sync_snapshot().await?;
+    apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)
+}
+
+/// Reconcile the local mirror against an already-fetched snapshot:
+///   1. order nodes parent-before-child and compute each node's parent rel path,
+///   2. ingest every node through `process_metadata_row` (same conflict logic +
+///      `upsert_file` placeholder-freshness flow the old BFS used),
+///   3. PRUNE every own-tree row the snapshot omits (deletion reconciliation),
+///      EXCEPT rows touched at/after `snapshot_fetched_at` (a just-completed
+///      upload) and EXCEPT the whole tree when the snapshot is suspiciously empty
+///      (both handled inside `prune_absent`),
+///   4. store the snapshot's `seq_id` as the cursor.
+///
+/// `snapshot_fetched_at` is the wall-clock second the snapshot HTTP fetch began;
+/// it is the prune freshness cutoff so an upload re-keyed mid-flight survives.
+///
+/// Split out from `bootstrap_from_snapshot` so it's directly unit-testable with
+/// a synthetic `SyncSnapshot` (no HTTP).
+fn apply_snapshot(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    snapshot: &crate::api_client::SyncSnapshot,
+    now_secs: i64,
+    snapshot_fetched_at: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<()> {
+    // Resolve each node's PARENT relative path. The snapshot is a flat node list
+    // (each with `parent_id`); the old BFS got nesting for free by listing
+    // folder-by-folder. Here we topologically order so a parent's resolved path
+    // is known before its children, then thread it into `process_metadata_row`
+    // exactly as the BFS threaded the folder's path.
+    let order = order_snapshot_nodes(&snapshot.nodes);
+
+    let mut seen: HashSet<String> = HashSet::new();
+    // file_id → resolved FULL relative path (so children can prefix their leaf).
+    let mut resolved_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for f in order {
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
         }
-        let size = f["size_bytes"].as_i64().unwrap_or(0);
-        let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-        match bridge.db().get_file(file_id)? {
-            None => {
-                // (1) New file — insert as cloud_only. base = remote
-                // (next-tick conflicts compare against this).
-                apply_metadata_file_row(
-                    bridge.db(),
-                    f,
-                    names.get(file_id).map(String::as_str),
-                    Namespace::MyFiles,
-                    None,
-                    None,
-                    PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
-                    now_secs,
-                )?;
-            }
-            Some(entry) if entry.status == FileStatus::Local => {
-                // (2) Local copy + remote moved? Nothing to check if
-                // the timestamps haven't drifted past base.
-                if remote_updated <= entry.remote_updated_at {
-                    continue;
-                }
+        if !seen.insert(file_id.to_string()) {
+            continue;
+        }
+        // Parent's resolved path ("" at the vault root, or when the parent
+        // didn't resolve — the leaf then sits at root, matching BFS behaviour
+        // where an unresolved parent frame simply wasn't descended).
+        let parent_rel_path = f["parent_id"]
+            .as_str()
+            .and_then(|pid| resolved_paths.get(pid))
+            .cloned()
+            .unwrap_or_default();
 
-                // Synthesise version triplet. We don't have the
-                // server's content hash on file metadata, so we hash
-                // by `size-mtime` as an opaque-but-stable surrogate.
-                // Treating the surrogate's equality as "same version"
-                // is conservative — a file edited to the same
-                // size+mtime won't be flagged, but those collisions
-                // are vanishingly rare in practice.
-                let local = VersionInfo {
-                    hash: entry.content_hash.clone().unwrap_or_default(),
-                    modified_at: entry.modified_at as u64,
-                };
-                let remote = VersionInfo {
-                    hash: format!("{size}-{remote_updated}"),
-                    modified_at: remote_updated as u64,
-                };
-                let base = VersionInfo {
-                    hash: entry.content_hash.clone().unwrap_or_default(),
-                    modified_at: entry.remote_updated_at as u64,
-                };
-                // Local matches base → only remote changed. Quietly
-                // re-anchor and let a future hydrate replace bytes
-                // when the user opens it.
-                if !is_conflict(&local, &remote, &base) {
-                    let mut updated = entry.clone();
-                    updated.remote_updated_at = remote_updated;
-                    updated.size_bytes = size;
-                    updated.modified_at = remote_updated;
-                    bridge.db().upsert_file(&updated)?;
-                    apply_metadata_file_row(
-                        bridge.db(),
-                        f,
-                        names.get(file_id).map(String::as_str),
-                        Namespace::MyFiles,
-                        None,
-                        None,
-                        PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
-                        now_secs,
-                    )?;
-                    continue;
-                }
-
-                // True conflict. Flip status, anchor `modified_at` to
-                // "now" so Task 13's auto-resolution clock starts
-                // from detection rather than from whatever the row
-                // happened to carry before.
-                let mut updated = entry.clone();
-                updated.status = FileStatus::Conflict;
-                updated.modified_at = now_secs;
-                bridge.db().upsert_file(&updated)?;
-
-                let file_name = std::path::Path::new(&entry.path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&entry.path)
-                    .to_string();
-                let is_text = is_text_file(&file_name);
-                tracing::warn!(
-                    file_id = %entry.file_id,
-                    name = %file_name,
-                    "conflict detected on tick — both sides moved past base"
-                );
-                conflicts.push(ConflictDetected {
-                    file_id: entry.file_id.clone(),
-                    file_name,
-                    is_text,
-                });
-            }
-            Some(entry) => {
-                // (3) Pending download/upload/conflict/error — let
-                // the dedicated path own its transitions.
-                if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
-                    apply_metadata_file_row(
-                        bridge.db(),
-                        f,
-                        names.get(file_id).map(String::as_str),
-                        Namespace::MyFiles,
-                        None,
-                        None,
-                        PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
-                        now_secs,
-                    )?;
-                }
-                continue;
+        if let Some((rel_path, _kind)) =
+            process_metadata_row(bridge, f, &parent_rel_path, now_secs, conflicts)?
+        {
+            if !rel_path.is_empty() {
+                resolved_paths.insert(file_id.to_string(), rel_path);
             }
         }
     }
-    Ok(conflicts)
+
+    // Deletion reconciliation: anything in the local own-tree the snapshot did
+    // NOT mention was deleted/trashed server-side. `prune_absent` excludes shared
+    // rows, rows with a pending upload/op, rows touched at/after the snapshot
+    // fetch (a just-completed upload the snapshot predates), and refuses to prune
+    // the whole tree on a suspicious EMPTY snapshot (see its doc) — so neither an
+    // in-flight local create nor a just-uploaded file is ever collateral.
+    let pruned = bridge.db().prune_absent(&seen, snapshot_fetched_at)?;
+    if !pruned.is_empty() {
+        tracing::info!(count = pruned.len(), "sync_tick: pruned rows absent from snapshot");
+        // task 0806: removing only the DB row left the on-disk Cloud Files
+        // placeholder ghosting in Explorer. Now ALSO remove each pruned row's
+        // placeholder. `prune_absent` returns rows CHILDREN-BEFORE-PARENTS (orphan
+        // descendants of a pruned folder precede the folder), which is exactly the
+        // order placeholder removal needs (leaf files before their directory).
+        remove_pruned_placeholders(sync_root, &pruned);
+    }
+
+    bridge.db().set_sync_cursor(snapshot.seq_id)?;
+    Ok(())
+}
+
+/// Windows: remove the on-disk Cloud Files placeholder for each row the deletion
+/// reconcile just dropped from the DB (task 0806). The DB row is ALREADY gone (the
+/// caller deleted it before calling this), so the watcher's `handle_delete` finds
+/// no row and queues no server trash; we ALSO register each path in the watcher's
+/// engine-delete suppression set so the `NOTIFY_DELETE_COMPLETION` our own remove
+/// fires is dropped deterministically rather than echoing into a redundant trash.
+///
+/// `rows` MUST be ordered children-before-parents (both `prune_absent` and
+/// `delete_file_subtree` return that order) so a directory's leaf placeholders are
+/// removed before the directory placeholder itself.
+///
+/// A row whose path can't be safely resolved under the root (empty/traversal) is
+/// skipped. Per-row failures are logged (file_id only — zero-knowledge) and never
+/// abort the sweep. No-op on macOS/Linux.
+#[cfg(target_os = "windows")]
+fn remove_pruned_placeholders(sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
+    for row in rows {
+        let Some(path) = EngineBridge::placeholder_path_under(sync_root, &row.path) else {
+            continue;
+        };
+        // Register BEFORE the remove so the NOTIFY_DELETE_COMPLETION the remove
+        // fires is already suppressed when it lands in the watcher.
+        crate::watcher::suppress_engine_delete(&path);
+        if let Err(e) = crate::windows_cf::placeholders::delete_placeholder(&path, row.is_dir) {
+            // Zero-knowledge: never log the path — only the file_id + kind.
+            tracing::warn!(file_id = %row.file_id, is_dir = row.is_dir, error = %e, "remote-deletion reconcile: placeholder removal failed");
+        }
+    }
+}
+
+/// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
+#[cfg(not(target_os = "windows"))]
+fn remove_pruned_placeholders(_sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
+
+/// Order snapshot nodes so every node appears AFTER its parent (parents-first),
+/// which lets `apply_snapshot` resolve a parent's path before its children.
+///
+/// Roots (no `parent_id`, or a `parent_id` not present in the node set — a
+/// shared-into / cross-tree parent) come first; remaining nodes are emitted as
+/// their parents become available. Any nodes left in a `parent_id` cycle the
+/// server should never produce are appended at the end so they're still ingested
+/// (just possibly with an empty parent path), never dropped.
+fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    use std::collections::HashMap;
+    let present: HashSet<&str> = nodes.iter().filter_map(|n| n["id"].as_str()).collect();
+    // children[parent_id] = [node, …]
+    let mut children: HashMap<&str, Vec<&serde_json::Value>> = HashMap::new();
+    let mut roots: Vec<&serde_json::Value> = Vec::new();
+    for n in nodes {
+        match n["parent_id"].as_str() {
+            Some(pid) if present.contains(pid) => children.entry(pid).or_default().push(n),
+            _ => roots.push(n), // root, or parent outside the snapshot set
+        }
+    }
+    let mut ordered: Vec<&serde_json::Value> = Vec::with_capacity(nodes.len());
+    let mut queue: VecDeque<&serde_json::Value> = roots.into_iter().collect();
+    let mut emitted: HashSet<&str> = HashSet::new();
+    while let Some(n) = queue.pop_front() {
+        let Some(id) = n["id"].as_str() else { continue };
+        if !emitted.insert(id) {
+            continue;
+        }
+        ordered.push(n);
+        if let Some(kids) = children.get(id) {
+            for k in kids {
+                queue.push_back(k);
+            }
+        }
+    }
+    // Defensive: emit any node not reached (a parent_id cycle) so nothing is lost.
+    for n in nodes {
+        if let Some(id) = n["id"].as_str() {
+            if emitted.insert(id) {
+                ordered.push(n);
+            }
+        }
+    }
+    ordered
+}
+
+/// Apply ONE `/sync/ops` delta to the local mirror by `op_type`. Mirrors the
+/// server's op vocabulary (`server/.../routes/sync.rs` + the `emit_sync_op`
+/// call sites in `routes/files.rs` / `routes/uploads.rs`):
+///   * `file_create` / `folder_create` → ingest the new row (cloud_only),
+///   * `file_update`                   → refresh the existing row's metadata,
+///   * `file_rename` / `folder_rename` → update the leaf name (re-derives path),
+///   * `file_move`   / `folder_move`   → re-parent the row,
+///   * `file_trash`  / `file_delete`   → remove the local mirror row,
+///   * `file_restore`                  → request a re-snapshot ({id}-only payload
+///     can't rebuild the row; the authoritative snapshot re-materialises it).
+///
+/// Each op payload is `{ id, … }`. For create/update/rename/move we synthesise a
+/// `serde_json::Value` row and feed it through the SAME `process_metadata_row`
+/// ingest path the snapshot uses, so conflict detection + placeholder freshness
+/// are identical across both paths. Nested paths ARE resolved from the op's
+/// `parent_id`/`new_parent_id` against the local mirror (`parent_rel_path_by_id`),
+/// matching how `apply_snapshot` threads parent paths — because the Windows
+/// placeholder seeder (`populate_placeholders`) derives the on-disk location
+/// purely from the row's stored `path`, NOT from `parent_id`, and there is no
+/// periodic snapshot to fix a mis-prefixed row later. When a parent isn't locally
+/// known yet, the op requests a re-snapshot so nesting converges next tick.
+fn apply_sync_op(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    op: &crate::api_client::SyncOp,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<()> {
+    let payload = &op.payload;
+    let id = payload["id"].as_str().unwrap_or_default();
+    if id.is_empty() {
+        return Ok(());
+    }
+
+    match op.op_type.as_str() {
+        "file_trash" | "file_delete" => {
+            // Reconcile a REMOTE deletion (another client trashed/deleted this).
+            // Look up the row first: we need its status (to NOT clobber the local
+            // 0802 delete path) and, on Windows, its path/kind to remove the
+            // on-disk placeholder — not just the DB row (task 0806).
+            match bridge.db().get_file(id)? {
+                // 0802 distinction: a `Trashing` row is the LOCAL→server delete in
+                // flight (the user already removed the on-disk placeholder; the
+                // queued TrashFile op owns this row). This op is the server echo of
+                // that very delete — let the 0802 path converge it (the TrashFile op
+                // deletes the row on success). Removing the placeholder here would be
+                // a no-op (already gone), and we must NOT re-handle it, so skip.
+                Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {}
+                Some(_) => {
+                    // Remove the row (and, for a folder, its orphaned descendants by
+                    // path-prefix — the server trash is NOT recursive, task 0807) in
+                    // one transaction, children-before-parent. The DB row is gone
+                    // BEFORE we touch the placeholder, so the watcher's handle_delete
+                    // can't queue a redundant server trash.
+                    let removed = bridge.db().delete_file_subtree(id)?;
+                    remove_pruned_placeholders(sync_root, &removed);
+                }
+                // No row for the folder itself — the folder was absent from
+                // this desktop's snapshot (already trashed when the snapshot
+                // ran), but its CHILDREN may have been ingested and stored with
+                // `parent_id = id`.  Sweep those orphaned children by
+                // `parent_id` so they don't linger as ghost placeholders in
+                // Explorer (task 0828).  The sweep is scoped strictly to
+                // descendants of `id` and is a no-op when none are found.
+                None => {
+                    let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
+                    if !orphans.is_empty() {
+                        tracing::info!(
+                            folder_id = %id,
+                            count = orphans.len(),
+                            "sync_tick: trashed folder had no local row but \
+                             {} orphaned child(ren) — pruned (task 0828)",
+                            orphans.len()
+                        );
+                        remove_pruned_placeholders(sync_root, &orphans);
+                    }
+                }
+            }
+        }
+        "file_restore" => {
+            // The restore payload is only `{ id }` (server `routes/files.rs`), so
+            // the un-trashed row's full metadata is NOT recoverable from the op.
+            // We already DELETED this row on the preceding `file_trash`/
+            // `file_delete` op, and there is NO periodic snapshot in steady state
+            // (the cursor only advances via ops once bootstrapped) — so a no-op
+            // here would make a trash-then-restore on another device leave the
+            // file permanently invisible on THIS device. Request a re-bootstrap
+            // on the next tick: the authoritative snapshot re-materialises the
+            // restored row. Cheap and matches the existing gap-recovery design.
+            bridge.db().request_resnapshot()?;
+            tracing::info!(
+                file_id = %id,
+                "sync_tick: file_restore op — scheduling re-snapshot to re-materialise the row"
+            );
+        }
+        "file_rename" | "folder_rename" => {
+            // Re-key the leaf name. Build a row carrying the NEW name_encrypted so
+            // `resolve_relative_path` re-derives the plaintext leaf. We keep the
+            // existing row's parent path by reading its current path's parent.
+            let new_name = payload["new_name_encrypted"].as_str();
+            let row = synthesize_op_row(bridge, id, op, new_name);
+            let parent_rel = existing_parent_rel_path(bridge, id);
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+        }
+        "file_move" | "folder_move" => {
+            // Re-parent. The op gives `new_parent_id`; the leaf name is unchanged.
+            // The move op carries no name blob, so `synthesize_op_row` supplies the
+            // unchanged leaf as a plaintext `"name"` fallback from the existing
+            // row's stored path (the `files` table doesn't persist name_encrypted).
+            let row = synthesize_op_row(bridge, id, op, None);
+            // Resolve the NEW parent's full relative path from the local mirror by
+            // `new_parent_id` (the same way `apply_snapshot` resolves nesting), so
+            // a move-into-folder lands the row under its folder prefix instead of
+            // at the sync root. If the new parent isn't locally known yet, fall
+            // back to a re-snapshot rather than mis-placing the row at root.
+            let parent_rel = parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str());
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+        }
+        "file_create" | "folder_create" | "file_update" => {
+            let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
+            // For a CREATE there is no existing local row, so the parent path must
+            // come from the op's `parent_id` resolved against the local mirror —
+            // NOT from the (nonexistent) row's own path, which would yield "" and
+            // mis-place a nested create at the sync root. `populate_placeholders`
+            // derives the on-disk location purely from the row's `path`, so the
+            // path prefix MUST be correct here; there is no periodic snapshot to
+            // fix it later. For an UPDATE the row already exists, so keep its
+            // current parent prefix (`existing_parent_rel_path`).
+            let parent_rel = if op.op_type == "file_update" {
+                existing_parent_rel_path(bridge, id)
+            } else {
+                parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
+            };
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+        }
+        other => {
+            tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
+        }
+    }
+    Ok(())
+}
+
+/// Build a `/files`-shaped `serde_json::Value` from a sync op + the existing
+/// local row, so `process_metadata_row` ingests it identically to a snapshot
+/// node. Carries the op's `id` plus any of `name_encrypted` / `parent_id` /
+/// `size_bytes` / `version_number` / `is_folder` it can determine, falling back
+/// to the existing row's values where the op is partial (e.g. a `file_update`
+/// that only changed `has_thumbnail`).
+fn synthesize_op_row(
+    bridge: &EngineBridge,
+    id: &str,
+    op: &crate::api_client::SyncOp,
+    name_encrypted: Option<&str>,
+) -> serde_json::Value {
+    let payload = &op.payload;
+    let existing = bridge.db().get_file(id).ok().flatten();
+    let existing_contract = bridge.db().get_file_contract_state(id).ok().flatten();
+
+    let is_folder = op.op_type.starts_with("folder_")
+        || existing
+            .as_ref()
+            .map(|e| e.item_kind == ItemKind::Folder)
+            .unwrap_or(false);
+
+    let mut row = serde_json::json!({ "id": id, "is_folder": is_folder });
+
+    // name_encrypted: op-provided wins (create/rename carry it). A MOVE op carries
+    // NO name blob, and the `files` table does NOT persist `name_encrypted`, so it
+    // is genuinely unrecoverable from the op for a move. To still compose the
+    // correct path, fall back to the EXISTING row's plaintext leaf (the last
+    // segment of its already-decrypted stored `path`) as the `"name"` field —
+    // `resolve_relative_path` prefers `name_encrypted` but falls through to
+    // `"name"`, so the moved row keeps its leaf under the new parent prefix
+    // instead of resolving to an empty path (which would mis-seed at the root or
+    // skip the row entirely).
+    if let Some(name) = name_encrypted.or_else(|| payload["name_encrypted"].as_str()) {
+        row["name_encrypted"] = serde_json::json!(name);
+    } else if let Some(leaf) = existing.as_ref().and_then(|e| {
+        e.path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+    }) {
+        row["name"] = serde_json::json!(leaf);
+    }
+    // parent_id: a move sets new_parent_id; create/update set parent_id; else keep
+    // the existing parent.
+    let parent_id = payload["new_parent_id"]
+        .as_str()
+        .or_else(|| payload["parent_id"].as_str())
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().and_then(|e| e.parent_id.clone()));
+    if let Some(pid) = parent_id {
+        row["parent_id"] = serde_json::json!(pid);
+    }
+    // size_bytes: op-provided wins, else existing.
+    let size = payload["size_bytes"]
+        .as_i64()
+        .or_else(|| existing.as_ref().map(|e| e.size_bytes));
+    if let Some(sz) = size {
+        row["size_bytes"] = serde_json::json!(sz);
+    }
+    // version_number: op-provided wins, else the existing contract's.
+    let version = payload["version_number"]
+        .as_i64()
+        .or_else(|| existing_contract.as_ref().map(|c| c.current_version));
+    if let Some(v) = version {
+        row["version_number"] = serde_json::json!(v);
+    }
+    // updated_at: stamp "now" so the conflict check treats an op as a fresh
+    // remote change (the op log carries no file timestamp the client can read).
+    row["updated_at"] = serde_json::json!(now_secs());
+    row
+}
+
+/// Resolve a parent's FULL relative path from the local mirror by its `file_id`
+/// — the parent path a freshly-created/moved child must be prefixed with. This
+/// mirrors how [`apply_snapshot`] resolves nesting (it threads each parent's
+/// resolved full path into its children), so an op-driven create/move lands at
+/// the SAME path a fresh snapshot would produce.
+///
+///   * `parent_id == None`            → "" (root child),
+///   * parent row present locally     → the parent's stored full `path` (its
+///     leading slash trimmed so it composes cleanly as a prefix),
+///   * `parent_id == Some` but the parent row is NOT in the local mirror yet
+///     (the create/move arrived before its parent's create op landed) → "" for
+///     THIS tick AND a re-snapshot is requested, so the authoritative snapshot
+///     re-places the row under its correct prefix on the next tick rather than
+///     leaving it permanently mis-placed at the sync root.
+fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&str>) -> String {
+    let Some(pid) = parent_id.filter(|p| !p.is_empty()) else {
+        return String::new(); // root child — no prefix
+    };
+    match bridge.db().get_file(pid).ok().flatten() {
+        Some(parent) => parent.path.trim_start_matches('/').to_string(),
+        None => {
+            // Parent not locally known — can't compute the prefix from the op
+            // alone. Schedule a re-snapshot so the next tick reconciles nesting
+            // authoritatively; a best-effort log keeps this observable.
+            if let Err(e) = bridge.db().request_resnapshot() {
+                tracing::warn!(error = %e, "sync_tick: could not request re-snapshot for unknown parent");
+            }
+            tracing::info!(
+                parent_id = %pid,
+                "sync_tick: op references a parent not in the local mirror; scheduling re-snapshot"
+            );
+            String::new()
+        }
+    }
+}
+
+/// The PARENT relative path of an existing local row (everything before the last
+/// `/` in its stored `path`), or "" when the row is unknown / at the vault root.
+/// Used so an op-driven re-ingest keeps a nested row under its folder prefix
+/// without needing the parent's plaintext name in the op.
+fn existing_parent_rel_path(bridge: &EngineBridge, id: &str) -> String {
+    bridge
+        .db()
+        .get_file(id)
+        .ok()
+        .flatten()
+        .and_then(|e| {
+            let p = e.path.trim_start_matches('/');
+            p.rsplit_once('/').map(|(parent, _leaf)| parent.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Apply one server metadata row during [`sync_tick`]'s recursive walk,
+/// running the same three-way decision the flat sweep used (new → cloud_only;
+/// local + remote-moved → conflict check; otherwise refresh metadata). On
+/// success returns `Some((resolved_rel_path, item_kind))` so the BFS can
+/// recurse into folders using the row's full nested path; returns `None` only
+/// when the row is unusable (empty id / undecryptable name).
+fn process_metadata_row(
+    bridge: &EngineBridge,
+    f: &serde_json::Value,
+    parent_rel_path: &str,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> anyhow::Result<Option<(String, ItemKind)>> {
+    let file_id = f["id"].as_str().unwrap_or_default();
+    if file_id.is_empty() {
+        return Ok(None);
+    }
+    let size = f["size_bytes"].as_i64().unwrap_or(0);
+    let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+
+    // Helper to refresh metadata + return the resolved path/kind. The single
+    // place that writes the row's nested path and folder/file classification.
+    let apply = |bridge: &EngineBridge| -> anyhow::Result<Option<(String, ItemKind)>> {
+        let entry = apply_metadata_file_row(
+            bridge.db(),
+            f,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            now_secs,
+            bridge.api().master_key(),
+            parent_rel_path,
+        )?;
+        Ok(entry.map(|e| (e.path, e.item_kind)))
+    };
+
+    match bridge.db().get_file(file_id)? {
+        // (0) Locally-deleted, server-trash pending (task 0802). The row is in
+        // `Trashing` because the user deleted the file and the `TrashFile` op has
+        // already succeeded (op removed) OR is still in flight. A `/sync/snapshot`
+        // that STILL lists this file is just propagation lag — the server has set
+        // `is_trashed=TRUE` but the snapshot read hasn't caught up. We MUST NOT
+        // re-materialise the row: neither re-insert it nor flip it back to
+        // `CloudOnly`, which would re-mint the placeholder (the "deleted file comes
+        // back" race). Keep it EXACTLY as-is (`Trashing`, no placeholder). When the
+        // trash finally propagates the file drops out of the snapshot and
+        // `prune_absent` removes the row; if the `file_trash` op echo arrives first
+        // `apply_sync_op` deletes it. Either way it converges WITHOUT resurrecting.
+        Some(entry) if entry.status == FileStatus::Trashing => {
+            // Still report path/kind so a (rare) trashing folder's independent
+            // children continue to enumerate; do NOT touch this row's status.
+            Ok(Some((entry.path, entry.item_kind)))
+        }
+        None => {
+            // (1) New to us — insert as cloud_only. base = remote.
+            apply(bridge)
+        }
+        Some(entry) if entry.status == FileStatus::Local => {
+            // (2) Local copy + remote moved? Nothing to check if the
+            // timestamps haven't drifted past base. Still report the row's
+            // path/kind so a folder we already have locally is still descended.
+            if remote_updated <= entry.remote_updated_at {
+                return Ok(Some((entry.path, entry.item_kind)));
+            }
+
+            // Synthesise version triplet (no server content hash on metadata;
+            // `size-mtime` is an opaque-but-stable surrogate — conservative,
+            // a same-size+mtime edit won't flag, but those collisions are rare).
+            let local = VersionInfo {
+                hash: entry.content_hash.clone().unwrap_or_default(),
+                modified_at: entry.modified_at as u64,
+            };
+            let remote = VersionInfo {
+                hash: format!("{size}-{remote_updated}"),
+                modified_at: remote_updated as u64,
+            };
+            let base = VersionInfo {
+                hash: entry.content_hash.clone().unwrap_or_default(),
+                modified_at: entry.remote_updated_at as u64,
+            };
+            // Local matches base → only remote changed. Quietly re-anchor and
+            // let a future hydrate replace bytes when the user opens it.
+            if !is_conflict(&local, &remote, &base) {
+                let mut updated = entry.clone();
+                updated.remote_updated_at = remote_updated;
+                updated.size_bytes = size;
+                updated.modified_at = remote_updated;
+                bridge.db().upsert_file(&updated)?;
+                return apply(bridge);
+            }
+
+            // True conflict. Flip status, anchor `modified_at` to "now" so the
+            // auto-resolution clock starts from detection.
+            let mut updated = entry.clone();
+            updated.status = FileStatus::Conflict;
+            updated.modified_at = now_secs;
+            bridge.db().upsert_file(&updated)?;
+
+            let file_name = std::path::Path::new(&entry.path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&entry.path)
+                .to_string();
+            let is_text = is_text_file(&file_name);
+            tracing::warn!(
+                file_id = %entry.file_id,
+                name = %file_name,
+                "conflict detected on tick — both sides moved past base"
+            );
+            conflicts.push(ConflictDetected {
+                file_id: entry.file_id.clone(),
+                file_name,
+                is_text,
+            });
+            // A conflicted folder is unusual, but still report its path/kind so
+            // enumeration of its (independent) children continues.
+            Ok(Some((entry.path, entry.item_kind)))
+        }
+        Some(entry) => {
+            // (3) Pending download/upload/conflict/error — let the dedicated
+            // path own its transitions, but still refresh cloud_only/downloading
+            // metadata (and always report path/kind so folders are descended).
+            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
+                return apply(bridge);
+            }
+            Ok(Some((entry.path, entry.item_kind)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1956,6 +3357,34 @@ mod tests {
     fn test_invalid_transition_rejected() {
         let mut sm = FileSM::new(FileStatus::CloudOnly);
         assert!(sm.transition(FileEvent::UploadStart).is_err());
+    }
+
+    // ── Shared upload-trigger helpers (task 0780) ────────────────────────────
+    // Relocated from the retired `watcher`-local copies so the one shared
+    // engine-internal + relative-path logic stays covered.
+
+    #[test]
+    fn engine_internal_filters_state_dir_and_lock() {
+        let root = std::path::PathBuf::from("/sync");
+        assert!(path_is_engine_internal(&root, &root.join(".beebeeb").join("state.db")));
+        assert!(path_is_engine_internal(&root, &root.join(".beebeeb-sync.lock")));
+        assert!(path_is_engine_internal(&root, &root.join("sub").join(".beebeeb").join("x")));
+        assert!(!path_is_engine_internal(&root, &root.join("photo.jpg")));
+        assert!(!path_is_engine_internal(&root, &root.join("docs").join("a.txt")));
+    }
+
+    #[test]
+    fn relative_db_path_is_slash_joined_without_leading_slash() {
+        let root = std::path::PathBuf::from("/sync");
+        assert_eq!(relative_db_path(&root, &root.join("a.txt")).as_deref(), Some("a.txt"));
+        assert_eq!(
+            relative_db_path(&root, &root.join("docs").join("b.md")).as_deref(),
+            Some("docs/b.md")
+        );
+        assert_eq!(
+            relative_db_path(&root, &std::path::PathBuf::from("/other/c.txt")),
+            None
+        );
     }
 
     #[test]
@@ -2198,6 +3627,7 @@ mod tests {
                 file_id: None,
                 parent_id: None,
                 filename: "report.txt".into(),
+                rel_path: None,
                 kind: FinderWriteItemKind::File,
                 contents_path: Some(source.to_string_lossy().into_owned()),
                 content_type: Some("text/plain".into()),
@@ -2241,6 +3671,7 @@ mod tests {
                 file_id: Some("file-1".into()),
                 parent_id: Some("folder-1".into()),
                 filename: "renamed.txt".into(),
+                rel_path: None,
                 kind: FinderWriteItemKind::File,
                 contents_path: None,
                 content_type: Some("text/plain".into()),
@@ -2281,6 +3712,140 @@ mod tests {
         assert!(queued[0].payload_path.is_none());
     }
 
+    #[tokio::test]
+    async fn test_process_due_operations_trash_calls_api_and_keeps_row_trashing() {
+        // task 0802 (server-authoritative deletion): a locally-deleted file is
+        // parked in `Trashing` and its `TrashFile` op enqueued. Processing that op
+        // must (a) issue the server trash DELETE and (b) on success DROP THE OP but
+        // KEEP the row in `Trashing`. The `Trashing` status — not the op — is now
+        // the durable hidden-locally marker; convergence (row removal) happens
+        // authoritatively once the trash propagates out of `/sync/snapshot`
+        // (`prune_absent`) or the `file_trash` op echo arrives (`apply_sync_op`).
+        // Deleting the row HERE is what caused the "deleted file comes back" race
+        // (a same-tick lagged snapshot would re-insert it as CloudOnly).
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![("200 OK".into(), serde_json::json!({ "ok": true }))]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+
+        // Row in the post-local-delete `Trashing` state + a queued trash op.
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-1".into(),
+                path: "doomed.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 5,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-trash-1".into(),
+                kind: OperationKind::TrashFile,
+                file_id: Some("server-file-1".into()),
+                parent_id: None,
+                target_path: None,
+                metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-trash-1".to_string()]);
+        assert!(outcome.retried_op_ids.is_empty());
+
+        // The op is gone (success removes it) but the row REMAINS in `Trashing` —
+        // the durable marker. The seeder only re-mints `CloudOnly`, so a `Trashing`
+        // row never re-creates the placeholder; the row itself is removed later by
+        // prune/op-echo once the server trash propagates.
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+        let row = bridge.db.get_file("server-file-1").unwrap();
+        assert!(row.is_some(), "trash op must KEEP the row on success (not delete it)");
+        assert_eq!(
+            row.unwrap().status,
+            FileStatus::Trashing,
+            "row stays Trashing after a successful trash — the durable hidden-locally marker"
+        );
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "DELETE");
+        assert_eq!(requests[0].path, "/api/v1/files/server-file-1");
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_trash_retries_and_keeps_row_on_server_error() {
+        // If the server trash fails, the op must be retried (not dropped) and the
+        // row must be PRESERVED — recoverable rather than lost. (The row is left
+        // in `Trashing`, so the placeholder still does not reappear meanwhile.)
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![(
+            "500 Internal Server Error".into(),
+            serde_json::json!({ "error": "boom" }),
+        )]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-2".into(),
+                path: "doomed2.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 5,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-trash-2".into(),
+                kind: OperationKind::TrashFile,
+                file_id: Some("server-file-2".into()),
+                parent_id: None,
+                target_path: None,
+                metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert!(outcome.completed_op_ids.is_empty());
+        assert_eq!(outcome.retried_op_ids, vec!["op-trash-2".to_string()]);
+        // Row preserved (still Trashing) so a future retry can complete and the
+        // file is recoverable from the server in the meantime.
+        let row = bridge.db.get_file("server-file-2").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Trashing);
+
+        let _ = server.finish();
+    }
+
     #[test]
     fn test_recursive_pin_queues_hydration_for_cloud_only_descendants() {
         let dir = tempfile::tempdir().unwrap();
@@ -2303,8 +3868,14 @@ mod tests {
             256,
         );
 
-        let queued = bridge.set_recursive_pin("folder-a", true).unwrap();
+        // `sync_root` is only used on Windows (to resolve placeholder paths for
+        // CfSetPinState). On the non-Windows test host the hydrate-enqueue path
+        // runs and `sync_root` is unused, so any path is fine here.
+        let queued = bridge.set_recursive_pin(dir.path(), "folder-a", true).unwrap();
         assert_eq!(queued.changed_item_ids.len(), 3);
+        // hydrate_operations is the non-Windows materialise path; on Windows the
+        // OS (CfSetPinState) hydrates pinned files, so this count is 0 there.
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(queued.hydrate_operations, 1);
 
         let due = bridge.db.list_due_operations(now_secs()).unwrap();
@@ -2313,14 +3884,20 @@ mod tests {
                 && op.file_id.as_deref() == Some("folder-a")
                 && op.metadata_json.as_deref().unwrap_or("").contains("\"pinned\":true")
         }));
-        assert!(
-            due.iter()
-                .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-a") })
-        );
-        assert!(
-            !due.iter()
-                .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-local") })
-        );
+        // On Windows the pin path calls CfSetPinState; the OS drives hydration
+        // via FETCH_DATA rather than us enqueuing HydrateFile ops, so no
+        // HydrateFile entries exist in the queue on that platform.
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(
+                due.iter()
+                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-a") })
+            );
+            assert!(
+                !due.iter()
+                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-local") })
+            );
+        }
     }
 
     #[test]
@@ -2418,24 +3995,25 @@ mod tests {
             "object_version_id": "object-7"
         });
 
+        // This fixture carries a plaintext `path` and no `name_encrypted`, so
+        // it exercises the plaintext fallback in `resolve_relative_path`; the
+        // master key is unused on that branch.
         let entry = apply_metadata_file_row(
             &db,
             &metadata,
-            Some("spec.docx"),
             Namespace::MyFiles,
             None,
             None,
             PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
             2000,
+            &[0u8; 32],
+            "",
         )
         .unwrap()
         .unwrap();
 
         assert_eq!(entry.status, FileStatus::CloudOnly);
         assert_eq!(entry.remote_updated_at, 1234);
-        // Task 0809: the decrypted name is stored in `files.path` (the display
-        // name the File Provider reads crypto-free), winning over the row's plaintext.
-        assert_eq!(entry.path, "spec.docx");
         let contract = db.get_file_contract_state("file-1").unwrap().unwrap();
         assert_eq!(contract.namespace, Namespace::MyFiles);
         assert_eq!(contract.parent_id.as_deref(), Some("folder-1"));
@@ -2450,6 +4028,183 @@ mod tests {
         assert_eq!(contract.current_version, 7);
         assert_eq!(contract.current_object_version_id.as_deref(), Some("object-7"));
         assert_eq!(contract.last_sync_at, 2000);
+    }
+
+    #[test]
+    fn test_metadata_file_row_decrypts_encrypted_name_into_path() {
+        // E2EE invariant: the server returns the filename only as the
+        // encrypted `name_encrypted` blob (no plaintext path). The ingest must
+        // decrypt it with the master key and store the plaintext relative path
+        // so placeholder seeding + hydration can resolve a real destination.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let master_key = [7u8; 32];
+        let file_id = "f1e2d3c4-0000-4000-8000-000000000001";
+        // Encrypt the name exactly as every client does (shared core path).
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name_encrypted =
+            beebeeb_core::encrypt::encrypt_name(&mk, file_id, "Quarterly Report.pdf", Some("application/pdf"))
+                .unwrap();
+
+        let metadata = serde_json::json!({
+            "id": file_id,
+            "name_encrypted": name_encrypted,
+            "size_bytes": 2048,
+            "updated_at": 5555,
+            "is_folder": false,
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            6000,
+            &master_key,
+            "",
+        )
+        .unwrap()
+        .unwrap();
+
+        // The decrypted name lands in `path` (a root-level item's relative
+        // path under the sync root IS its name), not an empty string.
+        assert_eq!(entry.path, "Quarterly Report.pdf");
+        assert_eq!(entry.status, FileStatus::CloudOnly);
+        let stored = db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(stored.path, "Quarterly Report.pdf");
+    }
+
+    #[test]
+    fn test_metadata_file_row_falls_back_when_name_undecryptable() {
+        // A garbled/foreign blob must not abort the sweep nor poison the row:
+        // resolve_relative_path falls through to any plaintext field, else "".
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let metadata = serde_json::json!({
+            "id": "f1e2d3c4-0000-4000-8000-000000000002",
+            "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\",\"nonce\":[],\"ciphertext\":[]}",
+            "size_bytes": 10,
+            "updated_at": 1,
+            "is_folder": false,
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            1,
+            &[9u8; 32],
+            "",
+        )
+        .unwrap()
+        .unwrap();
+
+        // No plaintext field present → empty path (caller skips seeding),
+        // but the row still upserts so the rest of the sweep proceeds.
+        assert_eq!(entry.path, "");
+    }
+
+    #[test]
+    fn test_metadata_file_row_composes_nested_path_under_parent() {
+        // NESTED enumeration: a child discovered under a folder must be stored
+        // at `<parent_rel_path>/<decrypted_leaf>` (slash-joined, no leading
+        // slash) so the path round-trips with the upload watcher's
+        // `relative_db_path` and the windows_cf placeholder seeder.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let master_key = [3u8; 32];
+        let file_id = "aaaaaaaa-0000-4000-8000-000000000003";
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name_encrypted =
+            beebeeb_core::encrypt::encrypt_name(&mk, file_id, "notes.txt", Some("text/plain")).unwrap();
+
+        let metadata = serde_json::json!({
+            "id": file_id,
+            "name_encrypted": name_encrypted,
+            "size_bytes": 12,
+            "updated_at": 42,
+            "is_folder": false,
+            "parent_id": "folder-docs",
+        });
+
+        // Parent folder resolved to "docs" earlier in the BFS walk.
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            100,
+            &master_key,
+            "docs",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(entry.path, "docs/notes.txt");
+        assert_eq!(entry.item_kind, ItemKind::File);
+        assert_eq!(entry.parent_id.as_deref(), Some("folder-docs"));
+        // The stored row (what list_by_status / the seeder reads) agrees, and
+        // the contract carries the authoritative parent_id + item_kind.
+        let stored = db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(stored.path, "docs/notes.txt");
+        assert_eq!(stored.item_kind, ItemKind::File);
+        assert_eq!(stored.parent_id.as_deref(), Some("folder-docs"));
+        let contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        assert_eq!(contract.parent_id.as_deref(), Some("folder-docs"));
+        assert_eq!(contract.item_kind, ItemKind::File);
+    }
+
+    #[test]
+    fn test_metadata_file_row_classifies_folder_rows() {
+        // A row the server marks as a folder must surface item_kind == Folder
+        // both on the returned FileEntry and the stored row, so the BFS walk
+        // descends into it and the placeholder seeder mints a DIRECTORY.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let master_key = [5u8; 32];
+        let file_id = "bbbbbbbb-0000-4000-8000-000000000004";
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&mk, file_id, "Photos", None).unwrap();
+
+        let metadata = serde_json::json!({
+            "id": file_id,
+            "name_encrypted": name_encrypted,
+            "size_bytes": 0,
+            "updated_at": 7,
+            "is_folder": true,
+        });
+
+        let entry = apply_metadata_file_row(
+            &db,
+            &metadata,
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            100,
+            &master_key,
+            "",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(entry.path, "Photos");
+        assert_eq!(entry.item_kind, ItemKind::Folder);
+        assert!(entry.is_dir());
+        let stored = db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(stored.item_kind, ItemKind::Folder);
+        assert!(stored.is_dir());
     }
 
     #[tokio::test]
@@ -2472,6 +4227,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -2503,6 +4259,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -2558,6 +4315,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -2642,6 +4400,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 0,
                 last_error: None,
+                backup_source_key: None,
                 created_at: 100,
                 updated_at: 100,
             })
@@ -2726,6 +4485,7 @@ mod tests {
                 file_id: Some("shared-editable".into()),
                 parent_id: None,
                 filename: "Editable.txt".into(),
+                rel_path: None,
                 kind: FinderWriteItemKind::File,
                 contents_path: Some(source.to_string_lossy().into_owned()),
                 content_type: Some("text/plain".into()),
@@ -2758,6 +4518,8 @@ mod tests {
                 modified_at: 100,
                 content_hash: Some("local".into()),
                 remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
             })
             .unwrap();
         bridge
@@ -2776,6 +4538,7 @@ mod tests {
                 max_attempts: 3,
                 next_retry_at: 100,
                 last_error: Some("quota exceeded".into()),
+                backup_source_key: None,
                 created_at: 101,
                 updated_at: 101,
             })
@@ -2796,6 +4559,7 @@ mod tests {
                 max_attempts: 5,
                 next_retry_at: 100,
                 last_error: Some("403 forbidden: permission denied".into()),
+                backup_source_key: None,
                 created_at: 102,
                 updated_at: 102,
             })
@@ -2816,6 +4580,7 @@ mod tests {
                 max_attempts: 25,
                 next_retry_at: 100,
                 last_error: Some("stale base version rejected".into()),
+                backup_source_key: None,
                 created_at: 103,
                 updated_at: 103,
             })
@@ -2891,11 +4656,555 @@ mod tests {
                 modified_at: 0,
                 content_hash: None,
                 remote_updated_at: 0,
+                parent_id: parent_id.map(str::to_string),
+                item_kind: ItemKind::File,
             })
             .unwrap();
         let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
         contract.parent_id = parent_id.map(str::to_string);
         contract.cache_bytes = cache_bytes;
         bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    // ── /sync delta engine tests (task 0789) ──────────────────────────────────
+    //
+    // A scriptable mock that answers `/api/v1/sync/snapshot` and
+    // `/api/v1/sync/ops` from a FIFO of canned responses (status + JSON body)
+    // and records every request path. Mirrors `UploadMockServer`'s raw-TCP shape
+    // (the existing test harness) so it shares the request-capture pattern the
+    // 0789 plan calls out.
+
+    struct SyncMockServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl SyncMockServer {
+        /// `responses`: ordered `(http_status, json_body)` answered one per
+        /// incoming request. The server serves exactly `responses.len()`
+        /// requests then exits, so the test must drive precisely that many.
+        fn start(responses: Vec<(String, serde_json::Value)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                for (status, body) in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    server_requests.lock().unwrap().push(request);
+                    let response = http_json(&status, body);
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            Self { base_url, requests, handle }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.handle.join().unwrap();
+            Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
+        }
+    }
+
+    fn enc_name(master_key: &[u8; 32], file_id: &str, name: &str) -> String {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+        beebeeb_core::encrypt::encrypt_name(&mk, file_id, name, None).unwrap()
+    }
+
+    /// Build a snapshot node the way the server's `/sync/snapshot` does.
+    fn snap_node(
+        master_key: &[u8; 32],
+        id: &str,
+        name: &str,
+        parent_id: Option<&str>,
+        is_folder: bool,
+        updated_at: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "parent_id": parent_id,
+            "name_encrypted": enc_name(master_key, id, name),
+            "size_bytes": 10,
+            "is_folder": is_folder,
+            "content_hash": serde_json::Value::Null,
+            "version_number": 1,
+            "is_trashed": false,
+            "is_starred": false,
+            "updated_at": updated_at,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_bootstrap_snapshot_ingests_same_rows_as_walk() {
+        // cursor unset → ONE /sync/snapshot bootstrap. Every node lands as a
+        // cloud_only row with the decrypted nested path, and the cursor is set
+        // to the snapshot's seq_id.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [7u8; 32];
+        let folder = "f0000000-0000-4000-8000-000000000001";
+        let child = "c0000000-0000-4000-8000-000000000002";
+        let root_file = "a0000000-0000-4000-8000-000000000003";
+        let snapshot = serde_json::json!({
+            "seq_id": 12,
+            "nodes": [
+                snap_node(&mk, folder, "docs", None, true, 100),
+                snap_node(&mk, child, "notes.txt", Some(folder), false, 100),
+                snap_node(&mk, root_file, "top.txt", None, false, 100),
+            ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        let conflicts = sync_tick(&bridge, dir.path()).await.unwrap();
+        assert!(conflicts.is_empty());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "bootstrap = exactly one request");
+        assert_eq!(requests[0].path, "/api/v1/sync/snapshot");
+
+        // Nested + root rows all present, paths nested correctly, all cloud_only.
+        let f = bridge.db().get_file(folder).unwrap().unwrap();
+        assert_eq!(f.path, "docs");
+        assert_eq!(f.item_kind, ItemKind::Folder);
+        let c = bridge.db().get_file(child).unwrap().unwrap();
+        assert_eq!(c.path, "docs/notes.txt", "child nested under parent's resolved path");
+        assert_eq!(c.status, FileStatus::CloudOnly);
+        let r = bridge.db().get_file(root_file).unwrap().unwrap();
+        assert_eq!(r.path, "top.txt");
+        // Cursor advanced to the snapshot seq_id.
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(12));
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_snapshot_prunes_row_absent_from_snapshot() {
+        // A known local row the fresh snapshot OMITS must be pruned (the silent
+        // deletion-reconciliation fix).
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [4u8; 32];
+        let kept = "11111111-0000-4000-8000-000000000001";
+        let stale = "22222222-0000-4000-8000-000000000002";
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        // Pre-seed a settled own-tree row that the snapshot will NOT mention.
+        bridge.db().upsert_file(&FileEntry {
+            file_id: stale.into(),
+            path: "deleted-server-side.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        }).unwrap();
+
+        let snapshot = serde_json::json!({
+            "seq_id": 5,
+            "nodes": [ snap_node(&mk, kept, "kept.txt", None, false, 50) ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        // Re-point the bridge at the mock by rebuilding it on the same DB path.
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        server.finish();
+
+        assert!(bridge.db().get_file(kept).unwrap().is_some());
+        assert!(bridge.db().get_file(stale).unwrap().is_none(), "snapshot-absent row pruned");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_snapshot_window_does_not_resurrect_trashing_row() {
+        // task 0802 — THE WINDOW (the bug this fix closes). A file was just
+        // locally deleted: its row is `Trashing`, its `TrashFile` op already
+        // SUCCEEDED (so the op is gone). On the very next tick the server's
+        // `/sync/snapshot` read is replica-lagged / same-second and STILL lists
+        // the (now-trashed) file. The OLD code's None/insert arm re-inserted a
+        // FRESH `CloudOnly` row here and re-minted the placeholder — the "deleted
+        // file comes back" bug. The fix: `process_metadata_row`'s `Trashing` guard
+        // preserves the row untouched, and `prune_absent` does NOT remove it while
+        // it's still listed. Assert: row stays `Trashing`, never `CloudOnly`.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [7u8; 32];
+        let trashing = "33333333-0000-4000-8000-000000000003";
+        // First bridge only to create the DB file; rebuilt below against the mock.
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        // Pre-seed the post-local-delete state: Trashing row, NO pending op.
+        bridge
+            .db()
+            .upsert_file(&FileEntry {
+                file_id: trashing.into(),
+                path: "doomed.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 10,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 10,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        // Snapshot STILL lists the trashed file (propagation lag) — exactly the
+        // race window. (is_trashed flag on the node is irrelevant: the lagged
+        // snapshot is what the engine sees.)
+        let snapshot = serde_json::json!({
+            "seq_id": 9,
+            "nodes": [ snap_node(&mk, trashing, "doomed.txt", None, false, 10) ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        server.finish();
+
+        let row = bridge.db().get_file(trashing).unwrap();
+        assert!(row.is_some(), "Trashing row must NOT be pruned while still listed in the snapshot");
+        assert_eq!(
+            row.unwrap().status,
+            FileStatus::Trashing,
+            "a snapshot still listing a Trashing file must NOT resurrect it to CloudOnly (the bug)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_snapshot_absent_prunes_trashing_row_after_propagation() {
+        // task 0802 — CONVERGENCE end-to-end: once the trash propagates the file
+        // is ABSENT from the snapshot, and the op-less `Trashing` row is pruned —
+        // final convergence with the (already-removed) on-disk placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [7u8; 32];
+        let trashing = "44444444-0000-4000-8000-000000000004";
+        let kept = "55555555-0000-4000-8000-000000000005";
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        bridge
+            .db()
+            .upsert_file(&FileEntry {
+                file_id: trashing.into(),
+                path: "doomed.txt".into(),
+                status: FileStatus::Trashing,
+                size_bytes: 10,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 10,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        // Snapshot no longer lists the trashed file (propagation complete); it
+        // lists an unrelated row so the empty-snapshot guard doesn't trip.
+        let snapshot = serde_json::json!({
+            "seq_id": 9,
+            "nodes": [ snap_node(&mk, kept, "kept.txt", None, false, 10) ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), snapshot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        server.finish();
+
+        assert!(bridge.db().get_file(kept).unwrap().is_some());
+        assert!(
+            bridge.db().get_file(trashing).unwrap().is_none(),
+            "an op-less Trashing row absent from the snapshot must be pruned (convergence)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_ops_sequence_converges_to_fresh_snapshot() {
+        // Bootstrap, then apply a stream of ops, and assert the resulting mirror
+        // matches what a fresh snapshot of the post-op tree would produce.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let keep = "aaaa0000-0000-4000-8000-000000000001";
+        let doomed = "bbbb0000-0000-4000-8000-000000000002";
+        let created = "cccc0000-0000-4000-8000-000000000003";
+
+        // Bootstrap snapshot: {keep, doomed}, seq 1.
+        let boot = serde_json::json!({
+            "seq_id": 1,
+            "nodes": [
+                snap_node(&mk, keep, "keep.txt", None, false, 10),
+                snap_node(&mk, doomed, "doomed.txt", None, false, 10),
+            ],
+        });
+        // Ops: create `created`, trash `doomed`. Highest seq = 3.
+        let ops = serde_json::json!({
+            "since": 1,
+            "ops": [
+                { "seq_id": 2, "op_type": "file_create",
+                  "payload": { "id": created, "name_encrypted": enc_name(&mk, created, "fresh.txt"),
+                               "parent_id": serde_json::Value::Null, "size_bytes": 7,
+                               "storage_pool_id": "pool" } },
+                { "seq_id": 3, "op_type": "file_trash", "payload": { "id": doomed } },
+            ],
+        });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // Tick 1: bootstrap (cursor 0 → snapshot). Tick 2: ops?since=1.
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(1));
+        sync_tick(&bridge, dir.path()).await.unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "/api/v1/sync/snapshot");
+        assert_eq!(requests[1].path, "/api/v1/sync/ops?since=1");
+
+        // Convergence: keep + created present, doomed gone, cursor at 3 — exactly
+        // a fresh snapshot of the post-op tree.
+        assert!(bridge.db().get_file(keep).unwrap().is_some());
+        assert!(bridge.db().get_file(created).unwrap().is_some(), "file_create applied");
+        assert_eq!(bridge.db().get_file(created).unwrap().unwrap().path, "fresh.txt");
+        assert!(bridge.db().get_file(doomed).unwrap().is_none(), "file_trash removed the row");
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(3), "cursor advanced to max seq_id");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_ops_429_backs_off_and_preserves_cursor() {
+        // A 429 on /sync/ops must NOT advance the cursor and must NOT lose data —
+        // send_with_retry rides it out; if it ultimately surfaces, the tick
+        // simply retries next time. Here the mock 429s every attempt; sync_tick
+        // must return Ok with the cursor unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [3u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        // Pre-set a cursor so we take the ops path (not bootstrap).
+        bridge.db().set_sync_cursor(8).unwrap();
+
+        // send_with_retry does up to 1 + MAX_429_RETRIES (=3) attempts → 4 total.
+        let err_body = serde_json::json!({ "error": "rate limit exceeded", "retry_after": 0 });
+        let responses = vec![
+            ("429 Too Many Requests".into(), err_body.clone()),
+            ("429 Too Many Requests".into(), err_body.clone()),
+            ("429 Too Many Requests".into(), err_body.clone()),
+            ("429 Too Many Requests".into(), err_body),
+        ];
+        let server = SyncMockServer::start(responses);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // Must not panic / error out the runner; cursor stays put for a retry.
+        let conflicts = sync_tick(&bridge, dir.path()).await.unwrap();
+        assert!(conflicts.is_empty());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4, "one initial + 3 retries (429 backoff)");
+        for r in &requests {
+            assert_eq!(r.path, "/api/v1/sync/ops?since=8");
+        }
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(8), "cursor preserved across 429");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_seq_id_zero_bootstrap_then_takes_ops_path_not_resnapshot() {
+        // BLOCKER regression (issue 1): the server returns seq_id 0 for any vault
+        // whose `sync_ops` log is empty (MAX(seq_id) → NULL → unwrap_or(0)). seq_id
+        // 0 is a VALID bootstrapped cursor, NOT an "unset" sentinel. The 2nd tick
+        // MUST issue /sync/ops?since=0 and MUST NOT re-snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [5u8; 32];
+        let only = "dddd0000-0000-4000-8000-000000000001";
+
+        // Bootstrap snapshot with seq_id 0 (empty op log) and one node.
+        let boot = serde_json::json!({
+            "seq_id": 0,
+            "nodes": [ snap_node(&mk, only, "only.txt", None, false, 10) ],
+        });
+        // Empty ops list at since=0 (nothing happened yet). Because the ops list
+        // is empty, the freshness-probe snapshot also fires; it returns seq_id 0,
+        // which is NOT < cursor(0), so it does NOT re-bootstrap.
+        let ops_empty = serde_json::json!({ "since": 0, "ops": [] });
+        let probe = serde_json::json!({ "seq_id": 0, "nodes": [
+            snap_node(&mk, only, "only.txt", None, false, 10)
+        ] });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops_empty),
+            ("200 OK".into(), probe),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // Tick 1: cursor UNSET → bootstrap snapshot, stores cursor Some(0).
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        assert_eq!(
+            bridge.db().get_sync_cursor().unwrap(),
+            Some(0),
+            "bootstrap with seq_id 0 stores a real Some(0) cursor"
+        );
+
+        // Tick 2: cursor Some(0) → MUST take the ops path (since=0), NOT re-bootstrap.
+        sync_tick(&bridge, dir.path()).await.unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/api/v1/sync/snapshot", "tick1 = bootstrap");
+        assert_eq!(
+            requests[1].path, "/api/v1/sync/ops?since=0",
+            "tick2 takes the ops delta path (NOT a re-bootstrap snapshot)"
+        );
+        // The 3rd request is the empty-delta freshness probe, not a re-bootstrap.
+        assert_eq!(requests[2].path, "/api/v1/sync/snapshot");
+        // The row from bootstrap survives (no spurious re-prune).
+        assert!(bridge.db().get_file(only).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_nested_create_and_move_match_fresh_snapshot_path() {
+        // HIGH regression (issue 2): a nested file_create and a move-into-folder
+        // applied via ops must land at the SAME mirror path a fresh snapshot would
+        // produce — under the parent's prefix, not at the sync root.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [6u8; 32];
+        let folder = "f1110000-0000-4000-8000-000000000001";
+        let nested = "f1110000-0000-4000-8000-000000000002";
+        let mover = "f1110000-0000-4000-8000-000000000003";
+
+        // Bootstrap: just the folder (parents-known-first), seq 1.
+        let boot = serde_json::json!({
+            "seq_id": 1,
+            "nodes": [ snap_node(&mk, folder, "docs", None, true, 10) ],
+        });
+        // Ops: create a NESTED file under `folder`; create a root file then move
+        // it INTO `folder`. Highest seq = 4.
+        let ops = serde_json::json!({
+            "since": 1,
+            "ops": [
+                { "seq_id": 2, "op_type": "file_create",
+                  "payload": { "id": nested, "name_encrypted": enc_name(&mk, nested, "notes.txt"),
+                               "parent_id": folder, "size_bytes": 3, "storage_pool_id": "pool" } },
+                { "seq_id": 3, "op_type": "file_create",
+                  "payload": { "id": mover, "name_encrypted": enc_name(&mk, mover, "moved.txt"),
+                               "parent_id": serde_json::Value::Null, "size_bytes": 3,
+                               "storage_pool_id": "pool" } },
+                { "seq_id": 4, "op_type": "file_move",
+                  "payload": { "id": mover, "old_parent_id": serde_json::Value::Null,
+                               "new_parent_id": folder } },
+            ],
+        });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
+        sync_tick(&bridge, dir.path()).await.unwrap(); // ops
+        server.finish();
+
+        // Both items nested under the folder prefix, exactly as a fresh snapshot
+        // (which resolves nesting via parent_id) would place them.
+        assert_eq!(
+            bridge.db().get_file(nested).unwrap().unwrap().path,
+            "docs/notes.txt",
+            "nested file_create lands under the parent prefix, not at root"
+        );
+        assert_eq!(
+            bridge.db().get_file(mover).unwrap().unwrap().path,
+            "docs/moved.txt",
+            "move-into-folder lands under the new parent prefix, not at root"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_trash_then_restore_keeps_row_via_resnapshot() {
+        // HIGH regression (issue 3/7): a trash op deletes the local row; the
+        // following restore op ({id}-only payload) cannot rebuild it, so it must
+        // schedule a re-snapshot that re-materialises the row on the next tick.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [8u8; 32];
+        let file = "e1110000-0000-4000-8000-000000000001";
+
+        // Bootstrap: the file exists, seq 1.
+        let boot = serde_json::json!({
+            "seq_id": 1,
+            "nodes": [ snap_node(&mk, file, "doc.txt", None, false, 10) ],
+        });
+        // Ops: trash then restore. Highest seq = 3.
+        let ops = serde_json::json!({
+            "since": 1,
+            "ops": [
+                { "seq_id": 2, "op_type": "file_trash", "payload": { "id": file } },
+                { "seq_id": 3, "op_type": "file_restore", "payload": { "id": file } },
+            ],
+        });
+        // The restore scheduled a re-snapshot, so the NEXT tick bootstraps from
+        // this fresh snapshot (which includes the restored, no-longer-trashed row).
+        let resnap = serde_json::json!({
+            "seq_id": 3,
+            "nodes": [ snap_node(&mk, file, "doc.txt", None, false, 10) ],
+        });
+
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), boot),
+            ("200 OK".into(), ops),
+            ("200 OK".into(), resnap),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
+        sync_tick(&bridge, dir.path()).await.unwrap(); // ops: trash + restore (deletes, schedules re-snapshot)
+        // After the ops tick, the trash removed the row and the restore could not
+        // rebuild it from {id} alone — it is gone for THIS tick, but a re-snapshot
+        // is pending.
+        assert!(
+            bridge.db().get_file(file).unwrap().is_none(),
+            "trash removed the row; restore can't rebuild it from {{id}} alone"
+        );
+        sync_tick(&bridge, dir.path()).await.unwrap(); // re-snapshot re-materialises the row
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2].path, "/api/v1/sync/snapshot", "tick3 = forced re-snapshot");
+        assert!(
+            bridge.db().get_file(file).unwrap().is_some(),
+            "re-snapshot re-materialised the restored row — it is NOT permanently invisible"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_empty_snapshot_does_not_prune_existing_tree() {
+        // BLOCKER regression (issue 4): a degraded EMPTY snapshot (200 with no
+        // nodes) must NOT prune the entire local own-tree.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [2u8; 32];
+        let kept = "c2220000-0000-4000-8000-000000000001";
+
+        // Pre-seed a settled own-tree row stamped in the past (so the freshness
+        // cutoff would otherwise allow pruning it).
+        {
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+            bridge.db().upsert_file(&FileEntry {
+                file_id: kept.into(),
+                path: "important.txt".into(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 1,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            }).unwrap();
+        }
+
+        // Bootstrap with an EMPTY snapshot.
+        let boot = serde_json::json!({ "seq_id": 7, "nodes": [] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        server.finish();
+
+        assert!(
+            bridge.db().get_file(kept).unwrap().is_some(),
+            "empty snapshot must NOT prune the existing own-tree (fail-closed)"
+        );
     }
 }

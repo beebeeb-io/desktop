@@ -30,9 +30,13 @@
 
 #![cfg(target_os = "windows")]
 
-use windows::core::PCWSTR;
 use windows::Win32::Storage::CloudFilters::*;
-use windows::Win32::Storage::FileSystem::FILE_BASIC_INFO;
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_PINNED,
+    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED,
+    FILE_BASIC_INFO, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+};
+use windows::core::PCWSTR;
 
 /// Create a single cloud-only placeholder under `parent_dir`. The file
 /// shows up in Explorer immediately with the cloud-icon overlay; bytes
@@ -48,15 +52,22 @@ use windows::Win32::Storage::FileSystem::FILE_BASIC_INFO;
 ///   filename never reaches Windows.
 /// - `size_bytes`: plaintext size — what the user expects to see in
 ///   the size column.
-/// - `_modified_at`: kept for API parity; we don't currently mint a
-///   `FILETIME` from it (Windows is happy enough with the 0 default,
-///   and the engine_bridge has the real value if we need to backfill).
+/// - `modified_at`: unix timestamp (seconds; millis tolerated — see
+///   [`unix_to_filetime`]) of the file's last modification. Converted to
+///   a Windows `FILETIME` tick count and written to the placeholder's
+///   `LastWriteTime` / `ChangeTime` / `CreationTime` so Explorer shows a
+///   real modified date instead of a blank/epoch one.
+/// - `is_dir`: when `true`, mint a **directory** placeholder
+///   (`FILE_ATTRIBUTE_DIRECTORY`) that is a real, openable folder in
+///   Explorer — children land inside it on disk. When `false`, mint a file
+///   placeholder (`FILE_ATTRIBUTE_NORMAL`) whose bytes are hydrated on open.
 pub fn create_placeholder(
     parent_dir: &std::path::Path,
     file_id: &str,
     name: &str,
     size_bytes: i64,
-    _modified_at: i64,
+    modified_at: i64,
+    is_dir: bool,
 ) -> anyhow::Result<()> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
@@ -68,6 +79,49 @@ pub fn create_placeholder(
     // the file_id so the fetch callback can decode it directly.
     let identity: Vec<u8> = file_id.as_bytes().to_vec();
 
+    // Convert the file's unix modified timestamp into the Windows
+    // FILETIME tick count (100-ns intervals since 1601-01-01) that
+    // FILE_BASIC_INFO stores as an i64.
+    let modified_ticks = unix_to_filetime(modified_at);
+
+    // Directory vs file placeholder.
+    //  - DIRECTORY: a real, openable folder. Its children are the on-disk
+    //    placeholders we seed inside it; a directory has no data stream so
+    //    `FileSize` is 0.
+    //  - FILE (NORMAL): a hydrate-on-open stub carrying the plaintext size.
+    let file_attributes = if is_dir {
+        FILE_ATTRIBUTE_DIRECTORY.0
+    } else {
+        FILE_ATTRIBUTE_NORMAL.0
+    };
+    let file_size = if is_dir { 0 } else { size_bytes };
+
+    // Placeholder-create flags:
+    //  - MARK_IN_SYNC: this placeholder reflects the latest server state.
+    //    Without it Windows treats a new placeholder as locally-modified
+    //    relative to the cloud and starts a spurious upload conflict.
+    //  - DISABLE_ON_DEMAND_POPULATION (directories only): the per-directory
+    //    analog of the root's CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT
+    //    + CF_POPULATION_POLICY_ALWAYS_FULL. It tells Windows this directory is
+    //    ALREADY fully enumerated by its on-disk children, so Explorer must NOT
+    //    block on a FETCH_PLACEHOLDERS callback (which this in-process provider
+    //    never registers — see mod.rs). This is what keeps nested folders from
+    //    reintroducing the enumeration hang while staying in the eager model.
+    //  - PIN STATE (inherit): we deliberately set NO pin flag here. A freshly
+    //    created placeholder has pin state `CF_PIN_STATE_INHERIT` by default,
+    //    which resolves to the EFFECTIVE pin state of its parent directory. So a
+    //    child minted under a directory the user pinned ("Always keep on this
+    //    device", i.e. `set_pin_state(parent, pinned=true, recurse=true)`)
+    //    automatically inherits `pinned` and is kept resident — no per-child
+    //    CfSetPinState needed (the recursive parent pin also stamps existing
+    //    children; inherit covers children created LATER). Adding an explicit
+    //    `CF_PIN_STATE_PINNED` here would be wrong: it would force every new
+    //    placeholder resident regardless of the parent, defeating cloud-only.
+    let mut create_flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+    if is_dir {
+        create_flags |= CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION;
+    }
+
     // SAFETY: `entry`, `parent_wide`, `name_wide`, `identity` all live
     // on this stack frame for the duration of the FFI call. The
     // `CfCreatePlaceholders` API copies what it needs before returning
@@ -77,22 +131,28 @@ pub fn create_placeholder(
             RelativeFileName: PCWSTR(name_wide.as_ptr()),
             FsMetadata: CF_FS_METADATA {
                 BasicInfo: FILE_BASIC_INFO {
-                    // 0x20 = FILE_ATTRIBUTE_NORMAL. Anything other
-                    // than 0 is required, otherwise Cloud Files
-                    // refuses the placeholder. We don't carry over
-                    // hidden/system bits; we have no use for them.
-                    FileAttributes: 0x20,
+                    // FILE_ATTRIBUTE_DIRECTORY (0x10) for folders, else
+                    // FILE_ATTRIBUTE_NORMAL (0x80). A non-zero attribute is
+                    // required or Cloud Files refuses the placeholder. (The
+                    // previous file path hardcoded 0x20 / ARCHIVE, which also
+                    // worked; NORMAL is the semantically-correct file attr.) We
+                    // don't carry over hidden/system bits; we have no use for them.
+                    FileAttributes: file_attributes,
+                    // Real timestamps so Explorer's Date Modified column
+                    // is populated. We only have a single modified time
+                    // from the server, so we mirror it across
+                    // creation/write/change. LastAccessTime is left at 0
+                    // (Windows treats 0 as "don't change / unknown").
+                    CreationTime: modified_ticks,
+                    LastWriteTime: modified_ticks,
+                    ChangeTime: modified_ticks,
                     ..Default::default()
                 },
-                FileSize: size_bytes,
+                FileSize: file_size,
             },
             FileIdentity: identity.as_ptr() as *const _,
             FileIdentityLength: identity.len() as u32,
-            // MARK_IN_SYNC = "this placeholder reflects the latest
-            // server state." Without this Windows treats every new
-            // placeholder as locally modified relative to the cloud,
-            // which kicks off a spurious upload conflict.
-            Flags: CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC,
+            Flags: create_flags,
             // Result is filled in by Windows on return. Initialised to
             // S_OK so a no-op (already exists) reads sensibly.
             Result: windows::core::HRESULT(0),
@@ -103,22 +163,718 @@ pub fn create_placeholder(
         // placeholder" call shape. Batch creation is possible by
         // passing a longer slice, but we pace creation per-file as the
         // engine bridge discovers them, so single-entry is fine.
+        // windows 0.58 takes the placeholder array as a `&mut [..]` slice
+        // (the length is derived from it) plus an optional
+        // `entriesprocessed` out-pointer — four args total, not five.
         let entries = std::slice::from_mut(&mut entry);
-        CfCreatePlaceholders(
-            PCWSTR(parent_wide.as_ptr()),
-            entries,
-            entries.len() as u32,
-            CF_CREATE_FLAG_NONE,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("CfCreatePlaceholders: {e}"))?;
+        if let Err(e) = CfCreatePlaceholders(PCWSTR(parent_wide.as_ptr()), entries, CF_CREATE_FLAG_NONE, None) {
+            // A placeholder that already exists is the steady state on every
+            // tick after the first — `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
+            // (0x800700B7). Treat it as success: the desired end state holds.
+            const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
+            if e.code() == ALREADY_EXISTS {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfCreatePlaceholders: {e}"));
+        }
     }
 
-    tracing::debug!(
-        file_id = %file_id,
-        parent = %parent_dir.display(),
-        name = %name,
-        "cloud placeholder created"
-    );
+    // Zero-knowledge: log the file_id + kind only. The decrypted plaintext
+    // filename (and the parent path, which can carry decrypted folder names)
+    // must never reach the logs.
+    tracing::debug!(file_id = %file_id, is_dir, "cloud placeholder created");
     Ok(())
+}
+
+/// Remove the on-disk Cloud Files placeholder at `path` as part of reconciling a
+/// REMOTE deletion (a file/folder trashed or hard-deleted on another client) back
+/// into this client — task 0806. This is the missing half of remote-deletion
+/// reconciliation: both reconcile paths (`apply_sync_op` for `file_trash`/
+/// `file_delete` ops and `apply_snapshot`/`prune_absent` for snapshot-absence)
+/// previously deleted only the `state.db` row, leaving the placeholder visible in
+/// Explorer forever (the "ghost file" the founder reported).
+///
+/// ## NOT the local-delete path (0802)
+///
+/// This is REMOTE→local. The LOCAL→server delete (task 0802) is the opposite
+/// direction: the user deletes the on-disk placeholder in Explorer, the watcher's
+/// `handle_delete` queues a server `TrashFile` op, and the row is marked
+/// `Trashing` (the placeholder is ALREADY gone — the user removed it). Callers on
+/// this path MUST skip a `Trashing` row so we never double-handle a local delete.
+///
+/// ## Why remove FIRST, and only revert on a remove failure
+///
+/// A placeholder is a reparse point under Cloud Files control. The naive order
+/// — `CfRevertPlaceholder` (strip the reparse identity → plain file) THEN
+/// `std::fs::remove_*` — opens a resurrection window (task 0806 review,
+/// high-severity): between the revert and the remove, the entry is a PLAIN file
+/// with real (hydrated) content and NO `state.db` row. The independent scan
+/// loop (`watcher::scan_loop`, every `SCAN_INTERVAL`, no shared lock with the
+/// sync tick) would classify it as genuinely-new — filter-2
+/// (`is_cloud_placeholder`) is FALSE now that the reparse bit is gone, filter-3
+/// (`get_file_by_path`) is None because the caller already deleted the row — and
+/// re-upload it to the server, resurrecting a file the user deleted on another
+/// device. Worse, if the `remove_*` then FAILS (the file is open/locked, common
+/// on Windows under AV or an editor), the reverted plain orphan persists and the
+/// very next scan re-uploads it deterministically — a permanent re-upload trap.
+///
+/// So we `remove_*` FIRST. A placeholder removes cleanly as a plain filesystem
+/// delete (the reparse point is unlinked); on success the entry is simply gone —
+/// no window where a plain, row-less file exists on disk. We deliberately do NOT
+/// `CfRevertPlaceholder` on the success path: there is nothing left to revert.
+///
+/// On a `remove_*` failure we DO NOT revert either — reverting would strip the
+/// reparse bit and create exactly the row-less plain orphan the scan re-uploads.
+/// Instead we leave the entry AS A PLACEHOLDER (its reparse bit intact) and
+/// return `Err`. Filter-2 (`is_cloud_placeholder`) keeps excluding it from
+/// upload for as long as it sits there, so a transient lock can never resurrect
+/// the file — the worst case is a still-visible placeholder the user (or a later
+/// reconcile) evicts, never an unwanted re-upload.
+///
+/// ## Directories: children-first
+///
+/// For a directory we `remove_dir_all`, which recursively deletes children then
+/// the directory. The server has NO recursive trash (task 0807), so a trashed
+/// FOLDER leaves its children present in the snapshot; the *DB-side* orphan prune
+/// (`prune_absent` / `apply_sync_op`) removes the descendant rows, and the
+/// descendant placeholders inside this directory are swept here in one
+/// `remove_dir_all`. (The DB layer still removes each descendant ROW so its
+/// status/cursor bookkeeping is correct; the on-disk subtree is gone in one call.)
+///
+/// ## Tolerated outcomes (the end state already holds)
+///
+/// - `NotFound` — the entry is already gone (a prior tick removed it, or the
+///   user beat us to it). Desired end state → `Ok(())`.
+///
+/// ## Failure leaves a managed placeholder, never a plain orphan
+///
+/// On any other `remove_*` error the entry remains a Cloud Files placeholder
+/// (reparse bit intact). We return `Err` WITHOUT reverting, so filter-2 keeps it
+/// excluded from upload and a transient lock cannot resurrect the file.
+///
+/// ## Zero-knowledge
+///
+/// NEVER logs `path` (it can carry decrypted folder/file names) — not even at
+/// debug. Callers pass a `file_id` to log instead.
+pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Result<()> {
+    // Remove the on-disk entry FIRST. A placeholder is a reparse point and
+    // removes as an ordinary filesystem delete (children-first `remove_dir_all`
+    // for a directory, a plain unlink for a file) — there is no need to
+    // `CfRevertPlaceholder` it beforehand, and doing so would open a resurrection
+    // window (see the doc comment: a reverted-but-not-yet-removed plain file with
+    // no DB row is re-uploaded by the scan loop). A "not found" is the desired end
+    // state (already removed), so map it to Ok.
+    //
+    // On any other error we return `Err` and DELIBERATELY leave the entry as a
+    // placeholder: its reparse bit is still set, so filter-2 (`is_cloud_placeholder`)
+    // keeps excluding it from upload. We never revert here — a revert would strip
+    // the reparse bit and produce a row-less plain orphan the scan would resurrect.
+    let removed = if is_dir {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removed {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("remove placeholder (is_dir={is_dir}): {e}")),
+    }
+
+    // Zero-knowledge: never log the path (it carries decrypted names). The caller
+    // logs the file_id.
+    tracing::debug!(is_dir, "removed cloud placeholder (remote-deletion reconcile)");
+    Ok(())
+}
+
+/// Convert a freshly-uploaded **plain local file** at `path` into an
+/// in-sync Cloud Files placeholder, so Explorer shows it with the synced
+/// (green check) overlay rather than as an ordinary always-local file.
+///
+/// Called by the upload watcher path (task 0780) right after a NEW
+/// user-created file under the sync root has been encrypted + uploaded and
+/// the server has assigned it a `file_id`. The point is two-fold:
+///
+/// 1. **Identity** — stamp the same `FileIdentity` blob (UTF-8 `file_id`)
+///    the placeholder seeder uses, so a later `free_up_space` /
+///    on-demand-hydrate round-trips through the same fetch callback. Without
+///    this the file would be a local-only file with no CF identity and could
+///    never be dehydrated or re-hydrated.
+///
+/// 2. **In-sync state** — `CF_CONVERT_FLAG_MARK_IN_SYNC` marks the new
+///    placeholder as reflecting the latest server state, so Windows does NOT
+///    immediately treat it as locally-modified-relative-to-cloud (which would
+///    kick off a spurious re-upload — the very feedback loop we are avoiding).
+///    We do NOT pass `CF_CONVERT_FLAG_DEHYDRATE`: the user just created this
+///    file locally, so the happy path keeps the bytes on disk and merely
+///    re-labels them as an in-sync placeholder. Dehydration (reclaiming the
+///    bytes) is the separate `free_up_space` / smart-cache path.
+///
+/// Best-effort and idempotent: a file that is ALREADY a placeholder returns
+/// `ERROR_NOT_A_CLOUD_FILE`-adjacent failures from `CfConvertToPlaceholder`,
+/// which we map to `Ok(())` — converting a placeholder again is a no-op.
+///
+/// SAFETY: opens a Cloud Files handle via `CfOpenFileWithOplock` (exclusive,
+/// write access — conversion mutates the file's reparse data) and always
+/// closes it via `CfCloseHandle` before returning.
+pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // FileIdentity is opaque to Windows — raw UTF-8 bytes of the file_id, the
+    // exact same encoding `create_placeholder` uses, so the fetch callback can
+    // decode it identically on a later hydration.
+    let identity: Vec<u8> = file_id.as_bytes().to_vec();
+
+    // SAFETY: `path_wide` / `identity` live on this stack frame for the whole
+    // call. The opened handle is closed before return on every path.
+    unsafe {
+        // Exclusive + write access: converting a file to a placeholder
+        // rewrites its reparse data, so we need a writable, exclusive handle.
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert): {e}"))?;
+
+        let result = CfConvertToPlaceholder(
+            handle,
+            Some(identity.as_ptr() as *const core::ffi::c_void),
+            identity.len() as u32,
+            // MARK_IN_SYNC, no DEHYDRATE — keep the user's bytes on disk but
+            // label the file as a synced placeholder. ENABLE_ON_DEMAND_POPULATION
+            // is for directories; this is a file, so it's omitted.
+            CF_CONVERT_FLAG_MARK_IN_SYNC,
+            None,
+            None,
+        );
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // 0x8007017C = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_ALREADY_CONNECTED)
+            // and 0x80070178 = ERROR_NOT_A_CLOUD_FILE are the "already a
+            // placeholder / nothing to convert" steady states — treat as the
+            // desired end state. Anything else is a real failure.
+            const ALREADY_A_PLACEHOLDER: windows::core::HRESULT =
+                windows::core::HRESULT(0x8007017Cu32 as i32);
+            if e.code() == ALREADY_A_PLACEHOLDER {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfConvertToPlaceholder: {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the file_id only, never the decrypted plaintext path.
+    tracing::debug!(file_id = %file_id, "converted local file to in-sync placeholder");
+    Ok(())
+}
+
+/// Convert a brand-new plain local file at `path` into a Cloud Files
+/// placeholder WITHOUT marking it in-sync, called the moment we decide to upload
+/// it (task 0780) and BEFORE the upload completes.
+///
+/// Why convert pre-upload at all: a plain file the user just dropped into a
+/// CF-connected root is NOT a placeholder, so it has no Cloud Files identity and
+/// the CF filter has no reason to leave it alone while we read its bytes for the
+/// encrypted upload. Converting it to a placeholder hands it to the filter under
+/// our control, so it is not reclaimed/dehydrated mid-upload.
+///
+/// Why NOT `MARK_IN_SYNC` here (unlike [`convert_to_in_sync_placeholder`]): the
+/// file is NOT yet on the server — the upload is only just being queued. Marking
+/// it in-sync now would be a lie (and could let "Free up space" dehydrate bytes
+/// that were never uploaded). We pass `CF_CONVERT_FLAG_NONE`: the file becomes a
+/// placeholder that keeps its bytes on disk and is understood to be locally
+/// ahead of the cloud. Once the real `file_id` lands,
+/// [`super::super::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]
+/// → [`convert_to_in_sync_placeholder`] re-stamps it in-sync with the server id.
+///
+/// We use a throwaway identity here (the local op uuid would do, but we have no
+/// server id yet) — pass `local_id`, which `finalize` overwrites with the real
+/// server `file_id` on the in-sync re-stamp. The identity is opaque to Windows.
+///
+/// Best-effort + idempotent: a file that is already a placeholder returns the
+/// "already a cloud file" HRESULT, which we map to `Ok(())`. A failure here
+/// leaves a working plain file that still uploads — the convert is an
+/// anti-reclaim guard, not a correctness requirement — so the caller only logs.
+///
+/// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// (conversion rewrites reparse data) and always closes it before returning.
+pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let identity: Vec<u8> = local_id.as_bytes().to_vec();
+
+    // SAFETY: `path_wide` / `identity` live for the whole call; the handle is
+    // closed on every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
+
+        // NONE: become a placeholder, keep bytes on disk, do NOT claim in-sync.
+        let result = CfConvertToPlaceholder(
+            handle,
+            Some(identity.as_ptr() as *const core::ffi::c_void),
+            identity.len() as u32,
+            CF_CONVERT_FLAG_NONE,
+            None,
+            None,
+        );
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // Already a placeholder / already a cloud file → desired end state.
+            const ALREADY_A_PLACEHOLDER: windows::core::HRESULT =
+                windows::core::HRESULT(0x8007017Cu32 as i32);
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == ALREADY_A_PLACEHOLDER || e.code() == NOT_A_CLOUD_FILE {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfConvertToPlaceholder (unsynced): {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the local id only, never the decrypted path/filename.
+    tracing::debug!(local_id = %local_id, "converted new local file to unsynced placeholder (pre-upload)");
+    Ok(())
+}
+
+/// Dehydrate a Cloud Files placeholder at `path`, freeing the on-disk bytes
+/// that live INSIDE the placeholder while keeping it visible in Explorer as a
+/// cloud-only file. Returns the number of bytes actually reclaimed from disk.
+///
+/// This is the Windows-correct replacement for the Unix `remove_file` in
+/// `free_up_space` (task 0781): on Windows CF the hydrated bytes are stored in
+/// the placeholder's primary data stream, NOT in a separate cache copy — so a
+/// `remove_file` would delete the user's file outright (and the old code's
+/// `remove_file` on a still-present placeholder simply failed/no-op'd, leaving
+/// the file fully hydrated while the DB lied that it was cloud-only).
+///
+/// We dehydrate the WHOLE file (`startingoffset = 0`, `length = -1` meaning
+/// "to EOF" per the Cloud Files contract). `bytes_freed` is computed from the
+/// real on-disk allocation BEFORE dehydration (the logical file size, which
+/// for a fully-hydrated placeholder equals the bytes on disk) and only
+/// returned on a SUCCESSFUL dehydrate — a failed dehydrate reclaims nothing,
+/// so the caller must not flip the DB row to cloud_only for it.
+///
+/// `Ok(0)` (no error) is returned when the file is already dehydrated /
+/// partial — there is nothing to reclaim and the end state already holds.
+///
+/// SAFETY: opens a CF handle via `CfOpenFileWithOplock` and always closes it
+/// via `CfCloseHandle` before returning.
+pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
+    // Logical size = bytes currently materialised on disk for a fully-hydrated
+    // placeholder. Read it before we dehydrate so we can report what we freed.
+    let size_before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
+    // every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
+
+        // length = -1 → dehydrate from `startingoffset` to EOF. NONE flags =
+        // synchronous foreground dehydration (we want the bytes gone now so
+        // the freed figure is accurate when we return).
+        let result = CfDehydratePlaceholder(handle, 0, -1, CF_DEHYDRATE_FLAG_NONE, None);
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // 0x80070179 = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_NOT_IN_SYNC):
+            // the placeholder isn't in-sync (e.g. locally-modified) so it can't
+            // be safely dehydrated — skip it, reclaim nothing, don't error the
+            // whole sweep. Anything else is a real failure for THIS file.
+            const NOT_IN_SYNC: windows::core::HRESULT = windows::core::HRESULT(0x80070179u32 as i32);
+            // 0x80070178 = ERROR_NOT_A_CLOUD_FILE — already a plain file or
+            // already dehydrated; nothing to reclaim.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == NOT_IN_SYNC || e.code() == NOT_A_CLOUD_FILE {
+                return Ok(0);
+            }
+            return Err(anyhow::anyhow!("CfDehydratePlaceholder: {e}"));
+        }
+    }
+
+    Ok(size_before)
+}
+
+/// Proactively **hydrate** the Cloud Files placeholder at `path`: force Windows
+/// to materialise a cloud-only placeholder's bytes on disk now, instead of
+/// waiting for the user to open it. This is the missing half of "available
+/// offline": [`set_pin_state`] tells Windows a file is PINNED (kept resident,
+/// exempt from auto-dehydration) but does NOT itself download a not-yet-opened
+/// file — a pinned-but-unopened placeholder stays `RECALL_ON_DATA_ACCESS`
+/// (cloud-only) until something reads it. `CfHydratePlaceholder` is the API that
+/// performs that download eagerly.
+///
+/// It works by triggering our existing `FETCH_DATA` callback
+/// (`super::callbacks::fetch_data_callback` → `EngineBridge::hydrate_file` →
+/// decrypt + transfer), i.e. the exact working hydration path an open would take
+/// — so a successful call leaves a fully-resident, openable file.
+///
+/// We hydrate the WHOLE file (`startingoffset = 0`, `length = -1` meaning "to
+/// EOF" per the Cloud Files contract, identical to [`dehydrate_placeholder`]'s
+/// range) with `CF_HYDRATE_FLAG_NONE` (synchronous foreground hydration). The
+/// call BLOCKS until the bytes are on disk, so callers must run it OFF any IPC /
+/// latency-sensitive thread.
+///
+/// In windows-0.58 `CfHydratePlaceholder(filehandle, startingoffset: i64,
+/// length: i64, hydrateflags: CF_HYDRATE_FLAGS, overlapped)` takes the range as
+/// two bare `i64`s (NOT a `CF_FILE_RANGE` struct) — the same shape as
+/// `CfDehydratePlaceholder` — verified at
+/// `windows-0.58.0/src/Windows/Win32/Storage/CloudFilters/mod.rs`.
+///
+/// Map the "nothing to do" outcomes to `Ok(())`: `ERROR_NOT_A_CLOUD_FILE`
+/// (0x80070178 — already a plain/fully-resident file) and
+/// `ERROR_CLOUD_FILE_NOT_IN_SYNC` (0x80070179 — the placeholder can't be
+/// hydrated right now, e.g. locally-modified); both mean the per-file proactive
+/// hydrate has no work to do and must not abort a folder-wide sweep.
+///
+/// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// (matching [`dehydrate_placeholder`]) and always closes it via `CfCloseHandle`
+/// before returning — on every exit path, no leak.
+pub fn hydrate_placeholder(path: &std::path::Path) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
+    // every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (hydrate): {e}"))?;
+
+        // length = -1 → hydrate from `startingoffset` to EOF (whole file). NONE
+        // flags = synchronous foreground hydration: the call returns only once
+        // the bytes are on disk. This drives our FETCH_DATA callback, the same
+        // path a user open would take.
+        let result = CfHydratePlaceholder(handle, 0, -1, CF_HYDRATE_FLAG_NONE, None);
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // 0x80070178 = ERROR_NOT_A_CLOUD_FILE — already a plain file or
+            // already fully hydrated; nothing to fetch.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            // 0x80070179 = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_NOT_IN_SYNC):
+            // the placeholder isn't in-sync (e.g. locally-modified) so it can't
+            // be hydrated right now — skip it, don't error the whole sweep.
+            const NOT_IN_SYNC: windows::core::HRESULT = windows::core::HRESULT(0x80070179u32 as i32);
+            if e.code() == NOT_A_CLOUD_FILE || e.code() == NOT_IN_SYNC {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfHydratePlaceholder: {e}"));
+        }
+    }
+
+    // Zero-knowledge: no parameters carry the decrypted path; log a bare marker.
+    tracing::debug!("hydrated cloud placeholder (proactive pin)");
+    Ok(())
+}
+
+/// Set the **pin state** of the Cloud Files placeholder at `path` — the
+/// OS-level "available offline" flag that drives Explorer's "Always keep on
+/// this device" green-check (pinned) vs the cloud-only overlay (unpinned).
+///
+/// ## Why this exists (the missing half of the pin model)
+///
+/// Before this, `set_recursive_pin` only flipped the DB `pin_state` column and
+/// enqueued an out-of-band hydrate — Windows itself was never told, so it kept
+/// auto-dehydrating "pinned" files (the DB said pinned, the OS had no idea).
+/// `CfSetPinState(CF_PIN_STATE_PINNED)` is the correct OS contract: a pinned
+/// placeholder is hydrated by Windows via the normal FETCH_DATA path and is NOT
+/// auto-dehydrated, so it stays resident ("available offline"). Unpinning
+/// (`CF_PIN_STATE_UNPINNED`) makes the file eligible for reclaim again but does
+/// NOT itself dehydrate it (that is `dehydrate_placeholder` / "Free up space").
+///
+/// - `pinned`: `true` → `CF_PIN_STATE_PINNED`; `false` → `CF_PIN_STATE_UNPINNED`.
+/// - `recurse`: `true` → `CF_SET_PIN_FLAG_RECURSE`, applying the pin to the whole
+///   subtree (used for directory pins so every descendant inherits the state);
+///   `false` → `CF_SET_PIN_FLAG_NONE` (single placeholder only).
+///
+/// Map `ERROR_NOT_A_CLOUD_FILE` (0x80070178) to `Ok(())`: the path is a plain
+/// (non-placeholder) file — there is no pin state to set, which for our purposes
+/// is the desired end state (a fully-local file is already "available offline").
+///
+/// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// (setting pin state mutates the placeholder's reparse data) and always closes
+/// it via `CfCloseHandle` before returning — on every exit path, no leak.
+pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let pin_state = if pinned {
+        CF_PIN_STATE_PINNED
+    } else {
+        CF_PIN_STATE_UNPINNED
+    };
+    let pin_flags = if recurse {
+        CF_SET_PIN_FLAG_RECURSE
+    } else {
+        CF_SET_PIN_FLAG_NONE
+    };
+
+    // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
+    // every exit path.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
+
+        let result = CfSetPinState(handle, pin_state, pin_flags, None);
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // 0x80070178 = ERROR_NOT_A_CLOUD_FILE — the path is not a placeholder
+            // (already a plain local file). There is no pin state to set; treat as
+            // the desired end state rather than erroring the caller.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == NOT_A_CLOUD_FILE {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfSetPinState: {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the pin parameters only, NEVER the decrypted path.
+    tracing::debug!(pinned, recurse, "set cloud placeholder pin state");
+    Ok(())
+}
+
+/// True if `path` is a reparse point — i.e. a Cloud Files placeholder this
+/// provider created. We never create any other kind of reparse point under
+/// the sync root, so a reparse-point attribute is a reliable, cheap signal
+/// that the engine (not the user) owns this on-disk entry.
+///
+/// Used as a SECONDARY feedback-loop guard by the upload watcher: the PRIMARY
+/// guard is the state DB (a path already tracked as a server file is never
+/// re-uploaded), but a placeholder that the seeder just minted may race ahead
+/// of its DB row in some orderings, so the attribute check catches it too.
+///
+/// Returns `false` (treat as a normal file → eligible for upload) on any
+/// attribute-query error: failing open here only risks a redundant upload
+/// attempt that the DB guard will already have suppressed, never data loss.
+pub fn is_cloud_placeholder(path: &std::path::Path) -> bool {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `path_wide` is a valid NUL-terminated wide string alive for the
+    // duration of the call. `GetFileAttributesW` does not retain the pointer.
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(path_wide.as_ptr())) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return false;
+    }
+    (attrs & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
+}
+
+/// Raw `GetFileAttributesW` result for the on-disk entry at `path`, or `None`
+/// if the query fails (path gone, access denied → `INVALID_FILE_ATTRIBUTES`).
+///
+/// This is the thin Windows-only reader feeding the per-tick reconcile pass
+/// ([`super::reconcile_placeholder_state`]): the returned `u32` carries the
+/// Cloud Files placeholder bits (`RECALL_ON_DATA_ACCESS`, `PINNED`, `UNPINNED`)
+/// that [`crate::state_db::decode_os_state`] turns into a status/pin delta. The
+/// decode itself is platform-agnostic and unit-tested on Linux; this fn just
+/// fetches the mask the same way [`is_cloud_placeholder`] does.
+///
+/// `decode_os_state` (in `state_db`, cross-platform) hardcodes the same three
+/// bit values as plain `u32`s because it must compile on Linux where the
+/// `windows` crate doesn't resolve. The compile-time asserts below pin those
+/// literals to the real `windows`-crate constants so the two can never drift:
+/// if Microsoft ever changed a value, THIS file would fail to compile on
+/// Windows rather than silently mis-decoding placeholders.
+const _: () = {
+    assert!(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0x0040_0000);
+    assert!(FILE_ATTRIBUTE_PINNED.0 == 0x0008_0000);
+    assert!(FILE_ATTRIBUTE_UNPINNED.0 == 0x0010_0000);
+};
+
+pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `path_wide` is a valid NUL-terminated wide string alive for the
+    // duration of the call. `GetFileAttributesW` does not retain the pointer.
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(path_wide.as_ptr())) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return None;
+    }
+    Some(attrs)
+}
+
+/// Resize the Cloud Files placeholder at `path` so its `FileSize` matches
+/// the AES-256-GCM-authenticated decrypted plaintext length, and re-stamp
+/// it in-sync. This is **Tier-1 of the hydration resolve-or-error path**
+/// (task 0783): when `hydrate_file` decrypts successfully but the decrypted
+/// length disagrees with the placeholder's recorded size (the server stored
+/// the *encrypted* size on some upload paths — see the 0783 decision file),
+/// the decrypted length is ground truth, so we correct the placeholder to it.
+///
+/// ## Why this runs AFTER the fetch fails, not during it
+///
+/// `CfUpdatePlaceholder` cannot legally resize a placeholder that has an
+/// in-flight hydration: the file is in-use by the active `FETCH_DATA`
+/// transfer, and the call returns `ERROR_CLOUD_FILE_IN_USE`. The documented
+/// way to abort a hydration mid-callback is `CfExecute(TRANSFER_DATA)` with a
+/// non-success status (our `fail_transfer`). So the callback fails THIS fetch
+/// cleanly first, THEN calls this to correct the size out-of-band. The file
+/// stays openable: the very next open fires a fresh `FETCH_DATA` against the
+/// now-aligned size and hydrates successfully. The end state — an openable
+/// file whose size equals the decrypted length — is reached, just one open
+/// later, which is the only point at which the resize is API-legal.
+///
+/// ## What we change
+///
+/// We pass a `CF_FS_METADATA` carrying ONLY the corrected `FileSize` plus
+/// `FILE_ATTRIBUTE_NORMAL`; the `FILE_BASIC_INFO` timestamp fields are left at
+/// 0, which Windows treats as "do not change" so the file keeps its real
+/// Date Modified. `CF_UPDATE_FLAG_MARK_IN_SYNC` re-anchors the placeholder to
+/// the corrected metadata so Windows does not treat the resize as a local
+/// edit needing re-upload. We pass `None` for the file identity (keep the
+/// existing UTF-8 `file_id` blob) and no dehydrate range (the whole file is
+/// already cloud-only after the failed fetch).
+///
+/// Best-effort: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
+/// and always closes it before returning. A failure here leaves the
+/// placeholder at the stale size (the file is no worse off than before this
+/// path existed — Tier-2 still surfaced a real error on the failed fetch), so
+/// the caller only logs.
+///
+/// SAFETY: `path_wide` lives for the whole call; the handle is closed on every
+/// exit path.
+pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `path_wide` is alive for the whole call; `metadata` lives on this
+    // stack frame and `CfUpdatePlaceholder` copies what it needs before return.
+    unsafe {
+        let handle = CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        )
+        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (resize): {e}"))?;
+
+        let metadata = CF_FS_METADATA {
+            BasicInfo: FILE_BASIC_INFO {
+                // 0 timestamps = "leave unchanged" so the placeholder keeps its
+                // real Date Modified; only the size is being corrected here.
+                CreationTime: 0,
+                LastAccessTime: 0,
+                LastWriteTime: 0,
+                ChangeTime: 0,
+                // A non-zero attribute is required; NORMAL matches what
+                // create_placeholder mints for a file.
+                FileAttributes: FILE_ATTRIBUTE_NORMAL.0,
+            },
+            // The correction: the placeholder's logical size becomes the
+            // decrypted plaintext length (clamped non-negative).
+            FileSize: true_size_bytes.max(0),
+        };
+
+        let result = CfUpdatePlaceholder(
+            handle,
+            Some(&metadata as *const CF_FS_METADATA),
+            // Keep the existing FileIdentity blob (the UTF-8 file_id) — passing
+            // None means "do not touch the identity".
+            None,
+            0,
+            // No dehydrate range: the file is fully cloud-only after the failed
+            // fetch, so there is no hydrated range to invalidate.
+            None,
+            // MARK_IN_SYNC: the corrected metadata IS the latest truth, so don't
+            // let Windows read the resize as a local modification.
+            CF_UPDATE_FLAG_MARK_IN_SYNC,
+            None,
+            None,
+        );
+
+        CfCloseHandle(handle);
+
+        if let Err(e) = result {
+            // ERROR_NOT_A_CLOUD_FILE (0x80070178) — the path isn't a placeholder
+            // (e.g. it was hydrated to a plain file or removed). Nothing to
+            // resize; treat as the end state rather than erroring the sweep.
+            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
+            if e.code() == NOT_A_CLOUD_FILE {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("CfUpdatePlaceholder (resize): {e}"));
+        }
+    }
+
+    // Zero-knowledge: log the corrected size only, never the decrypted path.
+    tracing::debug!(true_size_bytes, "resized cloud placeholder to decrypted length");
+    Ok(())
+}
+
+/// Number of seconds between the Windows FILETIME epoch (1601-01-01) and
+/// the Unix epoch (1970-01-01).
+const FILETIME_UNIX_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
+
+/// Convert a Unix timestamp into a Windows FILETIME tick count: the
+/// number of 100-nanosecond intervals since 1601-01-01, as stored in
+/// `FILE_BASIC_INFO`'s i64 timestamp fields.
+///
+/// The desktop DB stores `modified_at` in **seconds** (see
+/// `engine_bridge::now_secs`). As a defensive measure we also accept
+/// millisecond values: anything implausibly large to be seconds (beyond
+/// ~year 5000) is treated as milliseconds. A non-positive or zero input
+/// yields 0, which Windows renders as "no date".
+fn unix_to_filetime(modified_at: i64) -> i64 {
+    if modified_at <= 0 {
+        return 0;
+    }
+
+    // Year ~5000 in unix seconds. A value larger than this is almost
+    // certainly milliseconds, not seconds.
+    const SECONDS_SANITY_CEILING: i64 = 95_617_584_000;
+    let unix_secs = if modified_at > SECONDS_SANITY_CEILING {
+        modified_at / 1000
+    } else {
+        modified_at
+    };
+
+    // Shift to the 1601 epoch, then scale seconds → 100-ns ticks.
+    // saturating_* keeps a pathological value from overflowing into a
+    // negative (which Explorer would render as a bogus 1601 date).
+    unix_secs
+        .saturating_add(FILETIME_UNIX_EPOCH_OFFSET_SECS)
+        .saturating_mul(10_000_000)
 }

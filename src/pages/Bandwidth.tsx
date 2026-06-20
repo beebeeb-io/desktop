@@ -33,13 +33,24 @@ const DEFAULT_CONFIG: DesktopConfig = {
   notify_quota_warnings: true,
 }
 
-const SLIDER_MAX_KBPS = 10_000 // 10 MB/s — anything beyond is "unlimited"
+// Slider ceiling: 100 Mbps = 100 000 kbps. Anything higher is effectively
+// unlimited for almost all consumer connections.
+const SLIDER_MAX_KBPS = 100_000 // 100 Mbps
 const DEBOUNCE_MS = 500
 
+/**
+ * Convert kbps to a human label shown on the slider.
+ *
+ * Display unit is Mbps (SI decimal: 1 Mbps = 1000 kbps) to match the CLI
+ * `bb speedtest` output and standard router/ISP marketing figures.
+ * For very low values we fall back to kbps to keep the display readable.
+ */
 function formatLimit(kbps: number): string {
-  if (kbps === 0) return 'Unlimited'
-  if (kbps >= 1024) return `${(kbps / 1024).toFixed(1)} MB/s`
-  return `${kbps} KB/s`
+  if (kbps === 0) return 'Max network speed: unlimited'
+  // kbps → Mbps via decimal (1 Mbps = 1000 kbps, the network convention)
+  const mbps = kbps / 1000
+  if (mbps >= 1) return `Max network speed: ${mbps % 1 === 0 ? mbps : mbps.toFixed(1)} Mbps`
+  return `Max network speed: ${kbps} kbps`
 }
 
 export default function Bandwidth() {
@@ -141,7 +152,7 @@ export default function Bandwidth() {
           type="range"
           min={0}
           max={SLIDER_MAX_KBPS}
-          step={64}
+          step={1000}
           value={config.upload_kbps_limit}
           onChange={(e) =>
             update({ upload_kbps_limit: Number(e.target.value) })
@@ -168,7 +179,7 @@ export default function Bandwidth() {
           type="range"
           min={0}
           max={SLIDER_MAX_KBPS}
-          step={64}
+          step={1000}
           value={config.download_kbps_limit}
           onChange={(e) =>
             update({ download_kbps_limit: Number(e.target.value) })
