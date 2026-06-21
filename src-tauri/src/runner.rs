@@ -302,6 +302,43 @@ fn build_heartbeat(
     }
 }
 
+/// Normalize a sync-root path so the SAME folder always produces the SAME key
+/// the server dedupes on (task 0833). `register_session` runs on every engine
+/// spawn (app restart, re-login, reconnect); without a stable key the server
+/// would append a new `client_sessions` row each time and the folder would show
+/// up multiple times in the device/sync list.
+///
+/// - **Windows:** the filesystem is case-insensitive and accepts both `\` and
+///   `/`, and the same folder can be reached via different drive-letter casing
+///   (`C:\X` vs `c:\x`). We canonicalize when possible (resolves `..`/symlinks
+///   and yields a consistent form; canonicalize can fail e.g. if the folder is
+///   temporarily missing, so we fall back to the raw path), strip the `\\?\`
+///   verbatim/UNC prefix `canonicalize` adds, then lowercase and convert `\` to
+///   `/` for a stable comparison key. The server can still resolve a normal
+///   path from this form.
+/// - **Unix:** the filesystem is case-sensitive, so we leave the path as-is
+///   (only resolving via canonicalize when it succeeds, to collapse `..` and
+///   symlinks; the case is preserved).
+fn normalize_sync_path(sync_root: &Path) -> String {
+    let resolved = std::fs::canonicalize(sync_root).unwrap_or_else(|_| sync_root.to_path_buf());
+
+    #[cfg(windows)]
+    {
+        let s = resolved.to_string_lossy();
+        // Strip the verbatim/UNC prefix std::fs::canonicalize adds on Windows.
+        let s = s
+            .strip_prefix(r"\\?\UNC\")
+            .map(|rest| format!(r"\\{rest}"))
+            .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+        s.replace('\\', "/").to_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        resolved.to_string_lossy().into_owned()
+    }
+}
+
 /// Register THIS device + open ONE sync session, best-effort.
 ///
 /// Idempotent on the device (server UPSERTs on hostname+platform); the session
@@ -320,7 +357,7 @@ async fn register_session(api: &ApiClient, sync_root: &Path) -> Option<(String, 
         }
     };
 
-    let local_path = sync_root.to_string_lossy().into_owned();
+    let local_path = normalize_sync_path(sync_root);
     let session = match api
         .create_session(
             &device.id,
