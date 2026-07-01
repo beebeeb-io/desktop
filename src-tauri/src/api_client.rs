@@ -310,6 +310,29 @@ impl ApiClient {
         )
     }
 
+    /// Full URL for uploading an encrypted thumbnail variant. The medium
+    /// variant intentionally uses `/thumbnail` (no `/medium` suffix), matching
+    /// web/mobile. Other variants use `/thumbnail/{variant}`.
+    pub fn thumbnail_upload_url(&self, file_id: &str, variant: &str, blurhash: Option<&str>) -> String {
+        let mut url = if variant == "medium" {
+            format!("{}/api/v1/files/{}/thumbnail", self.base_url, encode(file_id))
+        } else {
+            format!(
+                "{}/api/v1/files/{}/thumbnail/{}",
+                self.base_url,
+                encode(file_id),
+                encode(variant)
+            )
+        };
+        if variant == "medium" {
+            if let Some(blurhash) = blurhash.filter(|value| !value.is_empty()) {
+                url.push_str("?blurhash=");
+                url.push_str(&encode(blurhash));
+            }
+        }
+        url
+    }
+
     pub fn upload_init_url(&self) -> String {
         self.url("/api/v1/uploads/init")
     }
@@ -478,6 +501,29 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// `PUT /api/v1/files/:id/thumbnail[/variant]` — upload a raw encrypted
+    /// thumbnail blob in the web/mobile envelope (`nonce(12) || ciphertext+tag`).
+    /// The server stores it opaquely; plaintext thumbnail bytes must never reach
+    /// this method.
+    pub async fn upload_thumbnail(
+        &self,
+        file_id: &str,
+        variant: &str,
+        encrypted: &[u8],
+        blurhash: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .put(self.thumbnail_upload_url(file_id, variant, blurhash))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/octet-stream")
+            .body(encrypted.to_vec())
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
     }
 
     /// `PUT /api/v1/files/:id/chunks/:idx` — uploads encrypted chunk
@@ -1046,6 +1092,14 @@ mod tests {
         assert_eq!(
             client.version_download_url("file/one", "version two"),
             "https://api.beebeeb.io/api/v1/files/file%2Fone/versions/version%20two/download"
+        );
+        assert_eq!(
+            client.thumbnail_upload_url("file/one", "medium", Some("LEHV6nWB2yk8pyo0adR*.7kCMdnj")),
+            "https://api.beebeeb.io/api/v1/files/file%2Fone/thumbnail?blurhash=LEHV6nWB2yk8pyo0adR%2A.7kCMdnj"
+        );
+        assert_eq!(
+            client.thumbnail_upload_url("file/one", "large", Some("ignored")),
+            "https://api.beebeeb.io/api/v1/files/file%2Fone/thumbnail/large"
         );
     }
 

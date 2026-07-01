@@ -32,6 +32,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -90,6 +91,60 @@ impl WireCounters {
         let dn = self.download_bytes.swap(0, Ordering::Relaxed);
         (up, dn)
     }
+}
+
+const THUMBNAIL_VARIANTS_FOR_UPLOAD: [ThumbnailUploadVariant; 2] =
+    [ThumbnailUploadVariant::Medium, ThumbnailUploadVariant::Large];
+const MEDIUM_ENCRYPTED_THUMBNAIL_MAX_BYTES: usize = 128 * 1024;
+const LARGE_ENCRYPTED_THUMBNAIL_MAX_BYTES: usize = 512 * 1024;
+const BLURHASH_COMPONENTS_X: usize = 4;
+const BLURHASH_COMPONENTS_Y: usize = 3;
+const BLURHASH_SOURCE_MAX_DIMENSION: u32 = 64;
+const BLURHASH_BASE83: &[u8; 83] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThumbnailUploadVariant {
+    Medium,
+    Large,
+}
+
+impl ThumbnailUploadVariant {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+
+    fn config(self) -> beebeeb_core::thumbnail::ThumbnailConfig {
+        match self {
+            Self::Medium => beebeeb_core::thumbnail::ThumbnailConfig::medium(),
+            Self::Large => beebeeb_core::thumbnail::ThumbnailConfig::large(),
+        }
+    }
+
+    fn encrypted_max_bytes(self) -> usize {
+        match self {
+            Self::Medium => MEDIUM_ENCRYPTED_THUMBNAIL_MAX_BYTES,
+            Self::Large => LARGE_ENCRYPTED_THUMBNAIL_MAX_BYTES,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ThumbnailSource {
+    rgba: Zeroizing<Vec<u8>>,
+    width: u32,
+    height: u32,
+    is_video: bool,
+}
+
+#[derive(Debug)]
+struct PreparedThumbnailUpload {
+    variant: ThumbnailUploadVariant,
+    encrypted: Zeroizing<Vec<u8>>,
+    blurhash: Option<String>,
 }
 
 // ── Per-file state machine ────────────────────────────────────────────────────
@@ -566,6 +621,7 @@ impl EngineBridge {
         }
 
         let completed = self.api.complete_upload_session(&upload.upload_session_id).await?;
+        let thumbnail_content_type = content_type.clone();
         self.apply_completed_upload(
             local_file_id,
             &server_file_id,
@@ -575,6 +631,21 @@ impl EngineBridge {
             content_type,
             Some(upload.object_version_id),
         )?;
+        if let Err(e) = self
+            .upload_thumbnails_for_plaintext_media(
+                &server_file_id,
+                payload_path,
+                thumbnail_content_type.as_deref(),
+                &file_key,
+            )
+            .await
+        {
+            tracing::warn!(
+                file_id = %server_file_id,
+                error = %e,
+                "upload-time thumbnail generation/upload skipped"
+            );
+        }
         if let Err(e) = std::fs::remove_file(payload_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(path = %payload_path.display(), error = %e, "failed to remove staged upload payload");
@@ -594,6 +665,28 @@ impl EngineBridge {
         #[cfg(target_os = "windows")]
         self.finalize_local_upload_placeholder(op, &server_file_id, sync_root);
 
+        Ok(())
+    }
+
+    async fn upload_thumbnails_for_plaintext_media(
+        &self,
+        server_file_id: &str,
+        payload_path: &Path,
+        mime_type: Option<&str>,
+        file_key: &beebeeb_core::kdf::FileKey,
+    ) -> anyhow::Result<()> {
+        let uploads = prepare_thumbnail_uploads_for_plaintext_media(payload_path, mime_type, file_key)?;
+        for upload in uploads {
+            self.api
+                .upload_thumbnail(
+                    server_file_id,
+                    upload.variant.label(),
+                    &upload.encrypted,
+                    upload.blurhash.as_deref(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("upload {} thumbnail: {e}", upload.variant.label()))?;
+        }
         Ok(())
     }
 
@@ -2218,6 +2311,287 @@ fn upload_init_request_for_operation(
     }
 }
 
+fn prepare_thumbnail_uploads_for_plaintext_media(
+    payload_path: &Path,
+    mime_type: Option<&str>,
+    file_key: &beebeeb_core::kdf::FileKey,
+) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
+    if !beebeeb_core::media::is_media(mime_type) {
+        return Ok(Vec::new());
+    }
+
+    let source = decode_thumbnail_source(payload_path, mime_type)?;
+    let blurhash = if source.is_video {
+        None
+    } else {
+        blurhash_for_source(&source).ok().flatten()
+    };
+
+    let mut uploads = Vec::new();
+    for variant in THUMBNAIL_VARIANTS_FOR_UPLOAD {
+        let config = variant.config();
+        let output =
+            match beebeeb_core::thumbnail::generate_thumbnail(&source.rgba, source.width, source.height, &config) {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::warn!(
+                        variant = variant.label(),
+                        error = %e,
+                        "thumbnail generation skipped for variant"
+                    );
+                    continue;
+                }
+            };
+        let plaintext = Zeroizing::new(output.data);
+        let encrypted = Zeroizing::new(
+            beebeeb_core::encrypt::encrypt_chunk_raw(file_key, &plaintext)
+                .map_err(|e| anyhow::anyhow!("encrypt thumbnail {}: {e}", variant.label()))?,
+        );
+        if encrypted.len() > variant.encrypted_max_bytes() {
+            tracing::warn!(
+                variant = variant.label(),
+                bytes = encrypted.len(),
+                max_bytes = variant.encrypted_max_bytes(),
+                "thumbnail generation skipped because encrypted payload is too large"
+            );
+            continue;
+        }
+        uploads.push(PreparedThumbnailUpload {
+            variant,
+            encrypted,
+            blurhash: if variant == ThumbnailUploadVariant::Medium {
+                blurhash.clone()
+            } else {
+                None
+            },
+        });
+    }
+
+    Ok(uploads)
+}
+
+fn decode_thumbnail_source(payload_path: &Path, mime_type: Option<&str>) -> anyhow::Result<ThumbnailSource> {
+    match mime_type {
+        Some(mime) if mime.starts_with("video/") => decode_video_thumbnail_source(payload_path),
+        _ => decode_image_thumbnail_source(payload_path),
+    }
+}
+
+fn decode_image_thumbnail_source(payload_path: &Path) -> anyhow::Result<ThumbnailSource> {
+    let image = image::ImageReader::open(payload_path)?
+        .with_guessed_format()?
+        .decode()
+        .map_err(|e| anyhow::anyhow!("decode image for thumbnail: {e}"))?;
+    dynamic_image_to_thumbnail_source(image, false)
+}
+
+fn decode_video_thumbnail_source(payload_path: &Path) -> anyhow::Result<ThumbnailSource> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for seek in ["1", "0"] {
+        match decode_video_frame_with_ffmpeg(payload_path, seek) {
+            Ok(source) => return Ok(source),
+            Err(e) => last_error = Some(e),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("video thumbnail extraction failed")))
+}
+
+fn decode_video_frame_with_ffmpeg(payload_path: &Path, seek: &str) -> anyhow::Result<ThumbnailSource> {
+    let ffmpeg = std::env::var_os("BEEBEEB_FFMPEG_PATH").unwrap_or_else(|| "ffmpeg".into());
+    let output = Command::new(ffmpeg)
+        .arg("-nostdin")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-ss")
+        .arg(seek)
+        .arg("-i")
+        .arg(payload_path)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-f")
+        .arg("image2pipe")
+        .arg("-vcodec")
+        .arg("png")
+        .arg("-")
+        .output()
+        .map_err(|e| anyhow::anyhow!("spawn ffmpeg for video thumbnail: {e}"))?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let snippet: String = stderr.chars().take(240).collect();
+        anyhow::bail!("ffmpeg video thumbnail failed: {snippet}");
+    }
+
+    let frame_png = Zeroizing::new(output.stdout);
+    let image =
+        image::load_from_memory(&frame_png).map_err(|e| anyhow::anyhow!("decode ffmpeg thumbnail frame: {e}"))?;
+    dynamic_image_to_thumbnail_source(image, true)
+}
+
+fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, is_video: bool) -> anyhow::Result<ThumbnailSource> {
+    let rgba = image.into_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    if width == 0 || height == 0 {
+        anyhow::bail!("thumbnail source has zero dimensions");
+    }
+    Ok(ThumbnailSource {
+        rgba: Zeroizing::new(rgba.into_raw()),
+        width,
+        height,
+        is_video,
+    })
+}
+
+fn blurhash_for_source(source: &ThumbnailSource) -> anyhow::Result<Option<String>> {
+    let (small_rgba, width, height) = beebeeb_core::thumbnail::resize_for_thumbnail(
+        &source.rgba,
+        source.width,
+        source.height,
+        BLURHASH_SOURCE_MAX_DIMENSION,
+    )
+    .map_err(|e| anyhow::anyhow!("resize blurhash source: {e}"))?;
+    let small_rgba = Zeroizing::new(small_rgba);
+    Ok(encode_blurhash_rgba(
+        &small_rgba,
+        width,
+        height,
+        BLURHASH_COMPONENTS_X,
+        BLURHASH_COMPONENTS_Y,
+    ))
+}
+
+fn encode_blurhash_rgba(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    components_x: usize,
+    components_y: usize,
+) -> Option<String> {
+    if width == 0
+        || height == 0
+        || components_x == 0
+        || components_x > 9
+        || components_y == 0
+        || components_y > 9
+        || rgba.len() != width as usize * height as usize * 4
+    {
+        return None;
+    }
+
+    let mut factors = Vec::with_capacity(components_x * components_y);
+    for y in 0..components_y {
+        for x in 0..components_x {
+            factors.push(multiply_blurhash_basis(rgba, width, height, x, y));
+        }
+    }
+
+    let size_flag = (components_x - 1) + (components_y - 1) * 9;
+    let mut encoded = String::with_capacity(4 + 2 * factors.len());
+    encoded.push_str(&encode_base83(size_flag as u32, 1));
+
+    let maximum_value = if factors.len() > 1 {
+        let actual_max = factors[1..]
+            .iter()
+            .flat_map(|factor| factor.iter())
+            .fold(0.0_f64, |max, value| max.max(value.abs()));
+        let quantized = ((actual_max * 166.0 - 0.5).floor() as i32).clamp(0, 82) as u32;
+        encoded.push_str(&encode_base83(quantized, 1));
+        (quantized + 1) as f64 / 166.0
+    } else {
+        encoded.push_str(&encode_base83(0, 1));
+        1.0
+    };
+
+    encoded.push_str(&encode_base83(encode_blurhash_dc(factors[0]), 4));
+    for factor in factors.iter().skip(1) {
+        encoded.push_str(&encode_base83(encode_blurhash_ac(*factor, maximum_value), 2));
+    }
+
+    if encoded.len() <= 64 { Some(encoded) } else { None }
+}
+
+fn multiply_blurhash_basis(rgba: &[u8], width: u32, height: u32, component_x: usize, component_y: usize) -> [f64; 3] {
+    let normalisation = if component_x == 0 && component_y == 0 { 1.0 } else { 2.0 };
+    let width_f = width as f64;
+    let height_f = height as f64;
+    let mut r = 0.0;
+    let mut g = 0.0;
+    let mut b = 0.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let basis = (std::f64::consts::PI * component_x as f64 * x as f64 / width_f).cos()
+                * (std::f64::consts::PI * component_y as f64 * y as f64 / height_f).cos();
+            let idx = ((y * width + x) as usize) * 4;
+            let alpha = rgba[idx + 3] as f64 / 255.0;
+            let sr = (rgba[idx] as f64 / 255.0) * alpha + (1.0 - alpha);
+            let sg = (rgba[idx + 1] as f64 / 255.0) * alpha + (1.0 - alpha);
+            let sb = (rgba[idx + 2] as f64 / 255.0) * alpha + (1.0 - alpha);
+            r += basis * srgb_to_linear(sr);
+            g += basis * srgb_to_linear(sg);
+            b += basis * srgb_to_linear(sb);
+        }
+    }
+
+    let scale = normalisation / (width_f * height_f);
+    [r * scale, g * scale, b * scale]
+}
+
+fn srgb_to_linear(value: f64) -> f64 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f64) -> u32 {
+    let value = value.clamp(0.0, 1.0);
+    let srgb = if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb * 255.0 + 0.5).floor().clamp(0.0, 255.0) as u32
+}
+
+fn encode_blurhash_dc(value: [f64; 3]) -> u32 {
+    (linear_to_srgb(value[0]) << 16) + (linear_to_srgb(value[1]) << 8) + linear_to_srgb(value[2])
+}
+
+fn encode_blurhash_ac(value: [f64; 3], maximum_value: f64) -> u32 {
+    let quant_r = quantize_blurhash_ac(value[0], maximum_value);
+    let quant_g = quantize_blurhash_ac(value[1], maximum_value);
+    let quant_b = quantize_blurhash_ac(value[2], maximum_value);
+    quant_r * 19 * 19 + quant_g * 19 + quant_b
+}
+
+fn quantize_blurhash_ac(value: f64, maximum_value: f64) -> u32 {
+    let normalized = if maximum_value > 0.0 {
+        value / maximum_value
+    } else {
+        0.0
+    };
+    (sign_pow(normalized.clamp(-1.0, 1.0), 0.5) * 9.0 + 9.5)
+        .floor()
+        .clamp(0.0, 18.0) as u32
+}
+
+fn sign_pow(value: f64, exp: f64) -> f64 {
+    value.abs().powf(exp).copysign(value)
+}
+
+fn encode_base83(mut value: u32, length: usize) -> String {
+    let mut chars = vec![0u8; length];
+    for i in (0..length).rev() {
+        chars[i] = BLURHASH_BASE83[(value % 83) as usize];
+        value /= 83;
+    }
+    String::from_utf8(chars).expect("base83 alphabet is ASCII")
+}
+
 fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
     metadata["operation"].as_str() == Some("create_file")
 }
@@ -3628,6 +4002,86 @@ mod tests {
         assert!(!replace.is_media);
     }
 
+    fn write_test_png(path: &Path) {
+        let image = image::RgbaImage::from_fn(8, 6, |x, y| {
+            image::Rgba([(x * 31) as u8, (y * 41) as u8, ((x + y) * 17) as u8, 255])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(path, png.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn test_prepare_thumbnail_uploads_encrypts_medium_and_large_with_blurhash() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("photo.png");
+        write_test_png(&payload);
+
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes([31u8; 32]);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let uploads = prepare_thumbnail_uploads_for_plaintext_media(&payload, Some("image/png"), &file_key).unwrap();
+
+        assert_eq!(uploads.len(), 2);
+        assert_eq!(uploads[0].variant, ThumbnailUploadVariant::Medium);
+        assert_eq!(uploads[1].variant, ThumbnailUploadVariant::Large);
+        assert!(uploads[0].blurhash.as_ref().is_some_and(|hash| hash.len() <= 64));
+        assert!(uploads[1].blurhash.is_none());
+
+        for upload in &uploads {
+            assert!(upload.encrypted.len() <= upload.variant.encrypted_max_bytes());
+            let plaintext = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &upload.encrypted).unwrap();
+            assert!(plaintext.starts_with(b"RIFF"), "thumbnail plaintext must be WebP");
+            assert_ne!(&*upload.encrypted, plaintext.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_prepare_thumbnail_uploads_extracts_video_frame_when_ffmpeg_available() {
+        if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .arg("-nostdin")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-y")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("testsrc=size=16x16:rate=1")
+            .arg("-t")
+            .arg("1")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg(&payload)
+            .status()
+            .unwrap();
+        if !status.success() {
+            return;
+        }
+
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes([32u8; 32]);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-video-1");
+        let uploads = prepare_thumbnail_uploads_for_plaintext_media(&payload, Some("video/mp4"), &file_key).unwrap();
+
+        assert_eq!(uploads.len(), 2);
+        assert_eq!(uploads[0].variant, ThumbnailUploadVariant::Medium);
+        assert_eq!(uploads[1].variant, ThumbnailUploadVariant::Large);
+        assert!(uploads[0].blurhash.is_none(), "video thumbnails do not carry blurhash");
+        assert!(uploads[1].blurhash.is_none());
+
+        for upload in &uploads {
+            let plaintext = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &upload.encrypted).unwrap();
+            assert!(plaintext.starts_with(b"RIFF"), "video thumbnail plaintext must be WebP");
+        }
+    }
+
     #[test]
     fn test_download_chunk_decrypts_raw_and_json_formats() {
         let file_id = uuid::Uuid::new_v4().to_string();
@@ -3683,17 +4137,38 @@ mod tests {
     impl UploadMockServer {
         fn start(fail_chunk: bool) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
             let server_requests = Arc::clone(&requests);
             let handle = thread::spawn(move || {
-                let expected_requests = if fail_chunk { 3 } else { 4 };
-                for _ in 0..expected_requests {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    let request = read_http_request(&mut stream);
-                    let response = upload_mock_response(&request, fail_chunk);
-                    server_requests.lock().unwrap().push(request);
-                    stream.write_all(response.as_bytes()).unwrap();
+                let expected_min_requests = if fail_chunk { 3 } else { 4 };
+                let started = std::time::Instant::now();
+                let mut idle_after_min_since: Option<std::time::Instant> = None;
+                loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            idle_after_min_since = None;
+                            let request = read_http_request(&mut stream);
+                            let response = upload_mock_response(&request, fail_chunk);
+                            server_requests.lock().unwrap().push(request);
+                            stream.write_all(response.as_bytes()).unwrap();
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            let count = server_requests.lock().unwrap().len();
+                            if count >= expected_min_requests {
+                                let idle_since = idle_after_min_since.get_or_insert_with(std::time::Instant::now);
+                                if idle_since.elapsed() >= Duration::from_millis(300) {
+                                    break;
+                                }
+                            }
+                            if started.elapsed() >= Duration::from_secs(5) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("upload mock accept failed: {e}"),
+                    }
                 }
             });
             Self {
@@ -3793,6 +4268,9 @@ mod tests {
                     "mime_type": "text/plain"
                 }),
             ),
+            ("PUT", path) if path.starts_with("/api/v1/files/server-file-1/thumbnail") => {
+                http_json("200 OK", serde_json::json!({ "message": "thumbnail uploaded" }))
+            }
             _ => http_json(
                 "404 Not Found",
                 serde_json::json!({ "error": format!("unexpected {} {}", request.method, request.path) }),
@@ -4768,6 +5246,78 @@ mod tests {
         );
         assert_eq!(requests[3].method, "POST");
         assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    #[tokio::test]
+    async fn test_process_due_operations_uploads_encrypted_image_thumbnails_after_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("photo.png");
+        write_test_png(&payload);
+
+        let server = UploadMockServer::start(false);
+        let master_key = [31u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-photo".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-photo-1".into()),
+                parent_id: None,
+                target_path: Some("Photos/photo.png".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "photo.png",
+                        "content_type": "image/png"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-photo".to_string()]);
+
+        let requests = server.finish();
+        let medium = requests
+            .iter()
+            .find(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash="))
+            .expect("medium thumbnail upload with blurhash query");
+        let large = requests
+            .iter()
+            .find(|r| r.method == "PUT" && r.path == "/api/v1/files/server-file-1/thumbnail/large")
+            .expect("large thumbnail upload");
+
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let medium_plain = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &medium.body).unwrap();
+        let large_plain = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &large.body).unwrap();
+
+        assert_ne!(medium.body, medium_plain);
+        assert_ne!(large.body, large_plain);
+        assert!(medium_plain.starts_with(b"RIFF"), "medium thumbnail must be WebP");
+        assert!(large_plain.starts_with(b"RIFF"), "large thumbnail must be WebP");
+
+        let complete_index = requests
+            .iter()
+            .position(|r| r.method == "POST" && r.path == "/api/v1/uploads/upload-session-1/complete")
+            .unwrap();
+        let medium_index = requests.iter().position(|r| std::ptr::eq(r, medium)).unwrap();
+        let large_index = requests.iter().position(|r| std::ptr::eq(r, large)).unwrap();
+        assert!(medium_index > complete_index);
+        assert!(large_index > complete_index);
     }
 
     #[tokio::test]

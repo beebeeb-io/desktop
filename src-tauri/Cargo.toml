@@ -78,6 +78,11 @@ notify = "8"
 # and already present transitively via beebeeb-core (zeroize 1.8.x), so this
 # adds no new tree entry — it only promotes it to a direct dep we can derive on.
 zeroize = { version = "1", features = ["derive"] }
+# Decode local plaintext media into RGBA before handing resize/encode to
+# beebeeb-core's shared thumbnail primitive. Same version/features as the
+# Windows thumbnail provider dependency below; promoted to all desktop targets
+# because upload-time thumbnail generation is cross-platform sync-engine logic.
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
 
 # ── Browser-based device-code login handoff (browser_login.rs) ───────────────
 # The crypto + WS deps below mirror repos/cli/Cargo.toml exactly so the
@@ -274,12 +279,6 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-# Pure-Rust image decoding for the Explorer thumbnail provider (task 0823):
-# decodes the decrypted server thumbnail (WebP from web, JPEG/PNG from other
-# clients) to RGBA8 in memory, so we never pull in GDI+/WIC COM just to turn a
-# small blob into pixels. Default features cover WebP/JPEG/PNG/GIF/BMP.
-image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
 
 # Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`
 # macro used in `windows_cf/status_ui.rs` (the Explorer breadcrumb status flyout).
