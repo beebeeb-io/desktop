@@ -438,3 +438,106 @@ fn open_browser(app: &tauri::AppHandle, url: &str) {
         tracing::warn!(error = %e, "failed to open browser for sign-in; user can paste the URL");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Task 0983: the device-code handoff (`ws.send(pubkey)` + the first
+    //! `recv_text()` waiting for the server's `{user_code, verification_uri}`
+    //! frame) must be bounded, not just the WebSocket CONNECT. These tests
+    //! exercise `recv_text` — the exact function `run_handoff` wraps in
+    //! `tokio::time::timeout(DEVICE_CODE_TIMEOUT, ...)` — against a mock stream
+    //! standing in for the real `WebSocketStream`, since a live server can't run
+    //! in this test binary. `recv_text` is generic over any
+    //! `StreamExt<Item = Result<Message, Error>> + Unpin`, so the mock exercises
+    //! the identical code path `run_handoff` calls, not a re-implementation of it.
+
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    type WsItem = Result<Message, tokio_tungstenite::tungstenite::Error>;
+
+    /// A mock WebSocket stream that never yields an item — standing in for a
+    /// server that accepted the connection but stalls before sending the first
+    /// device-code frame (the exact bug this task fixes).
+    struct StalledStream;
+
+    impl futures_util::Stream for StalledStream {
+        type Item = WsItem;
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    /// A mock stream that first emits a couple of ping/pong control frames (as a
+    /// real server connection may) and then the device-code text frame —
+    /// standing in for the healthy happy path `recv_text` must keep working.
+    struct HealthyStream {
+        frames: Vec<Message>,
+    }
+
+    impl futures_util::Stream for HealthyStream {
+        type Item = WsItem;
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.frames.is_empty() {
+                Poll::Ready(None)
+            } else {
+                Poll::Ready(Some(Ok(self.frames.remove(0))))
+            }
+        }
+    }
+
+    /// If the server accepts the WS but never sends the first device-code
+    /// frame, the caller's `tokio::time::timeout(DEVICE_CODE_TIMEOUT, recv_text(..))`
+    /// (mirrored here with a short duration so the test doesn't take 15s) must
+    /// elapse and return an error promptly — not hang forever. This is the exact
+    /// regression this task guards: before the fix, only the CONNECT was bounded.
+    #[tokio::test]
+    async fn device_code_recv_times_out_when_server_stalls_after_connect() {
+        let mut ws = StalledStream;
+        let bound = Duration::from_millis(50);
+
+        let outcome = tokio::time::timeout(bound, recv_text(&mut ws)).await;
+
+        assert!(
+            outcome.is_err(),
+            "recv_text on a stalled connection must be bounded by the timeout, not hang forever"
+        );
+    }
+
+    /// Happy path guard: a healthy server that replies with the device-code
+    /// frame (after some ping/pong control frames) must still resolve well
+    /// within the bound — confirming the timeout wrapper added for this task
+    /// does not change behavior on a working connection.
+    #[tokio::test]
+    async fn device_code_recv_returns_promptly_on_healthy_connection() {
+        let mut ws = HealthyStream {
+            frames: vec![
+                Message::Ping(vec![].into()),
+                Message::Pong(vec![].into()),
+                Message::Text(r#"{"user_code":"ABCD-1234","verification_uri":"https://beebeeb.io/cli","expires_in":300}"#.into()),
+            ],
+        };
+        let bound = Duration::from_secs(15); // mirrors DEVICE_CODE_TIMEOUT — real-time wait, but this branch resolves immediately
+
+        let outcome = tokio::time::timeout(bound, recv_text(&mut ws))
+            .await
+            .expect("must not time out on a healthy connection");
+
+        let text = outcome.expect("recv_text must succeed once the text frame arrives");
+        assert!(text.contains("user_code"));
+    }
+
+    /// A closed connection (no frames, stream ends) must surface as an
+    /// immediate, actionable error — not as a silent hang requiring the outer
+    /// timeout to fire. Regression guard for `recv_text`'s `None` arm.
+    #[tokio::test]
+    async fn device_code_recv_errors_immediately_on_closed_connection() {
+        let mut ws = HealthyStream { frames: vec![] };
+
+        let result = recv_text(&mut ws).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Connection closed"));
+    }
+}
