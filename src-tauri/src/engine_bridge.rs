@@ -1705,16 +1705,38 @@ impl EngineBridge {
         // Use Zeroizing so that if we bail mid-loop (network error,
         // decrypt error) the partial plaintext is still wiped.
         let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size));
 
-        for i in 0..chunk_count {
+        self.download_and_decrypt_chunk_range(file_id, &file_key, 0..chunk_count, download_kbps_limit, approx_size)
+            .await
+    }
+
+    /// Download + decrypt chunk indices `[range.start, range.end)` for
+    /// `file_id`, concatenating the plaintext into one [`Zeroizing`] buffer.
+    /// Shared by [`Self::do_hydrate`] (the whole-file range `0..chunk_count`)
+    /// and [`Self::hydrate_file_range`] (a covering sub-range) so the
+    /// pacing/wire-counting/zeroize discipline lives in exactly one place.
+    ///
+    /// `approx_size_hint` only sizes the initial allocation (`Vec::with_capacity`)
+    /// — it never bounds or truncates the actual read, so a wrong hint costs at
+    /// most a reallocation, never a silent short read.
+    async fn download_and_decrypt_chunk_range(
+        &self,
+        file_id: &str,
+        file_key: &beebeeb_core::kdf::FileKey,
+        range: std::ops::Range<u32>,
+        download_kbps_limit: u64,
+        approx_size_hint: usize,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
+
+        for i in range {
             let chunk_start = std::time::Instant::now();
             let chunk_bytes = self.api.download_chunk(file_id, i).await?;
             let wire_len = chunk_bytes.len() as u64;
             // Decrypt into a temporary buffer, copy into the accumulator,
             // then zeroize the temporary. This limits live plaintext to
             // the accumulator + one chunk at any moment.
-            let mut decrypted = decrypt_downloaded_chunk(&file_key, &chunk_bytes)
+            let mut decrypted = decrypt_downloaded_chunk(file_key, &chunk_bytes)
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
@@ -1736,6 +1758,126 @@ impl EngineBridge {
         }
 
         Ok(acc)
+    }
+
+    /// Download `file_id` from the vault, decrypt, and return ONLY the plaintext
+    /// bytes covering `[required_offset, required_offset + required_length)` —
+    /// **in memory only**, never written to disk. This is the range-targeted
+    /// counterpart to [`Self::hydrate_file_to_memory`] (task 1024, follow-up to
+    /// 0769): instead of decrypting the whole file on every CF fetch callback, it
+    /// downloads + decrypts only the chunks that cover the requested range, so
+    /// peak memory is bounded by one covering-range buffer (typically a handful
+    /// of chunks) rather than the entire file.
+    ///
+    /// Requires an authoritative, uniform `chunk_size_bytes` for the file.
+    /// `chunk_size_bytes` is NOT returned by `GET /api/v1/files/:id` today (only
+    /// `chunk_count` + `size_bytes` are) — but every chunk layout this server
+    /// produces (`beebeeb_types::plan_chunks`/`plan_with_cap`) is `chunk_count - 1`
+    /// full-size chunks followed by one (possibly smaller) remainder chunk, so
+    /// `chunk_size_bytes` is fully recoverable as `ceil(size_bytes / chunk_count)`
+    /// WITHOUT re-deriving it from an upload profile (which could be wrong for a
+    /// file uploaded by a different client/profile than this one assumes). See
+    /// [`derive_uniform_chunk_size`].
+    ///
+    /// Returns `Ok(None)` (never an error) when the covering-chunk math can't be
+    /// established from the metadata this endpoint returns today (`chunk_count`
+    /// is `0`, or `size_bytes` is missing) — the caller falls back to
+    /// [`Self::hydrate_file_to_memory`] for the whole-file path in that case.
+    ///
+    /// Status bookkeeping: unlike [`Self::hydrate_file_to_memory`], this method
+    /// does **not** flip the row to `FileStatus::Local` — a single range fetch is
+    /// not evidence the whole file is now cached, so marking it fully `Local`
+    /// here would be a stronger claim than the bytes we actually have. See the
+    /// caller (`windows_cf::callbacks::fetch_data_callback`) for how "fully
+    /// in-sync" is decided instead.
+    #[cfg(any(target_os = "windows", test))]
+    pub async fn hydrate_file_range(
+        &self,
+        file_id: &str,
+        required_offset: u64,
+        required_length: u64,
+    ) -> anyhow::Result<Option<HydratedRange>> {
+        let _file_uuid: uuid::Uuid = file_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
+
+        let meta = self.api.get_file(file_id).await?;
+        let chunk_count = meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
+
+        let (Some(size_bytes), true) = (size_bytes, chunk_count > 0) else {
+            // Missing/zero metadata — caller falls back to the whole-file path.
+            return Ok(None);
+        };
+
+        let Some(chunk_size_bytes) = derive_uniform_chunk_size(size_bytes, chunk_count) else {
+            return Ok(None);
+        };
+
+        // Clamp the requested range to the file's real extent before computing
+        // covering chunks, so a stale/over-wide CF request never derives an
+        // out-of-bounds chunk index.
+        let range_end = required_offset.saturating_add(required_length).min(size_bytes);
+        if range_end <= required_offset {
+            // Degenerate/empty range — nothing to hydrate.
+            return Ok(Some(HydratedRange {
+                data: Zeroizing::new(Vec::new()),
+                range_start_bytes: required_offset,
+                covers_whole_file: size_bytes == 0,
+            }));
+        }
+
+        let first_chunk = required_offset / chunk_size_bytes;
+        let last_chunk = (range_end - 1) / chunk_size_bytes;
+        let first_chunk_u32 =
+            u32::try_from(first_chunk).map_err(|_| anyhow::anyhow!("chunk index {first_chunk} exceeds u32 range"))?;
+        let last_chunk_u32 =
+            u32::try_from(last_chunk).map_err(|_| anyhow::anyhow!("chunk index {last_chunk} exceeds u32 range"))?;
+
+        self.db.set_status(file_id, FileStatus::Downloading)?;
+
+        let mk_bytes: [u8; 32] = *self.api.master_key();
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+        let download_kbps_limit = crate::config::DesktopConfig::load()
+            .map(|c| c.download_kbps_limit)
+            .unwrap_or(0);
+
+        let covering_span_hint = ((last_chunk_u32 - first_chunk_u32) as usize + 1) * chunk_size_bytes as usize;
+        let range_start_bytes = first_chunk * chunk_size_bytes;
+        let covers_whole_file = first_chunk_u32 == 0 && last_chunk_u32 as u64 == chunk_count - 1;
+
+        match self
+            .download_and_decrypt_chunk_range(
+                file_id,
+                &file_key,
+                first_chunk_u32..(last_chunk_u32 + 1),
+                download_kbps_limit,
+                covering_span_hint,
+            )
+            .await
+        {
+            Ok(data) => {
+                // Only a whole-file covering range is evidence the file is fully
+                // cached; a partial range leaves the row `Downloading` for the
+                // caller (the CF callback) to resolve based on what CF itself
+                // reports (see `windows_cf::callbacks`).
+                if covers_whole_file {
+                    self.db.set_status(file_id, FileStatus::Local)?;
+                    self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
+                    let _ = self.enforce_smart_cache(CachePolicy::default());
+                }
+                Ok(Some(HydratedRange {
+                    data,
+                    range_start_bytes,
+                    covers_whole_file,
+                }))
+            }
+            Err(e) => {
+                let _ = self.db.set_status(file_id, FileStatus::Error);
+                Err(e)
+            }
+        }
     }
 
     /// Fetch the encrypted server thumbnail for `file_id`, decrypt it **in
@@ -2098,6 +2240,49 @@ fn decrypt_downloaded_chunk(
             beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
         }
     }
+}
+
+/// The result of [`EngineBridge::hydrate_file_range`]: the decrypted plaintext
+/// covering the requested range, plus enough context for the caller to splice
+/// out the exact `[required_offset, required_offset + required_length)` span.
+#[cfg(any(target_os = "windows", test))]
+pub struct HydratedRange {
+    /// Decrypted plaintext for chunks `[first_chunk, last_chunk]` — i.e. the
+    /// smallest chunk-aligned span that covers the requested byte range. This
+    /// is NOT necessarily aligned to the requested range itself; the caller
+    /// must slice `data[required_offset - range_start_bytes ..]`.
+    pub data: Zeroizing<Vec<u8>>,
+    /// Absolute byte offset (into the full file) of `data[0]` — i.e.
+    /// `first_chunk * chunk_size_bytes`.
+    pub range_start_bytes: u64,
+    /// `true` when `data` happens to cover the ENTIRE file (the covering-chunk
+    /// range was `[0, chunk_count)`). Only then is a range hydration equivalent
+    /// to a whole-file hydration for status-bookkeeping / resolve-or-error
+    /// purposes.
+    pub covers_whole_file: bool,
+}
+
+/// Recover the server's uniform per-chunk plaintext size from `size_bytes` +
+/// `chunk_count` alone, without assuming any particular upload profile.
+///
+/// Every chunk layout this server produces (`beebeeb_types::plan_with_cap`) is
+/// `chunk_count - 1` chunks of exactly `chunk_size_bytes`, followed by one
+/// (possibly smaller) remainder chunk — regardless of which client/profile
+/// uploaded the file. That makes `chunk_size_bytes` the unique value satisfying
+/// `chunk_count == ceil(size_bytes / chunk_size_bytes)` with all-but-the-last
+/// chunk full-size, which is exactly `ceil(size_bytes / chunk_count)`:
+/// re-deriving it from a upload-profile guess (e.g. re-running `plan_chunks`
+/// client-side) would silently produce the WRONG size for a file uploaded by a
+/// different client/profile than the one running this code — this formula is
+/// profile-agnostic and always correct for a uniform-except-last layout.
+///
+/// Returns `None` for `chunk_count == 0` (nothing to divide by — always a
+/// caller error, since a real file has `chunk_count >= 1`).
+fn derive_uniform_chunk_size(size_bytes: u64, chunk_count: u64) -> Option<u64> {
+    if chunk_count == 0 {
+        return None;
+    }
+    Some(size_bytes.div_ceil(chunk_count).max(1))
 }
 
 fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
@@ -3613,6 +3798,222 @@ mod tests {
                 serde_json::json!({ "error": format!("unexpected {} {}", request.method, request.path) }),
             ),
         }
+    }
+
+    // ── hydrate_file_range (task 1024) ───────────────────────────────────────
+
+    /// `hydrate_file_range` parses `file_id` as a UUID up front, so every
+    /// hydration test needs a real one — this is an arbitrary fixed value, not
+    /// tied to any real file.
+    const TEST_FILE_ID: &str = "d6c090b4-69c8-437e-a61b-2023ea99ef89";
+
+    /// Encrypt `plaintext` under `file_key` the same wire format
+    /// `decrypt_downloaded_chunk` accepts (`decrypt_chunk_raw`'s
+    /// `nonce(12) || ciphertext || tag(16)`), returning the raw bytes a
+    /// `download_chunk` response body would carry.
+    fn encrypt_chunk_wire(file_key: &beebeeb_core::kdf::FileKey, plaintext: &[u8]) -> Vec<u8> {
+        let blob = beebeeb_core::encrypt::encrypt_chunk(file_key, plaintext).unwrap();
+        let mut wire = blob.nonce.clone();
+        wire.extend_from_slice(&blob.ciphertext);
+        wire
+    }
+
+    /// Minimal mock server for hydration tests: serves `GET /api/v1/files/:id`
+    /// (metadata) and `GET /api/v1/files/:id/chunks/:idx` (one encrypted chunk
+    /// each) from a fixed plan, so `hydrate_file_range` can be exercised against
+    /// real encrypted bytes without a live server.
+    struct HydrationMockServer {
+        base_url: String,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl HydrationMockServer {
+        /// `chunks` are PLAINTEXT chunk bodies (already split by the caller to
+        /// the desired chunk_size_bytes); `size_bytes`/`chunk_count` reported by
+        /// the metadata endpoint are derived from `chunks` so the test plan is
+        /// internally consistent (mirrors how `plan_with_cap` lays out chunks:
+        /// uniform except the last).
+        fn start(file_key: beebeeb_core::kdf::FileKey, chunks: Vec<Vec<u8>>, requests: usize) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let size_bytes: usize = chunks.iter().map(|c| c.len()).sum();
+            let chunk_count = chunks.len();
+            let handle = thread::spawn(move || {
+                for _ in 0..requests {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    let response = hydration_mock_response(&request, &file_key, &chunks, size_bytes, chunk_count);
+                    match response {
+                        MockResponse::Text(body) => stream.write_all(body.as_bytes()).unwrap(),
+                        MockResponse::Binary(body) => {
+                            let header = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            stream.write_all(header.as_bytes()).unwrap();
+                            stream.write_all(&body).unwrap();
+                        }
+                    }
+                }
+            });
+            Self { base_url, handle }
+        }
+
+        fn finish(self) {
+            self.handle.join().unwrap();
+        }
+    }
+
+    enum MockResponse {
+        Text(String),
+        Binary(Vec<u8>),
+    }
+
+    fn hydration_mock_response(
+        request: &RecordedRequest,
+        file_key: &beebeeb_core::kdf::FileKey,
+        chunks: &[Vec<u8>],
+        size_bytes: usize,
+        chunk_count: usize,
+    ) -> MockResponse {
+        if request.method == "GET" && request.path == format!("/api/v1/files/{TEST_FILE_ID}") {
+            return MockResponse::Text(http_json(
+                "200 OK",
+                serde_json::json!({
+                    "id": TEST_FILE_ID,
+                    "size_bytes": size_bytes,
+                    "chunk_count": chunk_count,
+                }),
+            ));
+        }
+        if let Some(idx_str) = request
+            .path
+            .strip_prefix(&format!("/api/v1/files/{TEST_FILE_ID}/chunks/"))
+        {
+            let idx: usize = idx_str.parse().expect("chunk index");
+            let wire = encrypt_chunk_wire(file_key, &chunks[idx]);
+            return MockResponse::Binary(wire);
+        }
+        MockResponse::Text(http_json(
+            "404 Not Found",
+            serde_json::json!({ "error": format!("unexpected {} {}", request.method, request.path) }),
+        ))
+    }
+
+    fn hydration_test_key(master_key: [u8; 32], file_id: &str) -> beebeeb_core::kdf::FileKey {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        beebeeb_core::kdf::derive_file_key(&mk, file_id.as_bytes())
+    }
+
+    /// A multi-chunk file: request a range that spans exactly ONE interior
+    /// chunk. `hydrate_file_range` must download+decrypt ONLY that chunk — the
+    /// mock server accepts exactly 2 requests (the metadata GET + the one
+    /// covering chunk GET) and would hang/fail on a third, so this test fails
+    /// loudly if the whole file were downloaded instead.
+    #[test]
+    fn hydrate_file_range_downloads_only_covering_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+
+        // 3 chunks of 10 bytes each (uniform, no remainder) — chunk 1 is the
+        // interior chunk under test.
+        let chunks: Vec<Vec<u8>> = vec![b"AAAAAAAAAA".to_vec(), b"BBBBBBBBBB".to_vec(), b"CCCCCCCCCC".to_vec()];
+        // 1 metadata GET + 1 chunk GET (only chunk index 1).
+        let server = HydrationMockServer::start(file_key, chunks, 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/range.bin", None, FileStatus::CloudOnly, 30);
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, 10, 10).await })
+            .unwrap()
+            .expect("chunk_size_bytes derivable from size_bytes+chunk_count");
+
+        assert_eq!(result.range_start_bytes, 10);
+        assert!(!result.covers_whole_file);
+        assert_eq!(&*result.data, b"BBBBBBBBBB");
+
+        server.finish();
+
+        // The row must NOT be marked Local from a single interior-range fetch —
+        // only a whole-file covering range is evidence of full hydration.
+        let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Downloading);
+    }
+
+    /// A range request that happens to cover the WHOLE file (offset 0, length
+    /// >= size) — this is the `covers_whole_file` branch, which mirrors
+    /// `hydrate_file_to_memory`'s bookkeeping: mark `Local` + `mark_cached`.
+    #[test]
+    fn hydrate_file_range_covering_whole_file_marks_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [11u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+
+        let chunks: Vec<Vec<u8>> = vec![b"HELLOWORLD".to_vec()]; // 1 chunk, 10 bytes
+        let server = HydrationMockServer::start(file_key, chunks, 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/whole.bin", None, FileStatus::CloudOnly, 10);
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, 0, 10).await })
+            .unwrap()
+            .unwrap();
+
+        assert!(result.covers_whole_file);
+        assert_eq!(&*result.data, b"HELLOWORLD");
+
+        server.finish();
+
+        let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+    }
+
+    /// Metadata missing `chunk_count` (or it's `0`) must fall back cleanly —
+    /// `Ok(None)`, never an error — so the caller can retry via the whole-file
+    /// `hydrate_file_to_memory` path.
+    #[test]
+    fn hydrate_file_range_falls_back_when_chunk_count_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [3u8; 32];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            let body = http_json(
+                "200 OK",
+                serde_json::json!({ "id": TEST_FILE_ID, "size_bytes": 100 }), // no chunk_count
+            );
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), base_url, master_key);
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, 0, 10).await })
+            .unwrap();
+        assert!(result.is_none());
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn derive_uniform_chunk_size_matches_server_layout() {
+        // Single chunk, no remainder.
+        assert_eq!(derive_uniform_chunk_size(10, 1), Some(10));
+        // 3 uniform 10-byte chunks.
+        assert_eq!(derive_uniform_chunk_size(30, 3), Some(10));
+        // 2 full 10-byte chunks + a 4-byte remainder (24 bytes / 3 chunks).
+        assert_eq!(derive_uniform_chunk_size(24, 3), Some(8));
+        // chunk_count == 0 is always a caller error, never a valid layout.
+        assert_eq!(derive_uniform_chunk_size(100, 0), None);
+        // Empty file, one empty chunk — must not divide by zero downstream.
+        assert_eq!(derive_uniform_chunk_size(0, 1), Some(1));
     }
 
     #[test]
