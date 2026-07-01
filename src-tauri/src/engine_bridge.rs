@@ -2942,7 +2942,7 @@ fn shared_invite_allows_write(invite: &serde_json::Value) -> bool {
     {
         return true;
     }
-    ["permission", "permissions", "role", "access"]
+    ["permission", "capability", "permissions", "role", "access"]
         .iter()
         .filter_map(|key| invite.get(*key).and_then(|value| value.as_str()))
         .any(|value| {
@@ -4818,7 +4818,7 @@ mod tests {
                     "status": "approved",
                     "decrypted_name": "Editorial",
                     "is_folder": true,
-                    "permission": "write"
+                    "capability": "write"
                 },
                 {
                     "id": "invite-pending",
