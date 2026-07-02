@@ -104,19 +104,56 @@ jobs:
           test -n "$app_path"
           bash scripts/macos-release-preflight.sh "$app_path"
 
+      # Stage exactly the files we want to publish into a clean dist/ directory, then upload that
+      # directory as-is. Bundle directories are not safe to glob directly or wholesale:
+      # - Multiple narrow multi-line patterns in one upload-artifact `path:` have been observed to
+      #   silently keep only 1 of N real matches (confirmed 2026-07-02, msi/*.msi + *.msi.zip +
+      #   *.msi.zip.sig kept only the .msi).
+      # - A broad directory glob (`bundle/appimage/*`, `bundle/deb/*`) sweeps in linuxdeploy's and
+      #   dpkg's internal staging trees — hundreds of unrelated .so files, the unbundled raw binary,
+      #   dpkg's data.tar.gz — none of which should ever be a release asset (confirmed same day).
+      # Explicit `cp` of named files has no glob ambiguity for upload-artifact to get wrong.
+      - name: Stage release assets (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg dist/
+          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz dist/
+          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig dist/
+
+      - name: Stage release assets (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip.sig dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip dist/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip.sig dist/
+
+      - name: Stage release assets (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz.sig dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm dist/
+
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: beebeeb-desktop-macos
-          # Whole-directory globs, not per-extension ones — actions/upload-artifact@v4 has been
-          # observed silently dropping all but one match when given several narrow multi-line
-          # patterns that resolve to the same directory (confirmed 2026-07-02: a 3-pattern msi/
-          # glob uploaded only 1 of 3 real files). Globbing the directory is robust to that and
-          # also stops future bundle types (e.g. nsis, rpm) from being silently dropped.
-          path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/*
+          path: dist/*
           if-no-files-found: error
 
       - name: Upload Windows artifact
@@ -124,9 +161,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: beebeeb-desktop-windows
-          path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*
+          path: dist/*
           if-no-files-found: error
 
       - name: Upload Linux artifacts
@@ -134,10 +169,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: beebeeb-desktop-linux
-          path: |
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*
+          path: dist/*
           if-no-files-found: error
 
   release:
