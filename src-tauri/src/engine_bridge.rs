@@ -1862,19 +1862,15 @@ impl EngineBridge {
     /// peak memory is bounded by one covering-range buffer (typically a handful
     /// of chunks) rather than the entire file.
     ///
-    /// Requires an authoritative, uniform `chunk_size_bytes` for the file.
-    /// `chunk_size_bytes` is NOT returned by `GET /api/v1/files/:id` today (only
-    /// `chunk_count` + `size_bytes` are) — but every chunk layout this server
-    /// produces (`beebeeb_types::plan_chunks`/`plan_with_cap`) is `chunk_count - 1`
-    /// full-size chunks followed by one (possibly smaller) remainder chunk, so
-    /// `chunk_size_bytes` is fully recoverable as `ceil(size_bytes / chunk_count)`
-    /// WITHOUT re-deriving it from an upload profile (which could be wrong for a
-    /// file uploaded by a different client/profile than this one assumes). See
-    /// [`derive_uniform_chunk_size`].
+    /// Requires an authoritative, uniform `chunk_size_bytes` for the file. This
+    /// value must come from the server's stored `object_versions` row; it cannot
+    /// be recovered from `size_bytes / chunk_count`, because real files use a
+    /// fixed chunk size with only the final chunk shortened.
     ///
     /// Returns `Ok(None)` (never an error) when the covering-chunk math can't be
-    /// established from the metadata this endpoint returns today (`chunk_count`
-    /// is `0`, or `size_bytes` is missing) — the caller falls back to
+    /// established from the metadata (`chunk_count` is `0`, `size_bytes` is
+    /// missing, or `chunk_size_bytes` is missing/invalid) — the caller falls
+    /// back to
     /// [`Self::hydrate_file_to_memory`] for the whole-file path in that case.
     ///
     /// Status bookkeeping: unlike [`Self::hydrate_file_to_memory`], this method
@@ -1897,15 +1893,15 @@ impl EngineBridge {
         let meta = self.api.get_file(file_id).await?;
         let chunk_count = meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
         let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
+        let chunk_size_bytes = meta.get("chunk_size_bytes").and_then(|v| v.as_u64());
 
-        let (Some(size_bytes), true) = (size_bytes, chunk_count > 0) else {
-            // Missing/zero metadata — caller falls back to the whole-file path.
+        let (Some(size_bytes), Some(chunk_size_bytes), true) = (size_bytes, chunk_size_bytes, chunk_count > 0) else {
+            // Missing metadata — caller falls back to the whole-file path.
             return Ok(None);
         };
-
-        let Some(chunk_size_bytes) = derive_uniform_chunk_size(size_bytes, chunk_count) else {
+        if chunk_size_bytes == 0 {
             return Ok(None);
-        };
+        }
 
         // Clamp the requested range to the file's real extent before computing
         // covering chunks, so a stale/over-wide CF request never derives an
@@ -1920,12 +1916,16 @@ impl EngineBridge {
             }));
         }
 
-        let first_chunk = required_offset / chunk_size_bytes;
-        let last_chunk = (range_end - 1) / chunk_size_bytes;
-        let first_chunk_u32 =
-            u32::try_from(first_chunk).map_err(|_| anyhow::anyhow!("chunk index {first_chunk} exceeds u32 range"))?;
-        let last_chunk_u32 =
-            u32::try_from(last_chunk).map_err(|_| anyhow::anyhow!("chunk index {last_chunk} exceeds u32 range"))?;
+        let Some(plan) = plan_hydration_chunk_range(
+            size_bytes,
+            chunk_count,
+            chunk_size_bytes,
+            required_offset,
+            required_length,
+        )?
+        else {
+            return Ok(None);
+        };
 
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
@@ -1936,17 +1936,13 @@ impl EngineBridge {
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
 
-        let covering_span_hint = ((last_chunk_u32 - first_chunk_u32) as usize + 1) * chunk_size_bytes as usize;
-        let range_start_bytes = first_chunk * chunk_size_bytes;
-        let covers_whole_file = first_chunk_u32 == 0 && last_chunk_u32 as u64 == chunk_count - 1;
-
         match self
             .download_and_decrypt_chunk_range(
                 file_id,
                 &file_key,
-                first_chunk_u32..(last_chunk_u32 + 1),
+                plan.first_chunk..plan.last_chunk_exclusive,
                 download_kbps_limit,
-                covering_span_hint,
+                plan.covering_span_hint,
             )
             .await
         {
@@ -1955,15 +1951,15 @@ impl EngineBridge {
                 // cached; a partial range leaves the row `Downloading` for the
                 // caller (the CF callback) to resolve based on what CF itself
                 // reports (see `windows_cf::callbacks`).
-                if covers_whole_file {
+                if plan.covers_whole_file {
                     self.db.set_status(file_id, FileStatus::Local)?;
                     self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
                     let _ = self.enforce_smart_cache(CachePolicy::default());
                 }
                 Ok(Some(HydratedRange {
                     data,
-                    range_start_bytes,
-                    covers_whole_file,
+                    range_start_bytes: plan.range_start_bytes,
+                    covers_whole_file: plan.covers_whole_file,
                 }))
             }
             Err(e) => {
@@ -2678,27 +2674,78 @@ pub struct HydratedRange {
     pub covers_whole_file: bool,
 }
 
-/// Recover the server's uniform per-chunk plaintext size from `size_bytes` +
-/// `chunk_count` alone, without assuming any particular upload profile.
-///
-/// Every chunk layout this server produces (`beebeeb_types::plan_with_cap`) is
-/// `chunk_count - 1` chunks of exactly `chunk_size_bytes`, followed by one
-/// (possibly smaller) remainder chunk — regardless of which client/profile
-/// uploaded the file. That makes `chunk_size_bytes` the unique value satisfying
-/// `chunk_count == ceil(size_bytes / chunk_size_bytes)` with all-but-the-last
-/// chunk full-size, which is exactly `ceil(size_bytes / chunk_count)`:
-/// re-deriving it from a upload-profile guess (e.g. re-running `plan_chunks`
-/// client-side) would silently produce the WRONG size for a file uploaded by a
-/// different client/profile than the one running this code — this formula is
-/// profile-agnostic and always correct for a uniform-except-last layout.
-///
-/// Returns `None` for `chunk_count == 0` (nothing to divide by — always a
-/// caller error, since a real file has `chunk_count >= 1`).
-fn derive_uniform_chunk_size(size_bytes: u64, chunk_count: u64) -> Option<u64> {
-    if chunk_count == 0 {
-        return None;
+#[cfg(any(target_os = "windows", test))]
+struct HydrationChunkRangePlan {
+    first_chunk: u32,
+    last_chunk_exclusive: u32,
+    range_start_bytes: u64,
+    covering_span_hint: usize,
+    covers_whole_file: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn chunk_layout_matches_metadata(size_bytes: u64, chunk_count: u64, chunk_size_bytes: u64) -> bool {
+    if chunk_count == 0 || chunk_size_bytes == 0 {
+        return false;
     }
-    Some(size_bytes.div_ceil(chunk_count).max(1))
+
+    let size = size_bytes as u128;
+    let count = chunk_count as u128;
+    let chunk = chunk_size_bytes as u128;
+    if count == 1 {
+        return size <= chunk;
+    }
+
+    let full_prefix = (count - 1) * chunk;
+    let full_span = count * chunk;
+    size > full_prefix && size <= full_span
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn plan_hydration_chunk_range(
+    size_bytes: u64,
+    chunk_count: u64,
+    chunk_size_bytes: u64,
+    required_offset: u64,
+    required_length: u64,
+) -> anyhow::Result<Option<HydrationChunkRangePlan>> {
+    if !chunk_layout_matches_metadata(size_bytes, chunk_count, chunk_size_bytes) {
+        return Ok(None);
+    }
+
+    let range_end = required_offset.saturating_add(required_length).min(size_bytes);
+    if range_end <= required_offset {
+        return Ok(None);
+    }
+
+    let first_chunk = required_offset / chunk_size_bytes;
+    let last_chunk = (range_end - 1) / chunk_size_bytes;
+    if last_chunk >= chunk_count {
+        return Ok(None);
+    }
+
+    let first_chunk_u32 =
+        u32::try_from(first_chunk).map_err(|_| anyhow::anyhow!("chunk index {first_chunk} exceeds u32 range"))?;
+    let last_chunk_u32 =
+        u32::try_from(last_chunk).map_err(|_| anyhow::anyhow!("chunk index {last_chunk} exceeds u32 range"))?;
+    let last_chunk_exclusive = last_chunk_u32
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("chunk range end exceeds u32 range"))?;
+    let chunk_size_usize = usize::try_from(chunk_size_bytes)
+        .map_err(|_| anyhow::anyhow!("chunk_size_bytes {chunk_size_bytes} exceeds usize range"))?;
+    let chunk_count_in_range = usize::try_from(last_chunk_u32 - first_chunk_u32 + 1)
+        .map_err(|_| anyhow::anyhow!("covering chunk count exceeds usize range"))?;
+    let covering_span_hint = chunk_count_in_range
+        .checked_mul(chunk_size_usize)
+        .ok_or_else(|| anyhow::anyhow!("covering range size exceeds usize range"))?;
+
+    Ok(Some(HydrationChunkRangePlan {
+        first_chunk: first_chunk_u32,
+        last_chunk_exclusive,
+        range_start_bytes: first_chunk * chunk_size_bytes,
+        covering_span_hint,
+        covers_whole_file: first_chunk == 0 && last_chunk == chunk_count - 1,
+    }))
 }
 
 fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
@@ -4369,11 +4416,19 @@ mod tests {
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let size_bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chunk_count = chunks.len();
+            let chunk_size_bytes = chunks.first().map(|c| c.len()).unwrap_or(0);
             let handle = thread::spawn(move || {
                 for _ in 0..requests {
                     let (mut stream, _) = listener.accept().unwrap();
                     let request = read_http_request(&mut stream);
-                    let response = hydration_mock_response(&request, &file_key, &chunks, size_bytes, chunk_count);
+                    let response = hydration_mock_response(
+                        &request,
+                        &file_key,
+                        &chunks,
+                        size_bytes,
+                        chunk_count,
+                        chunk_size_bytes,
+                    );
                     match response {
                         MockResponse::Text(body) => stream.write_all(body.as_bytes()).unwrap(),
                         MockResponse::Binary(body) => {
@@ -4406,6 +4461,7 @@ mod tests {
         chunks: &[Vec<u8>],
         size_bytes: usize,
         chunk_count: usize,
+        chunk_size_bytes: usize,
     ) -> MockResponse {
         if request.method == "GET" && request.path == format!("/api/v1/files/{TEST_FILE_ID}") {
             return MockResponse::Text(http_json(
@@ -4414,6 +4470,7 @@ mod tests {
                     "id": TEST_FILE_ID,
                     "size_bytes": size_bytes,
                     "chunk_count": chunk_count,
+                    "chunk_size_bytes": chunk_size_bytes,
                 }),
             ));
         }
@@ -4460,7 +4517,7 @@ mod tests {
             .unwrap()
             .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, 10, 10).await })
             .unwrap()
-            .expect("chunk_size_bytes derivable from size_bytes+chunk_count");
+            .expect("server-provided chunk_size_bytes should enable range hydration");
 
         assert_eq!(result.range_start_bytes, 10);
         assert!(!result.covers_whole_file);
@@ -4472,6 +4529,75 @@ mod tests {
         // only a whole-file covering range is evidence of full hydration.
         let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Downloading);
+    }
+
+    /// Real desktop chunk planning is fixed-size per tier with only the last
+    /// chunk short. For 9 MiB at the desktop tier the layout is 4 MiB + 4 MiB +
+    /// 1 MiB, so a range inside the short final chunk must resolve to byte
+    /// offset 8 MiB. The old `ceil(size_bytes / chunk_count)` derivation would
+    /// incorrectly use 3 MiB and report offset 6 MiB.
+    #[test]
+    fn hydrate_file_range_uses_server_chunk_size_for_short_last_chunk_boundary() {
+        const MIB: usize = 1024 * 1024;
+
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [12u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+
+        let mut last = vec![b'C'; MIB];
+        last[123..127].copy_from_slice(b"LAST");
+        let chunks: Vec<Vec<u8>> = vec![vec![b'A'; 4 * MIB], vec![b'B'; 4 * MIB], last];
+        let server = HydrationMockServer::start(file_key, chunks, 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "/short-last.bin",
+            None,
+            FileStatus::CloudOnly,
+            9 * MIB as i64,
+        );
+
+        let required_offset = (8 * MIB + 123) as u64;
+        let required_length = 4u64;
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                bridge
+                    .hydrate_file_range(TEST_FILE_ID, required_offset, required_length)
+                    .await
+            })
+            .unwrap()
+            .expect("server-provided chunk_size_bytes should enable range hydration");
+
+        assert_eq!(result.range_start_bytes, (8 * MIB) as u64);
+        assert!(!result.covers_whole_file);
+        let relative_start = (required_offset - result.range_start_bytes) as usize;
+        let relative_end = relative_start + required_length as usize;
+        assert_eq!(&result.data[relative_start..relative_end], b"LAST");
+
+        server.finish();
+    }
+
+    #[test]
+    fn hydration_range_plan_uses_authoritative_chunk_size_for_short_last_chunk() {
+        const MIB: u64 = 1024 * 1024;
+
+        let plan = plan_hydration_chunk_range(9 * MIB, 3, 4 * MIB, 8 * MIB + 123, 4)
+            .unwrap()
+            .expect("valid server chunk size should produce a range plan");
+
+        assert_eq!(plan.first_chunk, 2);
+        assert_eq!(plan.last_chunk_exclusive, 3);
+        assert_eq!(plan.range_start_bytes, 8 * MIB);
+        assert_eq!(plan.covering_span_hint, 4 * MIB as usize);
+        assert!(!plan.covers_whole_file);
+        assert_ne!(
+            plan.range_start_bytes,
+            2 * (9 * MIB).div_ceil(3),
+            "regression guard: ceil(size/chunk_count) would pick the wrong base offset"
+        );
     }
 
     /// A range request that happens to cover the WHOLE file (offset 0, length
@@ -4534,17 +4660,33 @@ mod tests {
     }
 
     #[test]
-    fn derive_uniform_chunk_size_matches_server_layout() {
-        // Single chunk, no remainder.
-        assert_eq!(derive_uniform_chunk_size(10, 1), Some(10));
-        // 3 uniform 10-byte chunks.
-        assert_eq!(derive_uniform_chunk_size(30, 3), Some(10));
-        // 2 full 10-byte chunks + a 4-byte remainder (24 bytes / 3 chunks).
-        assert_eq!(derive_uniform_chunk_size(24, 3), Some(8));
-        // chunk_count == 0 is always a caller error, never a valid layout.
-        assert_eq!(derive_uniform_chunk_size(100, 0), None);
-        // Empty file, one empty chunk — must not divide by zero downstream.
-        assert_eq!(derive_uniform_chunk_size(0, 1), Some(1));
+    fn hydrate_file_range_falls_back_when_chunk_size_absent_even_if_size_and_count_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [4u8; 32];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            let body = http_json(
+                "200 OK",
+                serde_json::json!({
+                    "id": TEST_FILE_ID,
+                    "size_bytes": 24,
+                    "chunk_count": 3,
+                }),
+            );
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), base_url, master_key);
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, 0, 10).await })
+            .unwrap();
+        assert!(result.is_none());
+
+        handle.join().unwrap();
     }
 
     #[test]
