@@ -112,15 +112,17 @@ jobs:
       # - A broad directory glob (`bundle/appimage/*`, `bundle/deb/*`) sweeps in linuxdeploy's and
       #   dpkg's internal staging trees — hundreds of unrelated .so files, the unbundled raw binary,
       #   dpkg's data.tar.gz — none of which should ever be a release asset (confirmed same day).
-      # Explicit `cp` of named files has no glob ambiguity for upload-artifact to get wrong.
+      # This list is the VERIFIED real output of `tauri build`'s own "Found artifacts:" log line —
+      # not the candidate names it *looks for* (which include zip/tar.gz updater-bundle variants
+      # this Tauri config never actually produces; confirmed 2026-07-02 by a hard build failure).
+      # Each installer format gets its own direct .sig — there is no separate zip-wrapped bundle.
       - name: Stage release assets (macOS)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           mkdir -p dist
           cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg dist/
-          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz dist/
-          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig dist/
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg.sig dist/
 
       - name: Stage release assets (Windows)
         if: runner.os == 'Windows'
@@ -130,12 +132,8 @@ jobs:
           mkdir -p dist
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi dist/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.zip.sig dist/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe dist/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip.sig dist/
 
       - name: Stage release assets (Linux)
         if: runner.os == 'Linux'
@@ -143,10 +141,11 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz.sig dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig dist/
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb.sig dist/
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm dist/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm.sig dist/
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
