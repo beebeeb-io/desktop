@@ -2,20 +2,33 @@
 
 Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus the Rust sync engine from `core`. One codebase, three OS targets (macOS, Windows, Linux).
 
-## Release status — IN DEVELOPMENT, no official release yet
+## Release status — Windows + Linux released, macOS not yet
 
-There are **no published GitHub releases** for desktop, and the `release.yml`
-workflow currently **fails on every run** (it has never produced a successful
-build). This is expected pre-launch — desktop is the least-mature client. The
-README therefore shows a static `status: in development` badge instead of a CI/
-release badge (the previous badge pointed at a non-existent `ci.yml`).
+**`desktop-v0.1.0` is published** (Windows + Linux):
+https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.1.0 — signed MSI + NSIS installer
+for Windows, AppImage/.deb/.rpm for Linux, each with a minisign `.sig` for the auto-updater.
 
-**When the first official release ships, update BOTH this section and the README
-to reflect the actual released state:** remove the in-development banner, document
-the real install method (auto-update via minisign / per-OS bundles), and point
-the README badge at the workflow that's actually green (`release.yml` or a real
-`ci.yml`). Keep this note honest — do not claim a release or a green pipeline
-that doesn't exist.
+`release.yml` builds Windows and Linux only. **macOS is deliberately disabled** in the build
+matrix (commented out, not deleted) — two separate gaps block it:
+- `scripts/build-fileprovider-extension.sh`'s arch-detection doesn't support
+  `TAURI_ENV_ARCH=universal` (a real universal build needs building the File Provider extension
+  for both arches and `lipo`-combining them).
+- No Developer ID / notary credentials are wired into CI yet (task 0342).
+
+Re-enable by uncommenting the macOS entry in `release.yml`'s build matrix once both are resolved.
+
+**Not yet verified:** a real install + close-to-tray smoke test on physical Windows hardware
+(only build/sign/publish has been confirmed, from CI + local Linux verification — see below).
+
+**Local verification:** on Linux, `bun run tauri build --target x86_64-unknown-linux-gnu --
+--locked` reproduces the real build + `.deb`/`.rpm` bundling (needs `webkit2gtk-4.1`,
+`libayatana-appindicator`, `patchelf`, `fuse2`, `fuse3`, and a `TAURI_SIGNING_PRIVATE_KEY` — a
+throwaway local key via `bunx tauri signer generate` is fine for this, no need for the real prod
+key). `.AppImage` bundling specifically cannot be verified on Arch/WSL2: the vendored
+`linuxdeploy` tool's bundled `strip` binary is too old to parse the `.relr.dyn` ELF section
+modern Arch shared libraries use, and ignores the `STRIP` env override — this does not reproduce
+on GitHub's `ubuntu-latest` runners, so CI remains the source of truth for that one step. Windows
+and macOS builds cannot be reproduced locally at all (no cross-compile path from Linux).
 
 ## Architecture
 
