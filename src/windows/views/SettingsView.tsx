@@ -78,6 +78,14 @@ const PREF_META: Array<{ key: PrefKey; label: string; hint: string }> = [
   { key: 'backup_complete', label: 'Backup complete', hint: 'When a scheduled backup finishes.' },
 ]
 
+type ReleaseChannelValue = NonNullable<DesktopConfig['release_channel']>
+
+const RELEASE_CHANNELS: Array<{ value: ReleaseChannelValue; label: string; hint: string }> = [
+  { value: 'stable', label: 'Stable', hint: 'Regular releases after validation.' },
+  { value: 'beta', label: 'Beta', hint: 'Earlier builds for release testing.' },
+  { value: 'alpha', label: 'Alpha', hint: 'Earliest builds for rapid feedback.' },
+]
+
 const RED = 'oklch(0.5 0.18 25)'
 
 function Toggle({ on, busy = false, onChange, label }: { on: boolean; busy?: boolean; onChange: (next: boolean) => void; label: string }) {
@@ -557,8 +565,17 @@ function ExplorerIntegrationPanel() {
   )
 }
 
-function UpdatesPanel() {
+function UpdatesPanel({
+  config,
+  onConfigChange,
+  notice,
+}: {
+  config: DesktopConfig
+  onConfigChange: (patch: Partial<DesktopConfig>) => void
+  notice: string | null
+}) {
   const [version, setVersion] = useState<string | null>(null)
+  const releaseChannel = config.release_channel ?? 'stable'
 
   useEffect(() => {
     let cancelled = false
@@ -585,6 +602,89 @@ function UpdatesPanel() {
         </div>
         <Chip tone="green">Up to date</Chip>
       </Card>
+
+      <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '15px 18px', alignItems: 'center', borderBottom: `1px solid ${T.line}` }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Release channel</div>
+            <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
+              Choose which desktop releases this PC receives.
+            </div>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label="Release channel"
+            style={{
+              display: 'inline-grid',
+              gridTemplateColumns: 'repeat(3, minmax(66px, 1fr))',
+              background: T.paper2,
+              border: `1px solid ${T.line2}`,
+              borderRadius: 7,
+              padding: 3,
+              gap: 3,
+              flexShrink: 0,
+            }}
+          >
+            {RELEASE_CHANNELS.map((channel) => {
+              const selected = channel.value === releaseChannel
+              return (
+                <button
+                  key={channel.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => onConfigChange({ release_channel: channel.value })}
+                  style={{
+                    minWidth: 0,
+                    height: 28,
+                    padding: '0 10px',
+                    borderRadius: 5,
+                    border: selected ? `1px solid ${T.amberDeep}` : '1px solid transparent',
+                    background: selected ? T.paper : 'transparent',
+                    color: selected ? T.ink : T.ink2,
+                    fontSize: 11.5,
+                    fontWeight: selected ? 700 : 500,
+                    fontFamily: T.fontSans,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {channel.label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {RELEASE_CHANNELS.map((channel, index) => {
+          const selected = channel.value === releaseChannel
+          return (
+            <div
+              key={channel.value}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 12,
+                padding: '11px 18px',
+                alignItems: 'center',
+                borderBottom: index === RELEASE_CHANNELS.length - 1 ? 'none' : `1px solid ${T.line}`,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink }}>{channel.label}</div>
+                <div style={{ fontSize: 11, color: T.ink3, marginTop: 2, lineHeight: 1.45 }}>{channel.hint}</div>
+              </div>
+              {selected && <Chip tone="green">Selected</Chip>}
+            </div>
+          )
+        })}
+      </Card>
+
+      {notice && (
+        <div style={{ margin: '0 0 16px', padding: '10px 14px', borderRadius: 8, border: '1px solid oklch(0.88 0.05 84)', background: T.amberBg, fontSize: 12, color: T.amberDeep, lineHeight: 1.5 }}>
+          {notice}
+        </div>
+      )}
 
       <p style={{ margin: '0 0 16px', fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
         Beebeeb checks for updates automatically at startup and every 4 hours.
@@ -712,8 +812,9 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
   useEffect(() => {
     command<DesktopConfig | null>('desktop_config').then((result) => {
       if (result.ok && result.value != null) {
-        configRef.current = result.value
-        setConfig(result.value)
+        const loaded = { ...DEFAULT_CONFIG, ...result.value }
+        configRef.current = loaded
+        setConfig(loaded)
       }
     })
   }, [])
@@ -752,7 +853,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       case 'explorer-integration':
         return <ExplorerIntegrationPanel />
       case 'updates':
-        return <UpdatesPanel />
+        return <UpdatesPanel config={config} onConfigChange={(patch) => void handleConfigChange(patch)} notice={notice} />
       case 'advanced':
         return <AdvancedPanel />
       default:

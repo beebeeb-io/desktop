@@ -199,11 +199,44 @@ pub struct DesktopConfig {
     /// persisted so the choice survives a restart.
     #[serde(default)]
     pub sync_overlays: Option<bool>,
+
+    // ── Desktop update channel ────────────────────────────────────────
+    //
+    // Opt-in release channel for the Tauri updater. Stable remains the
+    // default and maps to the existing desktop/latest.json manifest so older
+    // clients and users who never touch the toggle keep their current update
+    // behavior.
+    #[serde(default)]
+    pub release_channel: ReleaseChannel,
 }
 
 /// `#[serde(default = ...)]` needs a function returning the default.
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    Stable,
+    Beta,
+    Alpha,
+}
+
+impl Default for ReleaseChannel {
+    fn default() -> Self {
+        Self::Stable
+    }
+}
+
+impl ReleaseChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+            Self::Alpha => "alpha",
+        }
+    }
 }
 
 impl Default for DesktopConfig {
@@ -235,6 +268,7 @@ impl Default for DesktopConfig {
             metered: None,
             files_on_demand: None,
             sync_overlays: None,
+            release_channel: ReleaseChannel::Stable,
         }
     }
 }
@@ -269,6 +303,11 @@ pub struct DesktopSettings {
     pub files_on_demand: Option<bool>,
     #[serde(default)]
     pub sync_overlays: Option<bool>,
+    /// Opt-in desktop update channel. `None` means the caller did not touch
+    /// this setting; `DesktopConfig` itself defaults missing on-disk values to
+    /// Stable.
+    #[serde(default)]
+    pub release_channel: Option<ReleaseChannel>,
 }
 
 impl From<&DesktopConfig> for DesktopSettings {
@@ -284,6 +323,7 @@ impl From<&DesktopConfig> for DesktopSettings {
             metered: c.metered,
             files_on_demand: c.files_on_demand,
             sync_overlays: c.sync_overlays,
+            release_channel: Some(c.release_channel),
         }
     }
 }
@@ -315,6 +355,9 @@ impl DesktopConfig {
         }
         if s.sync_overlays.is_some() {
             self.sync_overlays = s.sync_overlays;
+        }
+        if let Some(release_channel) = s.release_channel {
+            self.release_channel = release_channel;
         }
     }
 

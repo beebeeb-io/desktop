@@ -59,7 +59,7 @@ mod watcher;
 // so this `mod` declaration plus the conditional are belt-and-braces.
 #[cfg(target_os = "windows")]
 mod windows_cf;
-use config::DesktopConfig;
+use config::{DesktopConfig, ReleaseChannel};
 // `platform_keychain_store_for(id)` resolves to the macOS Keychain store on
 // macOS and the Windows Credential Manager store on Windows (Linux keeps the
 // fail-closed stub), segmenting every secret under the per-account id
@@ -4757,6 +4757,186 @@ async fn resolve_conflict(
 const UPDATE_CHECK_STARTUP_DELAY_SECS: u64 = 5;
 /// How often to re-check for updates while the app is running.
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 4;
+const UPDATE_MANIFEST_BASE_URL: &str = "https://releases.beebeeb.io";
+const DESKTOP_RELEASE_TAG_PREFIX: &str = "desktop-v";
+const DESKTOP_RELEASE_REPO_URL: &str = "https://github.com/beebeeb-io/desktop/releases/tag";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Option<Vec<PrereleasePart>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrereleasePart {
+    Numeric(u64),
+    Text(String),
+}
+
+impl Ord for PrereleasePart {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Numeric(a), Self::Numeric(b)) => a.cmp(b),
+            (Self::Numeric(_), Self::Text(_)) => std::cmp::Ordering::Less,
+            (Self::Text(_), Self::Numeric(_)) => std::cmp::Ordering::Greater,
+            (Self::Text(a), Self::Text(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for PrereleasePart {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParsedReleaseVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.major
+            .cmp(&other.major)
+            .then_with(|| self.minor.cmp(&other.minor))
+            .then_with(|| self.patch.cmp(&other.patch))
+            .then_with(|| match (&self.prerelease, &other.prerelease) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(a), Some(b)) => compare_prerelease_parts(a, b),
+            })
+    }
+}
+
+impl PartialOrd for ParsedReleaseVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn compare_prerelease_parts(a: &[PrereleasePart], b: &[PrereleasePart]) -> std::cmp::Ordering {
+    for (left, right) in a.iter().zip(b.iter()) {
+        let ordering = left.cmp(right);
+        if !ordering.is_eq() {
+            return ordering;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+fn parse_release_version(version: &str) -> Option<ParsedReleaseVersion> {
+    let version_without_build = version.split_once('+').map(|(v, _)| v).unwrap_or(version);
+    let (core, prerelease) = version_without_build
+        .split_once('-')
+        .map_or((version_without_build, None), |(core, pre)| (core, Some(pre)));
+
+    let mut core_parts = core.split('.');
+    let major = core_parts.next()?.parse::<u64>().ok()?;
+    let minor = core_parts.next()?.parse::<u64>().ok()?;
+    let patch = core_parts.next()?.parse::<u64>().ok()?;
+    if core_parts.next().is_some() {
+        return None;
+    }
+
+    let prerelease = match prerelease {
+        Some(pre) if pre.is_empty() => return None,
+        Some(pre) => {
+            let mut parts = Vec::new();
+            for part in pre.split('.') {
+                if part.is_empty() {
+                    return None;
+                }
+                if part.as_bytes().iter().all(u8::is_ascii_digit) {
+                    parts.push(PrereleasePart::Numeric(part.parse::<u64>().ok()?));
+                } else {
+                    parts.push(PrereleasePart::Text(part.to_string()));
+                }
+            }
+            Some(parts)
+        }
+        None => None,
+    };
+
+    Some(ParsedReleaseVersion {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+fn release_channel_from_version(version: &str) -> ReleaseChannel {
+    let version_without_build = version.split_once('+').map(|(v, _)| v).unwrap_or(version);
+    let Some((_, prerelease)) = version_without_build.split_once('-') else {
+        return ReleaseChannel::Stable;
+    };
+    match prerelease.split('.').next() {
+        Some("alpha") => ReleaseChannel::Alpha,
+        Some("beta") => ReleaseChannel::Beta,
+        _ => ReleaseChannel::Stable,
+    }
+}
+
+fn desktop_manifest_path_for_channel(channel: ReleaseChannel) -> &'static str {
+    match channel {
+        ReleaseChannel::Stable => "desktop/latest.json",
+        ReleaseChannel::Beta => "desktop/beta.json",
+        ReleaseChannel::Alpha => "desktop/alpha.json",
+    }
+}
+
+fn update_manifest_url_for_channel(channel: ReleaseChannel) -> String {
+    format!("{UPDATE_MANIFEST_BASE_URL}/{}", desktop_manifest_path_for_channel(channel))
+}
+
+fn release_notes_url_for_version(version: &str) -> String {
+    format!("{DESKTOP_RELEASE_REPO_URL}/{DESKTOP_RELEASE_TAG_PREFIX}{version}")
+}
+
+/// Return true only when the selected channel's manifest points to a version
+/// newer than the installed app. This deliberately chooses the "hold current
+/// build until the selected channel catches up" behavior for users switching
+/// from Beta/Alpha back to Stable: a stable manifest older than the installed
+/// prerelease is ignored instead of being offered as a downgrade.
+fn should_offer_channel_update(current_version: &str, remote_version: &str) -> bool {
+    match (
+        parse_release_version(current_version),
+        parse_release_version(remote_version),
+    ) {
+        (Some(current), Some(remote)) => remote > current,
+        _ => remote_version != current_version,
+    }
+}
+
+fn configured_release_channel() -> ReleaseChannel {
+    match DesktopConfig::load() {
+        Ok(cfg) => cfg.release_channel,
+        Err(error) => {
+            tracing::warn!(%error, "could not load desktop release channel; defaulting updater to stable");
+            ReleaseChannel::Stable
+        }
+    }
+}
+
+fn updater_for_release_channel(
+    app: &tauri::AppHandle,
+    channel: ReleaseChannel,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let endpoint = update_manifest_url_for_channel(channel);
+    app.updater_builder()
+        .endpoints(vec![
+            endpoint
+                .parse()
+                .map_err(|e| format!("parse update manifest URL {endpoint}: {e}"))?,
+        ])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|current, release| {
+            should_offer_channel_update(&current.to_string(), &release.version.to_string())
+        })
+        .build()
+        .map_err(|e| e.to_string())
+}
 
 /// Returns the app version string — displayed in the web UI Settings page.
 #[tauri::command]
@@ -4770,14 +4950,13 @@ fn app_version() -> &'static str {
 /// update-available banner. Returns an error string if installation fails.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let channel = configured_release_channel();
+    let updater = updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
 
     match update {
         Some(u) => {
-            tracing::info!(version = %u.version, "downloading update");
+            tracing::info!(version = %u.version, channel = %channel.as_str(), "downloading update");
 
             u.download_and_install(
                 |downloaded, total| {
@@ -5098,12 +5277,11 @@ async fn run_update_loop(app: tauri::AppHandle) {
 }
 
 async fn check_for_update(app: &tauri::AppHandle) {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let updater = match app.updater() {
+    let channel = configured_release_channel();
+    let updater = match updater_for_release_channel(app, channel) {
         Ok(u) => u,
         Err(e) => {
-            tracing::debug!("updater not available: {e}");
+            tracing::debug!(channel = %channel.as_str(), "updater not available: {e}");
             return;
         }
     };
@@ -5112,16 +5290,21 @@ async fn check_for_update(app: &tauri::AppHandle) {
         Ok(Some(update)) => {
             tracing::info!(
                 version = %update.version,
+                channel = %channel.as_str(),
                 "update available — notifying frontend"
             );
+            let version = update.version.to_string();
+            let release_channel = release_channel_from_version(&version);
             // Emit to the webview so the frontend can show a banner.
             // Frontend listens with: import { listen } from "@tauri-apps/api/event"
             //   await listen("update-available", handler)
             let _ = app.emit(
                 "update-available",
                 serde_json::json!({
-                    "version": update.version,
+                    "version": version,
+                    "channel": release_channel.as_str(),
                     "body": update.body.as_deref().unwrap_or(""),
+                    "release_notes_url": release_notes_url_for_version(&version),
                 }),
             );
         }
@@ -5497,10 +5680,12 @@ fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 mod tests {
     use super::{
         AppState, VaultEntryRow, build_vault_tree, classify_finder_install_error, clear_cached_profile,
-        finder_install_state_from_config, folder_leaf_name, is_disposable_cache_path, newly_excluded_ids,
-        normalize_recovery_phrase_input, subtree_file_ids,
+        desktop_manifest_path_for_channel, finder_install_state_from_config, folder_leaf_name,
+        is_disposable_cache_path, newly_excluded_ids, normalize_recovery_phrase_input,
+        release_channel_from_version, should_offer_channel_update, subtree_file_ids,
     };
     use crate::account_dto::AccountProfile;
+    use crate::config::ReleaseChannel;
     use crate::config::DesktopConfig;
     use std::collections::HashSet;
 
@@ -5679,6 +5864,36 @@ mod tests {
 
         let config_path = DesktopConfig::path().unwrap();
         assert!(!is_disposable_cache_path(&config_path));
+    }
+
+    #[test]
+    fn release_channel_is_derived_from_semver_prerelease_suffix() {
+        assert_eq!(release_channel_from_version("0.2.0"), ReleaseChannel::Stable);
+        assert_eq!(release_channel_from_version("0.2.0-beta.1"), ReleaseChannel::Beta);
+        assert_eq!(release_channel_from_version("0.2.0-alpha.1"), ReleaseChannel::Alpha);
+    }
+
+    #[test]
+    fn release_channel_manifest_paths_keep_stable_latest_unchanged() {
+        assert_eq!(desktop_manifest_path_for_channel(ReleaseChannel::Stable), "desktop/latest.json");
+        assert_eq!(desktop_manifest_path_for_channel(ReleaseChannel::Beta), "desktop/beta.json");
+        assert_eq!(desktop_manifest_path_for_channel(ReleaseChannel::Alpha), "desktop/alpha.json");
+    }
+
+    #[test]
+    fn channel_update_guard_holds_prerelease_until_stable_catches_up() {
+        assert!(
+            !should_offer_channel_update("0.2.0-beta.1", "0.1.9"),
+            "switching back to Stable must not offer a downgrade"
+        );
+        assert!(
+            should_offer_channel_update("0.2.0-beta.1", "0.2.0"),
+            "stable 0.2.0 supersedes its 0.2.0 prereleases"
+        );
+        assert!(
+            should_offer_channel_update("0.2.0-beta.1", "0.2.0-beta.2"),
+            "newer prerelease builds on the selected channel should still be offered"
+        );
     }
 
     // ── SelectiveSync wave-2: tree-build + aggregation + exclude-diff ──────────

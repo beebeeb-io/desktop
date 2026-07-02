@@ -17,7 +17,7 @@
 
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { command } from './desktopApi'
+import { command, openUrl } from './desktopApi'
 
 // Design tokens — must match the Windows app / tray surfaces
 const T = {
@@ -37,6 +37,8 @@ const T = {
 interface UpdatePayload {
   version: string
   body: string
+  channel?: 'stable' | 'beta' | 'alpha'
+  release_notes_url?: string
 }
 
 type InstallState = 'idle' | 'installing' | 'error'
@@ -111,6 +113,7 @@ export default function UpdateBanner() {
   }
 
   if (!update || dismissed) return null
+  const releaseNotesUrl = update.release_notes_url ?? `https://github.com/beebeeb-io/desktop/releases/tag/desktop-v${encodeURIComponent(update.version)}`
 
   return (
     <div
@@ -147,6 +150,24 @@ export default function UpdateBanner() {
         <span style={{ color: T.ink2 }}>
           Restart to apply the update.
         </span>
+        {' '}
+        <button
+          type="button"
+          onClick={() => void openUrl(releaseNotesUrl)}
+          style={{
+            border: 'none',
+            background: 'transparent',
+            padding: 0,
+            color: T.amberDeep,
+            font: 'inherit',
+            fontWeight: 600,
+            cursor: 'pointer',
+            textDecoration: 'underline',
+            textUnderlineOffset: 2,
+          }}
+        >
+          Release notes
+        </button>
         {update.body && (
           <span
             style={{

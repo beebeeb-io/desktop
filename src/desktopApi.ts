@@ -16,6 +16,7 @@ export interface SyncStatus {
 }
 
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
+export type ReleaseChannel = 'stable' | 'beta' | 'alpha'
 
 export interface DesktopConfig {
   upload_kbps_limit: number
@@ -29,6 +30,7 @@ export interface DesktopConfig {
   metered?: boolean
   files_on_demand?: boolean
   sync_overlays?: boolean
+  release_channel?: ReleaseChannel
 }
 
 /**
@@ -138,6 +140,7 @@ export const DEFAULT_CONFIG: DesktopConfig = {
   notify_conflicts: true,
   notify_sync_complete: false,
   notify_quota_warnings: true,
+  release_channel: 'stable',
 }
 
 function reasonFrom(error: unknown): string {
