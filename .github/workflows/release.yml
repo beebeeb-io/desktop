@@ -104,7 +104,7 @@ jobs:
           test -n "$app_path"
           bash scripts/macos-release-preflight.sh "$app_path"
 
-      # Stage exactly the files we want to publish into a clean dist/ directory, then upload that
+      # Stage exactly the files we want to publish into a clean release-assets/ directory, then upload that
       # directory as-is. Bundle directories are not safe to glob directly or wholesale:
       # - Multiple narrow multi-line patterns in one upload-artifact `path:` have been observed to
       #   silently keep only 1 of N real matches (confirmed 2026-07-02, msi/*.msi + *.msi.zip +
@@ -120,39 +120,39 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg dist/
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg.sig dist/
+          mkdir -p release-assets
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-assets/
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg.sig release-assets/
 
       - name: Stage release assets (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe dist/
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig dist/
+          mkdir -p release-assets
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi release-assets/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig release-assets/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe release-assets/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig release-assets/
 
       - name: Stage release assets (Linux)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb.sig dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm dist/
-          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm.sig dist/
+          mkdir -p release-assets
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage release-assets/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig release-assets/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb release-assets/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb.sig release-assets/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm release-assets/
+          cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm.sig release-assets/
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: beebeeb-desktop-macos
-          path: dist/*
+          path: release-assets/*
           if-no-files-found: error
 
       - name: Upload Windows artifact
@@ -160,7 +160,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: beebeeb-desktop-windows
-          path: dist/*
+          path: release-assets/*
           if-no-files-found: error
 
       - name: Upload Linux artifacts
@@ -168,7 +168,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: beebeeb-desktop-linux
-          path: dist/*
+          path: release-assets/*
           if-no-files-found: error
 
   release:
