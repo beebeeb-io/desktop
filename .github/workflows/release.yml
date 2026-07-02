@@ -135,7 +135,11 @@ jobs:
 
   release:
     name: Create GitHub Release
-    if: github.event_name == 'workflow_dispatch'
+    # Publish whatever platforms succeeded rather than requiring all three — `needs: build`
+    # reports one aggregate result for the whole matrix, so a single failing platform (e.g.
+    # macOS, still blocked on a separate File Provider gap) would otherwise skip this job even
+    # when the other platforms built and signed cleanly.
+    if: github.event_name == 'workflow_dispatch' && !cancelled()
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -147,14 +151,24 @@ jobs:
         with:
           path: artifacts
 
+      - name: Check for any artifacts
+        id: check
+        run: |
+          if find artifacts -type f | grep -q .; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create release
+        if: steps.check.outputs.found == 'true'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: desktop-v${{ inputs.version }}
           name: Beebeeb Desktop ${{ inputs.version }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.tar.gz
