@@ -2,20 +2,18 @@
  * Vite entry — picks which window component to mount based on the
  * `window` query param set by the Tauri side when it opens the webview.
  *
- *   • default (no ?window)         → settings shell (App.tsx)
+ *   • default (no ?window)         → compact app shell (App.tsx)
  *   • ?window=conflict             → conflict resolution (ConflictWindow.tsx)
  *   • ?window=onboarding           → first-launch flow (Onboarding.tsx, macOS)
  *   • ?window=onboarding&platform=windows
  *                                  → Windows first-run wizard (WindowsFirstRun.tsx)
  *   • ?window=tray                 → Windows 11 tray flyout (WindowsTray.tsx)
- *   • ?window=settings&platform=windows
- *                                  → Fluent-style Windows settings (WindowsSettings.tsx)
  *   • ?window=main-app&platform=windows
  *                                  → Windows main app shell (WindowsApp.tsx) —
  *                                    sidebar + content router hosting the data views
  *
  * Single HTML entry keeps the bundle layout simple — inactive components are
- * tree-shaken. The tray and settings windows are opened by the Rust side via
+ * tree-shaken. The tray and main app windows are opened by the Rust side via
  * tauri::WebviewWindowBuilder; they receive their ?window param in the URL.
  *
  * See docs/superpowers/plans/2026-05-07-desktop-sync-client.md (Task 8 + 12).
@@ -28,7 +26,6 @@ import ConflictWindow from './ConflictWindow'
 import Onboarding from './Onboarding'
 import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
-import WindowsSettings from './WindowsSettings'
 import WindowsApp from './WindowsApp'
 import './design.css'
 
@@ -54,8 +51,6 @@ if (which === 'conflict') {
   component = <WindowsFirstRun />
 } else if (which === 'onboarding') {
   component = <Onboarding />
-} else if (which === 'settings' && platform === 'windows') {
-  component = <WindowsSettings />
 } else if (which === 'main-app' && platform === 'windows') {
   component = <WindowsApp />
 } else {

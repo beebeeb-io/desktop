@@ -7,8 +7,7 @@
  * window shown automatically on launch once the PC is configured.
  *
  * This is the SHELL: a left sidebar (brand mark + nav groups + a live storage
- * widget) and a content area with a state-based router (mirroring
- * WindowsSettings' `activeNav` pattern). It hosts the data-backed views that
+ * widget) and a content area with a state-based router. It hosts the data-backed views that
  * later packages will fill — TODAY most views are honest placeholders / skeleton
  * slots. What IS finished here: the window, nav + active states, routing,
  * responsive content area, the auth gate, loading/skeleton scaffolding, and the
@@ -20,14 +19,14 @@
  * call almost none of them yet — that's the next packages' job. Each slot is
  * marked with a `DATA SLOT:` note naming the wrapper(s) it should consume.
  *
- * Design tokens + idioms are shared with WindowsSettings.tsx (the `T` map and
- * NavIcon set are intentionally kept parallel so the two Windows windows feel
- * like one product). Brand: amber for encryption state + the active nav icon
- * accent only; Inter for humans, JetBrains Mono for ids/sizes; name the city
- * only ("Falkenstein"), never the storage provider; honest voice; no emojis.
+ * Design tokens + idioms are shared through `src/windows/ui.tsx`. Brand: amber
+ * for encryption state + the active nav icon accent only; Inter for humans,
+ * JetBrains Mono for ids/sizes; name the city only ("Falkenstein"), never the
+ * storage provider; honest voice; no emojis.
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import {
   command,
   commandUnavailableLabel,
@@ -61,6 +60,7 @@ import SelectiveSyncView from './windows/views/SelectiveSyncView'
 import DevicesView from './windows/views/DevicesView'
 import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
+import SettingsView from './windows/views/SettingsView'
 import { useRegionLabel } from './windows/useRegion'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
@@ -80,6 +80,7 @@ type NavId =
 // Nav items reachable whether or not the user is signed in. Everything else is
 // auth-gated: hidden from the sidebar and replaced by the sign-in prompt.
 const ALWAYS_ACCESSIBLE: ReadonlySet<NavId> = new Set(['home', 'settings'])
+const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
 
 interface NavItem {
   id: NavId
@@ -117,6 +118,26 @@ const NAV_SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
     items: [{ id: 'settings', label: 'Settings', icon: 'cog' }],
   },
 ]
+
+function isNavId(value: unknown): value is NavId {
+  return (
+    value === 'home' ||
+    value === 'files' ||
+    value === 'account' ||
+    value === 'insights' ||
+    value === 'bandwidth' ||
+    value === 'selective-sync' ||
+    value === 'devices' ||
+    value === 'security' ||
+    value === 'activity' ||
+    value === 'settings'
+  )
+}
+
+function initialNav(): NavId {
+  const nav = new URLSearchParams(window.location.search).get('nav')
+  return isNavId(nav) ? nav : 'home'
+}
 
 // The honest placeholder body shown inside a not-yet-bound view. It clearly
 // states the view is scaffolded and shows skeleton rows so the layout reads as
@@ -1231,39 +1252,6 @@ function FilesView() {
   )
 }
 
-// SETTINGS — open the dedicated Windows settings window (keeps Settings reachable
-// from inside the app). The settings window holds sync, explorer integration,
-// launch, updates, etc.
-function SettingsView() {
-  const [error, setError] = useState<string | null>(null)
-  const open = async () => {
-    setError(null)
-    const r = await command<void>('show_settings_window')
-    if (!r.ok) setError(r.unsupported ? commandUnavailableLabel('show_settings_window') : r.reason)
-  }
-  return (
-    <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
-      <PageHeader
-        title="Settings"
-        subtitle="Sync rules, Explorer integration, launch-at-login, and updates live in the Settings window."
-      />
-      <Card style={{ padding: 18 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <div style={{ width: 36, height: 36, borderRadius: 9, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            <NavIcon name="cog" size={16} color={T.ink2} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 2 }}>Device &amp; system settings</div>
-            <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4 }}>Sync, bandwidth, Explorer integration, launch, and updates.</div>
-          </div>
-          <PrimaryBtn onClick={() => void open()}>Open Settings</PrimaryBtn>
-        </div>
-        {error && <div style={{ marginTop: 12, fontSize: 11.5, color: 'oklch(0.5 0.18 25)' }}>{error}</div>}
-      </Card>
-    </div>
-  )
-}
-
 // Placeholder views — each declares the data wrapper(s) the next package binds.
 const PLACEHOLDER_VIEWS: Record<string, { title: string; subtitle: string; note: string; dataSlot: string }> = {
   account: {
@@ -1373,7 +1361,7 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
 // ── Root component ──────────────────────────────────────────────────────────
 
 export default function WindowsApp() {
-  const [activeNav, setActiveNav] = useState<NavId>('home')
+  const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [usage, setUsage] = useState<BillingUsage | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -1410,6 +1398,19 @@ export default function WindowsApp() {
     void refresh()
     const id = window.setInterval(refresh, 5000)
     return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const unlisten = listen<string>(WINDOWS_APP_NAV_EVENT, (event) => {
+      if (!cancelled && isNavId(event.payload)) {
+        setActiveNav(event.payload)
+      }
+    })
+    return () => {
+      cancelled = true
+      void unlisten.then((callback) => callback())
+    }
   }, [])
 
   const loggedIn = status?.logged_in ?? false
@@ -1494,7 +1495,7 @@ export default function WindowsApp() {
       case 'files':
         return <FilesView />
       case 'settings':
-        return <SettingsView />
+        return <SettingsView status={status} onOpenSignIn={openSignIn} />
       case 'account':
         return <AccountView />
       case 'insights':

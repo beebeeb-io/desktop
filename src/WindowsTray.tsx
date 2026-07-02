@@ -14,7 +14,7 @@
  *     behind the card's rounded corners.
  *
  * Layout (top → bottom):
- *   • Header   — BrandMark + "Beebeeb" + settings gear (→ show_settings_window).
+ *   • Header   — BrandMark + "Beebeeb" + settings gear (→ main app Settings).
  *   • Status   — green check + a sync-state line derived from `sync_status`.
  *   • Recent   — scrollable list of recently-changed files (desktopFileOverview).
  *   • Actions  — Open folder · View online · Recycle bin.
@@ -22,7 +22,7 @@
  * Data sources:
  *   sync_status              → SyncStatus (logged_in / engine / syncing / conflicts)
  *   desktop_file_overview(8) → FileOverview.recent[] (path, size_bytes, status, modified_at)
- *   show_settings_window     → opens the Windows settings shell
+ *   show_main_app_settings   → opens the main app and selects Settings
  *   open_finder_location     → opens the sync root in Explorer
  *   openUrl                  → app.beebeeb.io / app.beebeeb.io/trash
  */
@@ -346,7 +346,7 @@ export default function WindowsTray() {
   const statusIsGood = !!status?.logged_in && status.conflicts === 0 && status.engine === 'running'
 
   const openSettings = async () => {
-    await command<void>('show_settings_window')
+    await command<void>('show_main_app_settings')
     void getCurrentWindow().hide()
   }
 

@@ -548,8 +548,8 @@ async fn start_engine_if_possible(
 /// Re-calling when the window already exists is a no-op (focus only).
 pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
     // Windows uses a wider two-column layout (WindowsFirstRun.tsx) selected by
-    // the `platform=windows` query param, matching the pattern in
-    // `show_settings_window` and the `windows-onboarding` entry in tauri.conf.json.
+    // the `platform=windows` query param, matching the `windows-onboarding`
+    // entry in tauri.conf.json.
     // macOS/Linux keep the original compact single-column Onboarding.tsx (no param).
     #[cfg(target_os = "windows")]
     let (label, url, width, height) = (
@@ -594,15 +594,6 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
 #[tauri::command]
 async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
     open_onboarding_window_impl(&app)
-}
-
-/// Show the settings window — called by `Onboarding.tsx` after the user
-/// completes the 3-step flow and closes the onboarding window.
-/// Also aliased as `show_settings_window` for callers in the Windows UI.
-#[tauri::command]
-fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_settings_window_impl(&app);
-    Ok(())
 }
 
 /// Result of an OPAQUE sign-in attempt handed back to the frontend.
@@ -2992,7 +2983,7 @@ fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
 // ── IPC aliases for frontend compatibility ────────────────────────────────────
 
 /// Alias so the frontend can call `desktop_config` (the name used in
-/// `WindowsFirstRun.tsx` and `WindowsSettings.tsx`) in addition to the
+/// `WindowsFirstRun.tsx` and the in-app settings view) in addition to the
 /// canonical `get_desktop_config`. Both names are registered in
 /// `generate_handler!`. Returns `None` when the config file doesn't
 /// exist yet (first-run path), which the frontend uses as a signal that
@@ -3007,15 +2998,6 @@ fn desktop_config() -> Result<Option<config::DesktopSettings>, String> {
     Ok(Some(config::DesktopSettings::from(&cfg)))
 }
 
-/// Alias so the frontend (`WindowsTray.tsx`, `WindowsFirstRun.tsx`) can
-/// call `show_settings_window` while the Rust side also keeps the
-/// original `show_settings` command for any existing callers.
-#[tauri::command]
-fn show_settings_window(app: tauri::AppHandle) -> Result<(), String> {
-    show_settings_window_impl(&app);
-    Ok(())
-}
-
 /// Open (or focus) the main Beebeeb app window. This is the new primary
 /// surface on Windows — the full sidebar + content-router shell
 /// (`WindowsApp.tsx`, selected by `?window=main-app&platform=windows`) that
@@ -3024,11 +3006,19 @@ fn show_settings_window(app: tauri::AppHandle) -> Result<(), String> {
 /// reachable from a nav item inside the app.
 ///
 /// On non-Windows platforms there is no dedicated main-app window yet, so we
-/// fall back to the existing settings window — keeping a single, predictable
+/// fall back to the compact app window — keeping a single, predictable
 /// entry point for callers regardless of OS.
 #[tauri::command]
 fn show_main_app_window(app: tauri::AppHandle) -> Result<(), String> {
     show_main_app_window_impl(&app);
+    Ok(())
+}
+
+/// Open (or focus) the main Beebeeb app window and select the consolidated
+/// Settings section. Used by the Windows tray flyout's Settings gear.
+#[tauri::command]
+fn show_main_app_settings(app: tauri::AppHandle) -> Result<(), String> {
+    show_main_app_window_with_nav(&app, Some("settings"));
     Ok(())
 }
 
@@ -3138,7 +3128,7 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
 /// `desktop.toml` so the paused state survives a restart.
 ///
 /// Emits an `engine-status` event with `state = "paused"` so the tray
-/// tooltip and any open settings window update immediately.
+/// tooltip and any open app window update immediately.
 #[tauri::command]
 async fn tray_pause_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.active_account()?.sync_paused.store(true, Ordering::Relaxed);
@@ -4602,7 +4592,7 @@ pub(crate) fn open_conflict_window_impl(
 /// The URL contract matches `repos/desktop/src/ConflictWindow.tsx`:
 /// `index.html?window=conflict&fileId=<uuid>&fileName=<utf8>&isText=<bool>`.
 /// `main.tsx` reads `?window=conflict` and mounts `ConflictWindow`
-/// instead of the default settings shell.
+/// instead of the default compact app shell.
 ///
 /// Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
 /// Phase 4 Task 12. Also called internally by Task 10's conflict
@@ -4738,7 +4728,7 @@ async fn resolve_conflict(
     };
     outcome?;
 
-    // Notify the settings window so it can re-poll sync_status and
+    // Notify the app window so it can re-poll sync_status and
     // refresh the conflict count without waiting for the next engine
     // tick.
     let _ = app.emit(
@@ -4931,11 +4921,10 @@ pub fn run() {
             // Browser-based device-code login handoff (Windows primary path)
             browser_login::start_browser_login,
             open_onboarding_window,
-            show_settings,
-            // WS1 — Windows UI aliases + tray commands
-            show_settings_window,
             // PKG-SHELL — open the Windows main app window
             show_main_app_window,
+            show_main_app_settings,
+            // WS1 — Windows UI aliases + tray commands
             desktop_config,
             tray_recent_activity,
             tray_pause_sync,
@@ -4994,8 +4983,8 @@ pub fn run() {
             setup_native_menu(app)?;
             setup_tray(app)?;
             // Defensive: hide windows that tauri_plugin_window_state may have
-            // restored visible on Windows. Only the onboarding window should
-            // appear on first-run; tray and settings surfaces are on-demand.
+            // restored visible on Windows. Only onboarding should appear on
+            // first-run; the tray flyout and main app are shown deliberately.
             #[cfg(target_os = "windows")]
             {
                 // macOS-labelled `settings` window is not used on Windows.
@@ -5004,10 +4993,6 @@ pub fn run() {
                 }
                 // Tray popup — shown only on tray-icon click.
                 if let Some(w) = app.get_webview_window("tray") {
-                    let _ = w.hide();
-                }
-                // Windows settings surface — shown only on user action.
-                if let Some(w) = app.get_webview_window("windows-settings") {
                     let _ = w.hide();
                 }
             }
@@ -5045,8 +5030,8 @@ pub fn run() {
 
             // First-launch detection: if no sync_root is configured and no
             // session is present, open the onboarding window automatically.
-            // The settings window stays hidden (visible:false in tauri.conf.json)
-            // until the user completes onboarding.
+            // App windows stay hidden (visible:false in tauri.conf.json) until
+            // onboarding or the configured-startup path opens the right one.
             let no_sync_root = DesktopConfig::load().map(|c| c.sync_root.is_none()).unwrap_or(true);
             if no_sync_root {
                 let h = app.handle().clone();
@@ -5061,7 +5046,7 @@ pub fn run() {
                 // Already configured — show the main app window after startup
                 // settles. On Windows this is the full sidebar/content shell
                 // (`main-app`); on macOS/Linux `show_main_app_window_impl`
-                // delegates to the existing settings window, so behaviour there
+                // delegates to the compact app window, so behaviour there
                 // is unchanged. The short delay mirrors onboarding and avoids
                 // racing Tauri's window setup.
                 let h = app.handle().clone();
@@ -5204,17 +5189,15 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
 /// Build the tray context menu with the current autostart checked state.
 /// Called on first setup and again whenever the autostart state changes.
 ///
-/// As of Task 8B the desktop app is tray-only — the WebView is a small
-/// fixed-size settings window rather than the full web client at
-/// `app.beebeeb.io`. The "Open Settings" tray item is the primary way
-/// users surface that window; "Hide" tucks it back without quitting
-/// the daemon.
+/// The tray context menu keeps the daemon reachable without quitting it.
+/// "Open Beebeeb" surfaces the main app on Windows and the compact app window
+/// on other platforms; "Hide" tucks the current app surface away.
 fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
     manager: &M,
     autostart_enabled: bool,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     // "Open Beebeeb" surfaces the main app window (the full sidebar/content
-    // shell on Windows; the settings window on macOS/Linux). The menu-item id
+    // shell on Windows; the compact app window on macOS/Linux). The menu-item id
     // stays `open_settings` for backwards compatibility with existing event
     // wiring — only the label and target window changed.
     let show_item = MenuItemBuilder::new("Open Beebeeb")
@@ -5382,8 +5365,17 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open_settings" => show_main_app_window_impl(app),
             "tray_hide" => {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.hide();
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(win) = app.get_webview_window("main-app") {
+                        let _ = win.hide();
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    if let Some(win) = app.get_webview_window("settings") {
+                        let _ = win.hide();
+                    }
                 }
             }
             "tray_autostart" => {
@@ -5411,9 +5403,9 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             // Left-click toggles window visibility.
             // On Windows: show/hide the frameless tray flyout ("tray" window),
             // positioned near the bottom-right corner so it appears above the
-            // system tray area. The "settings" window is only opened via the
-            // context-menu "Open Settings" item or the tray flyout itself.
-            // On macOS/Linux: toggle the main settings window as before.
+            // system tray area. The main app opens from the context menu or
+            // the tray flyout itself.
+            // On macOS/Linux: toggle the compact app window as before.
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -5457,8 +5449,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                         if win.is_visible().unwrap_or(false) {
                             let _ = win.hide();
                         } else {
-                            show_settings_window_impl(app);
+                            show_compact_app_window_impl(app);
                         }
+                    } else {
+                        show_compact_app_window_impl(app);
                     }
                 }
             }
@@ -5470,24 +5464,11 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Internal helper — show/create the appropriate settings window for the
-/// current platform. Not an IPC command; callers use the `show_settings`
-/// or `show_settings_window` IPC commands from the frontend.
-fn show_settings_window_impl(app: &tauri::AppHandle) {
-    // Windows ships a dedicated, larger settings shell (`windows-settings`)
-    // whose React route is selected by the `platform=windows` query param.
-    // macOS keeps the original compact `settings` window untouched.
-    #[cfg(target_os = "windows")]
-    let (label, url, width, height, resizable) = (
-        "windows-settings",
-        "index.html?window=settings&platform=windows",
-        1000.0,
-        680.0,
-        true,
-    );
-    #[cfg(not(target_os = "windows"))]
+/// Internal helper for non-Windows builds, where the compact app/settings
+/// shell is still the only primary window.
+#[cfg(not(target_os = "windows"))]
+fn show_compact_app_window_impl(app: &tauri::AppHandle) {
     let (label, url, width, height, resizable) = ("settings", "index.html", 680.0, 540.0, false);
-
     if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
         let _ = win.set_focus();
@@ -5506,36 +5487,49 @@ fn show_settings_window_impl(app: &tauri::AppHandle) {
             let _ = win.set_focus();
         }
         Err(error) => {
-            tracing::warn!(%error, "failed to create settings window");
+            tracing::warn!(%error, "failed to create compact app window");
         }
     }
 }
 
-/// Internal helper — show/create the main Beebeeb app window. On Windows this
-/// is the `main-app` webview (the full sidebar + content-router shell,
-/// `WindowsApp.tsx`, selected by `?window=main-app&platform=windows`). On
-/// other platforms there is no dedicated main-app shell yet, so we delegate to
-/// `show_settings_window_impl` — callers get a sensible window either way.
+/// Internal helper — show/create the main Beebeeb app window.
 ///
-/// Mirrors `show_settings_window_impl`: focus an existing window if present,
-/// otherwise build one. The window is declared `visible: false` in
-/// tauri.conf.json, so the explicit `show()` + `set_focus()` are required.
 fn show_main_app_window_impl(app: &tauri::AppHandle) {
+    show_main_app_window_with_nav(app, None);
+}
+
+/// Internal helper — show/create the main Beebeeb app window, optionally
+/// selecting a route once it is visible. On Windows this is the `main-app`
+/// webview (the full sidebar + content-router shell, `WindowsApp.tsx`,
+/// selected by `?window=main-app&platform=windows`). On other platforms there
+/// is no dedicated main-app shell yet, so we delegate to the compact app window.
+///
+/// Focuses an existing window if present, otherwise builds one. The window is
+/// declared `visible: false` in tauri.conf.json, so the explicit `show()` +
+/// `set_focus()` are required.
+fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
     #[cfg(not(target_os = "windows"))]
     {
-        // No dedicated main-app window outside Windows — reuse settings.
-        show_settings_window_impl(app);
+        let _ = nav;
+        // No dedicated main-app window outside Windows — reuse the compact app.
+        show_compact_app_window_impl(app);
         return;
     }
 
     #[cfg(target_os = "windows")]
     {
         let label = "main-app";
-        let url = "index.html?window=main-app&platform=windows";
+        let url = match nav {
+            Some(nav) => format!("index.html?window=main-app&platform=windows&nav={nav}"),
+            None => "index.html?window=main-app&platform=windows".to_string(),
+        };
 
         if let Some(win) = app.get_webview_window(label) {
             let _ = win.show();
             let _ = win.set_focus();
+            if let Some(nav) = nav {
+                let _ = win.emit("windows-app:navigate", nav);
+            }
             return;
         }
 
@@ -5550,6 +5544,9 @@ fn show_main_app_window_impl(app: &tauri::AppHandle) {
             Ok(win) => {
                 let _ = win.show();
                 let _ = win.set_focus();
+                if let Some(nav) = nav {
+                    let _ = win.emit("windows-app:navigate", nav);
+                }
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to create main app window");

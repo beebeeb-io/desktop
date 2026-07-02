@@ -1004,8 +1004,7 @@ function ReadyStep() {
 
   const finish = async () => {
     // "Open control center" lands in the main app window (the full sidebar +
-    // content shell), not the settings window. Settings is reachable from a
-    // nav item inside the app.
+    // content shell). Settings is reachable from a nav item inside the app.
     await command<void>('show_main_app_window')
     try { await getCurrentWindow().close() } catch { window.close() }
   }

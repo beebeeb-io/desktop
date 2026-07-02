@@ -1,17 +1,16 @@
 /**
  * ActivityView — the account's Activity surface for the Windows app (PKG-DATA).
  *
- * Three sections behind a lightweight in-view tab switch, each fully self-
+ * Two sections behind a lightweight in-view tab switch, each fully self-
  * fetching on mount and each handling all four states (loading / error / empty
  * / loaded) so a down login backend reads as crafted, never broken:
  *
  *   1. Timeline      — accountActivityFeed(1, 50) → events grouped by day.
  *   2. Notifications — accountNotifications() → list + unread_count (display
  *                      only; marking-read is not a wired IPC, so no fake button).
- *   3. Preferences   — accountNotificationPreferences() → the 5 booleans, each
- *                      an accessible switch; on change we PUT a single key via
- *                      accountUpdateNotificationPreferences and reflect the
- *                      RETURNED state (optimistic, reverting on failure).
+ *
+ * Notification preferences now live under the main app Settings area so account
+ * and desktop settings have one coherent home.
  *
  * Design grounded on design/hifi/hifi-settings.jsx (HiActivity for the day-
  * grouped timeline with per-row type dot, and HiSettingsNotifications for the
@@ -28,12 +27,9 @@ import { useEffect, useState } from 'react'
 import {
   accountActivityFeed,
   accountNotifications,
-  accountNotificationPreferences,
-  accountUpdateNotificationPreferences,
   type ActivityFeed,
   type ActivityFeedEvent,
   type NotificationList,
-  type NotificationPreferenceValues,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
 import { useRegionLabel } from '../useRegion'
@@ -460,196 +456,13 @@ function NotificationsSkeleton() {
   )
 }
 
-// ── Preferences section ──────────────────────────────────────────────────────
-
-type PrefKey = keyof NotificationPreferenceValues
-
-const PREF_META: Array<{ key: PrefKey; label: string; hint: string }> = [
-  { key: 'new_device_login', label: 'New device sign-in', hint: 'We can’t see your files, but we know when a new device signs in.' },
-  { key: 'share_received', label: 'Share received', hint: 'When someone grants you access to a file or folder.' },
-  { key: 'file_updated', label: 'File updated', hint: 'When a file in your vault changes on another device.' },
-  { key: 'storage_warning', label: 'Storage warning', hint: 'When you’re close to your storage limit.' },
-  { key: 'backup_complete', label: 'Backup complete', hint: 'When a scheduled backup finishes.' },
-]
-
-// Accessible switch built from T tokens (mirrors the Settings-window idiom).
-function Switch({ on, busy, onToggle, label }: { on: boolean; busy: boolean; onToggle: () => void; label: string }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      aria-busy={busy}
-      disabled={busy}
-      onClick={onToggle}
-      style={{
-        width: 36,
-        height: 20,
-        borderRadius: 999,
-        border: 'none',
-        padding: 2,
-        background: on ? T.amberDeep : T.line2,
-        cursor: busy ? 'progress' : 'pointer',
-        opacity: busy ? 0.6 : 1,
-        transition: 'background 150ms ease, opacity 150ms ease',
-        display: 'inline-flex',
-        alignItems: 'center',
-        flexShrink: 0,
-      }}
-    >
-      <div
-        style={{
-          width: 16,
-          height: 16,
-          borderRadius: '50%',
-          background: T.paper,
-          transform: on ? 'translateX(16px)' : 'translateX(0)',
-          transition: 'transform 150ms ease',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
-        }}
-      />
-    </button>
-  )
-}
-
-function PreferencesSection() {
-  const [values, setValues] = useState<NotificationPreferenceValues | null>(null)
-  const [err, setErr] = useState<{ reason: string; unsupported: boolean } | null>(null)
-  const [loading, setLoading] = useState(true)
-  // Per-key in-flight + a transient per-key save error.
-  const [busyKey, setBusyKey] = useState<PrefKey | null>(null)
-  const [saveError, setSaveError] = useState<string | null>(null)
-
-  const load = () => {
-    let cancelled = false
-    setLoading(true)
-    setErr(null)
-    setSaveError(null)
-    void (async () => {
-      const r = await accountNotificationPreferences()
-      if (cancelled) return
-      if (r.ok) { setValues(r.value.preferences); setErr(null) }
-      else { setErr({ reason: r.reason, unsupported: r.unsupported }); setValues(null) }
-      setLoading(false)
-    })()
-    return () => { cancelled = true }
-  }
-
-  useEffect(() => {
-    let active = true
-    setLoading(true)
-    setErr(null)
-    void (async () => {
-      const r = await accountNotificationPreferences()
-      if (!active) return
-      if (r.ok) setValues(r.value.preferences)
-      else setErr({ reason: r.reason, unsupported: r.unsupported })
-      setLoading(false)
-    })()
-    return () => { active = false }
-  }, [])
-
-  const toggle = (key: PrefKey) => {
-    if (!values || busyKey) return
-    const prev = values
-    const next = !values[key]
-    // Optimistic: flip immediately, confirm with the returned state, revert on fail.
-    setValues({ ...values, [key]: next })
-    setBusyKey(key)
-    setSaveError(null)
-    void (async () => {
-      const r = await accountUpdateNotificationPreferences({ [key]: next })
-      if (r.ok) {
-        setValues(r.value.preferences)
-      } else {
-        setValues(prev)
-        setSaveError(
-          r.unsupported
-            ? 'Changing this preference isn’t available in this build.'
-            : `Couldn’t save: ${r.reason}`,
-        )
-      }
-      setBusyKey(null)
-    })()
-  }
-
-  if (loading) return <PreferencesSkeleton />
-  if (err) return <ErrorBlock reason={err.reason} unsupported={err.unsupported} onRetry={load} />
-  if (!values) {
-    // Defensive: ok-but-no-values should never crash to a white screen.
-    return (
-      <EmptyBlock
-        icon="cog"
-        title="No preferences to show"
-        body="Notification preferences couldn’t be read for this account."
-      />
-    )
-  }
-
-  return (
-    <Card style={{ padding: 0, overflow: 'hidden' }}>
-      <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <NavIcon name="cog" size={14} color={T.ink2} />
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Preferences</div>
-          <div style={{ fontSize: 11, color: T.ink3 }}>Choose which events notify you.</div>
-        </div>
-      </div>
-
-      {PREF_META.map((m, i) => {
-        const last = i === PREF_META.length - 1
-        const on = values[m.key]
-        return (
-          <div
-            key={m.key}
-            style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '14px 20px', alignItems: 'center', borderBottom: last ? 'none' : `1px solid ${T.line}` }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{m.label}</div>
-              <div style={{ fontSize: 11, color: T.ink3, marginTop: 3, lineHeight: 1.5 }}>{m.hint}</div>
-            </div>
-            <Switch on={on} busy={busyKey === m.key} onToggle={() => toggle(m.key)} label={m.label} />
-          </div>
-        )
-      })}
-
-      {saveError && (
-        <div style={{ padding: '11px 20px', borderTop: `1px solid ${T.line}`, background: T.paper2, fontSize: 11.5, color: RED, lineHeight: 1.5 }}>
-          {saveError}
-        </div>
-      )}
-    </Card>
-  )
-}
-
-function PreferencesSkeleton() {
-  return (
-    <Card style={{ padding: 0, overflow: 'hidden' }}>
-      <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <NavIcon name="cog" size={14} color={T.ink4} />
-        <Skeleton width={110} height={12} />
-      </div>
-      {Array.from({ length: 5 }).map((_, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 36px', gap: 16, padding: '14px 20px', alignItems: 'center', borderBottom: i < 4 ? `1px solid ${T.line}` : 'none' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Skeleton width={`${44 - i * 4}%`} height={12} />
-            <Skeleton width={`${68 - i * 4}%`} height={10} />
-          </div>
-          <Skeleton width={36} height={20} radius={999} />
-        </div>
-      ))}
-    </Card>
-  )
-}
-
 // ── Tab switch ───────────────────────────────────────────────────────────────
 
-type Tab = 'timeline' | 'notifications' | 'preferences'
+type Tab = 'timeline' | 'notifications'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'notifications', label: 'Notifications' },
-  { id: 'preferences', label: 'Preferences' },
 ]
 
 function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
@@ -694,7 +507,7 @@ export default function ActivityView() {
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
       <PageHeader
         title="Activity"
-        subtitle="Your account’s timeline, notifications, and what we’re allowed to tell you about. We can’t read your files — these are account-level events only."
+        subtitle="Your account’s timeline and notifications. Notification preferences now live under Settings."
         aside={
           <Chip tone="amber">
             <NavIcon name="shield" size={11} color={T.amberDeep} />
@@ -709,7 +522,6 @@ export default function ActivityView() {
           four-state handling self-contained and the data fresh on return. */}
       {tab === 'timeline' && <TimelineSection key="timeline" />}
       {tab === 'notifications' && <NotificationsSection key="notifications" />}
-      {tab === 'preferences' && <PreferencesSection key="preferences" />}
     </div>
   )
 }

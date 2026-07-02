@@ -1,12 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the Beebeeb desktop windows. Targets the settings window, the first-launch onboarding window, the Windows main app window (`main-app`), and all on-demand conflict-resolution windows (label `conflict-<file_id>`, opened by the `open_conflict_window` IPC). Also covers Windows-specific webview labels (`windows-settings`, `windows-onboarding`) and the tray popup (`tray`) so that event listeners and IPC commands work on Windows webviews.",
+  "description": "Default capability for the Beebeeb desktop windows. Targets the compact settings/app window, the first-launch onboarding window, the Windows main app window (`main-app`), and all on-demand conflict-resolution windows (label `conflict-<file_id>`, opened by the `open_conflict_window` IPC). Also covers the Windows onboarding webview (`windows-onboarding`) and the tray popup (`tray`) so that event listeners and IPC commands work on Windows webviews.",
   "windows": [
     "settings",
     "onboarding",
     "tray",
-    "windows-settings",
     "windows-onboarding",
     "main-app",
     "conflict-*"

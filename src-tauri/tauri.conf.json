@@ -12,18 +12,6 @@
   "app": {
     "windows": [
       {
-        "label": "settings",
-        "title": "Beebeeb",
-        "url": "index.html",
-        "width": 680,
-        "height": 540,
-        "resizable": false,
-        "fullscreen": false,
-        "visible": false,
-        "center": true,
-        "decorations": true
-      },
-      {
         "label": "tray",
         "title": "Beebeeb",
         "url": "index.html?window=tray",
@@ -37,20 +25,6 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": false
-      },
-      {
-        "label": "windows-settings",
-        "title": "Beebeeb — Settings",
-        "url": "index.html?window=settings&platform=windows",
-        "width": 1000,
-        "height": 680,
-        "resizable": true,
-        "fullscreen": false,
-        "visible": false,
-        "center": true,
-        "decorations": true,
-        "minWidth": 780,
-        "minHeight": 520
       },
       {
         "label": "windows-onboarding",

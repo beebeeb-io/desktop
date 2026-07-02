@@ -3,7 +3,7 @@
  * consumed by WindowsApp + src/windows/views/*.
  */
 
-// ── Design tokens (parallel to WindowsSettings.tsx) ─────────────────────────
+// ── Design tokens ───────────────────────────────────────────────────────────
 
 export const T = {
   paper: 'oklch(0.985 0.004 85)',
@@ -23,7 +23,7 @@ export const T = {
   fontMono: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 } as const
 
-// ── Mini icon set (superset of WindowsSettings' NavIcon) ─────────────────────
+// ── Mini icon set ────────────────────────────────────────────────────────────
 
 export function NavIcon({ name, size = 13, color = 'currentColor' }: { name: string; size?: number; color?: string }) {
   const s = size
@@ -57,6 +57,19 @@ export function NavIcon({ name, size = 13, color = 'currentColor' }: { name: str
       return (
         <svg width={s} height={s} viewBox="0 0 16 16" fill={color}>
           <path d="M9 2 L4 9 L8 9 L7 14 L12 7 L8 7 Z" />
+        </svg>
+      )
+    case 'play':
+      return (
+        <svg width={s} height={s} viewBox="0 0 16 16" fill={color}>
+          <path d="M5 3 L13 8 L5 13 Z" />
+        </svg>
+      )
+    case 'download':
+      return (
+        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8 2 L8 10 M5 7 L8 10 L11 7" />
+          <path d="M2 13 L14 13" />
         </svg>
       )
     case 'chart':

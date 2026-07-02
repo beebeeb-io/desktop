@@ -488,7 +488,7 @@ function ReadyStep() {
   }, [])
 
   const finish = async () => {
-    await command<void>('show_settings')
+    await command<void>('show_main_app_window')
     try {
       const win = getCurrentWindow()
       await win.close()

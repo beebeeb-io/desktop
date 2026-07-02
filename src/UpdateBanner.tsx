@@ -19,7 +19,7 @@ import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command } from './desktopApi'
 
-// Design tokens — must match WindowsSettings.tsx / WindowsTray.tsx
+// Design tokens — must match the Windows app / tray surfaces
 const T = {
   paper: 'oklch(0.985 0.004 85)',
   line: 'oklch(0.90 0.008 82)',
