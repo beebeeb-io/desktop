@@ -2050,41 +2050,83 @@ impl EngineBridge {
         Ok(Zeroizing::new(plaintext))
     }
 
-    /// Apply a "Keep Mine" resolution: the local copy stays as-is,
-    /// status flips to `Local`, and `remote_updated_at` is bumped to
-    /// `max(now, prev + 1)` so the next [`sync_tick`] doesn't see the
-    /// server's still-divergent `updated_at` as a fresh conflict.
+    /// Apply a "Keep Mine" resolution: stage the current local bytes and upload
+    /// them as a new server version using the same chunked upload path as normal
+    /// Finder writes. On success, [`Self::upload_version`] applies the regular
+    /// upload completion bookkeeping (status, version, object version, size, and
+    /// remote timestamp). On failure, the row is left conflicted and the error is
+    /// returned to the caller so the UI does not report a false resolution.
     ///
-    /// **Open gap**: this does *not* upload local to the server. The
-    /// dampening above only suppresses re-detection until a sibling
-    /// device next touches the file — at which point the conflict
-    /// re-fires (correctly, because the user's "Keep Mine" wasn't
-    /// actually published). The full fix is a real upload path on
-    /// the bridge; tracked alongside the chunked-upload work that
-    /// `repos/cli/src/commands/push.rs` already implements.
-    ///
-    /// `Err` if the entry doesn't exist or the row update fails.
-    pub async fn resolve_keep_mine(&self, file_id: &str) -> anyhow::Result<()> {
-        let mut entry = self
+    /// `sync_root` is supplied by the caller because the bridge itself doesn't
+    /// know it (the runner owns that).
+    pub async fn resolve_keep_mine(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
+        let entry = self
             .db
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // Use whichever is later: clock-now, or one tick past whatever
-        // we already have. Guards against a clock that's running
-        // behind the server.
-        let new_anchor = now_secs.max(entry.remote_updated_at.saturating_add(1));
-        entry.status = FileStatus::Local;
-        entry.remote_updated_at = new_anchor;
-        // modified_at goes back to the local mtime semantic since the
-        // row is no longer in Conflict — best-effort: read the
-        // filesystem mtime if we can, otherwise reuse the new anchor.
-        entry.modified_at = new_anchor;
-        self.db.upsert_file(&entry)?;
-        tracing::info!(file_id = %file_id, "conflict resolved: keep mine (no upload yet — see TODO)");
+        if entry.is_dir() {
+            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}"));
+        }
+
+        let shared_contract = self.ensure_item_allows_shared_write(file_id, "keep mine")?;
+        let contract = self.db.get_file_contract_state(file_id)?;
+        let parent_id = contract.as_ref().and_then(|contract| contract.parent_id.clone());
+        let file_name = display_name_for_path(&entry.path);
+        let content_type = contract
+            .as_ref()
+            .and_then(|contract| contract.content_type.clone())
+            .or_else(|| beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string));
+        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
+
+        let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
+        let staged_path = stage_finder_payload(&local_path.to_string_lossy())?;
+        let staged_size = std::fs::metadata(&staged_path).map(|m| m.len()).unwrap_or(0);
+
+        let mut metadata = serde_json::json!({
+            "operation": "upload_version",
+            "name_encrypted": name_encrypted,
+            "content_type": content_type,
+            "size_bytes": staged_size,
+            "uploaded_by": "authenticated_desktop_user",
+        });
+        apply_shared_context(&mut metadata, shared_contract.as_ref());
+
+        let now = now_secs();
+        let op = PendingOperation {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some(file_id.to_string()),
+            parent_id,
+            target_path: Some(entry.path.clone()),
+            metadata_json: Some(serde_json::to_string(&metadata)?),
+            payload_path: Some(staged_path.clone()),
+            // Keep Mine is an explicit conflict override. Passing the stale base
+            // that caused the conflict would make the server reject the upload.
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 1,
+            next_retry_at: now,
+            last_error: None,
+            backup_source_key: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        if let Err(e) = self.upload_version(&op, sync_root).await {
+            if let Err(cleanup_error) = std::fs::remove_file(&staged_path) {
+                if cleanup_error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        file_id = %file_id,
+                        error = %cleanup_error,
+                        "failed to remove staged Keep Mine payload after upload error"
+                    );
+                }
+            }
+            return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+        }
+
+        tracing::info!(file_id = %file_id, "conflict resolved: keep mine uploaded local version");
         Ok(())
     }
 
@@ -2661,6 +2703,17 @@ fn derive_uniform_chunk_size(size_bytes: u64, chunk_count: u64) -> Option<u64> {
 
 fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
     stage_finder_payload_with_root(contents_path, default_finder_staging_root())
+}
+
+fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
+    let rel = rel_path.trim_matches('/');
+    if rel.is_empty() {
+        return Err(anyhow::anyhow!("conflict row has an empty local path"));
+    }
+    if rel.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..") {
+        return Err(anyhow::anyhow!("conflict row has an unsafe local path"));
+    }
+    Ok(sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
 fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) -> anyhow::Result<String> {
@@ -5246,6 +5299,135 @@ mod tests {
         );
         assert_eq!(requests[3].method, "POST");
         assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_keep_mine_uploads_local_payload_and_commits_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(sync_root.join("Docs")).unwrap();
+        let local_path = sync_root.join("Docs/conflict.txt");
+        std::fs::write(&local_path, b"mine upload payload").unwrap();
+
+        let server = UploadMockServer::start(false);
+        let master_key = [13u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-1".into(),
+                path: "Docs/conflict.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 99,
+                modified_at: 100,
+                content_hash: Some("local-conflict-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        contract.parent_id = Some("folder-1".into());
+        contract.content_type = Some("text/plain".into());
+        contract.current_version = 3;
+        contract.local_base_version = 2;
+        contract.current_object_version_id = Some("object-before".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+
+        let before = now_secs();
+        bridge
+            .resolve_keep_mine("server-file-1", &sync_root)
+            .await
+            .unwrap();
+
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert_eq!(entry.path, "Docs/conflict.txt");
+        assert_eq!(entry.size_bytes, 19);
+        assert_eq!(entry.content_hash.as_deref(), Some("local-conflict-hash"));
+        assert!(entry.remote_updated_at >= before);
+
+        let contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        assert_eq!(contract.current_version, 1);
+        assert_eq!(contract.local_base_version, 1);
+        assert_eq!(contract.current_object_version_id.as_deref(), Some("object-complete-1"));
+        assert_eq!(contract.parent_id.as_deref(), Some("folder-1"));
+        assert_eq!(contract.content_type.as_deref(), Some("text/plain"));
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(init_body["file_id"], "server-file-1");
+        assert_eq!(init_body["file_size_bytes"], 19);
+        assert_eq!(init_body["parent_id"], "folder-1");
+        assert_eq!(init_body["chunk_count"], 1);
+        assert!(
+            init_body.get("base_version_number").is_none(),
+            "Keep Mine is an explicit conflict override, not a stale-base retry"
+        );
+        assert_eq!(requests[1].method, "PATCH");
+        assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[2].method, "PUT");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_ne!(requests[2].body, b"mine upload payload");
+
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
+            b"mine upload payload"
+        );
+        assert_eq!(requests[3].method, "POST");
+        assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_keep_mine_returns_error_when_upload_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("conflict.txt"), b"retry me").unwrap();
+
+        let server = UploadMockServer::start(true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [14u8; 32]);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-1".into(),
+                path: "conflict.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 8,
+                modified_at: 100,
+                content_hash: Some("local-conflict-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        contract.content_type = Some("text/plain".into());
+        contract.current_version = 3;
+        contract.local_base_version = 2;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+
+        let err = bridge
+            .resolve_keep_mine("server-file-1", &sync_root)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("500 Internal Server Error"));
+
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Conflict);
+        assert_eq!(entry.remote_updated_at, 90);
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
     }
 
     #[tokio::test]

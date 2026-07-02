@@ -4697,7 +4697,10 @@ async fn resolve_conflict(
     let bridge = engine_bridge::EngineBridge::new(db, api);
 
     let outcome: Result<(), String> = match choice.as_str() {
-        "local" => bridge.resolve_keep_mine(&file_id).await.map_err(|e| e.to_string()),
+        "local" => bridge
+            .resolve_keep_mine(&file_id, &sync_root)
+            .await
+            .map_err(|e| e.to_string()),
         "remote" => bridge
             .resolve_keep_theirs(&file_id, &sync_root)
             .await
