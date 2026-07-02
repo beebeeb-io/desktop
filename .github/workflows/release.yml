@@ -73,6 +73,14 @@ jobs:
 
       - name: Set app version for this release
         shell: bash
+        env:
+          # Never interpolate ${{ inputs.version }} directly into the run:
+          # script body — GitHub substitutes it into the script TEXT before
+          # the shell runs, so a version string containing shell metacharacters
+          # would be a script-injection vector. Routing it through env: keeps
+          # the substitution on the YAML side and the shell only ever sees it
+          # as an ordinary, safely-quoted variable.
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           # Tauri's bundler names every artifact (.msi, .AppImage, .deb, .rpm,
@@ -85,7 +93,7 @@ jobs:
           # while the manifest looked for "0.1.1-beta.1" files that never
           # existed (confirmed 2026-07-02, run 28594881966). Bump the config
           # to the real release version before building so both stay in sync.
-          jq --arg version "${{ inputs.version }}" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
           mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
 
       - name: Validate release config
