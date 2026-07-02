@@ -81,6 +81,7 @@ jobs:
           # the substitution on the YAML side and the shell only ever sees it
           # as an ordinary, safely-quoted variable.
           RELEASE_VERSION: ${{ inputs.version }}
+          RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
           # Tauri's bundler names every artifact (.msi, .AppImage, .deb, .rpm,
@@ -93,38 +94,52 @@ jobs:
           # while the manifest looked for "0.1.1-beta.1" files that never
           # existed (confirmed 2026-07-02, run 28594881966).
           #
-          # But the WiX/MSI bundler additionally requires the package version's
-          # pre-release identifier to be numeric-only (<=65535) — "0.1.1-beta.1"
-          # fails Windows builds outright ("optional pre-release identifier...
-          # must be numeric-only", confirmed 2026-07-02, run 28596233300), even
-          # though Linux/macOS tolerate the text fine. So tauri.conf.json's
-          # `version` gets an MSI-safe numeric encoding (channel folded into a
-          # numeric offset), while the REAL human-readable version — needed for
-          # correct update-availability comparison against the channel manifest
-          # (which keeps the full "beta.N"/"alpha.N" text) and for the in-app
-          # "current version" display — is carried separately via the
-          # $BEEBEEB_RELEASE_VERSION env var, read by lib.rs by picking it up
-          # from the runner's env at `cargo build` time. See real_app_version()
-          # in src-tauri/src/lib.rs.
+          # Validate the shape regardless of platform — stable/beta.N/alpha.N
+          # only — so a malformed input fails fast on every runner, not just
+          # Windows.
           if [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
             BUILD_NUM="${BASH_REMATCH[2]}"
             if (( BUILD_NUM > 49999 )); then
               echo "::error::beta build number $BUILD_NUM exceeds the MSI-safe range (max 49999)."
               exit 1
             fi
-            MSI_VERSION="${BASH_REMATCH[1]}-${BUILD_NUM}"
           elif [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
             BUILD_NUM="${BASH_REMATCH[2]}"
             if (( BUILD_NUM > 15535 )); then
               echo "::error::alpha build number $BUILD_NUM exceeds the MSI-safe range (max 15535, offset by 50000)."
               exit 1
             fi
-            MSI_VERSION="${BASH_REMATCH[1]}-$((50000 + BUILD_NUM))"
-          elif [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            MSI_VERSION="$RELEASE_VERSION"
-          else
+          elif [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Desktop version '$RELEASE_VERSION' must be plain semver for Stable or use -beta.N / -alpha.N prerelease suffixes."
             exit 1
+          fi
+
+          # Only the WiX/MSI bundler additionally requires the package
+          # version's pre-release identifier to be numeric-only (<=65535) —
+          # "0.1.1-beta.1" fails Windows builds outright ("optional
+          # pre-release identifier... must be numeric-only", confirmed
+          # 2026-07-02, run 28596233300). Linux/macOS bundle the full text
+          # fine (Linux confirmed green in that same run) — applying the
+          # numeric-only rewrite to every platform would silently rename
+          # Linux/macOS artifacts too, breaking the exact filenames
+          # publish-manifest expects for those platforms (caught before this
+          # landed — the first version of this fix rewrote all three
+          # platforms uniformly). So the rewrite is Windows-only; Linux/macOS
+          # keep the human-readable version tauri.conf.json has always used.
+          #
+          # The REAL human-readable version — needed for correct
+          # update-availability comparison against the channel manifest
+          # (which keeps the full "beta.N"/"alpha.N" text on every platform)
+          # and for the in-app "current version" display — is carried
+          # separately via the $BEEBEEB_RELEASE_VERSION env var on all
+          # platforms, read at `cargo build` time by real_app_version() in
+          # src-tauri/src/lib.rs.
+          if [[ "$RUNNER_OS" == "Windows" && "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
+            MSI_VERSION="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+          elif [[ "$RUNNER_OS" == "Windows" && "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
+            MSI_VERSION="${BASH_REMATCH[1]}-$((50000 + ${BASH_REMATCH[2]}))"
+          else
+            MSI_VERSION="$RELEASE_VERSION"
           fi
 
           jq --arg version "$MSI_VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
@@ -329,9 +344,25 @@ jobs:
           # filename is a best-effort carry-forward until macOS release output is
           # verified. Missing macOS signatures omit darwin entries instead of
           # blocking Windows/Linux manifest publishing.
+          #
+          # Windows is the one platform whose artifact filename does NOT use
+          # $VER verbatim: the "Set app version for this release" build step
+          # rewrites tauri.conf.json's version to an MSI-safe numeric-only
+          # encoding for Windows only (WiX rejects text pre-release
+          # identifiers like "beta.1" — see that step's comments), so the
+          # actual .msi filename carries that rewritten value. Mirror the
+          # exact same transform here to compute the real filename.
+          if [[ "$VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
+            WINDOWS_VER="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+          elif [[ "$VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
+            WINDOWS_VER="${BASH_REMATCH[1]}-$((50000 + ${BASH_REMATCH[2]}))"
+          else
+            WINDOWS_VER="$VER"
+          fi
+
           MACOS_BUNDLE="Beebeeb_${VER}_universal.app.tar.gz"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
-          WINDOWS_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
+          WINDOWS_BUNDLE="Beebeeb_${WINDOWS_VER}_x64_en-US.msi"
 
           fetch_sig() {
             curl --proto '=https' --tlsv1.2 -fsSL "$1"
