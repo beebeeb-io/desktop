@@ -1681,7 +1681,7 @@ impl EngineBridge {
         // catch.
         self.db.set_status(file_id, FileStatus::Downloading)?;
         match self.do_hydrate(file_id).await {
-            Ok(mut hydrated) => {
+            Ok(mut buf) => {
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
                 // Make the destination directory if needed.
@@ -1689,11 +1689,11 @@ impl EngineBridge {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
                 }
-                let write_result = std::fs::write(dest_path, &*hydrated.data)
+                let write_result = std::fs::write(dest_path, &*buf)
                     .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
-                hydrated.data.zeroize();
+                buf.zeroize();
                 write_result?;
 
                 self.db.set_status(file_id, FileStatus::Local)?;
@@ -1732,32 +1732,20 @@ impl EngineBridge {
     /// the bytes live inside the CF placeholder in the sync root, not at a
     /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
     /// the real on-disk path from `path` + sync root (see state_db comment).
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(target_os = "windows")]
     pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        Ok(self.hydrate_file_to_memory_with_metadata(file_id).await?.data)
-    }
-
-    /// Variant of [`Self::hydrate_file_to_memory`] that also reports the fresh
-    /// `size_bytes` returned by the same metadata fetch used for chunk
-    /// discovery. Windows Cloud Files uses this to apply the 0783 size
-    /// invariant consistently with [`Self::hydrate_file_range`].
-    #[cfg(any(target_os = "windows", test))]
-    pub async fn hydrate_file_to_memory_with_metadata(&self, file_id: &str) -> anyhow::Result<HydratedFileMemory> {
         self.db.set_status(file_id, FileStatus::Downloading)?;
         match self.do_hydrate(file_id).await {
-            Ok(hydrated) => {
+            Ok(buf) => {
                 self.db.set_status(file_id, FileStatus::Local)?;
                 // cache_path is empty: on Windows CF the hydrated bytes live
                 // INSIDE the placeholder (the CF runtime writes them there after
                 // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
                 // file. Byte count is still recorded for smart-cache accounting.
                 self.db
-                    .mark_cached(file_id, "", hydrated.data.len() as i64, now_secs())?;
+                    .mark_cached(file_id, "", buf.len() as i64, now_secs())?;
                 let _ = self.enforce_smart_cache(CachePolicy::default());
-                Ok(HydratedFileMemory {
-                    data: hydrated.data,
-                    server_size_bytes: hydrated.server_size_bytes,
-                })
+                Ok(buf)
             }
             Err(e) => {
                 let _ = self.db.set_status(file_id, FileStatus::Error);
@@ -1778,7 +1766,7 @@ impl EngineBridge {
     /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
     /// handle that themselves so the disk-write decision stays at the call site,
     /// not buried inside the crypto loop.
-    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<HydratedFileBytes> {
+    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -1809,20 +1797,10 @@ impl EngineBridge {
         // ciphertext is always larger than plaintext anyway.
         // Use Zeroizing so that if we bail mid-loop (network error,
         // decrypt error) the partial plaintext is still wiped.
-        let server_size_bytes = meta
-            .get("size_bytes")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| i64::try_from(v).ok());
-        let approx_size = server_size_bytes.and_then(|v| usize::try_from(v).ok()).unwrap_or(0);
+        let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-        let data = self
-            .download_and_decrypt_chunk_range(file_id, &file_key, 0..chunk_count, download_kbps_limit, approx_size)
-            .await?;
-
-        Ok(HydratedFileBytes {
-            data,
-            server_size_bytes,
-        })
+        self.download_and_decrypt_chunk_range(file_id, &file_key, 0..chunk_count, download_kbps_limit, approx_size)
+            .await
     }
 
     /// Download + decrypt chunk indices `[range.start, range.end)` for
@@ -1924,8 +1902,6 @@ impl EngineBridge {
             // Missing/zero metadata — caller falls back to the whole-file path.
             return Ok(None);
         };
-        let file_size_bytes = i64::try_from(size_bytes)
-            .map_err(|_| anyhow::anyhow!("server size_bytes {size_bytes} exceeds i64 range"))?;
 
         let Some(chunk_size_bytes) = derive_uniform_chunk_size(size_bytes, chunk_count) else {
             return Ok(None);
@@ -1940,7 +1916,6 @@ impl EngineBridge {
             return Ok(Some(HydratedRange {
                 data: Zeroizing::new(Vec::new()),
                 range_start_bytes: required_offset,
-                file_size_bytes,
                 covers_whole_file: size_bytes == 0,
             }));
         }
@@ -1988,7 +1963,6 @@ impl EngineBridge {
                 Ok(Some(HydratedRange {
                     data,
                     range_start_bytes,
-                    file_size_bytes,
                     covers_whole_file,
                 }))
             }
@@ -2684,112 +2658,6 @@ fn decrypt_downloaded_chunk(
     }
 }
 
-struct HydratedFileBytes {
-    data: Zeroizing<Vec<u8>>,
-    server_size_bytes: Option<i64>,
-}
-
-/// The result of [`EngineBridge::hydrate_file_to_memory_with_metadata`]:
-/// decrypted whole-file plaintext plus the fresh server `size_bytes` fetched
-/// to plan chunk downloads. Plaintext remains memory-only and is wiped on drop.
-#[cfg(any(target_os = "windows", test))]
-pub struct HydratedFileMemory {
-    pub data: Zeroizing<Vec<u8>>,
-    pub server_size_bytes: Option<i64>,
-}
-
-/// What to do once hydration has enough trusted size evidence to compare the
-/// placeholder's recorded size with the server's real file size.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SizeDecision {
-    /// The sizes agree — transfer the bytes as-is.
-    Transfer,
-    /// The sizes disagree. Fail the current fetch and correct the placeholder
-    /// and DB to `corrected_size` out of band.
-    ResolveTo { corrected_size: i64 },
-}
-
-/// Trusted evidence for the 0783 size invariant. Range fetches must use server
-/// metadata because their decrypted buffer is intentionally only a subset of
-/// the file; whole-file fallback uses the same server metadata when available
-/// and falls back to authenticated plaintext length only if metadata omitted
-/// `size_bytes`.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HydrationSizeEvidence {
-    Range {
-        server_size_bytes: i64,
-        required_offset: i64,
-    },
-    WholeFile {
-        server_size_bytes: Option<i64>,
-        plaintext_len: i64,
-    },
-}
-
-/// Evidence for whether the bytes transferred to Cloud Files cover the full
-/// placeholder. Range hydration can answer this from its covering chunk span;
-/// whole-file fallback still transfers only the requested range, so it keeps
-/// the legacy requested-span gate.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HydrationCoverageEvidence {
-    Range {
-        covers_whole_file: bool,
-    },
-    WholeFileFallback {
-        required_offset: i64,
-        required_length: i64,
-        file_size: i64,
-    },
-}
-
-/// Range-aware size-resolution policy for Windows Cloud Files hydration (task
-/// 0783 + 1124). The invariant is server `size_bytes` vs `info.FileSize`, not
-/// decrypted range-buffer length vs `info.FileSize`.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn decide_hydration_size_action(
-    evidence: HydrationSizeEvidence,
-    placeholder_file_size: i64,
-) -> SizeDecision {
-    let authoritative_size = match evidence {
-        HydrationSizeEvidence::Range { server_size_bytes, .. } => server_size_bytes,
-        HydrationSizeEvidence::WholeFile {
-            server_size_bytes: Some(server_size_bytes),
-            ..
-        } => server_size_bytes,
-        HydrationSizeEvidence::WholeFile {
-            server_size_bytes: None,
-            plaintext_len,
-        } => plaintext_len,
-    }
-    .max(0);
-
-    if authoritative_size == placeholder_file_size {
-        SizeDecision::Transfer
-    } else {
-        SizeDecision::ResolveTo {
-            corrected_size: authoritative_size,
-        }
-    }
-}
-
-/// `CfSetInSyncState` is only honest after a range hydration that covered every
-/// chunk in the file. The callback uses this instead of inferring from the
-/// requested `[offset, length)` span.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn should_mark_in_sync_after_hydration(evidence: HydrationCoverageEvidence) -> bool {
-    match evidence {
-        HydrationCoverageEvidence::Range { covers_whole_file } => covers_whole_file,
-        HydrationCoverageEvidence::WholeFileFallback {
-            required_offset,
-            required_length,
-            file_size,
-        } => required_offset == 0 && required_length >= file_size,
-    }
-}
-
 /// The result of [`EngineBridge::hydrate_file_range`]: the decrypted plaintext
 /// covering the requested range, plus enough context for the caller to splice
 /// out the exact `[required_offset, required_offset + required_length)` span.
@@ -2803,9 +2671,6 @@ pub struct HydratedRange {
     /// Absolute byte offset (into the full file) of `data[0]` — i.e.
     /// `first_chunk * chunk_size_bytes`.
     pub range_start_bytes: u64,
-    /// Fresh server `size_bytes` from the same metadata read used to derive the
-    /// covering chunk span. This is the range-safe 0783 comparison basis.
-    pub file_size_bytes: i64,
     /// `true` when `data` happens to cover the ENTIRE file (the covering-chunk
     /// range was `[0, chunk_count)`). Only then is a range hydration equivalent
     /// to a whole-file hydration for status-bookkeeping / resolve-or-error
@@ -4468,94 +4333,6 @@ mod tests {
 
     // ── hydrate_file_range (task 1024) ───────────────────────────────────────
 
-    #[test]
-    fn range_size_check_ignores_partial_buffer_len_when_server_size_matches_placeholder() {
-        // A normal range fetch only decrypts the covering chunk span, so the
-        // buffer length is deliberately smaller than the full file. The 0783
-        // invariant is server metadata vs placeholder size, not range-buffer
-        // length vs placeholder size.
-        let partial_buffer_len = 10;
-        let placeholder_size = 30;
-        assert_ne!(partial_buffer_len, placeholder_size);
-
-        assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::Range {
-                    server_size_bytes: 30,
-                    required_offset: 10,
-                },
-                placeholder_size,
-            ),
-            SizeDecision::Transfer
-        );
-    }
-
-    #[test]
-    fn range_size_check_resolves_metadata_mismatch_for_nonzero_range() {
-        assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::Range {
-                    server_size_bytes: 30,
-                    required_offset: 10,
-                },
-                58,
-            ),
-            SizeDecision::ResolveTo { corrected_size: 30 }
-        );
-    }
-
-    #[test]
-    fn whole_file_size_check_uses_same_server_metadata_when_available() {
-        assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::WholeFile {
-                    server_size_bytes: Some(30),
-                    plaintext_len: 10,
-                },
-                30,
-            ),
-            SizeDecision::Transfer
-        );
-    }
-
-    #[test]
-    fn whole_file_size_check_falls_back_to_plaintext_len_without_metadata() {
-        assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::WholeFile {
-                    server_size_bytes: None,
-                    plaintext_len: 30,
-                },
-                58,
-            ),
-            SizeDecision::ResolveTo { corrected_size: 30 }
-        );
-    }
-
-    #[test]
-    fn in_sync_gate_uses_covering_range_flag() {
-        assert!(!should_mark_in_sync_after_hydration(HydrationCoverageEvidence::Range {
-            covers_whole_file: false,
-        }));
-        assert!(should_mark_in_sync_after_hydration(HydrationCoverageEvidence::Range {
-            covers_whole_file: true,
-        }));
-        assert!(!should_mark_in_sync_after_hydration(
-            HydrationCoverageEvidence::WholeFileFallback {
-                required_offset: 10,
-                required_length: 10,
-                file_size: 30,
-            }
-        ));
-        assert!(should_mark_in_sync_after_hydration(
-            HydrationCoverageEvidence::WholeFileFallback {
-                required_offset: 0,
-                required_length: 30,
-                file_size: 30,
-            }
-        ));
-    }
-
     /// `hydrate_file_range` parses `file_id` as a UUID up front, so every
     /// hydration test needs a real one — this is an arbitrary fixed value, not
     /// tied to any real file.
@@ -4686,7 +4463,6 @@ mod tests {
             .expect("chunk_size_bytes derivable from size_bytes+chunk_count");
 
         assert_eq!(result.range_start_bytes, 10);
-        assert_eq!(result.file_size_bytes, 30);
         assert!(!result.covers_whole_file);
         assert_eq!(&*result.data, b"BBBBBBBBBB");
 
@@ -4720,36 +4496,12 @@ mod tests {
             .unwrap();
 
         assert!(result.covers_whole_file);
-        assert_eq!(result.file_size_bytes, 10);
         assert_eq!(&*result.data, b"HELLOWORLD");
 
         server.finish();
 
         let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
-    }
-
-    #[test]
-    fn hydrate_file_to_memory_with_metadata_reports_server_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let master_key = [12u8; 32];
-        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-
-        let chunks: Vec<Vec<u8>> = vec![b"METADATA".to_vec()];
-        let server = HydrationMockServer::start(file_key, chunks, 2);
-
-        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_bridge_row(&bridge, TEST_FILE_ID, "/metadata.bin", None, FileStatus::CloudOnly, 8);
-
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { bridge.hydrate_file_to_memory_with_metadata(TEST_FILE_ID).await })
-            .unwrap();
-
-        assert_eq!(result.server_size_bytes, Some(8));
-        assert_eq!(&*result.data, b"METADATA");
-
-        server.finish();
     }
 
     /// Metadata missing `chunk_count` (or it's `0`) must fall back cleanly —

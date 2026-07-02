@@ -16,9 +16,8 @@
 //! - `CF_CALLBACK_PARAMETERS.FetchData` carries the byte range Windows
 //!   wants: `RequiredFileOffset` / `RequiredLength` (we MUST satisfy at
 //!   least this) plus an `Optional*` hint we may over-serve. We hydrate
-//!   the covering chunk span via `EngineBridge::hydrate_file_range`
-//!   (falling back to `hydrate_file_to_memory` when range math is
-//!   unavailable), then splice the required range back with
+//!   the whole file via `EngineBridge::hydrate_file_to_memory` (decrypt
+//!   entirely in memory) and then splice the required range back with
 //!   `CfExecute(TRANSFER_DATA)`.
 //!
 //! ## Threading
@@ -41,9 +40,9 @@
 //!
 //! ## Security
 //!
-//! Decrypted plaintext is NEVER written to disk. Range and whole-file
-//! hydration return [`zeroize::Zeroizing`] buffers that overwrite themselves
-//! on drop. We never log plaintext, keys, or tokens.
+//! Decrypted plaintext is NEVER written to disk. `hydrate_file_to_memory`
+//! decrypts entirely in memory and returns a [`zeroize::Zeroizing`] buffer
+//! that overwrites itself on drop. We never log plaintext, keys, or tokens.
 
 #![cfg(target_os = "windows")]
 
@@ -53,11 +52,6 @@ use windows::Win32::Foundation::{NTSTATUS, STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::System::CorrelationVector::CORRELATION_VECTOR;
 
-use crate::engine_bridge::{
-    HydratedFileMemory, HydratedRange, HydrationCoverageEvidence, HydrationSizeEvidence, SizeDecision,
-    decide_hydration_size_action, should_mark_in_sync_after_hydration,
-};
-
 /// Chunk size for the `CfExecute(TRANSFER_DATA)` loop. Cloud Files
 /// requires every non-final transfer's `Offset` and `Length` to be a
 /// multiple of the volume sector/page size; 1 MiB is a safe multiple of
@@ -66,40 +60,32 @@ use crate::engine_bridge::{
 /// requested range) may be shorter / unaligned.
 const TRANSFER_CHUNK: i64 = 1024 * 1024;
 
-enum FetchHydration {
-    Range(HydratedRange),
-    WholeFile(HydratedFileMemory),
+/// What to do once the plaintext is in hand, given the placeholder's recorded
+/// size vs the AES-256-GCM-authenticated decrypted length. Extracted as a pure
+/// decision so the resolve-or-error policy (task 0783) is unit-testable without
+/// a live Cloud Files transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeDecision {
+    /// The sizes agree — transfer the bytes as-is.
+    Transfer,
+    /// The sizes disagree. The decrypted length is ground truth, so fail this
+    /// fetch cleanly and resolve the placeholder/DB to `corrected_size` out of
+    /// band (Tier-1), falling back to a visible error if that can't be applied
+    /// (Tier-2). `corrected_size` is always the decrypted plaintext length.
+    ResolveTo { corrected_size: i64 },
 }
 
-impl FetchHydration {
-    fn size_evidence(&self, required_offset: i64) -> HydrationSizeEvidence {
-        match self {
-            FetchHydration::Range(range) => HydrationSizeEvidence::Range {
-                server_size_bytes: range.file_size_bytes,
-                required_offset,
-            },
-            FetchHydration::WholeFile(file) => HydrationSizeEvidence::WholeFile {
-                server_size_bytes: file.server_size_bytes,
-                plaintext_len: file.data.len() as i64,
-            },
-        }
-    }
-
-    fn coverage_evidence(
-        &self,
-        required_offset: i64,
-        required_length: i64,
-        file_size: i64,
-    ) -> HydrationCoverageEvidence {
-        match self {
-            FetchHydration::Range(range) => HydrationCoverageEvidence::Range {
-                covers_whole_file: range.covers_whole_file,
-            },
-            FetchHydration::WholeFile(_) => HydrationCoverageEvidence::WholeFileFallback {
-                required_offset,
-                required_length,
-                file_size,
-            },
+/// Pure size-resolution policy for the hydration path (task 0783). Given the
+/// placeholder's recorded `file_size` and the decrypted `plaintext_len`, decide
+/// whether to transfer as-is or to resolve to the authenticated decrypted
+/// length. The decrypted length wins on any mismatch because successful
+/// AES-256-GCM decryption authenticates the bytes (and thus their length).
+fn decide_size_action(plaintext_len: i64, file_size: i64) -> SizeDecision {
+    if plaintext_len == file_size {
+        SizeDecision::Transfer
+    } else {
+        SizeDecision::ResolveTo {
+            corrected_size: plaintext_len,
         }
     }
 }
@@ -150,15 +136,7 @@ pub unsafe extern "system" fn fetch_data_callback(
         Ok(s) => s.to_owned(),
         Err(e) => {
             tracing::warn!(error = %e, "FileIdentity is not valid UTF-8 — failing hydrate");
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
@@ -171,15 +149,7 @@ pub unsafe extern "system" fn fetch_data_callback(
         Some(b) => b,
         None => {
             tracing::warn!(file_id = %file_id, "fetch callback fired but no EngineBridge registered");
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
@@ -194,102 +164,47 @@ pub unsafe extern "system" fn fetch_data_callback(
                 file_id = %file_id,
                 "no tokio runtime handle registered; cannot hydrate Cloud Files request"
             );
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
 
-    let range_offset = match u64::try_from(required_offset) {
-        Ok(offset) => offset,
-        Err(_) => {
-            tracing::warn!(file_id = %file_id, required_offset, "negative Cloud Files fetch offset");
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
-            return;
-        }
-    };
-    let range_length = match u64::try_from(required_length) {
-        Ok(length) => length,
-        Err(_) => {
-            tracing::warn!(file_id = %file_id, required_length, "negative Cloud Files fetch length");
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
-            return;
-        }
-    };
-
-    // Decrypt only the chunk span that covers the requested range — plaintext
-    // is NEVER written to disk. If the range metadata is insufficient for
-    // bounded hydration, fall back to the existing whole-file in-memory path.
-    // Every success path carries a Zeroizing buffer that wipes itself on drop.
-    let hydration = handle.block_on(async {
-        match bridge.hydrate_file_range(&file_id, range_offset, range_length).await {
-            Ok(Some(range)) => Ok(FetchHydration::Range(range)),
-            Ok(None) => bridge
-                .hydrate_file_to_memory_with_metadata(&file_id)
-                .await
-                .map(FetchHydration::WholeFile),
-            Err(e) => Err(e),
-        }
-    });
-    let hydration = match hydration {
-        Ok(hydration) => hydration,
+    // Decrypt the whole file entirely in memory — plaintext is NEVER written
+    // to disk. Zero-knowledge requirement: the Cloud Files runtime will receive
+    // the bytes via CfExecute(TRANSFER_DATA) and write them into the placeholder
+    // itself; we must not leave a copy in %TEMP% or anywhere else on disk.
+    // The Zeroizing wrapper ensures the buffer is wiped on drop (normal, early
+    // return, or panic unwind) without any explicit scrubbing call here.
+    let buf = handle.block_on(async { bridge.hydrate_file_to_memory(&file_id).await });
+    let buf = match buf {
+        Ok(b) => b,
         Err(e) => {
             // Do NOT log the error's inner content at info+ if it could carry
-            // decrypted bytes; hydration errors are status strings only.
-            tracing::warn!(file_id = %file_id, error = %e, "Cloud Files range hydration failed");
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
+            // decrypted bytes; hydrate_file_to_memory errors are status strings only.
+            tracing::warn!(file_id = %file_id, error = %e, "hydrate_file_to_memory failed for Cloud Files callback");
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
             return;
         }
     };
 
-    // Size sanity: the server's fresh file size must match the size Windows
-    // recorded on the placeholder (info.FileSize). For range hydration the
-    // decrypted buffer is intentionally smaller than the file, so comparing
-    // buffer length to file_size would make every ordinary partial fetch look
-    // like the production 0783 mismatch. Whole-file fallback uses the same
-    // server metadata when available and only falls back to plaintext length
-    // when the metadata lacks `size_bytes`.
+    // Size sanity: the decrypted plaintext length must match the size
+    // Windows recorded on the placeholder (info.FileSize). A mismatch means
+    // our recorded size diverged from the file's real (decrypted) length —
+    // the dominant cause in production is the server having stored the
+    // *encrypted* size on some upload paths (task 0783 decision file), so
+    // file_size = plaintext_len + 28*chunk_count. Transferring against the
+    // wrong size risks an unaligned, non-EOF final chunk →
+    // STATUS_INVALID_PARAMETER on the last CfExecute.
     //
     // RESOLVE-OR-ERROR (task 0783) — never silently fail:
     //
-    //   Tier-1 (resolve): hydration fetched authenticated bytes and fresh file
-    //   metadata; `corrected_size` is the trusted logical plaintext size.
+    //   Tier-1 (resolve): hydrate_file_to_memory decrypted successfully, so the
+    //   bytes are AES-256-GCM AUTHENTICATED — `buf.len()` is GROUND TRUTH.
     //   We cannot resize the placeholder DURING this fetch (the file is in-use
     //   by the active transfer; CfUpdatePlaceholder would return
     //   ERROR_CLOUD_FILE_IN_USE), so we fail THIS fetch cleanly, then correct
-    //   the size out-of-band — resize the CF placeholder to the corrected
-    //   logical length AND rewrite the state_db size_bytes to it. The next open fires
+    //   the size out-of-band — resize the CF placeholder to the decrypted
+    //   length AND rewrite the state_db size_bytes to it. The next open fires
     //   a fresh, now-aligned FETCH_DATA and hydrates successfully, so the file
     //   becomes openable at its true size.
     //
@@ -300,103 +215,62 @@ pub unsafe extern "system" fn fetch_data_callback(
     //   rather than a green check on a file that won't open. The failed
     //   transfer (below) already surfaces an error on this open.
     if let SizeDecision::ResolveTo { corrected_size } =
-        decide_hydration_size_action(hydration.size_evidence(required_offset), file_size)
+        decide_size_action(buf.len() as i64, file_size)
     {
         tracing::warn!(
             file_id = %file_id,
-            corrected_size,
+            plaintext_len = buf.len(),
             file_size,
-            "server size != placeholder size; resolving placeholder to the authenticated logical length"
+            "hydrated size != placeholder size; resolving to the decrypted (authenticated) length"
         );
 
-        // Drop plaintext here — the resolution path works from the size only,
+        // Drop `buf` here — the resolution path works from the size only,
         // never the bytes. The Zeroizing drop wipes the allocation.
-        drop(hydration);
+        drop(buf);
 
         // Fail THIS fetch cleanly first: the file must not be mid-hydration
         // when we resize, and Explorer must stop spinning on this open.
-        unsafe {
-            fail_transfer(
-                connection_key,
-                transfer_key,
-                request_key,
-                required_offset,
-                required_length,
-            )
-        };
+        unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
 
-        // Tier-1: correct the placeholder + DB to the trusted logical length so
+        // Tier-1: correct the placeholder + DB to the authenticated length so
         // the NEXT open hydrates against an aligned size. `&*bridge` derefs the
         // Arc to a plain `&EngineBridge` (a `&Arc<_>` would not coerce here).
         unsafe { resolve_size_mismatch(info, &*bridge, &file_id, corrected_size) };
         return;
     }
 
-    // Splice the required range back into the placeholder. The hydration buffer
-    // is kept alive here so the data is valid for every CfExecute call inside
-    // transfer_range.
-    let transfer_ok = match &hydration {
-        FetchHydration::Range(range) => {
-            let range_start = match i64::try_from(range.range_start_bytes) {
-                Ok(range_start) => range_start,
-                Err(_) => {
-                    tracing::warn!(
-                        file_id = %file_id,
-                        range_start_bytes = range.range_start_bytes,
-                        "range start exceeds Cloud Files i64 offset range"
-                    );
-                    unsafe {
-                        fail_transfer(
-                            connection_key,
-                            transfer_key,
-                            request_key,
-                            required_offset,
-                            required_length,
-                        )
-                    };
-                    return;
-                }
-            };
-            unsafe {
-                transfer_range(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    &range.data,
-                    range_start,
-                    required_offset,
-                    required_length,
-                )
-            }
-        }
-        FetchHydration::WholeFile(file) => unsafe {
-            transfer_range(
-                connection_key,
-                transfer_key,
-                request_key,
-                &file.data,
-                0,
-                required_offset,
-                required_length,
-            )
-        },
+    // Splice the required range back into the placeholder. `buf` is kept alive
+    // here so the data is valid for every CfExecute call inside transfer_range.
+    let transfer_ok = unsafe {
+        transfer_range(
+            connection_key,
+            transfer_key,
+            request_key,
+            &buf,
+            required_offset,
+            required_length,
+        )
     };
 
-    let should_mark_in_sync =
-        should_mark_in_sync_after_hydration(hydration.coverage_evidence(required_offset, required_length, file_size));
-
-    // Drop plaintext now — transfer_range has consumed all bytes it needs.
+    // Drop `buf` now — transfer_range has consumed all bytes it needs.
     // The Zeroizing wrapper wipes the plaintext allocation on drop.
-    drop(hydration);
+    drop(buf);
 
     match transfer_ok {
         Ok(()) => {
             tracing::info!(file_id = %file_id, "hydrated and transferred Cloud Files range");
-            // Best-effort: mark the placeholder IN_SYNC only when the
-            // hydration result actually covered every chunk in the file.
-            // Requested span shape is no longer enough once bounded range
-            // hydration is live.
-            if should_mark_in_sync {
+            // Best-effort: mark the placeholder IN_SYNC so Explorer flips
+            // the overlay from "downloading" to the synced check — but
+            // ONLY when this fetch delivered the whole file. With
+            // CF_HYDRATION_POLICY_PARTIAL a request may cover just a
+            // range; marking the file fully in-sync after a partial
+            // transfer would be a lie and could suppress later fetches.
+            // (hydrate_file_to_memory always decrypts the whole file, so a
+            // [0, file_size) required range means the file is now fully
+            // present.) A failure here doesn't undo the transfer, so we
+            // only log.
+            let whole_file = required_offset == 0 && required_length >= file_size;
+            if whole_file {
                 if let Some(path) = normalized_path(info) {
                     unsafe { mark_in_sync(&path) };
                 }
@@ -406,15 +280,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             tracing::warn!(file_id = %file_id, error = %e, "CfExecute(TRANSFER_DATA) failed");
             // The transfer call itself failed; tell Explorer to stop
             // spinning. If this also fails there's nothing more we can do.
-            unsafe {
-                fail_transfer(
-                    connection_key,
-                    transfer_key,
-                    request_key,
-                    required_offset,
-                    required_length,
-                )
-            };
+            unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
         }
     }
 }
@@ -754,12 +620,12 @@ fn push_notify_event(event: crate::watcher::NotifyEvent) {
     }
 }
 
-/// Stream `[offset, offset+length)` of `plaintext` back into the placeholder
-/// via `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)`, chunked so each non-final
-/// transfer is page-aligned. `plaintext_base_offset` is the absolute file
-/// offset corresponding to `plaintext[0]`; it is `0` for whole-file fallback and
-/// the first covering chunk's offset for range hydration. If the requested range
-/// runs past the end of the decrypted data, we transfer what we have.
+/// Stream `[offset, offset+length)` of `plaintext` back into the
+/// placeholder via `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)`,
+/// chunked so each non-final transfer is page-aligned. Satisfies the
+/// caller's *required* range. If the requested range runs past the end
+/// of the decrypted data (shouldn't happen — the placeholder size and
+/// plaintext come from the same source) we transfer what we have.
 ///
 /// SAFETY: `connection_key` / `transfer_key` come from a live
 /// `CF_CALLBACK_INFO`. `plaintext` outlives every `CfExecute` call (it's
@@ -770,17 +636,13 @@ unsafe fn transfer_range(
     transfer_key: i64,
     request_key: i64,
     plaintext: &[u8],
-    plaintext_base_offset: i64,
     required_offset: i64,
     required_length: i64,
 ) -> windows::core::Result<()> {
-    let total_start = plaintext_base_offset.max(0);
-    let total_end = total_start.saturating_add(plaintext.len() as i64);
+    let total = plaintext.len() as i64;
     // Clamp the requested range to what we actually have.
-    let start = required_offset.clamp(total_start, total_end);
-    let end = required_offset
-        .saturating_add(required_length)
-        .clamp(total_start, total_end);
+    let start = required_offset.clamp(0, total);
+    let end = (required_offset + required_length).clamp(0, total);
     if end <= start {
         // Nothing to send for this range; report a zero-length success so
         // Cloud Files marks the request satisfied rather than aborted.
@@ -801,8 +663,7 @@ unsafe fn transfer_range(
     while off < end {
         let remaining = end - off;
         let len = remaining.min(TRANSFER_CHUNK);
-        let buf_index = (off - total_start) as usize;
-        let buf_ptr = unsafe { plaintext.as_ptr().add(buf_index) } as *const core::ffi::c_void;
+        let buf_ptr = unsafe { plaintext.as_ptr().add(off as usize) } as *const core::ffi::c_void;
         unsafe {
             transfer_one(
                 connection_key,
@@ -1017,83 +878,47 @@ mod tests {
     /// Sizes agree → transfer the bytes as-is (the steady-state path).
     #[test]
     fn size_match_transfers() {
-        assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::WholeFile {
-                    server_size_bytes: Some(20),
-                    plaintext_len: 20,
-                },
-                20,
-            ),
-            SizeDecision::Transfer
-        );
-        assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::WholeFile {
-                    server_size_bytes: Some(0),
-                    plaintext_len: 0,
-                },
-                0,
-            ),
-            SizeDecision::Transfer
-        );
+        assert_eq!(decide_size_action(20, 20), SizeDecision::Transfer);
+        assert_eq!(decide_size_action(0, 0), SizeDecision::Transfer);
     }
 
     /// The exact production bad-row shape: a single-chunk file whose recorded
-    /// placeholder size is stale/wrong. The fresh server size is trusted ground
-    /// truth for range hydration, so the resolution path must be chosen and the
-    /// corrected size must be the server size, NOT the recorded 48.
+    /// placeholder size is the ENCRYPTED size (plaintext + 28 = GCM nonce(12) +
+    /// tag(16)). The decrypted length (20) is authenticated ground truth, so the
+    /// resolution path must be chosen and the corrected size must be the
+    /// decrypted plaintext length, NOT the recorded 48.
     #[test]
-    fn single_chunk_gcm_overhead_resolves_to_server_size() {
-        let server_size = 20;
-        let recorded = server_size + 28; // 48 — stale encrypted size on the placeholder
+    fn single_chunk_gcm_overhead_resolves_to_plaintext_len() {
+        let plaintext_len = 20;
+        let recorded = plaintext_len + 28; // 48 — encrypted size stored by the server bug
         assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::Range {
-                    server_size_bytes: server_size,
-                    required_offset: 10,
-                },
-                recorded,
-            ),
+            decide_size_action(plaintext_len, recorded),
             SizeDecision::ResolveTo {
-                corrected_size: server_size
+                corrected_size: plaintext_len
             }
         );
     }
 
     /// Multi-chunk overhead (28 * chunk_count) resolves the same way: the
-    /// corrected size is always the server's logical size regardless of the
-    /// delta.
+    /// corrected size is always the decrypted length regardless of the delta.
     #[test]
-    fn multi_chunk_overhead_resolves_to_server_size() {
-        let server_size = 8 * 1024 * 1024; // spans 2 chunks at 4 MiB
-        let recorded = server_size + 28 * 2;
+    fn multi_chunk_overhead_resolves_to_plaintext_len() {
+        let plaintext_len = 8 * 1024 * 1024; // spans 2 chunks at 4 MiB
+        let recorded = plaintext_len + 28 * 2;
         assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::Range {
-                    server_size_bytes: server_size,
-                    required_offset: 4 * 1024 * 1024,
-                },
-                recorded,
-            ),
+            decide_size_action(plaintext_len, recorded),
             SizeDecision::ResolveTo {
-                corrected_size: server_size
+                corrected_size: plaintext_len
             }
         );
     }
 
-    /// A recorded size SMALLER than the server size (e.g. truncated/stale
-    /// placeholder) still resolves to the server size.
+    /// A recorded size SMALLER than the decrypted length (e.g. truncated/stale
+    /// placeholder) still resolves to the authenticated decrypted length.
     #[test]
-    fn smaller_recorded_size_resolves_to_server_size() {
+    fn smaller_recorded_size_resolves_to_plaintext_len() {
         assert_eq!(
-            decide_hydration_size_action(
-                HydrationSizeEvidence::Range {
-                    server_size_bytes: 100,
-                    required_offset: 40,
-                },
-                40,
-            ),
+            decide_size_action(100, 40),
             SizeDecision::ResolveTo { corrected_size: 100 }
         );
     }
