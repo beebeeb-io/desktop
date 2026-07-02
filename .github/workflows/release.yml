@@ -173,11 +173,17 @@ jobs:
 
   release:
     name: Create GitHub Release
-    # Publish whatever platforms succeeded rather than requiring all three — `needs: build`
-    # reports one aggregate result for the whole matrix, so a single failing platform (e.g.
-    # macOS, still blocked on a separate File Provider gap) would otherwise skip this job even
-    # when the other platforms built and signed cleanly.
-    if: github.event_name == 'workflow_dispatch' && !cancelled()
+    # Default (implicit) success-gating: this job only runs if `needs: build` succeeds, which
+    # requires EVERY enabled matrix platform to succeed — currently Windows + Linux, both of
+    # which are the full supported set now that macOS is commented out of the matrix entirely
+    # (see the matrix comment above). Do NOT relax this to "publish if any platform succeeded"
+    # while only fully-supported platforms are enabled — that was only safe for as long as an
+    # explicitly-optional, expected-to-fail platform (macOS) sat in the matrix alongside the
+    # required ones; without that, a silent partial release (e.g. Linux succeeds, Windows
+    # doesn't) would ship with a missing supported platform and no indication anything is wrong.
+    # If macOS is re-enabled as an optional platform later, this needs a deliberate per-platform
+    # required/optional check again, not a blanket `!cancelled()`.
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -189,17 +195,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Check for any artifacts
-        id: check
-        run: |
-          if find artifacts -type f | grep -q .; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create release
-        if: steps.check.outputs.found == 'true'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: desktop-v${{ inputs.version }}
