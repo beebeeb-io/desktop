@@ -248,14 +248,6 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
 
-    # ── Tray flyout: suppress the Win11 DWM window outline (task: tray frame) ──
-    # `DwmSetWindowAttribute` + `DWMWA_WINDOW_CORNER_PREFERENCE` / `DWMWCP_DONOTROUND`
-    # / `DWMWA_BORDER_COLOR` / `DWMWA_COLOR_NONE` live in `Win32::Graphics::Dwm`.
-    # The transparent, frameless "tray" flyout window still gets a rounded border +
-    # system shadow drawn by DWM on its window rectangle; we turn both off so the
-    # only visible surface is the React card (see lib.rs disable_dwm_window_frame).
-    "Win32_Graphics_Dwm",
-
     # ── Explorer media THUMBNAILS (windows_cf::thumbnail_provider, task 0823) ──
     # An in-process `IThumbnailProvider` COM server (CoRegisterClassObject +
     # LocalServer32, bound to the sync root via the `ThumbnailProvider` value under

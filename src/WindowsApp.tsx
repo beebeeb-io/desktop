@@ -77,10 +77,48 @@ type NavId =
   | 'activity'
   | 'settings'
 
+const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
+const WINDOWS_APP_NAV_STORAGE_KEY = 'bb.windowsApp.nav'
+const NAV_IDS: ReadonlySet<string> = new Set([
+  'home',
+  'files',
+  'account',
+  'insights',
+  'bandwidth',
+  'selective-sync',
+  'devices',
+  'security',
+  'activity',
+  'settings',
+])
+
+function navIdFromString(value: string | null): NavId | null {
+  return value != null && NAV_IDS.has(value) ? (value as NavId) : null
+}
+
+function consumeStoredNav(): NavId | null {
+  try {
+    const nav = navIdFromString(window.localStorage.getItem(WINDOWS_APP_NAV_STORAGE_KEY))
+    if (nav != null) window.localStorage.removeItem(WINDOWS_APP_NAV_STORAGE_KEY)
+    return nav
+  } catch {
+    return null
+  }
+}
+
+// `nav` is the query param `show_main_app_window_with_nav` (src-tauri/src/lib.rs)
+// sets when opening a fresh window; the localStorage fallback covers callers
+// (e.g. the tray's "View all in Beebeeb") that emit the Tauri navigate event
+// directly rather than going through that Rust helper, in case the event fires
+// before this window's listener has mounted.
+function initialNav(): NavId {
+  const params = new URLSearchParams(window.location.search)
+  return navIdFromString(params.get('nav')) ?? consumeStoredNav() ?? 'home'
+}
+
 // Nav items reachable whether or not the user is signed in. Everything else is
 // auth-gated: hidden from the sidebar and replaced by the sign-in prompt.
 const ALWAYS_ACCESSIBLE: ReadonlySet<NavId> = new Set(['home', 'settings'])
-const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
 
 interface NavItem {
   id: NavId
@@ -118,26 +156,6 @@ const NAV_SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
     items: [{ id: 'settings', label: 'Settings', icon: 'cog' }],
   },
 ]
-
-function isNavId(value: unknown): value is NavId {
-  return (
-    value === 'home' ||
-    value === 'files' ||
-    value === 'account' ||
-    value === 'insights' ||
-    value === 'bandwidth' ||
-    value === 'selective-sync' ||
-    value === 'devices' ||
-    value === 'security' ||
-    value === 'activity' ||
-    value === 'settings'
-  )
-}
-
-function initialNav(): NavId {
-  const nav = new URLSearchParams(window.location.search).get('nav')
-  return isNavId(nav) ? nav : 'home'
-}
 
 // The honest placeholder body shown inside a not-yet-bound view. It clearly
 // states the view is scaffolded and shows skeleton rows so the layout reads as
@@ -1378,6 +1396,34 @@ export default function WindowsApp() {
   const [kfOnboarding, setKfOnboarding] = useState<'auto' | 'forced' | 'closed'>('auto')
   const kfOnboardingKey = useRef(0)
 
+  useEffect(() => {
+    let cancelled = false
+    const unlisten = listen<string>(WINDOWS_APP_NAV_EVENT, (event) => {
+      if (cancelled) return
+      const nav = navIdFromString(event.payload)
+      if (nav != null) setActiveNav(nav)
+    })
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== WINDOWS_APP_NAV_STORAGE_KEY) return
+      const nav = navIdFromString(event.newValue)
+      if (nav != null) setActiveNav(nav)
+      try {
+        window.localStorage.removeItem(WINDOWS_APP_NAV_STORAGE_KEY)
+      } catch {
+        // Best effort only; the Tauri event path above is the primary route
+        // for already-open main-app windows.
+      }
+    }
+    window.addEventListener('storage', onStorage)
+
+    return () => {
+      cancelled = true
+      void unlisten.then((fn) => fn())
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
+
   // Manual re-open from the Manage-backup panel ("Set up backup").
   useEffect(() => {
     const onReopen = () => {
@@ -1398,19 +1444,6 @@ export default function WindowsApp() {
     void refresh()
     const id = window.setInterval(refresh, 5000)
     return () => { cancelled = true; window.clearInterval(id) }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    const unlisten = listen<string>(WINDOWS_APP_NAV_EVENT, (event) => {
-      if (!cancelled && isNavId(event.payload)) {
-        setActiveNav(event.payload)
-      }
-    })
-    return () => {
-      cancelled = true
-      void unlisten.then((callback) => callback())
-    }
   }, [])
 
   const loggedIn = status?.logged_in ?? false

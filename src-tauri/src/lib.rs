@@ -3036,6 +3036,8 @@ struct TrayActivityItem {
     progress: Option<u8>,
 }
 
+const TRAY_RECENT_ACTIVITY_LIMIT: usize = 50;
+
 /// Basename of a stored `FileEntry.path`. Uses `std::path::Path::file_name`
 /// so Windows cache paths stored with backslash separators yield the correct
 /// basename (a naive `rsplit('/')` would return the whole `C:\…\foo.txt`
@@ -3048,9 +3050,58 @@ fn entry_basename(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayActivityItem> {
+    let mut items: Vec<TrayActivityItem> = Vec::new();
+
+    // In-flight transfers first (downloading + uploading), newest first.
+    for status in [state_db::FileStatus::Downloading, state_db::FileStatus::Uploading] {
+        let label = if matches!(status, state_db::FileStatus::Downloading) {
+            "Downloading…"
+        } else {
+            "Uploading…"
+        };
+        let Ok(entries) = db.list_by_status(status) else {
+            continue;
+        };
+        let mut entries = entries;
+        entries.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| a.path.cmp(&b.path)));
+        for entry in entries {
+            items.push(TrayActivityItem {
+                id: entry.file_id,
+                name: entry_basename(&entry.path),
+                status: label.to_string(),
+                icon: "cloud".to_string(),
+                ok: None,
+                active: Some(true),
+                progress: None,
+            });
+        }
+    }
+
+    if let Ok(locals) = db.list_by_status(state_db::FileStatus::Local) {
+        // Sort by modified_at descending — most recently synced first.
+        let mut locals = locals;
+        locals.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| a.path.cmp(&b.path)));
+        for entry in locals {
+            items.push(TrayActivityItem {
+                id: entry.file_id,
+                name: entry_basename(&entry.path),
+                status: "Synced".to_string(),
+                icon: "file".to_string(),
+                ok: Some(true),
+                active: None,
+                progress: None,
+            });
+        }
+    }
+
+    items.truncate(TRAY_RECENT_ACTIVITY_LIMIT);
+    items
+}
+
 /// Return recent sync activity for the Windows tray flyout.
 ///
-/// Derives up to 8 items from the state DB:
+/// Derives activity from the state DB:
 ///   - Files currently downloading or uploading (active, with progress = None
 ///     because per-file byte progress isn't tracked at this layer)
 ///   - Recently-synced local files ordered by `modified_at` descending
@@ -3076,51 +3127,7 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
         return Vec::new();
     };
 
-    let mut items: Vec<TrayActivityItem> = Vec::new();
-
-    // In-flight transfers first (downloading + uploading, capped at 4 each).
-    for status in [state_db::FileStatus::Downloading, state_db::FileStatus::Uploading] {
-        let label = if matches!(status, state_db::FileStatus::Downloading) {
-            "Downloading…"
-        } else {
-            "Uploading…"
-        };
-        let Ok(entries) = db.list_by_status(status) else { continue };
-        for entry in entries.into_iter().take(4) {
-            items.push(TrayActivityItem {
-                id: entry.file_id,
-                name: entry_basename(&entry.path),
-                status: label.to_string(),
-                icon: "cloud".to_string(),
-                ok: None,
-                active: Some(true),
-                progress: None,
-            });
-        }
-    }
-
-    // Recently-synced local files (up to fill 8 total rows).
-    let remaining = 8usize.saturating_sub(items.len());
-    if remaining > 0 {
-        if let Ok(locals) = db.list_by_status(state_db::FileStatus::Local) {
-            // Sort by modified_at descending — most recently synced first.
-            let mut locals = locals;
-            locals.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
-            for entry in locals.into_iter().take(remaining) {
-                items.push(TrayActivityItem {
-                    id: entry.file_id,
-                    name: entry_basename(&entry.path),
-                    status: "Synced".to_string(),
-                    icon: "file".to_string(),
-                    ok: Some(true),
-                    active: None,
-                    progress: None,
-                });
-            }
-        }
-    }
-
-    items
+    tray_recent_activity_from_db(&db)
 }
 
 /// Pause the sync engine at runtime. Sets the shared `sync_paused` flag
@@ -5277,79 +5284,10 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
     });
 }
 
-/// Suppress the Windows 11 DWM window outline (rounded-rect border + system
-/// shadow) on the given Tauri window, leaving only what the WebView paints.
-///
-/// The tray flyout window is frameless + transparent, yet Win11's DWM still
-/// draws a rounded border and shadow on the window *rectangle* — visible as a
-/// faint "frame" around the white card (which is inset 8px inside the window).
-/// Setting `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND` drops the
-/// rounded outline; `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE` removes the 1px DWM
-/// border line. The card's own CSS shadow then floats it instead.
-///
-/// HWND version bridge: our DIRECT `windows` dep is 0.58, but Tauri 2.x pulls
-/// `windows` 0.61, so `tray_window.hwnd()` hands back a 0.61 `HWND` — a DISTINCT
-/// type from the 0.58 `HWND` that `DwmSetWindowAttribute@0.58` wants. Both
-/// newtypes wrap `*mut c_void`, so we reconstruct the 0.58 HWND from the raw
-/// pointer (`raw.0 as _`). Any failure is logged and ignored — this is a purely
-/// cosmetic refinement, never fatal.
-#[cfg(target_os = "windows")]
-fn disable_dwm_window_frame(window: &tauri::WebviewWindow) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    };
-
-    let raw = match window.hwnd() {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(error = %e, "tray frame: could not get HWND; leaving DWM default");
-            return;
-        }
-    };
-    // Bridge windows@0.61 HWND -> windows@0.58 HWND (both are *mut c_void).
-    let hwnd = HWND(raw.0 as _);
-
-    // SAFETY: `hwnd` is a live top-level window handle owned by this process.
-    // Both attributes take a value the size of their pointed-to constant; we
-    // pass the exact byte length (4) for each i32/u32 payload.
-    unsafe {
-        let pref = DWMWCP_DONOTROUND; // DWM_WINDOW_CORNER_PREFERENCE(1)
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            std::ptr::addr_of!(pref) as *const core::ffi::c_void,
-            std::mem::size_of_val(&pref) as u32,
-        ) {
-            tracing::warn!(error = %e, "tray frame: DWMWA_WINDOW_CORNER_PREFERENCE failed");
-        }
-
-        let border_none = DWMWA_COLOR_NONE; // 0xFFFFFFFE — suppress DWM border line
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            std::ptr::addr_of!(border_none) as *const core::ffi::c_void,
-            std::mem::size_of_val(&border_none) as u32,
-        ) {
-            tracing::warn!(error = %e, "tray frame: DWMWA_BORDER_COLOR failed");
-        }
-    }
-}
-
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // Read current autostart state so the check mark is correct on launch.
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let tray_menu = build_tray_menu(app, autostart_enabled)?;
-
-    // Windows 11 draws a rounded outline + shadow on the transparent tray
-    // flyout's window rectangle, which reads as a faint frame around the white
-    // card. Turn that off once at startup (the window is declared statically in
-    // tauri.conf.json, so it already exists here). Non-fatal cosmetic step.
-    #[cfg(target_os = "windows")]
-    if let Some(tray_window) = app.get_webview_window("tray") {
-        disable_dwm_window_frame(&tray_window);
-    }
 
     let icon = app
         .default_window_icon()
@@ -5701,6 +5639,35 @@ mod tests {
             email: Some("user@example.com".to_string()),
         };
         drop(session);
+    }
+
+    #[test]
+    fn tray_recent_activity_from_db_returns_more_than_eight_rows() {
+        use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+
+        for i in 0..12 {
+            db.upsert_file(&FileEntry {
+                file_id: format!("local-{i}"),
+                path: format!("Batch/file-{i}.txt"),
+                status: FileStatus::Local,
+                size_bytes: 100 + i,
+                modified_at: 1_700_000_000 + i,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .expect("seed local file");
+        }
+
+        let items = super::tray_recent_activity_from_db(&db);
+
+        assert_eq!(items.len(), 12);
+        assert_eq!(items[0].name, "file-11.txt");
+        assert_eq!(items[11].name, "file-0.txt");
     }
 
     #[test]

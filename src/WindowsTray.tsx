@@ -2,16 +2,16 @@
  * WindowsTray — Windows 11 taskbar tray flyout (OneDrive-class).
  *
  * Mounted when ?window=tray is in the query string. The window is a frameless,
- * transparent, always-on-top, skip-taskbar flyout (see tauri.conf.json) that the
- * Tauri side positions above the system-tray icon (lib.rs on_tray_icon_event).
+ * solid-surface, always-on-top, skip-taskbar flyout (see tauri.conf.json) that
+ * the Tauri side positions above the system-tray icon (lib.rs on_tray_icon_event).
  *
  * Native behaviour:
  *   • Hides on blur (click-outside dismiss), like OneDrive — getCurrentWindow()
  *     .onFocusChanged → hide() when focus is lost.
  *   • No window-chrome buttons — a native flyout has no titlebar.
- *   • The single visible surface is one rounded card; the document itself is
- *     transparent (design.css `.tray-window`), so there is no opaque rectangle
- *     behind the card's rounded corners.
+ *   • The single visible surface is an on-brand document background; the window
+ *     is deliberately opaque so Windows never shows an unstyled transparent
+ *     rectangle behind the flyout.
  *
  * Layout (top → bottom):
  *   • Header   — BrandMark + "Beebeeb" + settings gear (→ main app Settings).
@@ -21,13 +21,14 @@
  *
  * Data sources:
  *   sync_status              → SyncStatus (logged_in / engine / syncing / conflicts)
- *   desktop_file_overview(8) → FileOverview.recent[] (path, size_bytes, status, modified_at)
+ *   desktop_file_overview(50) → FileOverview.recent[] (path, size_bytes, status, modified_at)
  *   show_main_app_settings   → opens the main app and selects Settings
  *   open_finder_location     → opens the sync root in Explorer
  *   openUrl                  → app.beebeeb.io / app.beebeeb.io/trash
  */
 
 import { useEffect, useState } from 'react'
+import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   command,
@@ -35,7 +36,6 @@ import {
   loadSyncStatus,
   openUrl,
   revealAndOpenFile,
-  type FileOverview,
   type RecentFile,
   type SyncStatus,
 } from './desktopApi'
@@ -270,6 +270,10 @@ function relativeTime(epochSeconds: number): string {
 
 // Sublines that warn (need attention) get a warm/neutral non-amber tint.
 const WARN_STATUSES = new Set(['conflict', 'error'])
+const TRAY_RECENT_LIMIT = 50
+const TRAY_VIEW_ALL_THRESHOLD = 8
+const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
+const WINDOWS_APP_NAV_STORAGE_KEY = 'bb.windowsApp.nav'
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -315,7 +319,7 @@ export default function WindowsTray() {
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const result = await command<FileOverview>('desktop_file_overview', { recentLimit: 8 })
+      const result = await desktopFileOverview(TRAY_RECENT_LIMIT)
       if (cancelled) return
       if (result.ok) {
         setRecent(result.value.recent ?? [])
@@ -365,20 +369,29 @@ export default function WindowsTray() {
     void getCurrentWindow().hide()
   }
 
+  const openActivity = async () => {
+    try {
+      window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, 'activity')
+    } catch {
+      // Best effort only; already-open main windows still receive the Tauri
+      // event below.
+    }
+    await command<void>('show_main_app_window')
+    await emit(WINDOWS_APP_NAV_EVENT, 'activity').catch(() => undefined)
+    void getCurrentWindow().hide()
+  }
+
+  const showViewAll = recent.length > TRAY_VIEW_ALL_THRESHOLD
+
   return (
     <div
       style={{
-        // Small inset so the card's drop shadow has room to render inside the
-        // transparent window without being clipped. The Win11 DWM window outline
-        // (rounded border + system shadow) is disabled in Rust
-        // (disable_dwm_window_frame), so this card is the ONLY visible surface —
-        // no border, just the white block with one soft shadow to make it float.
+        // Fill the opaque frameless window with the intentional Beebeeb surface.
         position: 'absolute',
-        inset: 8,
+        inset: 0,
         background: T.paper,
-        borderRadius: 12,
+        border: `1px solid ${T.line}`,
         overflow: 'hidden',
-        boxShadow: '0 12px 32px -12px rgba(0,0,0,0.28)',
         display: 'flex',
         flexDirection: 'column',
         fontFamily: T.fontSans,
@@ -575,6 +588,39 @@ export default function WindowsTray() {
           })
         )}
       </div>
+
+      {showViewAll && (
+        <button
+          onClick={() => void openActivity()}
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            width: '100%',
+            padding: '8px 14px',
+            border: 'none',
+            borderTop: `1px solid ${T.line}`,
+            background: T.amberBg,
+            color: T.ink2,
+            cursor: 'pointer',
+            fontFamily: T.fontSans,
+            fontSize: 11.5,
+            fontWeight: 600,
+            textAlign: 'left',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'oklch(0.94 0.06 90)'
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = T.amberBg
+          }}
+        >
+          <span>View all in Beebeeb</span>
+          <ActionIcon name="external" size={13} color={T.amberDeep} />
+        </button>
+      )}
 
       {/* Action bar — 3 equal ghost buttons */}
       <div

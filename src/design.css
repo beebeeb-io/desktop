@@ -85,18 +85,15 @@ body {
 }
 
 /*
- * Tray flyout window — the Tauri "tray" webview is frameless + transparent
- * (decorations:false, transparent:true). The shared :root/body background
- * above is OPAQUE (var(--paper)), which paints a solid rectangle behind the
- * flyout's rounded card and shows through its corners (the "weird background
- * card half" glitch). When mounting ?window=tray, main.tsx adds .tray-window
- * to <html>; these overrides make the whole document fully transparent so the
- * single rounded card (with its own shadow) is the only visible surface.
+ * Tray flyout window — the Tauri "tray" webview is frameless but intentionally
+ * opaque (decorations:false, transparent:false). When mounting ?window=tray,
+ * main.tsx adds .tray-window to <html>; these overrides make the document's
+ * own surface explicit instead of relying on compositor transparency.
  */
 html.tray-window,
 html.tray-window body,
 html.tray-window #root {
-  background: transparent !important;
+  background: var(--paper) !important;
   margin: 0;
   padding: 0;
 }
