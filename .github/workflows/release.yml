@@ -71,6 +71,23 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Set app version for this release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tauri's bundler names every artifact (.msi, .AppImage, .deb, .rpm,
+          # etc.) after tauri.conf.json's own `version` field — it has no idea
+          # about the workflow_dispatch `version` input used for the git tag
+          # and the release-channel manifest. Every prior run happened to use
+          # version=0.1.0, matching the hardcoded config value, so this drift
+          # was invisible; the first release-channel dispatch with a different
+          # version (0.1.1-beta.1) proved bundle filenames stayed "0.1.0"
+          # while the manifest looked for "0.1.1-beta.1" files that never
+          # existed (confirmed 2026-07-02, run 28594881966). Bump the config
+          # to the real release version before building so both stay in sync.
+          jq --arg version "${{ inputs.version }}" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+
       - name: Validate release config
         if: runner.os == 'macOS'
         run: bash scripts/macos-release-preflight.sh
