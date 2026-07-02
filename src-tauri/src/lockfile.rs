@@ -10,10 +10,10 @@
 //!
 //! If both pointed at the same folder, the loopback registries are
 //! process-local and they would echo each other's writes indefinitely.
-//! The fix is a small advisory lock in the sync root: the first agent
-//! to start writes `.beebeeb-sync.lock` containing its `{pid, agent,
-//! hostname, started_at}`. The second agent reads the file, checks if
-//! the recorded pid is still alive, and either:
+//! The fix is a small advisory lock in Beebeeb's app-local state directory:
+//! the first agent to start writes `.beebeeb-sync.lock` containing its
+//! `{pid, agent, hostname, started_at}`. The second agent reads the file,
+//! checks if the recorded pid is still alive, and either:
 //!
 //! - aborts with a clear "already running as <agent>" message, or
 //! - overwrites the lock if the pid is dead (crash recovery)
@@ -36,13 +36,11 @@
 //!   once we ship the Windows installer.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-const LOCK_FILENAME: &str = ".beebeeb-sync.lock";
 
 /// On-disk JSON shape. Stable across releases — both the desktop and
 /// the CLI must serialize/deserialize the same field names.
@@ -61,7 +59,7 @@ pub struct LockFile {
 }
 
 impl LockFile {
-    /// Try to claim `.beebeeb-sync.lock` inside `sync_root` for
+    /// Try to claim `.beebeeb-sync.lock` inside the app-local state dir for
     /// `agent`. Returns:
     ///
     /// - `Ok(LockFile)` if no lock existed, or the prior holder is
@@ -69,8 +67,10 @@ impl LockFile {
     /// - `Err(...)` if the prior holder is still alive — message
     ///   includes the recorded agent and pid so the operator can
     ///   identify the conflict.
-    pub fn acquire(sync_root: &Path, agent: &str) -> Result<Self, String> {
-        let path = sync_root.join(LOCK_FILENAME);
+    pub fn acquire(agent: &str) -> Result<Self, String> {
+        let state_dir = crate::state_paths::beebeeb_state_dir()?;
+        fs::create_dir_all(&state_dir).map_err(|e| format!("create lock dir {}: {e}", state_dir.display()))?;
+        let path = state_dir.join(crate::state_paths::LOCK_FILENAME);
 
         // If a prior lock exists, decide whether to break it.
         if path.exists() {

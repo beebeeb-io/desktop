@@ -44,6 +44,7 @@ use crate::conflict::auto_resolution_deadline;
 use crate::engine_bridge::{CachePolicy, ConflictDetected, EngineBridge, WireCounters, sync_tick};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
+use crate::state_paths;
 
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
@@ -73,11 +74,6 @@ const TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// Windows-only.
 #[cfg(target_os = "windows")]
 const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
-
-/// Subdirectory inside the sync root where the daemon keeps its
-/// SQLite state DB. Hidden by leading dot so it doesn't pollute the
-/// user's view of "files in their vault".
-const STATE_DIR: &str = ".beebeeb";
 
 /// API base URL the engine talks to.
 ///
@@ -546,23 +542,22 @@ async fn run(
     mut cancel: oneshot::Receiver<()>,
     sync_paused: Arc<AtomicBool>,
 ) {
-    // Windows Cloud Files: connect the sync root FIRST, before any write into
-    // it. `CfRegisterSyncRoot` (run during onboarding) puts the folder under
-    // Cloud Files control but leaves it DISCONNECTED, and a disconnected root
-    // rejects every write with 0x801F0005 ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
-    // The very next steps below — `LockFile::acquire` writing
-    // `.beebeeb-sync.lock` and `StateDb::open` creating `.beebeeb/state.db` —
-    // both write INSIDE the root, so the root must be connected (live) before
-    // them. `connect_root` registers (idempotent) + `CfConnectSyncRoot`s the
-    // root; it needs neither the lock nor the DB, only the path. Placeholder
-    // seeding (which DOES need the DB + bridge) stays late via
-    // `seed_placeholders` after the bridge is built.
+    // Windows Cloud Files: connect the sync root before any placeholder work.
+    // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
+    // placeholder seeding still needs a connected root later in this task.
     #[cfg(target_os = "windows")]
     crate::windows_cf::connect_root(&sync_root);
 
-    // Acquire the mutual-exclusion lock with the CLI's `bb watch`.
-    // If a CLI agent is alive in the same folder, we don't start.
-    let _lock = match LockFile::acquire(&sync_root, "desktop") {
+    if let Err(e) = state_paths::prepare_beebeeb_state_dir_for_sync_root(&sync_root) {
+        let msg = format!("prepare app-local state dir: {e}");
+        tracing::error!(error = %msg);
+        emit_status(&app, "error", Some(&sync_root), Some(&msg));
+        return;
+    }
+
+    // Acquire the mutual-exclusion lock in app-local state, outside the user's
+    // synced files.
+    let _lock = match LockFile::acquire("desktop") {
         Ok(l) => l,
         Err(msg) => {
             tracing::error!(error = %msg, "could not acquire .beebeeb-sync.lock");
@@ -571,16 +566,18 @@ async fn run(
         }
     };
 
-    // Open the state DB at <sync_root>/.beebeeb/state.db. Create the
-    // directory if missing — first-launch path.
-    let state_dir = sync_root.join(STATE_DIR);
-    if let Err(e) = std::fs::create_dir_all(&state_dir) {
-        let msg = format!("create state dir: {e}");
-        tracing::error!(error = %msg);
-        emit_status(&app, "error", Some(&sync_root), Some(&msg));
-        return;
-    }
-    let db = match StateDb::open(state_dir.join("state.db")) {
+    // Open the state DB from app-local data. The migration step above already
+    // created the directory and moved any legacy sync-root metadata out.
+    let state_dir = match state_paths::beebeeb_state_dir() {
+        Ok(path) => path,
+        Err(e) => {
+            let msg = format!("resolve state dir: {e}");
+            tracing::error!(error = %msg);
+            emit_status(&app, "error", Some(&sync_root), Some(&msg));
+            return;
+        }
+    };
+    let db = match StateDb::open(state_dir.join(state_paths::STATE_DB_FILENAME)) {
         Ok(d) => Arc::new(d),
         Err(e) => {
             let msg = format!("open state.db: {e}");
@@ -670,7 +667,7 @@ async fn run(
     // BOTH the CF NOTIFY dispatch loop (modify of existing placeholders +
     // delete/rename) AND the enumeration scan loop (the create trigger); both
     // funnel new files through the shared `classify_local_path` gate that filters
-    // out engine-written placeholders, hydration writes, and `.beebeeb/`
+    // out engine-written placeholders, hydration writes, and legacy `.beebeeb/`
     // internals, then into the existing encrypted upload path. macOS/Linux get
     // creates via their OS extension over `ipc_socket`, so the watcher is
     // Windows-only here.

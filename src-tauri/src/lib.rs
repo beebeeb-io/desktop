@@ -1,6 +1,6 @@
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +47,7 @@ mod lockfile;
 mod macos_file_provider;
 mod runner;
 mod state_db;
+mod state_paths;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
 // `QueueFinderCreate`; the macOS File Provider and Linux FUSE paths drive that
@@ -1318,10 +1319,10 @@ fn persist_finder_install_result(
 }
 
 fn state_db_for_config(cfg: &DesktopConfig) -> Result<Option<state_db::StateDb>, String> {
-    let Some(sync_root) = &cfg.sync_root else {
+    let Some(_) = &cfg.sync_root else {
         return Ok(None);
     };
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1674,10 +1675,9 @@ async fn install_windows_shell_integration(
         let mut cfg = DesktopConfig::load()?;
 
         // Register the Cloud Files sync root with Windows. Idempotent at the OS
-        // layer. The engine runner re-registers + connects callbacks on spawn
-        // (`windows_cf::connect_root`, called before the engine writes its lock
-        // and state.db into the root); doing it here gives immediate feedback in
-        // onboarding before the engine ticks.
+        // layer. The engine runner re-registers + connects callbacks on spawn;
+        // doing it here gives immediate feedback in onboarding before the engine
+        // ticks.
         if let Err(error) = windows_cf::register_sync_root(&root) {
             let error = error.to_string();
             persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
@@ -2286,8 +2286,8 @@ mod reveal_and_open_file_tests {
 /// this command is the first-paint poll the settings UI uses while
 /// the event stream is still ramping up.
 ///
-/// File counts are read from the SQLite state DB at
-/// `<sync_root>/.beebeeb/state.db` via a fresh connection per call.
+/// File counts are read from the app-local SQLite state DB via a fresh
+/// connection per call.
 /// SQLite is happy to share read access with the runner's connection
 /// (default journal mode supports many concurrent readers); a poll
 /// takes well under a millisecond on a typical vault. If the DB
@@ -2333,44 +2333,47 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         }
     };
 
-    // Count files by status, opening a short-lived connection at the
-    // canonical state.db path. Wrap in a closure so an early `None`
-    // on any step cleanly degrades to zeros without unwraps.
-    let counts = sync_root_path
-        .as_ref()
-        .and_then(|root| {
-            let db_path = root.join(".beebeeb").join("state.db");
-            if !db_path.exists() {
-                return None;
-            }
-            let db = state_db::StateDb::open(&db_path).ok()?;
-            // Downloading + Uploading both count toward "in-flight
-            // sync work" for the WebView's syncing pill — there's no
-            // user-meaningful difference between "we're pulling" and
-            // "we're pushing" at the indicator level.
-            let downloading = db
-                .list_by_status(FileStatus::Downloading)
+    // Count files by status, opening a short-lived connection at the canonical
+    // app-local state.db path. No configured root / no DB degrades to zeros.
+    let counts = if sync_root_path.is_some() {
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        if db_path.exists() {
+            state_db::StateDb::open(&db_path)
                 .ok()
-                .map(|v| v.len() as u32)
-                .unwrap_or(0);
-            let uploading = db
-                .list_by_status(FileStatus::Uploading)
-                .ok()
-                .map(|v| v.len() as u32)
-                .unwrap_or(0);
-            let cloud_only = db
-                .list_by_status(FileStatus::CloudOnly)
-                .ok()
-                .map(|v| v.len() as u32)
-                .unwrap_or(0);
-            let conflicts = db
-                .list_by_status(FileStatus::Conflict)
-                .ok()
-                .map(|v| v.len() as u32)
-                .unwrap_or(0);
-            Some((downloading + uploading, cloud_only, conflicts))
-        })
-        .unwrap_or((0, 0, 0));
+                .map(|db| {
+                    // Downloading + Uploading both count toward "in-flight
+                    // sync work" for the WebView's syncing pill — there's no
+                    // user-meaningful difference between "we're pulling" and
+                    // "we're pushing" at the indicator level.
+                    let downloading = db
+                        .list_by_status(FileStatus::Downloading)
+                        .ok()
+                        .map(|v| v.len() as u32)
+                        .unwrap_or(0);
+                    let uploading = db
+                        .list_by_status(FileStatus::Uploading)
+                        .ok()
+                        .map(|v| v.len() as u32)
+                        .unwrap_or(0);
+                    let cloud_only = db
+                        .list_by_status(FileStatus::CloudOnly)
+                        .ok()
+                        .map(|v| v.len() as u32)
+                        .unwrap_or(0);
+                    let conflicts = db
+                        .list_by_status(FileStatus::Conflict)
+                        .ok()
+                        .map(|v| v.len() as u32)
+                        .unwrap_or(0);
+                    (downloading + uploading, cloud_only, conflicts)
+                })
+                .unwrap_or((0, 0, 0))
+        } else {
+            (0, 0, 0)
+        }
+    } else {
+        (0, 0, 0)
+    };
 
     Ok(serde_json::json!({
         "logged_in": logged_in,
@@ -2435,20 +2438,22 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
         .await
         .map_err(|e| format!("parse storage usage: {e}"))?;
 
-    let (cache_bytes, pinned_bytes) = DesktopConfig::load()
-        .ok()
-        .and_then(|cfg| cfg.sync_root)
-        .and_then(|root| {
-            let db_path = root.join(".beebeeb").join("state.db");
-            if !db_path.exists() {
-                return None;
-            }
-            let db = state_db::StateDb::open(&db_path).ok()?;
-            let pinned = db.cache_bytes_by_effective_pin(true).ok()?.max(0);
-            let unpinned = db.cache_bytes_by_effective_pin(false).ok()?.max(0);
-            Some((pinned.saturating_add(unpinned), pinned))
-        })
-        .unwrap_or((0, 0));
+    let (cache_bytes, pinned_bytes) = if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_some() {
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        if db_path.exists() {
+            let values = (|| {
+                let db = state_db::StateDb::open(&db_path).ok()?;
+                let pinned = db.cache_bytes_by_effective_pin(true).ok()?.max(0);
+                let unpinned = db.cache_bytes_by_effective_pin(false).ok()?.max(0);
+                Some((pinned.saturating_add(unpinned), pinned))
+            })();
+            values.unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
 
     let used_bytes = usage.used_bytes.max(0);
     let quota_bytes = usage.quota_bytes.max(0);
@@ -2534,7 +2539,7 @@ pub(crate) fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     };
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     }
@@ -2707,13 +2712,13 @@ fn free_up_space_unix(
 #[tauri::command]
 fn export_diagnostics() -> Result<serde_json::Value, String> {
     let cfg = DesktopConfig::load()?;
-    let Some(sync_root) = cfg.sync_root else {
+    let Some(_) = cfg.sync_root else {
         return Ok(serde_json::json!({
             "sync_root_configured": false,
             "queue": serde_json::Value::Null,
         }));
     };
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(serde_json::json!({
             "sync_root_configured": true,
@@ -2741,10 +2746,10 @@ fn export_diagnostics() -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
     let cfg = DesktopConfig::load()?;
-    let Some(sync_root) = cfg.sync_root else {
+    let Some(_) = cfg.sync_root else {
         return Ok(Vec::new());
     };
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(Vec::new());
     }
@@ -2784,8 +2789,10 @@ async fn restore_file_version(
     };
 
     let cfg = DesktopConfig::load()?;
-    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    if cfg.sync_root.is_none() {
+        return Err("no sync root configured".to_string());
+    }
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
     let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
     let bridge = engine_bridge::EngineBridge::new(db, api.clone());
@@ -3065,10 +3072,13 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
     let Ok(cfg) = DesktopConfig::load() else {
         return Vec::new();
     };
-    let Some(sync_root) = cfg.sync_root else {
+    let Some(_) = cfg.sync_root else {
         return Vec::new();
     };
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let Ok(state_dir) = state_paths::beebeeb_state_dir() else {
+        return Vec::new();
+    };
+    let db_path = state_dir.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Vec::new();
     }
@@ -3468,10 +3478,15 @@ fn mark_known_folder_onboarding_seen() -> Result<(), String> {
 /// DB is `Ok(0)`, a per-file dehydrate failure logs and continues.
 fn dehydrate_excluded_subtrees_blocking(newly_excluded: &[String]) -> Result<u64, String> {
     let cfg = DesktopConfig::load()?;
+    #[cfg(target_os = "windows")]
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(0);
     };
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    #[cfg(not(target_os = "windows"))]
+    if cfg.sync_root.is_none() {
+        return Ok(0);
+    }
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(0);
     }
@@ -4044,7 +4059,7 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
     let sync_root = cfg
         .sync_root
         .ok_or_else(|| "Choose a sync folder before changing offline availability.".to_string())?;
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Err("The local sync database has not been created yet. Start the daemon once before changing offline availability.".to_string());
     }
@@ -4318,12 +4333,12 @@ async fn account_storage_breakdown(
 
     let limit = largest_limit.unwrap_or(10);
 
-    // Resolve the state DB from the configured sync root, mirroring
-    // `desktop_storage_summary`. No root / no DB → empty (not an error).
-    let db_path = match DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
-        Some(root) => root.join(".beebeeb").join("state.db"),
-        None => return Ok(account_dto::compute_storage_breakdown(&[], limit)),
-    };
+    // Resolve the state DB from app-local data once a sync root is configured.
+    // No root / no DB → empty (not an error).
+    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+        return Ok(account_dto::compute_storage_breakdown(&[], limit));
+    }
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(account_dto::compute_storage_breakdown(&[], limit));
     }
@@ -4382,12 +4397,12 @@ async fn desktop_file_overview(
 
     let limit = recent_limit.unwrap_or(15);
 
-    // Resolve the state DB from the configured sync root, mirroring
-    // `account_storage_breakdown`. No root / no DB → empty (not an error).
-    let db_path = match DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
-        Some(root) => root.join(".beebeeb").join("state.db"),
-        None => return Ok(account_dto::compute_file_overview(&[], limit)),
-    };
+    // Resolve the state DB from app-local data once a sync root is configured.
+    // No root / no DB → empty (not an error).
+    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+        return Ok(account_dto::compute_file_overview(&[], limit));
+    }
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(account_dto::compute_file_overview(&[], limit));
     }
@@ -4522,10 +4537,10 @@ async fn get_bandwidth_history(
 
     let window_hours = hours.unwrap_or(20);
 
-    let db_path = match DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
-        Some(root) => root.join(".beebeeb").join("state.db"),
-        None => return Ok(vec![]),
-    };
+    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+        return Ok(vec![]);
+    }
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(vec![]);
     }
@@ -4689,9 +4704,9 @@ async fn resolve_conflict(
     let cfg = DesktopConfig::load()?;
     let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
 
-    // Build a fresh bridge. The state DB is at a deterministic path
-    // under the sync root (same convention as `runner::run`).
-    let db_path = sync_root.join(".beebeeb").join("state.db");
+    // Build a fresh bridge over the app-local state DB (same convention as
+    // `runner::run`).
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
     let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
     let bridge = engine_bridge::EngineBridge::new(db, api);
@@ -4933,6 +4948,15 @@ pub fn run() {
             get_bandwidth_history,
         ])
         .setup(|app| {
+            let app_handle = app.handle().clone();
+            state_paths::init_from_app(&app_handle).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
+            if let Ok(cfg) = DesktopConfig::load()
+                && let Some(sync_root) = cfg.sync_root
+                && let Err(error) = state_paths::prepare_beebeeb_state_dir_for_sync_root(&sync_root)
+            {
+                tracing::warn!(%error, sync_root = %sync_root.display(), "Beebeeb state migration did not complete during setup; runner will retry before opening state.db");
+            }
+
             // Multi-account Phase 1 (decision 0800/0808): resolve the PERSISTED
             // account id, synthesize the single account under it, then lazily
             // migrate the legacy flat keychain trio into the id-segmented layout.
