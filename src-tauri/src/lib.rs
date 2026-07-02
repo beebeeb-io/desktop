@@ -4931,17 +4931,33 @@ fn updater_for_release_channel(
                 .map_err(|e| format!("parse update manifest URL {endpoint}: {e}"))?,
         ])
         .map_err(|e| e.to_string())?
-        .version_comparator(|current, release| {
-            should_offer_channel_update(&current.to_string(), &release.version.to_string())
+        .version_comparator(|_current, release| {
+            // Deliberately ignore Tauri's own `_current` — it's read from
+            // tauri.conf.json's `version`, which release.yml keeps in an
+            // MSI-safe numeric-only shape (WiX rejects text pre-release
+            // identifiers like "beta.1"). That shape can't be compared
+            // meaningfully against the channel manifest's full human-readable
+            // version, so real_app_version() (the actual release version,
+            // carried in via a build-time env var) is the correct "current"
+            // for this comparison instead. See real_app_version() below.
+            should_offer_channel_update(real_app_version(), &release.version.to_string())
         })
         .build()
         .map_err(|e| e.to_string())
 }
 
+/// The real, human-readable release version ("0.1.1-beta.1"), independent of
+/// tauri.conf.json's MSI-safe numeric-only `version` field. Set by release.yml
+/// as $BEEBEEB_RELEASE_VERSION before `cargo build` runs; falls back to the
+/// Cargo package version for local/dev builds where CI hasn't set it.
+fn real_app_version() -> &'static str {
+    option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// Returns the app version string — displayed in the web UI Settings page.
 #[tauri::command]
 fn app_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    real_app_version()
 }
 
 /// Download and install the pending update, then relaunch.

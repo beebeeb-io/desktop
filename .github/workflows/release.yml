@@ -91,10 +91,45 @@ jobs:
           # was invisible; the first release-channel dispatch with a different
           # version (0.1.1-beta.1) proved bundle filenames stayed "0.1.0"
           # while the manifest looked for "0.1.1-beta.1" files that never
-          # existed (confirmed 2026-07-02, run 28594881966). Bump the config
-          # to the real release version before building so both stay in sync.
-          jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          # existed (confirmed 2026-07-02, run 28594881966).
+          #
+          # But the WiX/MSI bundler additionally requires the package version's
+          # pre-release identifier to be numeric-only (<=65535) — "0.1.1-beta.1"
+          # fails Windows builds outright ("optional pre-release identifier...
+          # must be numeric-only", confirmed 2026-07-02, run 28596233300), even
+          # though Linux/macOS tolerate the text fine. So tauri.conf.json's
+          # `version` gets an MSI-safe numeric encoding (channel folded into a
+          # numeric offset), while the REAL human-readable version — needed for
+          # correct update-availability comparison against the channel manifest
+          # (which keeps the full "beta.N"/"alpha.N" text) and for the in-app
+          # "current version" display — is carried separately via the
+          # $BEEBEEB_RELEASE_VERSION env var, read by lib.rs by picking it up
+          # from the runner's env at `cargo build` time. See real_app_version()
+          # in src-tauri/src/lib.rs.
+          if [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
+            BUILD_NUM="${BASH_REMATCH[2]}"
+            if (( BUILD_NUM > 49999 )); then
+              echo "::error::beta build number $BUILD_NUM exceeds the MSI-safe range (max 49999)."
+              exit 1
+            fi
+            MSI_VERSION="${BASH_REMATCH[1]}-${BUILD_NUM}"
+          elif [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
+            BUILD_NUM="${BASH_REMATCH[2]}"
+            if (( BUILD_NUM > 15535 )); then
+              echo "::error::alpha build number $BUILD_NUM exceeds the MSI-safe range (max 15535, offset by 50000)."
+              exit 1
+            fi
+            MSI_VERSION="${BASH_REMATCH[1]}-$((50000 + BUILD_NUM))"
+          elif [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            MSI_VERSION="$RELEASE_VERSION"
+          else
+            echo "::error::Desktop version '$RELEASE_VERSION' must be plain semver for Stable or use -beta.N / -alpha.N prerelease suffixes."
+            exit 1
+          fi
+
+          jq --arg version "$MSI_VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
           mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+          echo "BEEBEEB_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
       - name: Validate release config
         if: runner.os == 'macOS'
