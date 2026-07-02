@@ -210,3 +210,131 @@ jobs:
           files: artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-manifest:
+    name: Publish update manifest
+    # Keep manifest publishing in this workflow instead of a separate `on: release`
+    # workflow. Releases created with the default GITHUB_TOKEN do not trigger other
+    # workflows, so the old publish-release.yml was unreachable and has been removed.
+    if: github.event_name == 'workflow_dispatch'
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout releases repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: beebeeb-io/releases
+          ref: main
+          token: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          persist-credentials: false
+          path: releases-repo
+
+      - name: Generate desktop/latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: desktop-v${{ github.event.inputs.version }}
+          VER: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
+
+          # The Tauri updater verifies update bundles against the embedded pubkey
+          # in tauri.conf.json using the .sig files produced at build time.
+          # Windows and Linux must fail closed if their signatures are absent.
+          # macOS is still disabled in the release matrix, so its updater bundle
+          # filename is a best-effort carry-forward until macOS release output is
+          # verified. Missing macOS signatures omit darwin entries instead of
+          # blocking Windows/Linux manifest publishing.
+          MACOS_BUNDLE="Beebeeb_${VER}_universal.app.tar.gz"
+          LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
+          WINDOWS_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
+
+          fetch_sig() {
+            curl --proto '=https' --tlsv1.2 -fsSL "$1"
+          }
+
+          fetch_optional_sig() {
+            local url="$1"
+
+            if ! curl --proto '=https' --tlsv1.2 -fsSL "$url"; then
+              echo "::notice::Optional macOS signature not found at $url; omitting macOS manifest entries" >&2
+            fi
+          }
+
+          SIG_MACOS=$(fetch_optional_sig "${BASE_URL}/${MACOS_BUNDLE}.sig")
+          SIG_LINUX=$(fetch_sig "${BASE_URL}/${LINUX_BUNDLE}.sig")
+          SIG_WINDOWS=$(fetch_sig "${BASE_URL}/${WINDOWS_BUNDLE}.sig")
+
+          mkdir -p releases-repo/desktop
+
+          jq -n \
+            --arg ver "$VER" \
+            --arg notes "$NOTES" \
+            --arg date "$DATE" \
+            --arg base_url "$BASE_URL" \
+            --arg macos_bundle "$MACOS_BUNDLE" \
+            --arg linux_bundle "$LINUX_BUNDLE" \
+            --arg windows_bundle "$WINDOWS_BUNDLE" \
+            --arg sig_macos "$SIG_MACOS" \
+            --arg sig_linux "$SIG_LINUX" \
+            --arg sig_windows "$SIG_WINDOWS" \
+            '{
+              version: $ver,
+              notes: $notes,
+              pub_date: $date,
+              platforms: (
+                {
+                  "linux-x86_64": {
+                    url: ($base_url + "/" + $linux_bundle),
+                    signature: $sig_linux
+                  },
+                  "windows-x86_64": {
+                    url: ($base_url + "/" + $windows_bundle),
+                    signature: $sig_windows
+                  }
+                }
+                + (
+                  if $sig_macos == "" then
+                    {}
+                  else
+                    {
+                      "darwin-aarch64": {
+                        url: ($base_url + "/" + $macos_bundle),
+                        signature: $sig_macos
+                      },
+                      "darwin-x86_64": {
+                        url: ($base_url + "/" + $macos_bundle),
+                        signature: $sig_macos
+                      }
+                    }
+                  end
+                )
+              )
+            }' > releases-repo/desktop/latest.json
+
+      - name: Commit and push to releases repo
+        working-directory: releases-repo
+        run: |
+          set -euo pipefail
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git remote set-url origin "https://x-access-token:${RELEASES_PUSH_TOKEN}@github.com/beebeeb-io/releases.git"
+          git add desktop/latest.json
+
+          if git diff --cached --quiet; then
+            echo "desktop/latest.json already up to date"
+          else
+            git commit -m "desktop: update manifest $TAG"
+            git push
+          fi
+        env:
+          RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          TAG: desktop-v${{ github.event.inputs.version }}
