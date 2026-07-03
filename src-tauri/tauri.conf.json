@@ -16,7 +16,7 @@
         "title": "Beebeeb",
         "url": "index.html?window=tray",
         "width": 400,
-        "height": 390,
+        "height": 560,
         "resizable": false,
         "fullscreen": false,
         "visible": false,

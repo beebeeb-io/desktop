@@ -1147,6 +1147,29 @@ impl StateDb {
         Ok(())
     }
 
+    /// Clear transient transfer states left behind by a previous process.
+    ///
+    /// `Uploading` and `Downloading` mean "the current engine is actively moving
+    /// bytes". After a crash, abort, logout, or process kill there is no active
+    /// transfer owning those rows anymore, so startup must reconcile them before
+    /// tray/status snapshots count them as live work:
+    /// - `Downloading` falls back to `CloudOnly`; a later open/pin can rehydrate.
+    /// - `Uploading` becomes `Error`; the durable operation queue still carries
+    ///   any staged upload retry, but the row is not reported as in-flight.
+    pub fn reconcile_stale_in_flight_on_startup(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files
+             SET status = CASE status
+                WHEN 'downloading' THEN 'cloud_only'
+                WHEN 'uploading' THEN 'error'
+                ELSE status
+             END
+             WHERE status IN ('downloading', 'uploading')",
+            [],
+        )
+    }
+
     /// Apply a batch of native-Explorer-derived state deltas in ONE
     /// transaction. Each tuple is `(file_id, status_opt, pin_opt)` where a
     /// `Some` means "the on-disk placeholder disagrees with the DB, write this";
@@ -3114,6 +3137,29 @@ mod tests {
         let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
         assert!(pruned.is_empty());
         assert!(db.get_file("uploading-row").unwrap().is_some(), "uploading row never pruned");
+    }
+
+    #[test]
+    fn reconcile_stale_in_flight_on_startup_resets_transient_rows() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "stale-upload", FileStatus::Uploading, 10);
+        seed_own_row(&db, "stale-download", FileStatus::Downloading, 20);
+        seed_own_row(&db, "local", FileStatus::Local, 30);
+        seed_own_row(&db, "conflict", FileStatus::Conflict, 40);
+
+        let touched = db.reconcile_stale_in_flight_on_startup().unwrap();
+
+        assert_eq!(touched, 2);
+        assert_eq!(db.get_file("stale-upload").unwrap().unwrap().status, FileStatus::Error);
+        assert_eq!(
+            db.get_file("stale-download").unwrap().unwrap().status,
+            FileStatus::CloudOnly
+        );
+        assert_eq!(db.get_file("local").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(db.get_file("conflict").unwrap().unwrap().status, FileStatus::Conflict);
+        assert!(db.list_by_status(FileStatus::Uploading).unwrap().is_empty());
+        assert!(db.list_by_status(FileStatus::Downloading).unwrap().is_empty());
     }
 
     #[test]

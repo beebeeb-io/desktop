@@ -272,6 +272,7 @@ function relativeTime(epochSeconds: number): string {
 const WARN_STATUSES = new Set(['conflict', 'error'])
 const TRAY_RECENT_LIMIT = 50
 const TRAY_VIEW_ALL_THRESHOLD = 8
+const TRAY_RECENT_ROW_HEIGHT = 48
 const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
 const WINDOWS_APP_NAV_STORAGE_KEY = 'bb.windowsApp.nav'
 
@@ -391,6 +392,7 @@ export default function WindowsTray() {
         inset: 0,
         background: T.paper,
         border: `1px solid ${T.line}`,
+        boxSizing: 'border-box',
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
@@ -403,6 +405,8 @@ export default function WindowsTray() {
       <div
         style={{
           padding: '12px 12px 12px 14px',
+          height: 53,
+          boxSizing: 'border-box',
           display: 'flex',
           alignItems: 'center',
           gap: 10,
@@ -443,6 +447,8 @@ export default function WindowsTray() {
       <div
         style={{
           padding: '10px 14px',
+          height: 37,
+          boxSizing: 'border-box',
           display: 'flex',
           alignItems: 'center',
           gap: 8,
@@ -513,6 +519,8 @@ export default function WindowsTray() {
                   gridTemplateColumns: '30px 1fr auto',
                   alignItems: 'center',
                   gap: 10,
+                  height: TRAY_RECENT_ROW_HEIGHT,
+                  boxSizing: 'border-box',
                   padding: '9px 14px',
                   width: '100%',
                   background: 'transparent',
@@ -547,6 +555,7 @@ export default function WindowsTray() {
                   <div
                     style={{
                       fontSize: 11.5,
+                      lineHeight: 1.15,
                       fontWeight: 500,
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
@@ -562,7 +571,7 @@ export default function WindowsTray() {
                       fontSize: 11,
                       color: warn ? 'oklch(0.55 0.12 55)' : T.ink3,
                       marginTop: 2,
-                      lineHeight: 1.3,
+                      lineHeight: 1.2,
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
@@ -594,6 +603,8 @@ export default function WindowsTray() {
           onClick={() => void openActivity()}
           style={{
             flexShrink: 0,
+            height: 31,
+            boxSizing: 'border-box',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -626,6 +637,8 @@ export default function WindowsTray() {
       <div
         style={{
           borderTop: `1px solid ${T.line}`,
+          height: 52,
+          boxSizing: 'border-box',
           display: 'grid',
           gridTemplateColumns: '1fr 1fr 1fr',
           background: T.paper2,

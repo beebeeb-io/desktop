@@ -586,6 +586,18 @@ async fn run(
             return;
         }
     };
+    match db.reconcile_stale_in_flight_on_startup() {
+        Ok(0) => {}
+        Ok(touched) => {
+            tracing::info!(
+                touched,
+                "reconciled stale in-flight state rows from a previous engine session"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not reconcile stale in-flight state rows on startup");
+        }
+    }
 
     let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
     let bridge = Arc::new(EngineBridge::new(db.clone(), api.clone()));

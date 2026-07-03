@@ -509,11 +509,35 @@ impl EngineBridge {
         }
     }
 
-    async fn upload_version(&self, op: &PendingOperation, sync_root: &Path) -> anyhow::Result<()> {
+    async fn upload_version(
+        &self,
+        op: &PendingOperation,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    ) -> anyhow::Result<()> {
         let local_file_id = op
             .file_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("upload operation missing file_id"))?;
+        let previous_status = self.db.get_file(local_file_id)?.map(|entry| entry.status);
+        self.db.set_status(local_file_id, FileStatus::Uploading)?;
+
+        let result = self.do_upload_version(local_file_id, op, sync_root).await;
+        if result.is_err() {
+            let fallback_status = match previous_status {
+                Some(FileStatus::Conflict) => FileStatus::Conflict,
+                _ => FileStatus::Error,
+            };
+            let _ = self.db.set_status(local_file_id, fallback_status);
+        }
+        result
+    }
+
+    async fn do_upload_version(
+        &self,
+        local_file_id: &str,
+        op: &PendingOperation,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    ) -> anyhow::Result<()> {
         let payload_path = op
             .payload_path
             .as_deref()
@@ -5317,6 +5341,14 @@ mod tests {
     async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(
+            &bridge,
+            "file-1",
+            "Draft.txt",
+            None,
+            FileStatus::Uploading,
+            0,
+        );
         bridge
             .db
             .enqueue_operation(&PendingOperation {
@@ -5354,6 +5386,11 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .contains("staged upload payload is missing")
+        );
+        assert_eq!(
+            bridge.db.get_file("file-1").unwrap().unwrap().status,
+            FileStatus::Error,
+            "a failed/deferred upload must not remain counted as active Uploading"
         );
     }
 
