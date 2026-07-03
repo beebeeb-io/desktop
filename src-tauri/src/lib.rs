@@ -1,9 +1,10 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{
     Emitter, Manager, State,
     menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
@@ -4694,6 +4695,163 @@ async fn desktop_file_overview(
     Ok(overview)
 }
 
+// ── IPC commands: App Activity — local process resources (task 1191) ─────────
+
+static APP_ACTIVITY_MONITOR: LazyLock<Mutex<AppActivityMonitor>> =
+    LazyLock::new(|| Mutex::new(AppActivityMonitor::new()));
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AppActivitySnapshot {
+    pid: u32,
+    process_name: String,
+    cpu_percent: f32,
+    memory_rss_bytes: u64,
+    upload_bps: Option<u64>,
+    download_bps: Option<u64>,
+    throughput_sample_age_ms: Option<u64>,
+    throughput_period_secs: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessResourceSnapshot {
+    pid: u32,
+    process_name: String,
+    cpu_percent: f32,
+    memory_rss_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ThroughputSnapshot {
+    upload_bps: Option<u64>,
+    download_bps: Option<u64>,
+    sample_age_ms: Option<u64>,
+    period_secs: Option<u32>,
+}
+
+struct AppActivityMonitor {
+    system: System,
+    pid: sysinfo::Pid,
+}
+
+impl AppActivityMonitor {
+    fn new() -> Self {
+        let pid = sysinfo::get_current_pid().unwrap_or_else(|_| sysinfo::Pid::from_u32(std::process::id()));
+        Self {
+            system: System::new(),
+            pid,
+        }
+    }
+
+    fn process_snapshot(&mut self) -> Result<ProcessResourceSnapshot, String> {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[self.pid]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+
+        let process = self
+            .system
+            .process(self.pid)
+            .ok_or_else(|| format!("current process {} not found", self.pid))?;
+        let cpu_percent = process.cpu_usage();
+
+        Ok(ProcessResourceSnapshot {
+            pid: self.pid.as_u32(),
+            process_name: process.name().to_string_lossy().into_owned(),
+            cpu_percent: if cpu_percent.is_finite() {
+                cpu_percent.max(0.0)
+            } else {
+                0.0
+            },
+            memory_rss_bytes: process.memory(),
+        })
+    }
+}
+
+fn bandwidth_sample_rates(up_bytes: u64, down_bytes: u64, period_secs: u32) -> (u64, u64) {
+    if period_secs == 0 {
+        return (0, 0);
+    }
+    (up_bytes / period_secs as u64, down_bytes / period_secs as u64)
+}
+
+fn latest_app_activity_throughput_snapshot() -> Result<ThroughputSnapshot, String> {
+    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+        return Ok(ThroughputSnapshot {
+            upload_bps: None,
+            download_bps: None,
+            sample_age_ms: None,
+            period_secs: None,
+        });
+    }
+
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    if !db_path.exists() {
+        return Ok(ThroughputSnapshot {
+            upload_bps: None,
+            download_bps: None,
+            sample_age_ms: None,
+            period_secs: None,
+        });
+    }
+
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+    let Some(sample) = db
+        .latest_bandwidth_sample()
+        .map_err(|e| format!("latest bandwidth sample: {e}"))?
+    else {
+        return Ok(ThroughputSnapshot {
+            upload_bps: None,
+            download_bps: None,
+            sample_age_ms: None,
+            period_secs: None,
+        });
+    };
+
+    let (upload_bps, download_bps) = bandwidth_sample_rates(sample.up_bytes, sample.down_bytes, sample.period_secs);
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let sampled_at_secs = if sample.sampled_at > 0 {
+        sample.sampled_at as u64
+    } else {
+        0
+    };
+
+    Ok(ThroughputSnapshot {
+        upload_bps: Some(upload_bps),
+        download_bps: Some(download_bps),
+        sample_age_ms: Some(now_secs.saturating_sub(sampled_at_secs).saturating_mul(1000)),
+        period_secs: Some(sample.period_secs),
+    })
+}
+
+#[tauri::command]
+async fn app_activity_snapshot() -> Result<AppActivitySnapshot, String> {
+    let (process, throughput) = tokio::task::spawn_blocking(|| -> Result<_, String> {
+        let process = APP_ACTIVITY_MONITOR
+            .lock()
+            .map_err(|_| "app activity monitor mutex poisoned".to_string())?
+            .process_snapshot()?;
+        let throughput = latest_app_activity_throughput_snapshot()?;
+        Ok((process, throughput))
+    })
+    .await
+    .map_err(|e| format!("app activity snapshot task failed: {e}"))??;
+
+    Ok(AppActivitySnapshot {
+        pid: process.pid,
+        process_name: process.process_name,
+        cpu_percent: process.cpu_percent,
+        memory_rss_bytes: process.memory_rss_bytes,
+        upload_bps: throughput.upload_bps,
+        download_bps: throughput.download_bps,
+        throughput_sample_age_ms: throughput.sample_age_ms,
+        throughput_period_secs: throughput.period_secs,
+    })
+}
+
 // ── IPC commands: Bandwidth view — speedtest + history (task 0810) ───────────
 
 /// Result shape returned by [`run_speedtest`].
@@ -5520,6 +5678,7 @@ pub fn run() {
             desktop_trash_delete_permanently,
             account_storage_breakdown,
             desktop_file_overview,
+            app_activity_snapshot,
             // Task 0090 — selective sync
             get_selective_sync,
             set_selective_sync,
@@ -6554,5 +6713,11 @@ mod tests {
         ];
         let got = subtree_file_ids(&rows, &["A".to_string(), "B".to_string()]);
         assert_eq!(got, vec!["b1".to_string()]);
+    }
+
+    #[test]
+    fn bandwidth_sample_rates_convert_bytes_window_to_bytes_per_second() {
+        assert_eq!(super::bandwidth_sample_rates(1_500, 3_000, 3), (500, 1_000));
+        assert_eq!(super::bandwidth_sample_rates(1_500, 3_000, 0), (0, 0));
     }
 }

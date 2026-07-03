@@ -2192,6 +2192,27 @@ impl StateDb {
         self.get_bandwidth_history_since(now - hours as i64 * 3600)
     }
 
+    /// Fetch the newest bandwidth sample, if any.
+    pub fn latest_bandwidth_sample(&self) -> Result<Option<BandwidthSample>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT sampled_at, up_bytes, down_bytes, period_secs
+             FROM bandwidth_samples
+             ORDER BY sampled_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(BandwidthSample {
+            sampled_at: row.get(0)?,
+            up_bytes: row.get::<_, i64>(1)? as u64,
+            down_bytes: row.get::<_, i64>(2)? as u64,
+            period_secs: row.get::<_, i64>(3)? as u32,
+        }))
+    }
+
     /// Remove samples older than `cutoff_secs` (seconds-since-epoch) to bound DB size.
     pub fn prune_bandwidth_samples(&self, cutoff_secs: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -3623,6 +3644,25 @@ mod tests {
         // Samples are ordered oldest-first.
         assert!(all[0].sampled_at < all[1].sampled_at);
         assert!(all[1].sampled_at < all[2].sampled_at);
+    }
+
+    #[test]
+    fn latest_bandwidth_sample_returns_newest_row() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        assert!(db.latest_bandwidth_sample().unwrap().is_none());
+
+        let t0: i64 = 1_700_000_000;
+        db.insert_bandwidth_sample(t0, 100, 200, 20).unwrap();
+        db.insert_bandwidth_sample(t0 + 40, 500, 600, 20).unwrap();
+        db.insert_bandwidth_sample(t0 + 20, 300, 400, 20).unwrap();
+
+        let latest = db.latest_bandwidth_sample().unwrap().expect("latest sample");
+        assert_eq!(latest.sampled_at, t0 + 40);
+        assert_eq!(latest.up_bytes, 500);
+        assert_eq!(latest.down_bytes, 600);
+        assert_eq!(latest.period_secs, 20);
     }
 
     #[test]

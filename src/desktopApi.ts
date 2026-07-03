@@ -90,6 +90,17 @@ export interface StorageSummary {
   pinned_bytes: number
 }
 
+export interface AppActivitySnapshot {
+  pid: number
+  process_name: string
+  cpu_percent: number
+  memory_rss_bytes: number
+  upload_bps?: number | null
+  download_bps?: number | null
+  throughput_sample_age_ms?: number | null
+  throughput_period_secs?: number | null
+}
+
 export interface SharedRoot {
   id: string
   name: string
@@ -203,6 +214,10 @@ export async function openUrl(url: string): Promise<CommandResult<void>> {
 
 export async function checkForDesktopUpdatesNow(): Promise<CommandResult<ManualUpdateCheckResult>> {
   return command<ManualUpdateCheckResult>('check_for_updates_now')
+}
+
+export async function appActivitySnapshot(): Promise<CommandResult<AppActivitySnapshot>> {
+  return command<AppActivitySnapshot>('app_activity_snapshot')
 }
 
 export function formatBytes(bytes: number): string {
