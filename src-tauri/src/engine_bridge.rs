@@ -1145,15 +1145,47 @@ impl EngineBridge {
         // it is no longer a regular file there is nothing to upload.
         match std::fs::symlink_metadata(path) {
             Ok(m) if m.is_file() => {}
-            _ => return None,
+            Ok(m) => {
+                let file_type = m.file_type();
+                tracing::debug!(
+                    path = %path.display(),
+                    is_dir = file_type.is_dir(),
+                    is_symlink = file_type.is_symlink(),
+                    "classify_local_path: rejected non-regular file"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "classify_local_path: stat failed; skipping"
+                );
+                return None;
+            }
         }
 
         // Filter 1 — engine-internal paths + OS junk.
         if path_is_engine_internal(sync_root, path) {
+            tracing::debug!(
+                path = %path.display(),
+                "classify_local_path: rejected engine-internal path"
+            );
             return None;
         }
-        let file_name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            tracing::debug!(
+                path = %path.display(),
+                "classify_local_path: rejected path with non-utf8 filename"
+            );
+            return None;
+        };
         if is_ignored_finder_name(&file_name) {
+            tracing::debug!(
+                path = %path.display(),
+                filename = %file_name,
+                "classify_local_path: rejected ignored/temp filename"
+            );
             return None;
         }
 
@@ -1164,19 +1196,39 @@ impl EngineBridge {
         // upload.
         #[cfg(target_os = "windows")]
         if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
+            tracing::debug!(
+                path = %path.display(),
+                "classify_local_path: rejected Cloud Files placeholder"
+            );
             return None;
         }
 
         // Filter 3 (authoritative) — already a known server file?
-        let rel = relative_db_path(sync_root, path)?;
+        let Some(rel) = relative_db_path(sync_root, path) else {
+            tracing::debug!(
+                path = %path.display(),
+                sync_root = %sync_root.display(),
+                "classify_local_path: rejected path outside sync root"
+            );
+            return None;
+        };
         match self.db.get_file_by_path(&rel) {
             Ok(Some(_existing)) => {
-                tracing::trace!("classify_local_path: skipping write to already-tracked server file");
+                tracing::debug!(
+                    path = %path.display(),
+                    rel_path = %rel,
+                    "classify_local_path: rejected already-tracked server file"
+                );
                 return None;
             }
             Ok(None) => { /* genuinely new — fall through */ }
             Err(e) => {
-                tracing::warn!(error = %e, "classify_local_path: state DB lookup failed; skipping to be safe");
+                tracing::warn!(
+                    path = %path.display(),
+                    rel_path = %rel,
+                    error = %e,
+                    "classify_local_path: state DB lookup failed; skipping to be safe"
+                );
                 return None;
             }
         }
@@ -1186,6 +1238,12 @@ impl EngineBridge {
         // otherwise upload at the root (None). We never attach to a row that isn't
         // a folder.
         let parent_id = self.resolve_parent_id_for(sync_root, path);
+        tracing::debug!(
+            path = %path.display(),
+            rel_path = %rel,
+            nested = parent_id.is_some(),
+            "classify_local_path: accepted new local file"
+        );
 
         Some(FinderWriteTarget {
             file_id: None,
@@ -2810,10 +2868,31 @@ fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) ->
 }
 
 fn default_finder_staging_root() -> PathBuf {
-    dirs::cache_dir()
+    let primary = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("beebeeb")
-        .join("finder-writes")
+        .join("finder-writes");
+    match verify_staging_root_writable(&primary) {
+        Ok(()) => primary,
+        Err(e) => {
+            let fallback = std::env::temp_dir().join("beebeeb").join("finder-writes");
+            tracing::warn!(
+                path = %primary.display(),
+                fallback = %fallback.display(),
+                error = %e,
+                "Finder staging cache root is unavailable; falling back to temp directory"
+            );
+            fallback
+        }
+    }
+}
+
+fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    let probe = root.join(format!(".beebeeb-write-test-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&probe, b"")?;
+    let _ = std::fs::remove_file(probe);
+    Ok(())
 }
 
 fn sanitize_staging_name(name: &str) -> String {

@@ -445,6 +445,11 @@ async fn scan_loop(
 fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &mut std::collections::HashSet<PathBuf>) {
     let mut seen_on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut dispatched = 0usize;
+    tracing::debug!(
+        sync_root = %sync_root.display(),
+        in_flight = in_flight.len(),
+        "enumeration scan: starting pass"
+    );
 
     // Live known-folder-backup gate (task 0811 review fix for the disable race).
     // The mirror copies files onto disk, but it can be racing a DISABLE: a file
@@ -490,11 +495,19 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             // Don't scaffold (enqueue CreateFolder for) a disabled backup folder's
             // subtree — same disable-race gate as files.
             if backup_disabled(dir_path) {
+                tracing::debug!(
+                    path = %dir_path.display(),
+                    "enumeration scan: skipped disabled backup directory"
+                );
                 return;
             }
             bridge.ensure_local_folder(sync_root, dir_path);
         },
         &mut |file_path| {
+            tracing::debug!(
+                path = %file_path.display(),
+                "enumeration scan: found file"
+            );
             seen_on_disk.insert(file_path.to_path_buf());
 
             // Already dispatched this lifetime and not yet reflected as a DB row?
@@ -502,6 +515,10 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             // reject it once the row lands, but this avoids the work + repeated
             // CfConvertToPlaceholder churn in the meantime.
             if in_flight.contains(file_path) {
+                tracing::debug!(
+                    path = %file_path.display(),
+                    "enumeration scan: skipped in-flight file"
+                );
                 return;
             }
 
@@ -511,6 +528,10 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             // never re-enqueues, even across restarts. (When the user re-enables,
             // the key returns to the set and the next scan picks it back up.)
             if backup_disabled(file_path) {
+                tracing::debug!(
+                    path = %file_path.display(),
+                    "enumeration scan: skipped disabled backup file"
+                );
                 return;
             }
 
@@ -520,12 +541,22 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             // parent folders keep getting scaffolded) but stop dispatching files —
             // the next pass picks up the remainder.
             if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
+                tracing::debug!(
+                    path = %file_path.display(),
+                    max_new_uploads = MAX_NEW_UPLOADS_PER_SCAN,
+                    "enumeration scan: skipped file due to per-scan upload cap"
+                );
                 return;
             }
 
             if dispatch_local_create(bridge, sync_root, file_path, "scan") {
                 in_flight.insert(file_path.to_path_buf());
                 dispatched += 1;
+            } else {
+                tracing::debug!(
+                    path = %file_path.display(),
+                    "enumeration scan: file was not queued"
+                );
             }
         },
     );
@@ -567,13 +598,21 @@ fn walk_dir(
     // Skip the whole engine-internal subtree up front (`.beebeeb/` etc.) so we
     // never even read its children — cheaper and impossible to misclassify.
     if crate::engine_bridge::path_is_engine_internal(sync_root, dir) {
+        tracing::debug!(
+            path = %dir.display(),
+            "enumeration scan: skipped engine-internal directory"
+        );
         return;
     }
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            tracing::trace!(error = %e, "enumeration scan: read_dir failed; skipping directory");
+            tracing::debug!(
+                path = %dir.display(),
+                error = %e,
+                "enumeration scan: read_dir failed; skipping directory"
+            );
             return;
         }
     };
@@ -582,7 +621,11 @@ fn walk_dir(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                tracing::trace!(error = %e, "enumeration scan: dir entry error; skipping");
+                tracing::debug!(
+                    path = %dir.display(),
+                    error = %e,
+                    "enumeration scan: dir entry error; skipping"
+                );
                 continue;
             }
         };
@@ -591,6 +634,10 @@ fn walk_dir(
         // Engine-internal guard per entry too (the lock file at the root, a
         // nested `.beebeeb`). Cheap and defensive.
         if crate::engine_bridge::path_is_engine_internal(sync_root, &path) {
+            tracing::debug!(
+                path = %path.display(),
+                "enumeration scan: skipped engine-internal entry"
+            );
             continue;
         }
 
@@ -600,12 +647,20 @@ fn walk_dir(
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) => {
-                tracing::trace!(error = %e, "enumeration scan: stat failed; skipping entry");
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "enumeration scan: stat failed; skipping entry"
+                );
                 continue;
             }
         };
         let ft = meta.file_type();
         if ft.is_symlink() {
+            tracing::debug!(
+                path = %path.display(),
+                "enumeration scan: skipped symlink"
+            );
             continue;
         }
         if ft.is_dir() {
@@ -615,6 +670,11 @@ fn walk_dir(
             walk_dir(sync_root, &path, depth + 1, on_dir, on_file);
         } else if ft.is_file() {
             on_file(&path);
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                "enumeration scan: skipped non-file entry"
+            );
         }
         // Other entry kinds (sockets, devices) are ignored.
     }
@@ -657,20 +717,6 @@ fn dispatch_local_create(
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let nested = target.parent_id.is_some();
 
-    // Windows: hand the new plain file to the Cloud Files filter as an UNSYNCED
-    // placeholder BEFORE we queue the upload, so the filter doesn't
-    // reclaim/dehydrate it while the transfer loop reads its bytes. No
-    // MARK_IN_SYNC — it isn't on the server yet; `finalize_local_upload_placeholder`
-    // re-stamps it in-sync (with the real server file_id) once the upload lands.
-    // Best-effort: a failure leaves a working plain file that still uploads.
-    #[cfg(target_os = "windows")]
-    {
-        let local_id = uuid::Uuid::new_v4().to_string();
-        if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id) {
-            tracing::warn!(error = %e, source, "upload driver: could not pre-convert new file to unsynced placeholder");
-        }
-    }
-
     // `queue_finder_create` stages a copy of the bytes, derives the per-file key
     // inside the transfer loop via beebeeb-core, and encrypts on upload — we
     // reuse it wholesale and never touch crypto here. It also upserts an
@@ -678,6 +724,24 @@ fn dispatch_local_create(
     // `classify_local_path` (filter 3) rejects this path → no double upload.
     match bridge.queue_finder_create(target) {
         Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+            // Windows: queue/stage FIRST, then hand the local file to Cloud Files
+            // as an UNSYNCED placeholder. If staging ever fails, the file stays a
+            // plain local file and a later scan can retry. Converting before the
+            // row exists can poison that retry path: the next scan sees a
+            // placeholder with no DB row and `classify_local_path` correctly
+            // rejects it as engine-owned.
+            #[cfg(target_os = "windows")]
+            {
+                let local_id = uuid::Uuid::new_v4().to_string();
+                if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id) {
+                    tracing::warn!(
+                        error = %e,
+                        op_id = %op_id,
+                        source,
+                        "upload driver: could not post-queue convert new file to unsynced placeholder"
+                    );
+                }
+            }
             // Zero-knowledge: log the op id, never the decrypted filename.
             tracing::info!(op_id = %op_id, size, nested, source, "upload driver: queued new local file for encrypted upload");
             true
@@ -809,8 +873,11 @@ async fn handle_rename(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_client::ApiClient;
+    use crate::state_db::{FileStatus, OperationKind, StateDb};
     use std::collections::HashSet;
     use std::fs;
+    use std::sync::Arc;
 
     #[test]
     fn engine_delete_suppression_is_consumed_once() {
@@ -918,6 +985,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let found = walked_rel(dir.path());
         assert!(found.is_empty(), "an empty root yields no files");
+    }
+
+    fn test_bridge(db_path: &std::path::Path) -> (Arc<StateDb>, EngineBridge) {
+        let db = Arc::new(StateDb::open(db_path).unwrap());
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [17u8; 32],
+        ));
+        let bridge = EngineBridge::new(db.clone(), api);
+        (db, bridge)
+    }
+
+    fn assert_uploading_row(db: &StateDb, rel_path: &str, expected_bytes: i64) {
+        let row = db
+            .get_file_by_path(rel_path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected Uploading state.db row for {rel_path}"));
+        assert_eq!(row.path, rel_path);
+        assert_eq!(row.status, FileStatus::Uploading);
+        assert_eq!(row.size_bytes, expected_bytes);
+
+        let queued = db.list_due_operations(i64::MAX).unwrap();
+        assert!(
+            queued.iter().any(|op| {
+                op.kind == OperationKind::UploadVersion && op.target_path.as_deref() == Some(rel_path)
+            }),
+            "expected queued upload_version operation for {rel_path}, got: {queued:?}"
+        );
+    }
+
+    #[test]
+    fn scan_queues_direct_explorer_drop_as_uploading_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync-root");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&sync_root).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        let (db, bridge) = test_bridge(&state_dir.join("state.db"));
+
+        let file = sync_root.join("direct-write.txt");
+        fs::write(&file, b"direct explorer payload").unwrap();
+
+        let mut in_flight = HashSet::new();
+        run_one_scan(&bridge, &sync_root, &mut in_flight);
+
+        assert_uploading_row(&db, "direct-write.txt", 23);
+    }
+
+    #[test]
+    fn scan_queues_atomic_temp_rename_explorer_drop_as_uploading_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync-root");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&sync_root).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        let (db, bridge) = test_bridge(&state_dir.join("state.db"));
+
+        let temp_file = sync_root.join("renamed-write.txt.tmp");
+        let final_file = sync_root.join("renamed-write.txt");
+        fs::write(&temp_file, b"atomic rename explorer payload").unwrap();
+
+        let mut in_flight = HashSet::new();
+        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        assert!(
+            db.get_file_by_path("renamed-write.txt.tmp").unwrap().is_none(),
+            "temporary Explorer copy name must not be queued"
+        );
+
+        fs::rename(&temp_file, &final_file).unwrap();
+        run_one_scan(&bridge, &sync_root, &mut in_flight);
+
+        assert_uploading_row(&db, "renamed-write.txt", 30);
     }
 
     #[cfg(unix)]
