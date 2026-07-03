@@ -5120,11 +5120,47 @@ const WINDOWS_TRAY_FLYOUT_HEIGHT: u32 = 560;
 const WINDOWS_TRAY_FLYOUT_GAP: i32 = 10;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn windows_tray_flyout_position(click_x: f64, click_y: f64) -> tauri::PhysicalPosition<i32> {
+fn windows_tray_flyout_position(
+    click_x: f64,
+    click_y: f64,
+    scale_factor: f64,
+) -> tauri::PhysicalPosition<i32> {
+    let scale_factor = valid_windows_tray_scale_factor(scale_factor);
+    let physical_width = (WINDOWS_TRAY_FLYOUT_WIDTH as f64 * scale_factor).round() as i32;
+    let physical_height = (WINDOWS_TRAY_FLYOUT_HEIGHT as f64 * scale_factor).round() as i32;
+    let physical_gap = (WINDOWS_TRAY_FLYOUT_GAP as f64 * scale_factor).round() as i32;
+
     tauri::PhysicalPosition {
-        x: (click_x as i32).saturating_sub(WINDOWS_TRAY_FLYOUT_WIDTH as i32),
-        y: (click_y as i32).saturating_sub(WINDOWS_TRAY_FLYOUT_HEIGHT as i32 + WINDOWS_TRAY_FLYOUT_GAP),
+        x: (click_x.round() as i32).saturating_sub(physical_width).max(0),
+        y: (click_y.round() as i32).saturating_sub(physical_height.saturating_add(physical_gap)),
     }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn valid_windows_tray_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click_x: f64, click_y: f64) -> f64 {
+    let click_monitor_scale = win
+        .monitor_from_point(click_x, click_y)
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
+        .filter(|scale_factor| scale_factor.is_finite() && *scale_factor > 0.0);
+
+    click_monitor_scale
+        .or_else(|| {
+            win.scale_factor()
+                .ok()
+                .filter(|scale_factor| scale_factor.is_finite() && *scale_factor > 0.0)
+        })
+        .unwrap_or(1.0)
 }
 
 fn window_state_denylist_labels() -> &'static [&'static str] {
@@ -5672,15 +5708,15 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                             let _ = win.hide();
                         } else {
                             // Position the flyout above the tray icon.
-                            // The window is 400x560; place it so the bottom-right
-                            // corner aligns with the click position (tray icon centre).
-                            // The tray event's `position` is already in physical
-                            // pixels, so we pass `Position::Physical` and offset in
-                            // the same (physical) coordinate space — no DPI
-                            // conversion needed here. The Y offset matches the
-                            // window height (+ a small gap) so the flyout sits
-                            // above, not over, the taskbar.
-                            let flyout_position = windows_tray_flyout_position(position.x, position.y);
+                            // The tray event's position is physical desktop
+                            // coordinates. The tray window size in tauri.conf.json
+                            // is logical, so resolve the scale from the monitor
+                            // containing the click; this handles a tray on a
+                            // non-primary monitor or a hidden window whose current
+                            // monitor is stale. If monitor lookup fails, fall back
+                            // to the window scale, then 1.0.
+                            let scale_factor = windows_tray_flyout_scale_factor(&win, position.x, position.y);
+                            let flyout_position = windows_tray_flyout_position(position.x, position.y, scale_factor);
                             let _ = win.set_position(tauri::Position::Physical(flyout_position));
                             let _ = win.show();
                             let _ = win.set_focus();
@@ -5999,10 +6035,26 @@ mod tests {
 
     #[test]
     fn tray_flyout_position_uses_configured_height_and_gap() {
-        let position = super::windows_tray_flyout_position(1_920.0, 1_080.0);
+        let cases = [
+            (1.0, 3_840.0, 2_160.0, 3_440, 1_590),
+            (1.5, 3_840.0, 2_160.0, 3_240, 1_305),
+            (2.0, 3_840.0, 2_160.0, 3_040, 1_020),
+        ];
 
-        assert_eq!(position.x, 1_520);
-        assert_eq!(position.y, 510);
+        for (scale_factor, click_x, click_y, expected_x, expected_y) in cases {
+            let position = super::windows_tray_flyout_position(click_x, click_y, scale_factor);
+
+            assert_eq!(position.x, expected_x, "x at scale factor {scale_factor}");
+            assert_eq!(position.y, expected_y, "y at scale factor {scale_factor}");
+        }
+    }
+
+    #[test]
+    fn tray_flyout_position_clamps_to_left_screen_edge() {
+        let position = super::windows_tray_flyout_position(250.0, 1_080.0, 1.5);
+
+        assert_eq!(position.x, 0);
+        assert_eq!(position.y, 225);
     }
 
     #[test]
