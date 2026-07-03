@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   accountNotificationPreferences,
   accountUpdateNotificationPreferences,
+  checkForDesktopUpdatesNow,
   command,
   commandUnavailableLabel,
   formatBytes,
@@ -19,6 +20,11 @@ import {
   settingLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
+import {
+  buildUpdateCheckViewModel,
+  stateFromManualUpdateResult,
+  type ManualUpdateCheckState,
+} from '../updateCheckViewModel'
 import { T, Card, Chip, NavIcon, PageHeader, PrimaryBtn, Skeleton } from '../ui'
 import { useRegionCity } from '../useRegion'
 
@@ -575,7 +581,12 @@ function UpdatesPanel({
   notice: string | null
 }) {
   const [version, setVersion] = useState<string | null>(null)
+  const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
+  const updateCheckRequestRef = useRef(0)
   const releaseChannel = config.release_channel ?? 'stable'
+  const updateCheckView = buildUpdateCheckViewModel(updateCheckState, version, releaseChannel)
+  const updateCheckBusy = updateCheckState.kind === 'checking'
+  const updateCheckError = updateCheckState.kind === 'error'
 
   useEffect(() => {
     let cancelled = false
@@ -585,6 +596,31 @@ function UpdatesPanel({
     return () => { cancelled = true }
   }, [])
 
+  const handleReleaseChannelChange = (channel: ReleaseChannelValue) => {
+    if (channel === releaseChannel) return
+    updateCheckRequestRef.current += 1
+    setUpdateCheckState({ kind: 'idle' })
+    onConfigChange({ release_channel: channel })
+  }
+
+  const handleCheckForUpdates = async () => {
+    const requestId = updateCheckRequestRef.current + 1
+    updateCheckRequestRef.current = requestId
+    setUpdateCheckState({ kind: 'checking' })
+
+    const result = await checkForDesktopUpdatesNow()
+    if (updateCheckRequestRef.current !== requestId) return
+
+    if (result.ok) {
+      setUpdateCheckState(stateFromManualUpdateResult(result.value))
+    } else {
+      setUpdateCheckState({
+        kind: 'error',
+        reason: result.unsupported ? commandUnavailableLabel('check_for_updates_now') : result.reason,
+      })
+    }
+  }
+
   return (
     <SettingsSectionShell>
       <PageHeader
@@ -592,15 +628,46 @@ function UpdatesPanel({
         subtitle="Beebeeb checks for updates at launch and every 4 hours. When one is available, the banner appears at the top of the app."
       />
 
-      <Card style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 18px', background: T.paper2, marginBottom: 16 }}>
+      <Card style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr) auto auto', alignItems: 'center', gap: 14, padding: '16px 18px', background: T.paper2, marginBottom: 16 }}>
         <div style={{ width: 36, height: 36, borderRadius: 9, background: T.paper, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <NavIcon name="download" size={15} color={T.amberDeep} />
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{version != null ? `Version ${version}` : 'Loading...'}</div>
-          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4, fontFamily: T.fontMono }}>Up to date</div>
+        <div role={updateCheckError ? 'alert' : 'status'} aria-live="polite" style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{updateCheckView.title}</div>
+          <div style={{ fontSize: 11.5, color: updateCheckError ? RED : T.ink3, lineHeight: 1.4, fontFamily: T.fontMono, wordBreak: 'break-word' as const }}>
+            {updateCheckView.detail}
+          </div>
         </div>
-        <Chip tone="green">Up to date</Chip>
+        <Chip tone={updateCheckView.tone}>{updateCheckView.chip}</Chip>
+        <button
+          type="button"
+          onClick={() => void handleCheckForUpdates()}
+          disabled={updateCheckBusy}
+          aria-busy={updateCheckBusy}
+          style={{
+            minWidth: 142,
+            height: 32,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 7,
+            padding: '0 13px',
+            fontSize: 12,
+            fontFamily: T.fontSans,
+            fontWeight: 600,
+            borderRadius: 6,
+            border: `1px solid ${T.amberDeep}`,
+            background: updateCheckBusy ? T.amberBg : T.amber,
+            color: T.ink,
+            cursor: updateCheckBusy ? 'progress' : 'pointer',
+            opacity: updateCheckBusy ? 0.72 : 1,
+            whiteSpace: 'nowrap' as const,
+            flexShrink: 0,
+          }}
+        >
+          <NavIcon name="download" size={12} color={T.ink} />
+          {updateCheckBusy ? 'Checking...' : 'Check for updates'}
+        </button>
       </Card>
 
       <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
@@ -633,7 +700,7 @@ function UpdatesPanel({
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  onClick={() => onConfigChange({ release_channel: channel.value })}
+                  onClick={() => handleReleaseChannelChange(channel.value)}
                   style={{
                     minWidth: 0,
                     height: 28,

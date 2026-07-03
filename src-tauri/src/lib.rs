@@ -4954,10 +4954,102 @@ fn real_app_version() -> &'static str {
     option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct UpdateAvailablePayload {
+    version: String,
+    channel: String,
+    body: String,
+    release_notes_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ManualUpdateCheckResult {
+    UpToDate {
+        current_version: String,
+        channel: String,
+    },
+    UpdateAvailable {
+        current_version: String,
+        channel: String,
+        version: String,
+        body: String,
+        release_notes_url: String,
+    },
+}
+
+fn manual_update_up_to_date_result(channel: ReleaseChannel) -> ManualUpdateCheckResult {
+    ManualUpdateCheckResult::UpToDate {
+        current_version: real_app_version().to_string(),
+        channel: channel.as_str().to_string(),
+    }
+}
+
+fn manual_update_available_result(
+    channel: ReleaseChannel,
+    version: String,
+    body: Option<&str>,
+) -> (ManualUpdateCheckResult, UpdateAvailablePayload) {
+    let body = body.unwrap_or("").to_string();
+    let release_notes_url = release_notes_url_for_version(&version);
+    let channel = channel.as_str().to_string();
+    let payload = UpdateAvailablePayload {
+        version: version.clone(),
+        channel: channel.clone(),
+        body: body.clone(),
+        release_notes_url: release_notes_url.clone(),
+    };
+
+    (
+        ManualUpdateCheckResult::UpdateAvailable {
+            current_version: real_app_version().to_string(),
+            channel,
+            version,
+            body,
+            release_notes_url,
+        },
+        payload,
+    )
+}
+
 /// Returns the app version string — displayed in the web UI Settings page.
 #[tauri::command]
 fn app_version() -> &'static str {
     real_app_version()
+}
+
+/// Manually check the currently selected release channel and report an honest
+/// status to Settings. If an update is available, emit the same banner event
+/// used by the background updater so the existing one-click flow takes over.
+#[tauri::command]
+async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateCheckResult, String> {
+    let channel = configured_release_channel();
+    let updater = updater_for_release_channel(&app, channel)
+        .map_err(|e| format!("Could not prepare the {} update check: {e}", channel.as_str()))?;
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.to_string();
+            tracing::info!(
+                version = %version,
+                channel = %channel.as_str(),
+                "manual update check found an update"
+            );
+
+            let (result, payload) =
+                manual_update_available_result(channel, version, update.body.as_deref());
+            let _ = app.emit("update-available", payload);
+            Ok(result)
+        }
+        Ok(None) => {
+            tracing::info!(channel = %channel.as_str(), "manual update check found no update");
+            Ok(manual_update_up_to_date_result(channel))
+        }
+        Err(error) => Err(format!(
+            "Could not reach the {} update manifest: {error}",
+            channel.as_str()
+        )),
+    }
 }
 
 /// Download and install the pending update, then relaunch.
@@ -5068,6 +5160,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
         .invoke_handler(tauri::generate_handler![
             app_version,
+            check_for_updates_now,
             install_update,
             toggle_autostart,
             autostart_enabled,
@@ -5713,8 +5806,10 @@ mod tests {
     use super::{
         AppState, VaultEntryRow, build_vault_tree, classify_finder_install_error, clear_cached_profile,
         desktop_manifest_path_for_channel, finder_install_state_from_config, folder_leaf_name,
-        is_disposable_cache_path, newly_excluded_ids, normalize_recovery_phrase_input,
-        release_channel_from_version, should_offer_channel_update, subtree_file_ids,
+        is_disposable_cache_path, manual_update_available_result, manual_update_up_to_date_result,
+        newly_excluded_ids, normalize_recovery_phrase_input, real_app_version,
+        release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
+        subtree_file_ids, ManualUpdateCheckResult, UpdateAvailablePayload,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::ReleaseChannel;
@@ -5948,6 +6043,46 @@ mod tests {
         assert!(
             should_offer_channel_update("0.2.0-beta.1", "0.2.0-beta.2"),
             "newer prerelease builds on the selected channel should still be offered"
+        );
+    }
+
+    #[test]
+    fn manual_update_check_result_reports_current_version_and_selected_channel() {
+        assert_eq!(
+            manual_update_up_to_date_result(ReleaseChannel::Beta),
+            ManualUpdateCheckResult::UpToDate {
+                current_version: real_app_version().to_string(),
+                channel: "beta".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn manual_update_available_result_reuses_banner_payload_shape() {
+        let (result, payload) = manual_update_available_result(
+            ReleaseChannel::Alpha,
+            "0.2.0-alpha.3".to_string(),
+            Some("Alpha notes"),
+        );
+
+        assert_eq!(
+            payload,
+            UpdateAvailablePayload {
+                version: "0.2.0-alpha.3".to_string(),
+                channel: "alpha".to_string(),
+                body: "Alpha notes".to_string(),
+                release_notes_url: release_notes_url_for_version("0.2.0-alpha.3"),
+            }
+        );
+        assert_eq!(
+            result,
+            ManualUpdateCheckResult::UpdateAvailable {
+                current_version: real_app_version().to_string(),
+                channel: "alpha".to_string(),
+                version: "0.2.0-alpha.3".to_string(),
+                body: "Alpha notes".to_string(),
+                release_notes_url: release_notes_url_for_version("0.2.0-alpha.3"),
+            }
         );
     }
 

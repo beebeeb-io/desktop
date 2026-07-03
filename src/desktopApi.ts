@@ -18,6 +18,21 @@ export interface SyncStatus {
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
 export type ReleaseChannel = 'stable' | 'beta' | 'alpha'
 
+export type ManualUpdateCheckResult =
+  | {
+      status: 'up_to_date'
+      current_version: string
+      channel: ReleaseChannel
+    }
+  | {
+      status: 'update_available'
+      current_version: string
+      channel: ReleaseChannel
+      version: string
+      body: string
+      release_notes_url: string
+    }
+
 export interface DesktopConfig {
   upload_kbps_limit: number
   download_kbps_limit: number
@@ -179,6 +194,10 @@ export async function openUrl(url: string): Promise<CommandResult<void>> {
   if (opened.ok) return opened
   window.open(url, '_blank', 'noopener,noreferrer')
   return opened
+}
+
+export async function checkForDesktopUpdatesNow(): Promise<CommandResult<ManualUpdateCheckResult>> {
+  return command<ManualUpdateCheckResult>('check_for_updates_now')
 }
 
 export function formatBytes(bytes: number): string {
