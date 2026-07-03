@@ -21,6 +21,27 @@ type Page =
   | 'bandwidth'
   | 'notifications'
 
+const COMPACT_APP_NAV_EVENT = 'compact-app:navigate'
+const PAGE_IDS: ReadonlySet<string> = new Set([
+  'status',
+  'finder',
+  'selective-sync',
+  'shared',
+  'versions',
+  'account',
+  'bandwidth',
+  'notifications',
+])
+
+function pageFromString(value: string | null): Page | null {
+  return value != null && PAGE_IDS.has(value) ? (value as Page) : null
+}
+
+function initialPage(): Page {
+  const params = new URLSearchParams(window.location.search)
+  return pageFromString(params.get('nav')) ?? 'status'
+}
+
 const NAV: Array<{ id: Page; label: string; icon: string }> = [
   { id: 'status', label: 'Status', icon: '●' },
   { id: 'finder', label: 'Finder location', icon: '⌂' },
@@ -33,7 +54,7 @@ const NAV: Array<{ id: Page; label: string; icon: string }> = [
 ]
 
 export default function App() {
-  const [page, setPage] = useState<Page>('status')
+  const [page, setPage] = useState<Page>(() => initialPage())
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [version, setVersion] = useState<string | null>(null)
   const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)
@@ -75,6 +96,11 @@ export default function App() {
         if (cancelled) return
         setPage('versions')
         setVersionCenterRefresh((value) => value + 1)
+      }),
+      listen<string>(COMPACT_APP_NAV_EVENT, (event) => {
+        if (cancelled) return
+        const next = pageFromString(event.payload)
+        if (next != null) setPage(next)
       }),
     ])
     return () => {

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,13 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{
     Emitter, Manager, State,
-    menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
+    menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
-#[cfg(not(target_os = "macos"))]
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
 mod account;
@@ -162,6 +162,10 @@ pub struct AppState {
     /// whenever no 2FA challenge is in flight. Stays on `AppState`: during the
     /// challenge there is no account yet to attach it to.
     pending_2fa: Mutex<Option<Pending2fa>>,
+    /// Last native-menu zoom scale applied to WebViews. Tauri exposes
+    /// `set_zoom` but not a readback API, so the menu owns this small bit of
+    /// process state.
+    pub menu_zoom_scale: Mutex<f64>,
 }
 
 impl AppState {
@@ -203,6 +207,7 @@ impl Default for AppState {
             active_account_id: Mutex::new(None),
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
+            menu_zoom_scale: Mutex::new(1.0),
         }
     }
 }
@@ -495,13 +500,13 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
     start_engine_if_possible(app.clone(), &state, token, master_key).await;
 }
 
-fn set_auth_present(state: &State<'_, AppState>, present: bool) {
+fn set_auth_present(state: &AppState, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
         *guard = present;
     }
 }
 
-fn set_auth_email(state: &State<'_, AppState>, email: Option<String>) {
+fn set_auth_email(state: &AppState, email: Option<String>) {
     // Per-account (decision 0800): the signed-in address belongs to the active
     // account, not the process. No active account (registry not synthesized) is
     // a silent no-op, mirroring the old poisoned-mutex swallow.
@@ -1050,13 +1055,11 @@ pub(crate) async fn apply_session(
     Ok(())
 }
 
-/// Drop any cached session and abort the engine if running. Called by
-/// the WebView on logout. Returns `Ok(())` even if the session mutex
-/// was poisoned, because logout should always appear to succeed from
-/// the user's POV — the only error path Tauri requires here is for
-/// the macro's async-with-state contract.
-#[tauri::command]
-async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
+/// Drop any cached session and abort the engine if running.
+///
+/// Shared by the WebView IPC command and the native menu "Sign out" item so
+/// both routes have the exact same security side-effects.
+async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     let acct = state.active_account()?;
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
@@ -1106,9 +1109,19 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
         *guard = "stopped".to_string();
     }
     clear_keychain_session(acct.id.as_str())?;
-    set_auth_present(&state, false);
-    set_auth_email(&state, None);
+    set_auth_present(state, false);
+    set_auth_email(state, None);
     Ok(())
+}
+
+/// Drop any cached session and abort the engine if running. Called by
+/// the WebView on logout. Returns `Ok(())` even if the session mutex
+/// was poisoned, because logout should always appear to succeed from
+/// the user's POV — the only error path Tauri requires here is for
+/// the macro's async-with-state contract.
+#[tauri::command]
+async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
+    clear_session_impl(&state).await
 }
 
 /// Restore a Keychain-backed session into memory and start the engine for the
@@ -3142,31 +3155,184 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
 ///
 /// Emits an `engine-status` event with `state = "paused"` so the tray
 /// tooltip and any open app window update immediately.
-#[tauri::command]
-async fn tray_pause_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.active_account()?.sync_paused.store(true, Ordering::Relaxed);
+async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.active_account()?.sync_paused.store(paused, Ordering::Relaxed);
     // Persist so the paused state survives a restart.
     let mut cfg = DesktopConfig::load()?;
-    cfg.pause_sync = true;
+    cfg.pause_sync = paused;
     cfg.save()?;
     // Notify the WebView + tray tooltip listener.
-    let _ = app.emit("engine-status", serde_json::json!({ "state": "paused" }));
-    tracing::info!("sync paused via tray");
+    let event_state = if paused { "paused" } else { "idle" };
+    let _ = app.emit("engine-status", serde_json::json!({ "state": event_state }));
+    tracing::info!(paused, "sync pause state changed");
     Ok(())
+}
+
+#[tauri::command]
+async fn tray_pause_sync(app: tauri::AppHandle) -> Result<(), String> {
+    set_sync_paused(&app, true).await
 }
 
 /// Resume the sync engine. Clears the `sync_paused` flag so the runner's
 /// next tick proceeds normally. Persists `pause_sync = false` to
 /// `desktop.toml`. Emits an `engine-status` event with `state = "idle"`.
 #[tauri::command]
-async fn tray_resume_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.active_account()?.sync_paused.store(false, Ordering::Relaxed);
-    let mut cfg = DesktopConfig::load()?;
-    cfg.pause_sync = false;
-    cfg.save()?;
-    let _ = app.emit("engine-status", serde_json::json!({ "state": "idle" }));
-    tracing::info!("sync resumed via tray");
-    Ok(())
+async fn tray_resume_sync(app: tauri::AppHandle) -> Result<(), String> {
+    set_sync_paused(&app, false).await
+}
+
+async fn toggle_sync_paused_from_menu(app: &tauri::AppHandle) -> Result<(), String> {
+    let paused = DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false);
+    set_sync_paused(app, !paused).await
+}
+
+#[tauri::command]
+async fn upload_files_to_sync_root(app: tauri::AppHandle) -> Result<usize, String> {
+    upload_files_to_sync_root_impl(&app)
+}
+
+#[tauri::command]
+fn create_folder_in_sync_root(app: tauri::AppHandle) -> Result<String, String> {
+    let path = create_folder_in_sync_root_impl(&app)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn report_problem(app: tauri::AppHandle) -> Result<String, String> {
+    let path = report_problem_impl(&app)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn sync_root_for_menu_file_action() -> Result<PathBuf, String> {
+    let root = DesktopConfig::load()
+        .ok()
+        .and_then(|cfg| cfg.sync_root)
+        .unwrap_or_else(config::default_sync_root_suggestion);
+    config::ensure_directory(&root)?;
+    Ok(root)
+}
+
+fn upload_files_to_sync_root_impl(app: &tauri::AppHandle) -> Result<usize, String> {
+    let sync_root = sync_root_for_menu_file_action()?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Upload files to Beebeeb")
+        .blocking_pick_files()
+        .unwrap_or_default();
+
+    let mut copied = 0usize;
+    for file in selected {
+        let source = file
+            .into_path()
+            .map_err(|e| format!("resolve selected file path: {e}"))?;
+        if !source.is_file() {
+            continue;
+        }
+        let Some(name) = source.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let destination = unused_child_path(&sync_root, &name)?;
+        std::fs::copy(&source, &destination).map_err(|e| {
+            format!(
+                "copy selected file into Beebeeb folder ({} -> {}): {e}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        copied += 1;
+    }
+
+    if copied > 0 {
+        let _ = app.emit("menu:files-added", serde_json::json!({ "count": copied }));
+        let _ = open_finder_location(Some(sync_root.to_string_lossy().into_owned()));
+    }
+
+    Ok(copied)
+}
+
+fn create_folder_in_sync_root_impl(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let sync_root = sync_root_for_menu_file_action()?;
+    let path = unused_child_path(&sync_root, "New folder")?;
+    std::fs::create_dir(&path).map_err(|e| format!("create Beebeeb folder {}: {e}", path.display()))?;
+    let _ = app.emit(
+        "menu:folder-created",
+        serde_json::json!({ "path": path.to_string_lossy() }),
+    );
+    if let Err(error) = app.opener().reveal_item_in_dir(&path) {
+        tracing::warn!(%error, path = %path.display(), "could not reveal new folder; opening sync root instead");
+        let _ = open_finder_location(Some(sync_root.to_string_lossy().into_owned()));
+    }
+    Ok(path)
+}
+
+fn diagnostics_bundle_path() -> Result<PathBuf, String> {
+    let state_dir = state_paths::beebeeb_state_dir().or_else(|_| {
+        DesktopConfig::path().map(|path| path.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir))
+    })?;
+    let dir = state_dir.join("diagnostics");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create diagnostics directory {}: {e}", dir.display()))?;
+    Ok(dir.join(format!("beebeeb-diagnostics-{}.json", now_unix_seconds())))
+}
+
+fn report_problem_impl(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let diagnostics = export_diagnostics()?;
+    let path = diagnostics_bundle_path()?;
+    let body = serde_json::to_vec_pretty(&diagnostics).map_err(|e| format!("serialize diagnostics: {e}"))?;
+    std::fs::write(&path, body).map_err(|e| format!("write diagnostics bundle {}: {e}", path.display()))?;
+
+    let _ = app.opener().reveal_item_in_dir(&path);
+    let subject = urlencoding::encode("Beebeeb desktop problem report");
+    let body_text = format!(
+        "Describe the problem here.\n\nDiagnostics bundle saved at:\n{}",
+        path.display()
+    );
+    let body = urlencoding::encode(&body_text);
+    app.opener()
+        .open_url(
+            format!("mailto:support@beebeeb.io?subject={subject}&body={body}"),
+            None::<&str>,
+        )
+        .map_err(|e| format!("open problem report email: {e}"))?;
+    Ok(path)
+}
+
+fn unused_child_path(parent: &Path, preferred_name: &str) -> Result<PathBuf, String> {
+    let preferred = Path::new(preferred_name)
+        .file_name()
+        .ok_or_else(|| "destination name is empty".to_string())?
+        .to_string_lossy()
+        .into_owned();
+    let first = parent.join(&preferred);
+    if !first.exists() {
+        return Ok(first);
+    }
+
+    let path = Path::new(&preferred);
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| preferred.clone());
+    let extension = path.extension().map(|ext| ext.to_string_lossy().into_owned());
+
+    for suffix in 2..10_000 {
+        let name = match &extension {
+            Some(ext) if !ext.is_empty() => format!("{stem} {suffix}.{ext}"),
+            _ => format!("{stem} {suffix}"),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "could not find an unused destination name for {} in {}",
+        preferred,
+        parent.display()
+    ))
 }
 
 /// Persist the user's chosen sync mode from the Windows first-run wizard.
@@ -5721,11 +5887,7 @@ const WINDOWS_TRAY_FLYOUT_HEIGHT: u32 = 560;
 const WINDOWS_TRAY_FLYOUT_GAP: i32 = 10;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn windows_tray_flyout_position(
-    click_x: f64,
-    click_y: f64,
-    scale_factor: f64,
-) -> tauri::PhysicalPosition<i32> {
+fn windows_tray_flyout_position(click_x: f64, click_y: f64, scale_factor: f64) -> tauri::PhysicalPosition<i32> {
     let scale_factor = valid_windows_tray_scale_factor(scale_factor);
     let physical_width = (WINDOWS_TRAY_FLYOUT_WIDTH as f64 * scale_factor).round() as i32;
     let physical_height = (WINDOWS_TRAY_FLYOUT_HEIGHT as f64 * scale_factor).round() as i32;
@@ -5887,6 +6049,9 @@ pub fn run() {
             tray_recent_activity,
             tray_pause_sync,
             tray_resume_sync,
+            upload_files_to_sync_root,
+            create_folder_in_sync_root,
+            report_problem,
             set_sync_mode,
             // Task 0812 — tray flyout: click file → reveal in Explorer + open
             reveal_and_open_file,
@@ -6016,12 +6181,9 @@ pub fn run() {
 
             Ok(())
         })
-        // Cmd+W / "Close Window" → hide to tray
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "close_window" {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.hide();
-                }
+            if let Some(spec) = desktop_menu_spec(event.id().as_ref()) {
+                handle_desktop_menu_action(app, spec);
             }
         })
         // Red-dot close button → hide to tray instead of quitting
@@ -6093,47 +6255,345 @@ async fn check_for_update(app: &tauri::AppHandle) {
 
 // ── Native menu bar ──────────────────────────────────────────────────────────
 
+const MENU_PREFERENCES_ID: &str = "menu_preferences";
+const MENU_CHECK_UPDATES_ID: &str = "menu_check_updates";
+const MENU_TOGGLE_SYNC_ID: &str = "menu_toggle_sync";
+const MENU_SIGN_OUT_ID: &str = "menu_sign_out";
+const MENU_QUIT_ID: &str = "menu_quit";
+const MENU_OPEN_FOLDER_ID: &str = "menu_open_folder";
+const MENU_UPLOAD_FILES_ID: &str = "menu_upload_files";
+const MENU_NEW_FOLDER_ID: &str = "menu_new_folder";
+const MENU_OPEN_WEB_APP_ID: &str = "menu_open_web_app";
+const MENU_SETTINGS_ID: &str = "menu_settings";
+const MENU_VIEW_FILES_ID: &str = "menu_view_files";
+const MENU_VIEW_ACTIVITY_ID: &str = "menu_view_activity";
+const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
+const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
+const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
+const MENU_ZOOM_OUT_ID: &str = "menu_zoom_out";
+const MENU_ZOOM_RESET_ID: &str = "menu_zoom_reset";
+const MENU_HELP_DOCS_ID: &str = "menu_help_docs";
+const MENU_HELP_SHORTCUTS_ID: &str = "menu_help_shortcuts";
+const MENU_HELP_REPORT_ID: &str = "menu_help_report";
+const MENU_HELP_STATUS_ID: &str = "menu_help_status";
+
+const WEB_APP_URL: &str = "https://app.beebeeb.io";
+const DOCUMENTATION_URL: &str = "https://docs.beebeeb.io";
+const KEYBOARD_SHORTCUTS_URL: &str = "https://docs.beebeeb.io/desktop/keyboard-shortcuts";
+const SERVICE_STATUS_URL: &str = "https://status.beebeeb.io";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+// The Windows app has no real Shared view yet (task 1186), so the native
+// Shared menu item falls through to Files instead of opening a fake placeholder.
+const WINDOWS_MAIN_APP_VIEW_ROUTES: &[&str] = &["files", "activity", "trash"];
+const MENU_ZOOM_MIN: f64 = 0.5;
+const MENU_ZOOM_MAX: f64 = 2.0;
+const MENU_ZOOM_STEP: f64 = 0.1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopMenuView {
+    Files,
+    Activity,
+    Shared,
+    Trash,
+}
+
+impl DesktopMenuView {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn route(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Activity => "activity",
+            Self::Shared => "shared",
+            Self::Trash => "trash",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuZoomAction {
+    In,
+    Out,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopMenuAction {
+    OpenSettings,
+    CheckForUpdates,
+    ToggleSync,
+    SignOut,
+    Quit,
+    OpenFolder,
+    UploadFiles,
+    NewFolder,
+    OpenWebApp,
+    OpenView(DesktopMenuView),
+    Zoom(MenuZoomAction),
+    OpenExternal(&'static str),
+    ReportProblem,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DesktopMenuSpec {
+    id: &'static str,
+    label: &'static str,
+    accelerator: Option<&'static str>,
+    action: DesktopMenuAction,
+}
+
+const DESKTOP_MENU_SPECS: &[DesktopMenuSpec] = &[
+    DesktopMenuSpec {
+        id: MENU_PREFERENCES_ID,
+        label: "Preferences...",
+        accelerator: Some("CmdOrCtrl+Comma"),
+        action: DesktopMenuAction::OpenSettings,
+    },
+    DesktopMenuSpec {
+        id: MENU_CHECK_UPDATES_ID,
+        label: "Check for updates...",
+        accelerator: Some("CmdOrCtrl+Shift+U"),
+        action: DesktopMenuAction::CheckForUpdates,
+    },
+    DesktopMenuSpec {
+        id: MENU_TOGGLE_SYNC_ID,
+        label: "Pause/Resume syncing",
+        accelerator: Some("CmdOrCtrl+Shift+P"),
+        action: DesktopMenuAction::ToggleSync,
+    },
+    DesktopMenuSpec {
+        id: MENU_SIGN_OUT_ID,
+        label: "Sign out",
+        accelerator: Some("CmdOrCtrl+Shift+L"),
+        action: DesktopMenuAction::SignOut,
+    },
+    DesktopMenuSpec {
+        id: MENU_QUIT_ID,
+        label: "Quit Beebeeb",
+        accelerator: Some("CmdOrCtrl+Q"),
+        action: DesktopMenuAction::Quit,
+    },
+    DesktopMenuSpec {
+        id: MENU_OPEN_FOLDER_ID,
+        label: "Open Beebeeb folder",
+        accelerator: Some("CmdOrCtrl+O"),
+        action: DesktopMenuAction::OpenFolder,
+    },
+    DesktopMenuSpec {
+        id: MENU_UPLOAD_FILES_ID,
+        label: "Upload files...",
+        accelerator: Some("CmdOrCtrl+U"),
+        action: DesktopMenuAction::UploadFiles,
+    },
+    DesktopMenuSpec {
+        id: MENU_NEW_FOLDER_ID,
+        label: "New folder...",
+        accelerator: Some("CmdOrCtrl+Shift+N"),
+        action: DesktopMenuAction::NewFolder,
+    },
+    DesktopMenuSpec {
+        id: MENU_OPEN_WEB_APP_ID,
+        label: "Open web app",
+        accelerator: Some("CmdOrCtrl+Shift+O"),
+        action: DesktopMenuAction::OpenWebApp,
+    },
+    DesktopMenuSpec {
+        id: MENU_SETTINGS_ID,
+        label: "Settings...",
+        accelerator: Some("CmdOrCtrl+Comma"),
+        action: DesktopMenuAction::OpenSettings,
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_FILES_ID,
+        label: "Files",
+        accelerator: Some("CmdOrCtrl+Digit1"),
+        action: DesktopMenuAction::OpenView(DesktopMenuView::Files),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_ACTIVITY_ID,
+        label: "Activity",
+        accelerator: Some("CmdOrCtrl+Digit2"),
+        action: DesktopMenuAction::OpenView(DesktopMenuView::Activity),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_SHARED_ID,
+        label: "Shared",
+        accelerator: Some("CmdOrCtrl+Digit3"),
+        action: DesktopMenuAction::OpenView(DesktopMenuView::Shared),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_TRASH_ID,
+        label: "Trash",
+        accelerator: Some("CmdOrCtrl+Digit4"),
+        action: DesktopMenuAction::OpenView(DesktopMenuView::Trash),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_IN_ID,
+        label: "Zoom in",
+        accelerator: Some("CmdOrCtrl+Equal"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::In),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_OUT_ID,
+        label: "Zoom out",
+        accelerator: Some("CmdOrCtrl+Minus"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::Out),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_RESET_ID,
+        label: "Actual size",
+        accelerator: Some("CmdOrCtrl+Digit0"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::Reset),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_DOCS_ID,
+        label: "Documentation",
+        accelerator: None,
+        action: DesktopMenuAction::OpenExternal(DOCUMENTATION_URL),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_SHORTCUTS_ID,
+        label: "Keyboard shortcuts",
+        accelerator: Some("CmdOrCtrl+Slash"),
+        action: DesktopMenuAction::OpenExternal(KEYBOARD_SHORTCUTS_URL),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_REPORT_ID,
+        label: "Report a problem",
+        accelerator: None,
+        action: DesktopMenuAction::ReportProblem,
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_STATUS_ID,
+        label: "Service status",
+        accelerator: None,
+        action: DesktopMenuAction::OpenExternal(SERVICE_STATUS_URL),
+    },
+];
+
+#[cfg(test)]
+fn desktop_menu_specs() -> &'static [DesktopMenuSpec] {
+    DESKTOP_MENU_SPECS
+}
+
+fn desktop_menu_spec(id: &str) -> Option<&'static DesktopMenuSpec> {
+    DESKTOP_MENU_SPECS.iter().find(|spec| spec.id == id)
+}
+
+fn desktop_menu_spec_required(id: &str) -> &'static DesktopMenuSpec {
+    desktop_menu_spec(id).unwrap_or_else(|| panic!("missing desktop menu spec: {id}"))
+}
+
+fn build_desktop_menu_item<M: tauri::Manager<tauri::Wry>>(
+    manager: &M,
+    spec: &DesktopMenuSpec,
+) -> tauri::Result<MenuItem<tauri::Wry>> {
+    let mut builder = MenuItemBuilder::new(spec.label).id(spec.id);
+    if let Some(accelerator) = spec.accelerator {
+        builder = builder.accelerator(accelerator);
+    }
+    builder.build(manager)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn menu_view_nav_target(view: DesktopMenuView, supported_routes: &[&str]) -> &'static str {
+    let route = view.route();
+    if supported_routes.contains(&route) {
+        route
+    } else {
+        "files"
+    }
+}
+
+fn compact_menu_page_for_view(view: DesktopMenuView) -> &'static str {
+    match view {
+        DesktopMenuView::Files => "finder",
+        DesktopMenuView::Activity => "status",
+        DesktopMenuView::Shared => "shared",
+        // The compact macOS/Linux shell has no Trash page yet; send it to the
+        // file surface instead of leaving a dead native item.
+        DesktopMenuView::Trash => "finder",
+    }
+}
+
+fn next_menu_zoom_scale(current: f64, action: MenuZoomAction) -> f64 {
+    let next = match action {
+        MenuZoomAction::In => current + MENU_ZOOM_STEP,
+        MenuZoomAction::Out => current - MENU_ZOOM_STEP,
+        MenuZoomAction::Reset => 1.0,
+    };
+    ((next.clamp(MENU_ZOOM_MIN, MENU_ZOOM_MAX) * 10.0).round()) / 10.0
+}
+
+fn about_metadata() -> AboutMetadata<'static> {
+    let channel = configured_release_channel();
+    AboutMetadata {
+        name: Some("Beebeeb".to_string()),
+        version: Some(real_app_version().to_string()),
+        comments: Some(format!("Release channel: {}", channel.as_str())),
+        website: Some("https://beebeeb.io".to_string()),
+        website_label: Some("beebeeb.io".to_string()),
+        ..AboutMetadata::default()
+    }
+}
+
 fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
-    // Beebeeb (app-name menu — macOS leftmost)
+    let preferences = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_PREFERENCES_ID))?;
+    let check_updates = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?;
+    let toggle_sync = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?;
+    let sign_out = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_SIGN_OUT_ID))?;
+    let quit = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_QUIT_ID))?;
+    let open_folder = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_OPEN_FOLDER_ID))?;
+    let upload_files = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_UPLOAD_FILES_ID))?;
+    let new_folder = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_NEW_FOLDER_ID))?;
+    let open_web_app = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_OPEN_WEB_APP_ID))?;
+    let settings = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_SETTINGS_ID))?;
+    let view_files = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_FILES_ID))?;
+    let view_activity = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_ACTIVITY_ID))?;
+    let view_shared = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_SHARED_ID))?;
+    let view_trash = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_TRASH_ID))?;
+    let zoom_in = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_ZOOM_IN_ID))?;
+    let zoom_out = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_ZOOM_OUT_ID))?;
+    let zoom_reset = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_ZOOM_RESET_ID))?;
+    let documentation = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_HELP_DOCS_ID))?;
+    let keyboard_shortcuts = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_HELP_SHORTCUTS_ID))?;
+    let report_problem = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_HELP_REPORT_ID))?;
+    let service_status = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_HELP_STATUS_ID))?;
+
     let beebeeb_menu = Submenu::with_items(
         app,
         "Beebeeb",
         true,
         &[
-            &PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(AboutMetadata::default()))?,
+            &PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(about_metadata()))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, None)?,
-            &PredefinedMenuItem::hide_others(app, None)?,
-            &PredefinedMenuItem::show_all(app, None)?,
+            &preferences,
+            &check_updates,
+            &toggle_sync,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, Some("Quit Beebeeb"))?,
+            &sign_out,
+            &quit,
         ],
     )?;
 
-    // File
     let file_menu = Submenu::with_items(
         app,
         "File",
         true,
         &[
-            // Cmd+W hides the window (standard macOS behaviour for apps that
-            // live in the menu bar — it doesn't quit the app).
-            &MenuItemBuilder::new("Close Window")
-                .id("close_window")
-                .accelerator("CmdOrCtrl+W")
-                .build(app)?,
+            &open_folder,
+            &upload_files,
+            &new_folder,
+            &PredefinedMenuItem::separator(app)?,
+            &open_web_app,
+            &settings,
         ],
     )?;
 
-    // Edit — essential for WebView text-input fields to get clipboard bindings
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
@@ -6141,8 +6601,151 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
         ],
     )?;
 
-    let menu = Menu::with_items(app, &[&beebeeb_menu, &file_menu, &edit_menu])?;
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[
+            &view_files,
+            &view_activity,
+            &view_shared,
+            &view_trash,
+            &PredefinedMenuItem::separator(app)?,
+            &zoom_in,
+            &zoom_out,
+            &zoom_reset,
+        ],
+    )?;
+
+    let help_menu = Submenu::with_items(
+        app,
+        "Help",
+        true,
+        &[
+            &documentation,
+            &keyboard_shortcuts,
+            &report_problem,
+            &PredefinedMenuItem::separator(app)?,
+            &service_status,
+        ],
+    )?;
+
+    let menu = Menu::with_items(app, &[&beebeeb_menu, &file_menu, &edit_menu, &view_menu, &help_menu])?;
     app.set_menu(menu)?;
+    Ok(())
+}
+
+fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenuSpec) {
+    match spec.action {
+        DesktopMenuAction::OpenSettings => show_main_app_window_with_nav(app, Some("settings")),
+        DesktopMenuAction::CheckForUpdates => {
+            show_main_app_window_with_nav(app, Some("settings"));
+            let app = app.clone();
+            spawn_menu_task(spec.id, async move {
+                let result = check_for_updates_now(app.clone()).await?;
+                let _ = app.emit("menu:update-check-finished", result);
+                Ok(())
+            });
+        }
+        DesktopMenuAction::ToggleSync => {
+            let app = app.clone();
+            spawn_menu_task(spec.id, async move { toggle_sync_paused_from_menu(&app).await });
+        }
+        DesktopMenuAction::SignOut => {
+            let app = app.clone();
+            spawn_menu_task(spec.id, async move {
+                let state = app.state::<AppState>();
+                clear_session_impl(&state).await
+            });
+        }
+        DesktopMenuAction::Quit => app.exit(0),
+        DesktopMenuAction::OpenFolder => log_menu_result(spec.id, open_finder_location(None)),
+        DesktopMenuAction::UploadFiles => {
+            let app = app.clone();
+            spawn_menu_task(spec.id, async move { upload_files_to_sync_root_impl(&app).map(|_| ()) });
+        }
+        DesktopMenuAction::NewFolder => log_menu_result(spec.id, create_folder_in_sync_root_impl(app).map(|_| ())),
+        DesktopMenuAction::OpenWebApp => log_menu_result(spec.id, open_external_url(app, WEB_APP_URL)),
+        DesktopMenuAction::OpenView(view) => log_menu_result(spec.id, open_menu_view(app, view)),
+        DesktopMenuAction::Zoom(action) => log_menu_result(spec.id, apply_menu_zoom(app, action)),
+        DesktopMenuAction::OpenExternal(url) => log_menu_result(spec.id, open_external_url(app, url)),
+        DesktopMenuAction::ReportProblem => log_menu_result(spec.id, report_problem_impl(app).map(|_| ())),
+    }
+}
+
+fn spawn_menu_task<F>(menu_id: &'static str, fut: F)
+where
+    F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        log_menu_result(menu_id, fut.await);
+    });
+}
+
+fn log_menu_result(menu_id: &str, result: Result<(), String>) {
+    if let Err(error) = result {
+        tracing::warn!(menu_id, %error, "native menu action failed");
+    }
+}
+
+fn open_external_url(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("open {url}: {e}"))
+}
+
+fn open_menu_view(app: &tauri::AppHandle, view: DesktopMenuView) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let nav = menu_view_nav_target(view, WINDOWS_MAIN_APP_VIEW_ROUTES);
+        show_main_app_window_with_nav(app, Some(nav));
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let page = compact_menu_page_for_view(view);
+        show_compact_app_window_with_nav(app, Some(page));
+        Ok(())
+    }
+}
+
+fn apply_menu_zoom(app: &tauri::AppHandle, action: MenuZoomAction) -> Result<(), String> {
+    let scale = {
+        let state = app.state::<AppState>();
+        let mut guard = state
+            .menu_zoom_scale
+            .lock()
+            .map_err(|_| "menu zoom mutex poisoned".to_string())?;
+        let next = next_menu_zoom_scale(*guard, action);
+        *guard = next;
+        next
+    };
+
+    let mut applied = false;
+    for (label, window) in app.webview_windows() {
+        if label == "tray" {
+            continue;
+        }
+        if let Err(error) = window.set_zoom(scale) {
+            tracing::warn!(window = %label, %error, "could not apply native menu zoom");
+        } else {
+            applied = true;
+        }
+    }
+
+    if !applied {
+        show_main_app_window_impl(app);
+        for label in ["main-app", "settings"] {
+            if let Some(window) = app.get_webview_window(label) {
+                window
+                    .set_zoom(scale)
+                    .map_err(|e| format!("apply zoom to {label}: {e}"))?;
+                return Ok(());
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -6357,10 +6960,23 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 /// shell is still the only primary window.
 #[cfg(not(target_os = "windows"))]
 fn show_compact_app_window_impl(app: &tauri::AppHandle) {
-    let (label, url, width, height, resizable) = ("settings", "index.html", 680.0, 540.0, false);
+    show_compact_app_window_with_nav(app, None);
+}
+
+/// Internal helper for non-Windows builds, optionally selecting one of the
+/// compact app's existing pages (`status`, `finder`, `shared`, ...).
+#[cfg(not(target_os = "windows"))]
+fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
+    let (label, width, height, resizable) = ("settings", 680.0, 540.0, false);
+    let url = nav
+        .map(|nav| format!("index.html?nav={nav}"))
+        .unwrap_or_else(|| "index.html".to_string());
     if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
         let _ = win.set_focus();
+        if let Some(nav) = nav {
+            let _ = win.emit("compact-app:navigate", nav);
+        }
         return;
     }
 
@@ -6374,6 +6990,9 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
         Ok(win) => {
             let _ = win.show();
             let _ = win.set_focus();
+            if let Some(nav) = nav {
+                let _ = win.emit("compact-app:navigate", nav);
+            }
         }
         Err(error) => {
             tracing::warn!(%error, "failed to create compact app window");
@@ -6399,9 +7018,14 @@ fn show_main_app_window_impl(app: &tauri::AppHandle) {
 fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = nav;
         // No dedicated main-app window outside Windows — reuse the compact app.
-        show_compact_app_window_impl(app);
+        // There is no separate compact Settings page; Preferences and Settings
+        // both intentionally focus the same compact app window.
+        let compact_nav = match nav {
+            Some("settings") | None => None,
+            Some(other) => Some(other),
+        };
+        show_compact_app_window_with_nav(app, compact_nav);
         return;
     }
 
@@ -6447,12 +7071,18 @@ fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, VaultEntryRow, build_vault_tree, classify_finder_install_error, clear_cached_profile,
-        desktop_manifest_path_for_channel, finder_install_state_from_config, folder_leaf_name,
-        is_disposable_cache_path, manual_update_available_result, manual_update_result_for_remote,
-        manual_update_up_to_date_result, newly_excluded_ids, normalize_recovery_phrase_input, real_app_version,
+        AppState, DesktopMenuAction, DesktopMenuView, MENU_CHECK_UPDATES_ID, MENU_HELP_DOCS_ID, MENU_HELP_REPORT_ID,
+        MENU_HELP_SHORTCUTS_ID, MENU_HELP_STATUS_ID, MENU_NEW_FOLDER_ID, MENU_OPEN_FOLDER_ID, MENU_OPEN_WEB_APP_ID,
+        MENU_PREFERENCES_ID, MENU_QUIT_ID, MENU_SETTINGS_ID, MENU_SIGN_OUT_ID, MENU_TOGGLE_SYNC_ID,
+        MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
+        MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
+        UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
+        classify_finder_install_error, clear_cached_profile, desktop_manifest_path_for_channel, desktop_menu_specs,
+        finder_install_state_from_config, folder_leaf_name, is_disposable_cache_path, manual_update_available_result,
+        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
+        next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, real_app_version,
         release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
-        should_show_conflict_notification, subtree_file_ids, ManualUpdateCheckResult, UpdateAvailablePayload,
+        should_show_conflict_notification, subtree_file_ids, unused_child_path,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
@@ -6934,5 +7564,93 @@ mod tests {
     fn bandwidth_sample_rates_convert_bytes_window_to_bytes_per_second() {
         assert_eq!(super::bandwidth_sample_rates(1_500, 3_000, 3), (500, 1_000));
         assert_eq!(super::bandwidth_sample_rates(1_500, 3_000, 0), (0, 0));
+    }
+
+    #[test]
+    fn native_menu_specs_cover_required_real_actions() {
+        let specs = desktop_menu_specs();
+        let ids: Vec<&str> = specs.iter().map(|spec| spec.id).collect();
+
+        assert!(ids.contains(&MENU_PREFERENCES_ID));
+        assert!(ids.contains(&MENU_SETTINGS_ID));
+        assert!(ids.contains(&MENU_CHECK_UPDATES_ID));
+        assert!(ids.contains(&MENU_TOGGLE_SYNC_ID));
+        assert!(ids.contains(&MENU_SIGN_OUT_ID));
+        assert!(ids.contains(&MENU_QUIT_ID));
+        assert!(ids.contains(&MENU_OPEN_FOLDER_ID));
+        assert!(ids.contains(&MENU_UPLOAD_FILES_ID));
+        assert!(ids.contains(&MENU_NEW_FOLDER_ID));
+        assert!(ids.contains(&MENU_OPEN_WEB_APP_ID));
+        assert!(ids.contains(&MENU_VIEW_FILES_ID));
+        assert!(ids.contains(&MENU_VIEW_ACTIVITY_ID));
+        assert!(ids.contains(&MENU_VIEW_SHARED_ID));
+        assert!(ids.contains(&MENU_VIEW_TRASH_ID));
+        assert!(ids.contains(&MENU_ZOOM_IN_ID));
+        assert!(ids.contains(&MENU_ZOOM_OUT_ID));
+        assert!(ids.contains(&MENU_ZOOM_RESET_ID));
+        assert!(ids.contains(&MENU_HELP_DOCS_ID));
+        assert!(ids.contains(&MENU_HELP_SHORTCUTS_ID));
+        assert!(ids.contains(&MENU_HELP_REPORT_ID));
+        assert!(ids.contains(&MENU_HELP_STATUS_ID));
+
+        for spec in specs {
+            if let DesktopMenuAction::OpenExternal(url) = spec.action {
+                assert!(!url.is_empty(), "menu item {} must have a real URL", spec.id);
+            }
+        }
+    }
+
+    #[test]
+    fn preferences_and_settings_open_same_settings_surface() {
+        let specs = desktop_menu_specs();
+        let preferences = specs.iter().find(|spec| spec.id == MENU_PREFERENCES_ID).unwrap();
+        let settings = specs.iter().find(|spec| spec.id == MENU_SETTINGS_ID).unwrap();
+
+        assert_eq!(preferences.action, DesktopMenuAction::OpenSettings);
+        assert_eq!(settings.action, DesktopMenuAction::OpenSettings);
+        assert_eq!(preferences.accelerator, Some("CmdOrCtrl+Comma"));
+        assert_eq!(settings.accelerator, Some("CmdOrCtrl+Comma"));
+    }
+
+    #[test]
+    fn trash_view_routes_to_trash_when_supported_otherwise_files() {
+        assert_eq!(
+            menu_view_nav_target(DesktopMenuView::Trash, &["files", "activity", "shared", "trash"]),
+            "trash"
+        );
+        assert_eq!(
+            menu_view_nav_target(DesktopMenuView::Trash, &["files", "activity", "shared"]),
+            "files"
+        );
+    }
+
+    #[test]
+    fn shared_view_falls_back_to_files_until_windows_has_real_shared_route() {
+        assert_eq!(
+            menu_view_nav_target(DesktopMenuView::Shared, WINDOWS_MAIN_APP_VIEW_ROUTES),
+            "files"
+        );
+    }
+
+    #[test]
+    fn zoom_scale_steps_clamps_and_resets() {
+        assert_eq!(next_menu_zoom_scale(1.0, MenuZoomAction::In), 1.1);
+        assert_eq!(next_menu_zoom_scale(1.0, MenuZoomAction::Out), 0.9);
+        assert_eq!(next_menu_zoom_scale(1.95, MenuZoomAction::In), 2.0);
+        assert_eq!(next_menu_zoom_scale(0.55, MenuZoomAction::Out), 0.5);
+        assert_eq!(next_menu_zoom_scale(1.4, MenuZoomAction::Reset), 1.0);
+    }
+
+    #[test]
+    fn unused_upload_destination_preserves_extension() {
+        let root = std::env::temp_dir().join(format!("beebeeb-menu-test-{}", now_unix_seconds()));
+        std::fs::create_dir_all(&root).unwrap();
+        let existing = root.join("Report.pdf");
+        std::fs::write(&existing, b"existing").unwrap();
+
+        let next = unused_child_path(&root, "Report.pdf").unwrap();
+
+        assert_eq!(next.file_name().unwrap().to_string_lossy(), "Report 2.pdf");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
