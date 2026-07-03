@@ -28,6 +28,12 @@ import {
   stateFromManualUpdateResult,
   type ManualUpdateCheckState,
 } from '../updateCheckViewModel'
+import {
+  ACCOUNT_NOTIFICATION_PREF_META,
+  DESKTOP_NOTIFICATION_PREF_META,
+  type AccountNotificationPrefKey,
+  type DesktopNotificationPrefKey,
+} from '../notificationPreferenceMeta'
 import { T, Card, Chip, NavIcon, PageHeader, PrimaryBtn, Skeleton } from '../ui'
 import { useRegionCity } from '../useRegion'
 import {
@@ -39,7 +45,6 @@ import {
 import { setDesktopThemePreference } from '../theme'
 
 type ShellIntegrationState = FinderInstallState
-type PrefKey = keyof NotificationPreferenceValues
 
 interface SettingsViewProps {
   status: SyncStatus | null
@@ -84,14 +89,6 @@ const SYNC_ROWS: SyncRow[] = [
     label: 'Show sync overlays in File Explorer',
     hint: 'The check, cloud, and spinner icons on your files.',
   },
-]
-
-const PREF_META: Array<{ key: PrefKey; label: string; hint: string }> = [
-  { key: 'new_device_login', label: 'New device sign-in', hint: 'We cannot see your files, but we know when a new device signs in.' },
-  { key: 'share_received', label: 'Share received', hint: 'When someone grants you access to a file or folder.' },
-  { key: 'file_updated', label: 'File updated', hint: 'When a file in your vault changes on another device.' },
-  { key: 'storage_warning', label: 'Storage warning', hint: 'When you are close to your storage limit.' },
-  { key: 'backup_complete', label: 'Backup complete', hint: 'When a scheduled backup finishes.' },
 ]
 
 type ReleaseChannelValue = NonNullable<DesktopConfig['release_channel']>
@@ -371,7 +368,7 @@ function NotificationPreferencesPanel() {
   const [values, setValues] = useState<NotificationPreferenceValues | null>(null)
   const [err, setErr] = useState<{ reason: string; unsupported: boolean } | null>(null)
   const [loading, setLoading] = useState(true)
-  const [busyKey, setBusyKey] = useState<PrefKey | null>(null)
+  const [busyKey, setBusyKey] = useState<AccountNotificationPrefKey | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const load = () => {
@@ -408,7 +405,7 @@ function NotificationPreferencesPanel() {
     return () => { active = false }
   }, [])
 
-  const toggle = (key: PrefKey) => {
+  const toggle = (key: AccountNotificationPrefKey) => {
     if (!values || busyKey) return
     const prev = values
     const next = !values[key]
@@ -449,8 +446,8 @@ function NotificationPreferencesPanel() {
         </div>
       </div>
 
-      {PREF_META.map((m, i) => {
-        const last = i === PREF_META.length - 1
+      {ACCOUNT_NOTIFICATION_PREF_META.map((m, i) => {
+        const last = i === ACCOUNT_NOTIFICATION_PREF_META.length - 1
         const on = values[m.key]
         return (
           <div key={m.key} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '14px 20px', alignItems: 'center', borderBottom: last ? 'none' : `1px solid ${T.line}` }}>
@@ -488,14 +485,71 @@ function NotificationPreferencesSkeleton() {
   )
 }
 
-function NotificationsSettingsPanel() {
+function DesktopNotificationPreferencesPanel({
+  config,
+  onConfigChange,
+  notice,
+}: {
+  config: DesktopConfig
+  onConfigChange: (patch: Partial<DesktopConfig>) => void
+  notice: string | null
+}) {
+  const toggleDesktopNotification = (key: DesktopNotificationPrefKey, value: boolean) => {
+    switch (key) {
+      case 'notify_conflicts':
+        onConfigChange({ notify_conflicts: value })
+        break
+    }
+  }
+
+  return (
+    <Card style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <NavIcon name="external" size={14} color={T.ink2} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Desktop alerts</div>
+          <div style={{ fontSize: 11, color: T.ink3 }}>Native notifications fired by this device.</div>
+        </div>
+      </div>
+
+      {DESKTOP_NOTIFICATION_PREF_META.map((m, i) => {
+        const last = i === DESKTOP_NOTIFICATION_PREF_META.length - 1
+        const on = config[m.key]
+        return (
+          <div key={m.key} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '14px 20px', alignItems: 'center', borderBottom: last ? 'none' : `1px solid ${T.line}` }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{m.label}</div>
+              <div style={{ fontSize: 11, color: T.ink3, marginTop: 3, lineHeight: 1.5 }}>{m.hint}</div>
+            </div>
+            <Toggle on={on} onChange={(value) => toggleDesktopNotification(m.key, value)} label={m.label} />
+          </div>
+        )
+      })}
+
+      {notice && <div style={{ padding: '11px 20px', borderTop: `1px solid ${T.line}`, background: T.paper2, fontSize: 11.5, color: RED, lineHeight: 1.5 }}>{notice}</div>}
+    </Card>
+  )
+}
+
+function NotificationsSettingsPanel({
+  config,
+  onConfigChange,
+  notice,
+}: {
+  config: DesktopConfig
+  onConfigChange: (patch: Partial<DesktopConfig>) => void
+  notice: string | null
+}) {
   return (
     <SettingsSectionShell>
       <PageHeader
         title="Notifications"
-        subtitle="Choose which account events Beebeeb is allowed to tell you about."
+        subtitle="Choose which desktop and account events Beebeeb is allowed to tell you about."
       />
-      <NotificationPreferencesPanel />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <DesktopNotificationPreferencesPanel config={config} onConfigChange={onConfigChange} notice={notice} />
+        <NotificationPreferencesPanel />
+      </div>
     </SettingsSectionShell>
   )
 }
@@ -1288,7 +1342,13 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
           />
         )
       case 'notifications':
-        return <NotificationsSettingsPanel />
+        return (
+          <NotificationsSettingsPanel
+            config={config}
+            onConfigChange={(patch) => void handleConfigChange(patch)}
+            notice={notice}
+          />
+        )
       case 'launch':
         return <LaunchPanel />
       case 'explorer-integration':

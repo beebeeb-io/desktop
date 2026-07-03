@@ -5048,14 +5048,17 @@ async fn open_conflict_window(
 /// without raising the OS notification.
 ///
 /// Spec: Phase 4 Task 11.
+fn should_show_conflict_notification(config: Result<DesktopConfig, String>) -> bool {
+    config.map(|c| c.notify_conflicts).unwrap_or(true)
+}
+
 pub(crate) fn notify_conflict_impl(app: &tauri::AppHandle, file_name: &str) -> Result<(), String> {
     use tauri_plugin_notification::NotificationExt;
 
     // Honour the user's preference. Best-effort load — if the config
     // file is unreadable we fall back to "show", matching the
     // documented Default of `notify_conflicts: true`.
-    let want = DesktopConfig::load().map(|c| c.notify_conflicts).unwrap_or(true);
-    if !want {
+    if !should_show_conflict_notification(DesktopConfig::load()) {
         return Ok(());
     }
 
@@ -6276,7 +6279,7 @@ mod tests {
         is_disposable_cache_path, manual_update_available_result, manual_update_up_to_date_result,
         newly_excluded_ids, normalize_recovery_phrase_input, real_app_version,
         release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
-        subtree_file_ids, ManualUpdateCheckResult, UpdateAvailablePayload,
+        should_show_conflict_notification, subtree_file_ids, ManualUpdateCheckResult, UpdateAvailablePayload,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
@@ -6497,6 +6500,21 @@ mod tests {
 
         let config_path = DesktopConfig::path().unwrap();
         assert!(!is_disposable_cache_path(&config_path));
+    }
+
+    #[test]
+    fn conflict_notification_gate_honors_disabled_preference() {
+        let cfg = DesktopConfig {
+            notify_conflicts: false,
+            ..DesktopConfig::default()
+        };
+
+        assert!(!should_show_conflict_notification(Ok(cfg)));
+    }
+
+    #[test]
+    fn conflict_notification_gate_fails_open_when_config_unreadable() {
+        assert!(should_show_conflict_notification(Err("config unreadable".to_string())));
     }
 
     #[test]
