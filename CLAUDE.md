@@ -138,6 +138,13 @@ Conflict resolution policy: never silently drop a version — default `KeepBoth`
 The backend must create a new server version for Finder writes when the server
 versioning contract supports it.
 
+Advanced desktop settings live in `DesktopConfig` (`desktop.toml`). `theme` is
+`light` / `dark` / `system` and is applied in the WebView through CSS variables.
+`local_cache_limit_bytes` is a per-device file-content cap over pinned plus
+unpinned cached bytes; `0` means Unlimited. Cache enforcement derives the
+evictable budget as `cap - pinned_bytes`, evicts least-recently-accessed
+non-pinned cache entries first, and never auto-evicts pinned content.
+
 ## Auto-update signing
 
 Tauri's updater verifies update bundles with minisign. The keypair was

@@ -27,6 +27,7 @@ import Onboarding from './Onboarding'
 import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
 import WindowsApp from './WindowsApp'
+import { initializeDesktopThemeFromConfig } from './windows/theme'
 import './design.css'
 
 const container = document.getElementById('root')
@@ -37,6 +38,8 @@ if (!container) {
 const params = new URLSearchParams(window.location.search)
 const which = params.get('window')
 const platform = params.get('platform')
+
+void initializeDesktopThemeFromConfig()
 
 let component: ReactElement
 if (which === 'conflict') {

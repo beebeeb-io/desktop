@@ -17,6 +17,7 @@ export interface SyncStatus {
 
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
 export type ReleaseChannel = 'stable' | 'beta' | 'alpha'
+export type DesktopTheme = 'light' | 'dark' | 'system'
 
 export type ManualUpdateCheckResult =
   | {
@@ -45,6 +46,8 @@ export interface DesktopConfig {
   metered?: boolean
   files_on_demand?: boolean
   sync_overlays?: boolean
+  theme?: DesktopTheme
+  local_cache_limit_bytes?: number
   release_channel?: ReleaseChannel
 }
 
@@ -155,6 +158,8 @@ export const DEFAULT_CONFIG: DesktopConfig = {
   notify_conflicts: true,
   notify_sync_complete: false,
   notify_quota_warnings: true,
+  theme: 'system',
+  local_cache_limit_bytes: 100_000_000_000,
   release_channel: 'stable',
 }
 

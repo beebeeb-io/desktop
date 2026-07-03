@@ -25,6 +25,11 @@ const CONFIG_FILENAME: &str = "desktop.toml";
 /// on macOS).
 const APP_CONFIG_DIR: &str = "beebeeb";
 
+/// User-facing cache limit unit. The UI labels these as GB, so use decimal
+/// bytes to keep "100 GB" displaying as exactly that.
+pub const LOCAL_CACHE_LIMIT_GB: i64 = 1_000_000_000;
+pub const DEFAULT_LOCAL_CACHE_LIMIT_BYTES: i64 = 100 * LOCAL_CACHE_LIMIT_GB;
+
 /// Top-level desktop config persisted on disk.
 ///
 /// Field order mirrors the TOML file the user might hand-edit. New
@@ -200,6 +205,18 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub sync_overlays: Option<bool>,
 
+    // ── Task 1190 — Advanced settings ─────────────────────────────────
+    //
+    // `theme` drives the WebView color tokens. Native window chrome is not
+    // controlled here yet; if a platform titlebar is introduced, read the same
+    // field from the Rust window setup path.
+    #[serde(default)]
+    pub theme: DesktopTheme,
+    /// Total local file-content cap in bytes. Includes pinned + unpinned cached
+    /// content; eviction only removes unpinned files. `0` means Unlimited.
+    #[serde(default = "default_local_cache_limit_bytes")]
+    pub local_cache_limit_bytes: i64,
+
     // ── Desktop update channel ────────────────────────────────────────
     //
     // Opt-in release channel for the Tauri updater. Stable remains the
@@ -213,6 +230,24 @@ pub struct DesktopConfig {
 /// `#[serde(default = ...)]` needs a function returning the default.
 fn default_true() -> bool {
     true
+}
+
+fn default_local_cache_limit_bytes() -> i64 {
+    DEFAULT_LOCAL_CACHE_LIMIT_BYTES
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesktopTheme {
+    Light,
+    Dark,
+    System,
+}
+
+impl Default for DesktopTheme {
+    fn default() -> Self {
+        Self::System
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +303,8 @@ impl Default for DesktopConfig {
             metered: None,
             files_on_demand: None,
             sync_overlays: None,
+            theme: DesktopTheme::System,
+            local_cache_limit_bytes: DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
             release_channel: ReleaseChannel::Stable,
         }
     }
@@ -303,6 +340,14 @@ pub struct DesktopSettings {
     pub files_on_demand: Option<bool>,
     #[serde(default)]
     pub sync_overlays: Option<bool>,
+    /// Advanced appearance preference. `None` means an older caller did not
+    /// include the field, so `apply_settings` must preserve the saved value.
+    #[serde(default)]
+    pub theme: Option<DesktopTheme>,
+    /// Advanced local cache cap. `Some(0)` means Unlimited; `None` means an
+    /// older caller omitted the field and the saved value should be preserved.
+    #[serde(default)]
+    pub local_cache_limit_bytes: Option<i64>,
     /// Opt-in desktop update channel. `None` means the caller did not touch
     /// this setting; `DesktopConfig` itself defaults missing on-disk values to
     /// Stable.
@@ -323,6 +368,8 @@ impl From<&DesktopConfig> for DesktopSettings {
             metered: c.metered,
             files_on_demand: c.files_on_demand,
             sync_overlays: c.sync_overlays,
+            theme: Some(c.theme),
+            local_cache_limit_bytes: Some(c.local_cache_limit_bytes),
             release_channel: Some(c.release_channel),
         }
     }
@@ -356,8 +403,23 @@ impl DesktopConfig {
         if s.sync_overlays.is_some() {
             self.sync_overlays = s.sync_overlays;
         }
+        if let Some(theme) = s.theme {
+            self.theme = theme;
+        }
+        if let Some(limit) = s.local_cache_limit_bytes {
+            self.local_cache_limit_bytes = limit.max(0);
+        }
         if let Some(release_channel) = s.release_channel {
             self.release_channel = release_channel;
+        }
+    }
+
+    /// Cache budget used by eviction. `None` means Unlimited.
+    pub fn local_cache_limit_for_eviction(&self) -> Option<i64> {
+        if self.local_cache_limit_bytes <= 0 {
+            None
+        } else {
+            Some(self.local_cache_limit_bytes)
         }
     }
 
@@ -512,7 +574,9 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopConfig, default_sync_root_suggestion};
+    use super::{
+        DEFAULT_LOCAL_CACHE_LIMIT_BYTES, DesktopConfig, DesktopSettings, DesktopTheme, default_sync_root_suggestion,
+    };
 
     // ── Task 0800 — multi-account Phase 1: persisted account id ────────────
 
@@ -583,14 +647,12 @@ mod tests {
         // Start from a clean slate so the mint branch (account_id == None) fires.
         let _ = std::fs::remove_file(&path);
 
-        let restore = || {
-            match &backup {
-                Some(bytes) => {
-                    std::fs::write(&path, bytes).expect("restore original config");
-                }
-                None => {
-                    let _ = std::fs::remove_file(&path);
-                }
+        let restore = || match &backup {
+            Some(bytes) => {
+                std::fs::write(&path, bytes).expect("restore original config");
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
             }
         };
 
@@ -687,6 +749,30 @@ mod tests {
         assert!(back.known_folder_enabled("desktop"));
         assert!(back.known_folder_enabled("pictures"));
         assert_eq!(back.known_folder_backup.len(), 2);
+    }
+
+    #[test]
+    fn advanced_settings_defaults_and_round_trips() {
+        // Missing keys from older desktop.toml files pick the new Advanced
+        // defaults: follow the OS theme and keep a 100 GB local cache cap.
+        let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
+        assert_eq!(cfg.theme, DesktopTheme::System);
+        assert_eq!(cfg.local_cache_limit_bytes, DEFAULT_LOCAL_CACHE_LIMIT_BYTES);
+
+        let mut settings = DesktopSettings::from(&DesktopConfig::default());
+        settings.theme = Some(DesktopTheme::Dark);
+        settings.local_cache_limit_bytes = Some(0);
+
+        let mut cfg = DesktopConfig::default();
+        cfg.apply_settings(settings);
+        assert_eq!(cfg.theme, DesktopTheme::Dark);
+        assert_eq!(cfg.local_cache_limit_bytes, 0);
+        assert_eq!(cfg.local_cache_limit_for_eviction(), None);
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialize advanced settings");
+        let back: DesktopConfig = toml::from_str(&toml).expect("parse advanced settings");
+        assert_eq!(back.theme, DesktopTheme::Dark);
+        assert_eq!(back.local_cache_limit_bytes, 0);
     }
 
     #[test]

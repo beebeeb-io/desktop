@@ -2424,7 +2424,7 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
                 let db = state_db::StateDb::open(&db_path).ok()?;
                 let pinned = db.cache_bytes_by_effective_pin(true).ok()?.max(0);
                 let unpinned = db.cache_bytes_by_effective_pin(false).ok()?.max(0);
-                Some((pinned.saturating_add(unpinned), pinned))
+                Some((unpinned, pinned))
             })();
             values.unwrap_or((0, 0))
         } else {

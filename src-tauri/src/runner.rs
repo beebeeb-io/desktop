@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_bridge::{CachePolicy, ConflictDetected, EngineBridge, WireCounters, sync_tick};
+use crate::engine_bridge::{ConflictDetected, EngineBridge, WireCounters, sync_tick};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 use crate::state_paths;
@@ -1015,10 +1015,8 @@ fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
     // (`None`) or `Some(true)` keeps the default on-demand behaviour.
     // A missing/unreadable config defaults to on-demand (the safe, low-disk
     // behaviour). This is one cheap TOML read per 5s tick.
-    let files_on_demand = crate::config::DesktopConfig::load()
-        .ok()
-        .and_then(|c| c.files_on_demand)
-        .unwrap_or(true);
+    let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
+    let files_on_demand = cfg.files_on_demand.unwrap_or(true);
     if !files_on_demand {
         // User opted into keeping everything local — skip eviction.
         return;
@@ -1029,7 +1027,7 @@ fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
     // has no metered-network detection on Windows yet, so this toggle is
     // persisted only for now (see DesktopConfig::metered).
 
-    match bridge.enforce_smart_cache(CachePolicy::default()) {
+    match bridge.enforce_local_cache_limit(cfg.local_cache_limit_for_eviction()) {
         Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
             tracing::info!(
                 evicted = outcome.evicted_file_ids.len(),

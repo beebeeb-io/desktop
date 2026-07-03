@@ -268,7 +268,7 @@ pub struct CachePolicy {
 impl Default for CachePolicy {
     fn default() -> Self {
         Self {
-            max_unpinned_cache_bytes: 2 * 1024 * 1024 * 1024,
+            max_unpinned_cache_bytes: crate::config::DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
             disk_pressure_min_free_bytes: 5 * 1024 * 1024 * 1024,
         }
     }
@@ -1551,7 +1551,7 @@ impl EngineBridge {
     ) -> anyhow::Result<CacheCleanupOutcome> {
         self.db
             .mark_cached(file_id, &cache_path.to_string_lossy(), cache_bytes, now_secs())?;
-        self.enforce_smart_cache(CachePolicy::default())
+        self.enforce_configured_cache_limit()
     }
 
     pub fn enforce_smart_cache(&self, policy: CachePolicy) -> anyhow::Result<CacheCleanupOutcome> {
@@ -1561,6 +1561,31 @@ impl EngineBridge {
         Ok(CacheCleanupOutcome {
             evicted_file_ids: evicted,
         })
+    }
+
+    pub fn enforce_local_cache_limit(&self, max_local_cache_bytes: Option<i64>) -> anyhow::Result<CacheCleanupOutcome> {
+        let Some(max_local_cache_bytes) = max_local_cache_bytes else {
+            return Ok(CacheCleanupOutcome {
+                evicted_file_ids: Vec::new(),
+            });
+        };
+        if max_local_cache_bytes <= 0 {
+            return Ok(CacheCleanupOutcome {
+                evicted_file_ids: Vec::new(),
+            });
+        }
+
+        let pinned_bytes = self.db.cache_bytes_by_effective_pin(true)?.max(0);
+        let max_unpinned_cache_bytes = max_local_cache_bytes.saturating_sub(pinned_bytes);
+        self.enforce_smart_cache(CachePolicy {
+            max_unpinned_cache_bytes,
+            ..CachePolicy::default()
+        })
+    }
+
+    pub fn enforce_configured_cache_limit(&self) -> anyhow::Result<CacheCleanupOutcome> {
+        let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
+        self.enforce_local_cache_limit(cfg.local_cache_limit_for_eviction())
     }
 
     pub fn version_conflict_feed(&self) -> anyhow::Result<Vec<VersionConflictEntry>> {
@@ -1802,7 +1827,7 @@ impl EngineBridge {
                 let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
                 self.db
                     .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
-                let _ = self.enforce_smart_cache(CachePolicy::default());
+                let _ = self.enforce_configured_cache_limit();
                 Ok(())
             }
             Err(e) => {
@@ -1845,7 +1870,7 @@ impl EngineBridge {
                 // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
                 // file. Byte count is still recorded for smart-cache accounting.
                 self.db.mark_cached(file_id, "", buf.len() as i64, now_secs())?;
-                let _ = self.enforce_smart_cache(CachePolicy::default());
+                let _ = self.enforce_configured_cache_limit();
                 Ok(buf)
             }
             Err(e) => {
@@ -2055,7 +2080,7 @@ impl EngineBridge {
                 if plan.covers_whole_file {
                     self.db.set_status(file_id, FileStatus::Local)?;
                     self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
-                    let _ = self.enforce_smart_cache(CachePolicy::default());
+                    let _ = self.enforce_configured_cache_limit();
                 }
                 Ok(Some(HydratedRange {
                     data,
@@ -5151,6 +5176,30 @@ mod tests {
 
         assert_eq!(evicted.evicted_file_ids, vec!["unpinned".to_string()]);
         assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
+    }
+
+    #[test]
+    fn test_local_cache_limit_counts_pinned_bytes_against_total_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "pinned", "/Pinned.txt", None, FileStatus::Local, 700);
+        seed_bridge_row(&bridge, "old", "/Old.txt", None, FileStatus::Local, 400);
+        seed_bridge_row(&bridge, "new", "/New.txt", None, FileStatus::Local, 300);
+
+        bridge.db.set_recursive_pin("pinned", true, 1).unwrap();
+        bridge.db.mark_cached("pinned", "/cache/pinned", 700, 10).unwrap();
+        bridge.db.mark_cached("old", "/cache/old", 400, 20).unwrap();
+        bridge.db.mark_cached("new", "/cache/new", 300, 30).unwrap();
+
+        let evicted = bridge.enforce_local_cache_limit(Some(1_000)).unwrap();
+
+        assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()]);
+        assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(bridge.db.get_file("new").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(
+            bridge.db.get_file("old").unwrap().unwrap().status,
+            FileStatus::CloudOnly
+        );
     }
 
     #[test]

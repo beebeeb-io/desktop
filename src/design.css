@@ -67,6 +67,65 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --paper:     oklch(0.17 0.006 80);
+  --paper-2:   oklch(0.21 0.007 80);
+  --paper-3:   oklch(0.26 0.008 80);
+  --line:      oklch(0.31 0.008 80);
+  --line-2:    oklch(0.41 0.01 80);
+
+  --ink:       oklch(0.94 0.006 85);
+  --ink-2:     oklch(0.82 0.008 85);
+  --ink-3:     oklch(0.67 0.008 85);
+  --ink-4:     oklch(0.52 0.008 85);
+
+  --amber:       oklch(0.82 0.17 84);
+  --amber-deep:  oklch(0.78 0.16 82);
+  --amber-soft:  oklch(0.36 0.08 86);
+  --amber-bg:    oklch(0.25 0.035 88);
+
+  --green:  oklch(0.74 0.16 155);
+  --red:    oklch(0.68 0.21 25);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22), 0 1px 1px rgba(0, 0, 0, 0.18);
+  --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.24), 0 4px 14px rgba(0, 0, 0, 0.18);
+  --shadow-3: 0 4px 10px rgba(0, 0, 0, 0.28), 0 24px 48px -12px rgba(0, 0, 0, 0.36);
+  --ring: 0 0 0 3px oklch(0.36 0.08 86 / 0.85);
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --paper:     oklch(0.17 0.006 80);
+    --paper-2:   oklch(0.21 0.007 80);
+    --paper-3:   oklch(0.26 0.008 80);
+    --line:      oklch(0.31 0.008 80);
+    --line-2:    oklch(0.41 0.01 80);
+
+    --ink:       oklch(0.94 0.006 85);
+    --ink-2:     oklch(0.82 0.008 85);
+    --ink-3:     oklch(0.67 0.008 85);
+    --ink-4:     oklch(0.52 0.008 85);
+
+    --amber:       oklch(0.82 0.17 84);
+    --amber-deep:  oklch(0.78 0.16 82);
+    --amber-soft:  oklch(0.36 0.08 86);
+    --amber-bg:    oklch(0.25 0.035 88);
+
+    --green:  oklch(0.74 0.16 155);
+    --red:    oklch(0.68 0.21 25);
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22), 0 1px 1px rgba(0, 0, 0, 0.18);
+    --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.24), 0 4px 14px rgba(0, 0, 0, 0.18);
+    --shadow-3: 0 4px 10px rgba(0, 0, 0, 0.28), 0 24px 48px -12px rgba(0, 0, 0, 0.36);
+    --ring: 0 0 0 3px oklch(0.36 0.08 86 / 0.85);
+
+    color-scheme: dark;
+  }
 }
 
 * {

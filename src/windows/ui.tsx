@@ -6,21 +6,21 @@
 // ── Design tokens ───────────────────────────────────────────────────────────
 
 export const T = {
-  paper: 'oklch(0.985 0.004 85)',
-  paper2: 'oklch(0.968 0.006 85)',
-  paper3: 'oklch(0.945 0.008 82)',
-  line: 'oklch(0.90 0.008 82)',
-  line2: 'oklch(0.83 0.01 80)',
-  ink: 'oklch(0.18 0.01 70)',
-  ink2: 'oklch(0.34 0.012 75)',
-  ink3: 'oklch(0.52 0.01 78)',
-  ink4: 'oklch(0.68 0.008 80)',
-  amber: 'oklch(0.82 0.17 84)',
-  amberDeep: 'oklch(0.66 0.15 72)',
-  amberBg: 'oklch(0.97 0.03 92)',
-  green: 'oklch(0.72 0.16 155)',
-  fontSans: "'Inter', 'Segoe UI', system-ui, ui-sans-serif, sans-serif",
-  fontMono: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  paper: 'var(--paper)',
+  paper2: 'var(--paper-2)',
+  paper3: 'var(--paper-3)',
+  line: 'var(--line)',
+  line2: 'var(--line-2)',
+  ink: 'var(--ink)',
+  ink2: 'var(--ink-2)',
+  ink3: 'var(--ink-3)',
+  ink4: 'var(--ink-4)',
+  amber: 'var(--amber)',
+  amberDeep: 'var(--amber-deep)',
+  amberBg: 'var(--amber-bg)',
+  green: 'var(--green)',
+  fontSans: 'var(--font-sans)',
+  fontMono: 'var(--font-mono)',
 } as const
 
 // ── Mini icon set ────────────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ export function PrimaryBtn({ children, onClick, disabled }: { children: React.Re
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.55 : 1,
         whiteSpace: 'nowrap' as const,
-        letterSpacing: '-0.005em',
+        letterSpacing: 0,
       }}
     >
       {children}
