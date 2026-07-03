@@ -1,6 +1,6 @@
-# Beebeeb Desktop 0.2.0-beta.1 — Trash, a real menu bar, and a working Advanced page
+# Beebeeb Desktop 0.2.0 — Trash, a real menu bar, and a working Advanced page
 
-0.2.0-alpha.1 shipped everything built since 0.1.2-beta.2: local Trash support, a fully wired native menu bar, and four new Advanced/Settings features (theme, local cache limit, App Activity, and a notification audit). This beta promotes the same build to the wider beta channel — no code changes since the alpha, just a channel promotion once the alpha survived initial testing.
+Everything built since 0.1.2-beta.2: local Trash support, a fully wired native menu bar, and four new Advanced/Settings features (theme, local cache limit, App Activity, and a notification audit). This is the same build as 0.2.0-alpha.1 and 0.2.0-beta.1, promoted straight to Stable — the default channel every install auto-updates to. Every change below passed its full local test suite, but none has yet been confirmed on real hardware; if you hit something that doesn't look right, that's exactly what the in-app "Report a problem" menu item (new in this release) is for.
 
 ### What's New
 
@@ -23,8 +23,8 @@
 - Rust test suite: `cargo test --lib` — 279 passed, 0 failed.
 - TypeScript: `bunx tsc --noEmit` clean; `bun test` 13/13 passing.
 - Real UI screenshots (Vite dev server running the actual React settings code, no Tauri runtime): confirmed the search box is gone, the Advanced page's theme and cache-limit controls render and the theme switch re-themes the whole window live, and the Updates page shows the new Check-for-updates button and channel picker.
-- Not verified: the native menu bar itself (OS chrome, invisible in a browser), native OS notifications, and an actual channel-downgrade install — all genuinely need real Windows/macOS hardware. This is the same gap 0.2.0-alpha.1 had; promoting to beta does not close it on its own.
+- Not verified: the native menu bar itself (OS chrome, invisible in a browser), native OS notifications, and an actual channel-downgrade install — all genuinely need real Windows/macOS hardware. Neither the alpha nor the beta closed this gap before this stable cut; that was a deliberate, informed call to release all three channels together rather than wait for a hardware pass.
 
 ### Install / Update
 
-Existing desktop installs on the Beta channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
+Existing desktop installs on the Stable channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
