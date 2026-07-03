@@ -16,9 +16,57 @@ env:
   BUNDLE_IDENTIFIER: io.beebeeb.desktop
 
 jobs:
+  validate-release-notes:
+    name: Validate release notes
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate authored release notes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          notes_path="RELEASE_NOTES.md"
+
+          if [[ ! -f "$notes_path" ]]; then
+            echo "::error file=$notes_path::Missing RELEASE_NOTES.md for Beebeeb Desktop $RELEASE_VERSION. Author the release notes at the repo root, commit them, then rerun this workflow. See docs/RELEASING.md."
+            exit 1
+          fi
+
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["RELEASE_VERSION"]
+          notes_path = pathlib.Path("RELEASE_NOTES.md")
+          notes = notes_path.read_text(encoding="utf-8")
+          exact_version = re.compile(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z-]|\.[0-9A-Za-z])")
+
+          if not exact_version.search(notes):
+              print(
+                  f"::error file=RELEASE_NOTES.md::RELEASE_NOTES.md must mention the exact release version {version}. "
+                  "Update the title/body for this release and commit it before rerunning the workflow. See docs/RELEASING.md.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
   build:
     name: Build ${{ matrix.name }}
     if: github.event_name == 'workflow_dispatch'
+    needs: validate-release-notes
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -265,6 +313,11 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -276,6 +329,7 @@ jobs:
           tag_name: desktop-v${{ inputs.version }}
           name: Beebeeb Desktop ${{ inputs.version }}
           target_commitish: ${{ github.sha }}
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           fail_on_unmatched_files: false
           # Single catch-all instead of a per-extension allowlist — the upload steps above now

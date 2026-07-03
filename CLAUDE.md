@@ -30,6 +30,12 @@ modern Arch shared libraries use, and ignores the `STRIP` env override — this 
 on GitHub's `ubuntu-latest` runners, so CI remains the source of truth for that one step. Windows
 and macOS builds cannot be reproduced locally at all (no cross-compile path from Linux).
 
+## Releases
+
+Before cutting a desktop release, follow `docs/RELEASING.md`. The release workflow fails closed
+unless the released commit contains a root `RELEASE_NOTES.md` whose contents mention the exact
+semver value passed to the workflow; author and commit per-release notes before triggering it.
+
 ## Architecture
 
 ```mermaid
