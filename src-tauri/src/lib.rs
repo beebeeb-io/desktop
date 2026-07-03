@@ -5023,6 +5023,22 @@ fn autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+const WINDOWS_TRAY_FLYOUT_WIDTH: u32 = 400;
+const WINDOWS_TRAY_FLYOUT_HEIGHT: u32 = 560;
+const WINDOWS_TRAY_FLYOUT_GAP: i32 = 10;
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_tray_flyout_position(click_x: f64, click_y: f64) -> tauri::PhysicalPosition<i32> {
+    tauri::PhysicalPosition {
+        x: (click_x as i32).saturating_sub(WINDOWS_TRAY_FLYOUT_WIDTH as i32),
+        y: (click_y as i32).saturating_sub(WINDOWS_TRAY_FLYOUT_HEIGHT as i32 + WINDOWS_TRAY_FLYOUT_GAP),
+    }
+}
+
+fn window_state_denylist_labels() -> &'static [&'static str] {
+    &["tray", "windows-onboarding"]
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
@@ -5034,7 +5050,11 @@ pub fn run() {
         // IPC after login. The future sync engine task reads from this.
         .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(window_state_denylist_labels())
+                .build(),
+        )
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
         // Native OS notifications — Task 11. The first conflict
@@ -5184,9 +5204,9 @@ pub fn run() {
 
             setup_native_menu(app)?;
             setup_tray(app)?;
-            // Defensive: hide windows that tauri_plugin_window_state may have
-            // restored visible on Windows. Only onboarding should appear on
-            // first-run; the tray flyout and main app are shown deliberately.
+            // Defensive: hide windows that older persisted state or other
+            // startup paths may leave visible. Fixed auxiliary windows are now
+            // excluded from window-state restore; main-app remains stateful.
             #[cfg(target_os = "windows")]
             {
                 // macOS-labelled `settings` window is not used on Windows.
@@ -5559,7 +5579,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                             let _ = win.hide();
                         } else {
                             // Position the flyout above the tray icon.
-                            // The window is 400×390; place it so the bottom-right
+                            // The window is 400x560; place it so the bottom-right
                             // corner aligns with the click position (tray icon centre).
                             // The tray event's `position` is already in physical
                             // pixels, so we pass `Position::Physical` and offset in
@@ -5567,12 +5587,8 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                             // conversion needed here. The Y offset matches the
                             // window height (+ a small gap) so the flyout sits
                             // above, not over, the taskbar.
-                            let _ = win.set_position(tauri::Position::Physical(
-                                tauri::PhysicalPosition {
-                                    x: (position.x as i32).saturating_sub(400),
-                                    y: (position.y as i32).saturating_sub(400),
-                                },
-                            ));
+                            let flyout_position = windows_tray_flyout_position(position.x, position.y);
+                            let _ = win.set_position(tauri::Position::Physical(flyout_position));
                             let _ = win.show();
                             let _ = win.set_focus();
                         }
@@ -5869,6 +5885,29 @@ mod tests {
         assert_eq!(items.len(), 12);
         assert_eq!(items[0].name, "file-11.txt");
         assert_eq!(items[11].name, "file-0.txt");
+    }
+
+    #[test]
+    fn window_state_excludes_fixed_auxiliary_windows_but_keeps_main_app() {
+        let labels = super::window_state_denylist_labels();
+
+        assert!(labels.contains(&"tray"));
+        assert!(labels.contains(&"windows-onboarding"));
+        assert!(!labels.contains(&"main-app"));
+    }
+
+    #[test]
+    fn tray_flyout_geometry_matches_configured_window() {
+        assert_eq!(super::WINDOWS_TRAY_FLYOUT_WIDTH, 400);
+        assert_eq!(super::WINDOWS_TRAY_FLYOUT_HEIGHT, 560);
+    }
+
+    #[test]
+    fn tray_flyout_position_uses_configured_height_and_gap() {
+        let position = super::windows_tray_flyout_position(1_920.0, 1_080.0);
+
+        assert_eq!(position.x, 1_520);
+        assert_eq!(position.y, 510);
     }
 
     #[test]
