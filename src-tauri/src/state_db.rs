@@ -25,6 +25,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
+
 /// High-level sync status for a single file. Maps 1:1 to the icon
 /// overlays rendered by the platform extensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -385,6 +387,48 @@ pub struct RevokedSharedCache {
     pub cache_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalActivityKind {
+    MovedToTrash,
+    Restored,
+}
+
+impl LocalActivityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LocalActivityKind::MovedToTrash => "moved_to_trash",
+            LocalActivityKind::Restored => "restored",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "restored" => LocalActivityKind::Restored,
+            _ => LocalActivityKind::MovedToTrash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalActivityEventInput {
+    pub event_type: LocalActivityKind,
+    pub file_id: Option<String>,
+    pub file_name: String,
+    pub rel_path: Option<String>,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalActivityEvent {
+    pub id: i64,
+    pub event_type: LocalActivityKind,
+    pub file_id: Option<String>,
+    pub file_name: String,
+    pub rel_path: Option<String>,
+    pub occurred_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingOperation {
     pub op_id: String,
@@ -524,6 +568,15 @@ impl StateDb {
                 period_secs INTEGER NOT NULL DEFAULT 20
             );
             CREATE INDEX IF NOT EXISTS idx_bandwidth_samples_at ON bandwidth_samples(sampled_at);
+            CREATE TABLE IF NOT EXISTS local_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                file_id TEXT,
+                file_name TEXT NOT NULL,
+                rel_path TEXT,
+                occurred_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_activity_recent ON local_activity(occurred_at DESC, id DESC);
         ",
         )?;
         ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -755,6 +808,63 @@ impl StateDb {
         Ok(removed)
     }
 
+    /// Append a local-only activity event and prune old rows. This table is the
+    /// durable recent-activity surface for events whose canonical file row may
+    /// legitimately disappear from `files` during sync convergence.
+    pub fn record_local_activity(&self, input: LocalActivityEventInput) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO local_activity (event_type, file_id, file_name, rel_path, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                input.event_type.as_str(),
+                input.file_id,
+                input.file_name,
+                input.rel_path,
+                input.occurred_at
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM local_activity
+             WHERE id NOT IN (
+               SELECT id FROM local_activity
+               ORDER BY occurred_at DESC, id DESC
+               LIMIT ?1
+             )",
+            params![LOCAL_ACTIVITY_MAX_ROWS as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Return newest local activity events, capped by the caller's limit.
+    pub fn list_recent_local_activity(&self, limit: usize) -> Result<Vec<LocalActivityEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(LOCAL_ACTIVITY_MAX_ROWS);
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, event_type, file_id, file_name, rel_path, occurred_at
+             FROM local_activity
+             ORDER BY occurred_at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let event_type = LocalActivityKind::from_str(&row.get::<_, String>(1)?);
+            Ok(LocalActivityEvent {
+                id: row.get(0)?,
+                event_type,
+                file_id: row.get(2)?,
+                file_name: row.get(3)?,
+                rel_path: row.get(4)?,
+                occurred_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Sweep and delete every descendant of `folder_id` from the DB when the
     /// folder's OWN row is ABSENT (the "ghost children" bug, task 0828).
     ///
@@ -794,10 +904,7 @@ impl StateDb {
     /// Only rows whose `parent_id` column equals `folder_id` (and their
     /// path-prefix descendants) are ever touched.  No broader match is possible:
     /// the query is `WHERE parent_id = ?1` with a single bound parameter.
-    pub fn delete_orphaned_children_of_absent_folder(
-        &self,
-        folder_id: &str,
-    ) -> Result<Vec<PrunedRow>> {
+    pub fn delete_orphaned_children_of_absent_folder(&self, folder_id: &str) -> Result<Vec<PrunedRow>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
@@ -805,9 +912,7 @@ impl StateDb {
         // Using `parent_id` (not path-prefix) because we have no path to start
         // from — that is precisely the condition that triggered this call.
         let direct_children: Vec<PrunedRow> = {
-            let mut stmt = tx.prepare(
-                "SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1",
-            )?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1")?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
@@ -845,17 +950,13 @@ impl StateDb {
                             Ok(PrunedRow {
                                 file_id: r.get(0)?,
                                 path: r.get(1)?,
-                                is_dir: ItemKind::from_str(&r.get::<_, String>(2)?)
-                                    == ItemKind::Folder,
+                                is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?
                     };
                     for d in descendants {
-                        tx.execute(
-                            "DELETE FROM files WHERE file_id = ?1",
-                            params![d.file_id],
-                        )?;
+                        tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
                         removed.push(d);
                     }
                 }
@@ -1021,11 +1122,7 @@ impl StateDb {
     ///
     /// Done in ONE transaction so a concurrent reader never sees a half-pruned
     /// tree.
-    pub fn prune_absent(
-        &self,
-        seen_file_ids: &HashSet<String>,
-        snapshot_fetched_at: i64,
-    ) -> Result<Vec<PrunedRow>> {
+    pub fn prune_absent(&self, seen_file_ids: &HashSet<String>, snapshot_fetched_at: i64) -> Result<Vec<PrunedRow>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
         // Candidate set: own-tree rows that are NOT pending an upload/op, not
@@ -2207,6 +2304,61 @@ mod tests {
     }
 
     #[test]
+    fn local_activity_round_trips_newest_first() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        db.record_local_activity(LocalActivityEventInput {
+            event_type: LocalActivityKind::MovedToTrash,
+            file_id: Some("file-1".into()),
+            file_name: "report.pdf".into(),
+            rel_path: Some("docs/report.pdf".into()),
+            occurred_at: 10,
+        })
+        .unwrap();
+        db.record_local_activity(LocalActivityEventInput {
+            event_type: LocalActivityKind::Restored,
+            file_id: Some("file-2".into()),
+            file_name: "notes.txt".into(),
+            rel_path: Some("notes.txt".into()),
+            occurred_at: 20,
+        })
+        .unwrap();
+
+        let events = db.list_recent_local_activity(10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, LocalActivityKind::Restored);
+        assert_eq!(events[0].file_id.as_deref(), Some("file-2"));
+        assert_eq!(events[0].file_name, "notes.txt");
+        assert_eq!(events[0].rel_path.as_deref(), Some("notes.txt"));
+        assert_eq!(events[0].occurred_at, 20);
+        assert_eq!(events[1].event_type, LocalActivityKind::MovedToTrash);
+        assert_eq!(events[1].file_name, "report.pdf");
+    }
+
+    #[test]
+    fn local_activity_prunes_to_cap() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        for i in 0..(LOCAL_ACTIVITY_MAX_ROWS + 5) {
+            db.record_local_activity(LocalActivityEventInput {
+                event_type: LocalActivityKind::MovedToTrash,
+                file_id: Some(format!("file-{i}")),
+                file_name: format!("file-{i}.txt"),
+                rel_path: Some(format!("file-{i}.txt")),
+                occurred_at: i as i64,
+            })
+            .unwrap();
+        }
+
+        let events = db.list_recent_local_activity(LOCAL_ACTIVITY_MAX_ROWS + 10).unwrap();
+        assert_eq!(events.len(), LOCAL_ACTIVITY_MAX_ROWS);
+        assert_eq!(events[0].occurred_at, (LOCAL_ACTIVITY_MAX_ROWS + 4) as i64);
+        assert_eq!(events.last().unwrap().occurred_at, 5);
+    }
+
+    #[test]
     fn get_file_by_path_matches_across_leading_slash() {
         let dir = tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
@@ -2452,10 +2604,7 @@ mod tests {
         let b_contract = db.get_file_contract_state("both").unwrap().unwrap();
         assert_eq!(b_contract.pin_state, PinState::Unpinned);
         assert_eq!(b_contract.last_sync_at, 12345);
-        assert_eq!(
-            db.get_file("both").unwrap().unwrap().status,
-            FileStatus::CloudOnly
-        );
+        assert_eq!(db.get_file("both").unwrap().unwrap().status, FileStatus::CloudOnly);
     }
 
     #[test]
@@ -3055,7 +3204,10 @@ mod tests {
         // survives regardless).
         let pruned = db.prune_absent(&HashSet::new(), FAR_FUTURE).unwrap();
         assert!(pruned.is_empty());
-        assert!(db.get_file("in-flight").unwrap().is_some(), "pending-op row never pruned");
+        assert!(
+            db.get_file("in-flight").unwrap().is_some(),
+            "pending-op row never pruned"
+        );
     }
 
     #[test]
@@ -3136,7 +3288,10 @@ mod tests {
         let seen: HashSet<String> = ["other".to_string()].into_iter().collect();
         let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
         assert!(pruned.is_empty());
-        assert!(db.get_file("uploading-row").unwrap().is_some(), "uploading row never pruned");
+        assert!(
+            db.get_file("uploading-row").unwrap().is_some(),
+            "uploading row never pruned"
+        );
     }
 
     #[test]
@@ -3178,7 +3333,10 @@ mod tests {
         let seen: HashSet<String> = ["my-own".to_string()].into_iter().collect();
         let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
         assert!(pruned.is_empty());
-        assert!(db.get_file("shared").unwrap().is_some(), "shared-with-me row never pruned by own-tree snapshot");
+        assert!(
+            db.get_file("shared").unwrap().is_some(),
+            "shared-with-me row never pruned by own-tree snapshot"
+        );
     }
 
     #[test]
@@ -3598,9 +3756,7 @@ mod tests {
         assert!(db.get_file("grandchild").unwrap().is_some());
 
         // Execute the fix: sweep orphaned children of the absent folder.
-        let removed = db
-            .delete_orphaned_children_of_absent_folder("folder-gone")
-            .unwrap();
+        let removed = db.delete_orphaned_children_of_absent_folder("folder-gone").unwrap();
 
         // All four rows must be gone.
         assert!(
@@ -3649,9 +3805,6 @@ mod tests {
         let removed = db
             .delete_orphaned_children_of_absent_folder("nonexistent-folder")
             .unwrap();
-        assert!(
-            removed.is_empty(),
-            "no children → should return empty vec"
-        );
+        assert!(removed.is_empty(), "no children → should return empty vec");
     }
 }

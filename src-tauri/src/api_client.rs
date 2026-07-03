@@ -75,12 +75,7 @@ fn header_secs(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> 
 /// defaulting to `RETRY_DEFAULT_WAIT_SECS`, then clamped to `RETRY_WAIT_CAP_SECS`
 /// and further trimmed so total sleep never exceeds `RETRY_TOTAL_BUDGET_SECS`.
 /// We stop once `attempt` reaches `MAX_429_RETRIES` or the budget is exhausted.
-fn retry_decision(
-    attempt: u32,
-    spent: u64,
-    retry_after: Option<u64>,
-    reset_in: Option<u64>,
-) -> Option<u64> {
+fn retry_decision(attempt: u32, spent: u64, retry_after: Option<u64>, reset_in: Option<u64>) -> Option<u64> {
     if attempt >= MAX_429_RETRIES || spent >= RETRY_TOTAL_BUDGET_SECS {
         return None;
     }
@@ -104,6 +99,7 @@ pub struct ListFilesScope<'a> {
     pub parent_id: Option<&'a str>,
     pub shared_folder_id: Option<&'a str>,
     pub trashed: Option<bool>,
+    pub cursor: Option<&'a str>,
 }
 
 // ── /sync delta engine DTOs (task 0789) ────────────────────────────────────────
@@ -357,6 +353,10 @@ impl ApiClient {
         self.url(&format!("/api/v1/files/{}/restore", encode(file_id)))
     }
 
+    pub fn permanent_file_url(&self, file_id: &str) -> String {
+        self.url(&format!("/api/v1/files/{}/permanent", encode(file_id)))
+    }
+
     pub fn versions_url(&self, file_id: &str) -> String {
         self.url(&format!("/api/v1/files/{}/versions", encode(file_id)))
     }
@@ -396,6 +396,9 @@ impl ApiClient {
         if let Some(trashed) = scope.trashed {
             query.push(format!("trashed={trashed}"));
         }
+        if let Some(cursor) = scope.cursor {
+            query.push(format!("cursor={}", encode(cursor)));
+        }
         if query.is_empty() {
             self.url("/api/v1/files")
         } else {
@@ -417,6 +420,7 @@ impl ApiClient {
                 parent_id: Some(id),
                 shared_folder_id: None,
                 trashed: None,
+                cursor: None,
             }),
             None => self.list_files_url(ListFilesScope::default()),
         };
@@ -488,11 +492,7 @@ impl ApiClient {
     /// A `404` (no thumbnail for this file / variant) surfaces as an `Err` via
     /// `error_for_status`; the caller treats any error as "no thumbnail" and lets
     /// Explorer fall back to the file-type icon.
-    pub async fn download_thumbnail(
-        &self,
-        file_id: &str,
-        variant: &str,
-    ) -> anyhow::Result<Vec<u8>> {
+    pub async fn download_thumbnail(&self, file_id: &str, variant: &str) -> anyhow::Result<Vec<u8>> {
         let resp = self
             .client
             .get(self.thumbnail_url(file_id, variant))
@@ -595,6 +595,7 @@ impl ApiClient {
                 parent_id,
                 shared_folder_id: Some(shared_folder_id),
                 trashed: None,
+                cursor: None,
             }))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
@@ -602,6 +603,38 @@ impl ApiClient {
             .error_for_status()?;
         let body: serde_json::Value = resp.json().await?;
         Ok(body["files"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Enumerate every trashed row by following the `/files?trashed=true`
+    /// `next_cursor`, mirroring the web app's `listAllFiles(..., { trashed:
+    /// true })`. The hard cap prevents a bad cursor loop from growing memory
+    /// without bound.
+    pub async fn list_trashed_files_all(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        const HARD_CAP: usize = 50_000;
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let url = self.list_files_url(ListFilesScope {
+                parent_id: None,
+                shared_folder_id: None,
+                trashed: Some(true),
+                cursor: cursor.as_deref(),
+            });
+            let resp = self.send_with_retry(|| self.client.get(&url)).await?;
+            let body: serde_json::Value = resp.json().await?;
+            let files = body["files"].as_array().cloned().unwrap_or_default();
+            out.extend(files);
+            if out.len() > HARD_CAP {
+                anyhow::bail!("trashed file listing exceeded hard cap of {HARD_CAP}");
+            }
+            cursor = body["next_cursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(out)
     }
 
     pub async fn list_versions(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
@@ -657,6 +690,17 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    pub async fn permanent_delete_file(&self, file_id: &str, confirm_token: &str) -> anyhow::Result<()> {
+        self.client
+            .delete(self.permanent_file_url(file_id))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("X-Confirm-Token", confirm_token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     pub async fn update_metadata(
@@ -767,10 +811,7 @@ impl ApiClient {
     /// sleep, and retry — up to `MAX_429_RETRIES` extra attempts and a total
     /// sleep budget of `RETRY_TOTAL_BUDGET_SECS`. The final 429 (or a non-429
     /// non-2xx at any point) is surfaced via `check_status`.
-    async fn send_with_retry(
-        &self,
-        build: impl Fn() -> reqwest::RequestBuilder,
-    ) -> anyhow::Result<reqwest::Response> {
+    async fn send_with_retry(&self, build: impl Fn() -> reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
         let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
         loop {
@@ -783,8 +824,8 @@ impl ApiClient {
             }
             // 429: decide whether (and how long) to wait before retrying.
             let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
-            let reset_in = header_secs(resp.headers(), "x-ratelimit-reset")
-                .map(|epoch| epoch.saturating_sub(now_unix_secs()));
+            let reset_in =
+                header_secs(resp.headers(), "x-ratelimit-reset").map(|epoch| epoch.saturating_sub(now_unix_secs()));
             match retry_decision(attempt, spent, retry_after, reset_in) {
                 Some(wait) => {
                     if wait > 0 {
@@ -871,9 +912,7 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/clients/sessions` — per-device sync sessions.
-    pub async fn client_sync_sessions(
-        &self,
-    ) -> anyhow::Result<crate::account_dto::ClientSyncSessionList> {
+    pub async fn client_sync_sessions(&self) -> anyhow::Result<crate::account_dto::ClientSyncSessionList> {
         self.get_typed("/api/v1/clients/sessions").await
     }
 
@@ -898,9 +937,7 @@ impl ApiClient {
             "platform": platform,
             "bb_version": bb_version,
         });
-        let resp = self
-            .send_with_retry(|| self.client.post(&url).json(&body))
-            .await?;
+        let resp = self.send_with_retry(|| self.client.post(&url).json(&body)).await?;
         Ok(resp.json().await?)
     }
 
@@ -928,9 +965,7 @@ impl ApiClient {
             "remote_path": remote_path,
             "heartbeat_interval_secs": heartbeat_interval_secs,
         });
-        let resp = self
-            .send_with_retry(|| self.client.post(&url).json(&body))
-            .await?;
+        let resp = self.send_with_retry(|| self.client.post(&url).json(&body)).await?;
         Ok(resp.json().await?)
     }
 
@@ -942,10 +977,7 @@ impl ApiClient {
     /// rate-limited one. A non-2xx is surfaced as an error the caller logs and
     /// swallows; the producer keeps ticking.
     pub async fn post_heartbeat(&self, session_id: &str, body: &HeartbeatBody) -> anyhow::Result<()> {
-        let url = self.url(&format!(
-            "/api/v1/clients/sessions/{}/heartbeat",
-            encode(session_id)
-        ));
+        let url = self.url(&format!("/api/v1/clients/sessions/{}/heartbeat", encode(session_id)));
         let resp = self
             .client
             .post(&url)
@@ -985,9 +1017,7 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/notifications/preferences` — push-preference toggles.
-    pub async fn notification_preferences(
-        &self,
-    ) -> anyhow::Result<crate::account_dto::NotificationPreferences> {
+    pub async fn notification_preferences(&self) -> anyhow::Result<crate::account_dto::NotificationPreferences> {
         self.get_typed("/api/v1/notifications/preferences").await
     }
 
@@ -998,9 +1028,7 @@ impl ApiClient {
         update: &crate::account_dto::NotificationPreferencesUpdate,
     ) -> anyhow::Result<crate::account_dto::NotificationPreferences> {
         let url = self.url("/api/v1/notifications/preferences");
-        let resp = self
-            .send_with_retry(|| self.client.put(&url).json(update))
-            .await?;
+        let resp = self.send_with_retry(|| self.client.put(&url).json(update)).await?;
         Ok(resp.json().await?)
     }
 
@@ -1086,8 +1114,9 @@ mod tests {
                 parent_id: Some("parent/one"),
                 shared_folder_id: Some("shared one"),
                 trashed: Some(false),
+                cursor: Some("cursor/one"),
             }),
-            "https://api.beebeeb.io/api/v1/files?parent_id=parent%2Fone&shared_folder_id=shared%20one&trashed=false"
+            "https://api.beebeeb.io/api/v1/files?parent_id=parent%2Fone&shared_folder_id=shared%20one&trashed=false&cursor=cursor%2Fone"
         );
         assert_eq!(
             client.version_download_url("file/one", "version two"),
@@ -1254,6 +1283,10 @@ mod tests {
         assert_eq!(
             client.restore_file_url("file one"),
             "https://api.beebeeb.io/api/v1/files/file%20one/restore"
+        );
+        assert_eq!(
+            client.permanent_file_url("file one"),
+            "https://api.beebeeb.io/api/v1/files/file%20one/permanent"
         );
         assert_eq!(
             client.folder_members_url("folder/one"),

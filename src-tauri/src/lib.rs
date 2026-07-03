@@ -559,12 +559,7 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
         640.0_f64,
     );
     #[cfg(not(target_os = "windows"))]
-    let (label, url, width, height) = (
-        "onboarding",
-        "index.html?window=onboarding",
-        860.0_f64,
-        640.0_f64,
-    );
+    let (label, url, width, height) = ("onboarding", "index.html?window=onboarding", 860.0_f64, 640.0_f64);
 
     if let Some(existing) = app.get_webview_window(label) {
         let _ = existing.show();
@@ -624,11 +619,7 @@ struct LoginOutcome {
 ///
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
-async fn desktop_login(
-    state: State<'_, AppState>,
-    email: String,
-    password: String,
-) -> Result<LoginOutcome, String> {
+async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<LoginOutcome, String> {
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -886,8 +877,8 @@ async fn desktop_unlock_with_recovery_phrase(
     }
 
     let account_id = acct.id.as_str().to_string();
-    let token =
-        load_session_token_from_keychain(&account_id)?.ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+    let token = load_session_token_from_keychain(&account_id)?
+        .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
     let recovery_phrase = normalize_recovery_phrase_input(&recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
@@ -2002,8 +1993,8 @@ fn is_contained(root: &std::path::Path, full: &std::path::Path) -> bool {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_dangerous_executable(path: &std::path::Path) -> bool {
     const DANGEROUS_EXTS: &[&str] = &[
-        "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js",
-        "jse", "wsf", "wsh", "msi", "reg", "cpl", "pif", "msc", "jar",
+        "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
+        "reg", "cpl", "pif", "msc", "jar",
     ];
     let Some(ext) = path.extension() else {
         return false;
@@ -2057,10 +2048,7 @@ fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> Result<(), S
             is_contained(&sync_root, &full_path)
         } else {
             // Fallback: verify parent is contained.
-            let parent_ok = full_path
-                .parent()
-                .map(|p| is_contained(&sync_root, p))
-                .unwrap_or(false);
+            let parent_ok = full_path.parent().map(|p| is_contained(&sync_root, p)).unwrap_or(false);
             // And the file name component must not contain any separator.
             let name_ok = full_path
                 .file_name()
@@ -3078,6 +3066,23 @@ fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayActivityItem>
         }
     }
 
+    if let Ok(events) = db.list_recent_local_activity(TRAY_RECENT_ACTIVITY_LIMIT) {
+        for event in events
+            .into_iter()
+            .filter(|event| event.event_type == state_db::LocalActivityKind::MovedToTrash)
+        {
+            items.push(TrayActivityItem {
+                id: event.file_id.unwrap_or_else(|| format!("activity-{}", event.id)),
+                name: event.file_name,
+                status: "Moved to trash".to_string(),
+                icon: "trash".to_string(),
+                ok: Some(true),
+                active: None,
+                progress: None,
+            });
+        }
+    }
+
     if let Ok(locals) = db.list_by_status(state_db::FileStatus::Local) {
         // Sort by modified_at descending — most recently synced first.
         let mut locals = locals;
@@ -3239,7 +3244,11 @@ async fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
     //    regardless of the reclaim outcome.
     let mut cfg = DesktopConfig::load()?;
     let old_excluded = cfg.excluded_folder_ids.clone().unwrap_or_default();
-    cfg.excluded_folder_ids = if excluded.is_empty() { None } else { Some(excluded.clone()) };
+    cfg.excluded_folder_ids = if excluded.is_empty() {
+        None
+    } else {
+        Some(excluded.clone())
+    };
     cfg.save()?;
 
     // 2. Diff for the subtrees we must reclaim now.
@@ -3252,7 +3261,10 @@ async fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
     let join = tokio::task::spawn_blocking(move || dehydrate_excluded_subtrees_blocking(&newly_excluded));
     match join.await {
         Ok(Ok(freed)) => {
-            tracing::info!(bytes_freed = freed, "set_selective_sync: dehydrated newly-excluded subtrees");
+            tracing::info!(
+                bytes_freed = freed,
+                "set_selective_sync: dehydrated newly-excluded subtrees"
+            );
         }
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "set_selective_sync: reclaim of excluded subtrees failed (list still persisted)");
@@ -3692,11 +3704,7 @@ fn folder_leaf_name(path: &str) -> Option<String> {
         return None;
     }
     let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    if leaf.is_empty() {
-        None
-    } else {
-        Some(leaf.to_string())
-    }
+    if leaf.is_empty() { None } else { Some(leaf.to_string()) }
 }
 
 /// Stable id-derived fallback label, mirroring the existing top-level path.
@@ -3969,8 +3977,12 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
         return Ok(Vec::new());
     };
 
-    let excluded: std::collections::HashSet<String> =
-        DesktopConfig::load().ok().and_then(|c| c.excluded_folder_ids).unwrap_or_default().into_iter().collect();
+    let excluded: std::collections::HashSet<String> = DesktopConfig::load()
+        .ok()
+        .and_then(|c| c.excluded_folder_ids)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     // Primary path: build from the local, already-nested state DB.
     if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
@@ -4141,7 +4153,10 @@ fn api_client_from_session(state: &State<'_, AppState>) -> Result<api_client::Ap
 async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
     let acct = state.active_account()?;
     {
-        let guard = acct.cached_profile.lock().map_err(|_| "profile mutex poisoned".to_string())?;
+        let guard = acct
+            .cached_profile
+            .lock()
+            .map_err(|_| "profile mutex poisoned".to_string())?;
         if let Some(profile) = guard.as_ref() {
             return Ok(profile.clone());
         }
@@ -4202,9 +4217,7 @@ async fn account_security_score(state: State<'_, AppState>) -> Result<account_dt
 
 /// `GET /api/v1/account/sessions` — active account sessions.
 #[tauri::command]
-async fn account_session_list(
-    state: State<'_, AppState>,
-) -> Result<account_dto::AccountSessionList, String> {
+async fn account_session_list(state: State<'_, AppState>) -> Result<account_dto::AccountSessionList, String> {
     api_client_from_session(&state)?
         .account_sessions()
         .await
@@ -4223,9 +4236,7 @@ async fn account_revoke_session(state: State<'_, AppState>, session_id: String) 
 /// `POST /api/v1/account/sessions/revoke-all-others` — revoke every other
 /// session; returns the count revoked.
 #[tauri::command]
-async fn account_revoke_other_sessions(
-    state: State<'_, AppState>,
-) -> Result<account_dto::RevokeAllResult, String> {
+async fn account_revoke_other_sessions(state: State<'_, AppState>) -> Result<account_dto::RevokeAllResult, String> {
     api_client_from_session(&state)?
         .revoke_other_sessions()
         .await
@@ -4243,9 +4254,7 @@ async fn account_devices(state: State<'_, AppState>) -> Result<account_dto::Clie
 
 /// `GET /api/v1/clients/sessions` — per-device sync sessions.
 #[tauri::command]
-async fn account_client_sessions(
-    state: State<'_, AppState>,
-) -> Result<account_dto::ClientSyncSessionList, String> {
+async fn account_client_sessions(state: State<'_, AppState>) -> Result<account_dto::ClientSyncSessionList, String> {
     api_client_from_session(&state)?
         .client_sync_sessions()
         .await
@@ -4268,9 +4277,7 @@ async fn account_activity_feed(
 
 /// `GET /api/v1/notifications` — notification list + unread count.
 #[tauri::command]
-async fn account_notifications(
-    state: State<'_, AppState>,
-) -> Result<account_dto::NotificationList, String> {
+async fn account_notifications(state: State<'_, AppState>) -> Result<account_dto::NotificationList, String> {
     api_client_from_session(&state)?
         .notifications()
         .await
@@ -4299,6 +4306,252 @@ async fn account_update_notification_preferences(
         .update_notification_preferences(&update)
         .await
         .map_err(|e| e.to_string())
+}
+
+fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
+    let from_plain = ["display_name", "decrypted_name", "filename", "file_name", "name"]
+        .into_iter()
+        .find_map(|key| {
+            file_meta
+                .get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+        });
+    if let Some(name) = from_plain {
+        return name;
+    }
+    if let Some(path) = file_meta
+        .get("path")
+        .and_then(|v| v.as_str())
+        .or_else(|| file_meta.get("display_path").and_then(|v| v.as_str()))
+        .and_then(folder_leaf_name)
+    {
+        return path;
+    }
+    let short = id.get(..8).unwrap_or(id);
+    format!("Encrypted item {short}…")
+}
+
+fn trash_item_from_meta(file_meta: &serde_json::Value, master_key: &[u8; 32]) -> Option<account_dto::DesktopTrashItem> {
+    let id = file_meta.get("id").and_then(|v| v.as_str())?.to_string();
+    let name = try_decrypt_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
+    let updated_at = file_meta
+        .get("updated_at")
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
+        .unwrap_or_default();
+
+    Some(account_dto::DesktopTrashItem {
+        id,
+        name,
+        is_folder: file_meta
+            .get("is_folder")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| file_meta.get("kind").and_then(|v| v.as_str()) == Some("folder")),
+        size_bytes: file_meta
+            .get("size_bytes")
+            .and_then(|v| v.as_i64())
+            .or_else(|| file_meta.get("size").and_then(|v| v.as_i64()))
+            .unwrap_or(0),
+        updated_at,
+        parent_id: file_meta.get("parent_id").and_then(|v| v.as_str()).map(str::to_string),
+    })
+}
+
+async fn confirm_action_plaintext(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    password: &str,
+) -> Result<account_dto::ConfirmActionResult, String> {
+    let res = client
+        .post(format!("{base_url}/api/v1/auth/confirm"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "password": password }))
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let body = res.json::<serde_json::Value>().await.unwrap_or_default();
+        if body.get("error").and_then(|v| v.as_str()) == Some("session_too_old_for_confirmation") {
+            return Err(body
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Sign in again before confirming this action.")
+                .to_string());
+        }
+        return Err("Incorrect password".to_string());
+    }
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Confirm action failed ({status}): {body}"));
+    }
+    res.json()
+        .await
+        .map_err(|e| format!("parse confirm action response: {e}"))
+}
+
+/// Exchange the current user's password for a single-use destructive-action
+/// token. Mirrors the web app's OPAQUE step-up flow, with a plaintext fallback
+/// only for legacy accounts that explicitly report `opaque_unavailable`.
+#[tauri::command]
+async fn desktop_confirm_action(
+    state: State<'_, AppState>,
+    password: String,
+) -> Result<account_dto::ConfirmActionResult, String> {
+    if password.is_empty() {
+        return Err("Password is required.".to_string());
+    }
+    let token = {
+        let acct = state.active_account()?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        guard
+            .as_ref()
+            .map(|s| s.token.clone())
+            .ok_or_else(|| "vault is locked".to_string())?
+    };
+
+    let base_url = runner::api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+
+    let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
+        .map_err(|e| format!("opaque confirm start: {e}"))?;
+    let start_resp = client
+        .post(format!("{base_url}/api/v1/auth/confirm-opaque-start"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "client_message": encode_base64(&login_start.message) }))
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+
+    if start_resp.status() == reqwest::StatusCode::CONFLICT {
+        let body = start_resp.json::<serde_json::Value>().await.unwrap_or_default();
+        if body.get("opaque_unavailable").and_then(|v| v.as_bool()) == Some(true) {
+            return confirm_action_plaintext(&client, &base_url, &token, &password).await;
+        }
+        return Err(body
+            .get("message")
+            .or_else(|| body.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Confirm action failed.")
+            .to_string());
+    }
+    if !start_resp.status().is_success() {
+        let status = start_resp.status();
+        let body = start_resp.text().await.unwrap_or_default();
+        return Err(format!("Confirm action start failed ({status}): {body}"));
+    }
+
+    let start_body: serde_json::Value = start_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse confirm start response: {e}"))?;
+    let server_message = start_body
+        .get("server_message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No server_message in confirm start response".to_string())?;
+    let server_state = start_body
+        .get("server_state")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No server_state in confirm start response".to_string())?;
+    let ksf_version = start_body
+        .get("ksf_version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "No ksf_version in confirm start response".to_string())? as u32;
+    let server_message_bytes =
+        decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
+    let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
+        &login_start.state,
+        password.as_bytes(),
+        &server_message_bytes,
+        ksf_version,
+    )
+    .map_err(|_| "Incorrect password".to_string())?;
+
+    let finish_resp = client
+        .post(format!("{base_url}/api/v1/auth/confirm-opaque-finish"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "client_message": encode_base64(&login_finish.message),
+            "server_state": server_state,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Incorrect password".to_string());
+    }
+    if !finish_resp.status().is_success() {
+        let status = finish_resp.status();
+        let body = finish_resp.text().await.unwrap_or_default();
+        return Err(format!("Confirm action finish failed ({status}): {body}"));
+    }
+    finish_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse confirm finish response: {e}"))
+}
+
+#[tauri::command]
+async fn desktop_trash_list(state: State<'_, AppState>) -> Result<Vec<account_dto::DesktopTrashItem>, String> {
+    let api = api_client_from_session(&state)?;
+    let raw = api.list_trashed_files_all().await.map_err(|e| e.to_string())?;
+    Ok(raw
+        .iter()
+        .filter_map(|file_meta| trash_item_from_meta(file_meta, api.master_key()))
+        .collect())
+}
+
+#[tauri::command]
+async fn desktop_trash_restore(
+    state: State<'_, AppState>,
+    file_id: String,
+    file_name: Option<String>,
+) -> Result<(), String> {
+    let api = api_client_from_session(&state)?;
+    api.restore_file(&file_id).await.map_err(|e| e.to_string())?;
+
+    if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
+        let _ = db.record_local_activity(state_db::LocalActivityEventInput {
+            event_type: state_db::LocalActivityKind::Restored,
+            file_id: Some(file_id.clone()),
+            file_name: file_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| file_id.clone()),
+            rel_path: None,
+            occurred_at: now_unix_seconds(),
+        });
+        let _ = db.request_resnapshot();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn desktop_trash_delete_permanently(
+    state: State<'_, AppState>,
+    file_id: String,
+    confirm_token: String,
+) -> Result<(), String> {
+    if confirm_token.trim().is_empty() {
+        return Err("Confirmation token is required.".to_string());
+    }
+    api_client_from_session(&state)?
+        .permanent_delete_file(&file_id, &confirm_token)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
+        let _ = db.request_resnapshot();
+    }
+    Ok(())
 }
 
 /// Local storage breakdown by content type (Media / Documents / Other) plus
@@ -4397,11 +4650,11 @@ async fn desktop_file_overview(
     // Resolve the state DB from app-local data once a sync root is configured.
     // No root / no DB → empty (not an error).
     if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
-        return Ok(account_dto::compute_file_overview(&[], limit));
+        return Ok(account_dto::compute_file_overview(&[], &[], limit));
     }
     let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
-        return Ok(account_dto::compute_file_overview(&[], limit));
+        return Ok(account_dto::compute_file_overview(&[], &[], limit));
     }
 
     // SQLite work is blocking; run it off the async executor (mirrors
@@ -4422,7 +4675,18 @@ async fn desktop_file_overview(
                 modified_at: e.modified_at,
             })
             .collect();
-        Ok(account_dto::compute_file_overview(&inputs, limit))
+        let activity: Vec<account_dto::FileOverviewActivityInput> = db
+            .list_recent_local_activity(limit)
+            .map_err(|e| format!("list local activity: {e}"))?
+            .into_iter()
+            .map(|event| account_dto::FileOverviewActivityInput {
+                event_type: event.event_type.as_str().to_string(),
+                file_name: event.file_name,
+                rel_path: event.rel_path,
+                occurred_at: event.occurred_at,
+            })
+            .collect();
+        Ok(account_dto::compute_file_overview(&inputs, &activity, limit))
     })
     .await
     .map_err(|e| format!("file overview task failed: {e}"))??;
@@ -4544,7 +4808,8 @@ async fn get_bandwidth_history(
 
     tokio::task::spawn_blocking(move || -> Result<_, String> {
         let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
-        db.get_bandwidth_history(window_hours).map_err(|e| format!("bandwidth history: {e}"))
+        db.get_bandwidth_history(window_hours)
+            .map_err(|e| format!("bandwidth history: {e}"))
     })
     .await
     .map_err(|e| format!("bandwidth history task failed: {e}"))?
@@ -4885,7 +5150,10 @@ fn desktop_manifest_path_for_channel(channel: ReleaseChannel) -> &'static str {
 }
 
 fn update_manifest_url_for_channel(channel: ReleaseChannel) -> String {
-    format!("{UPDATE_MANIFEST_BASE_URL}/{}", desktop_manifest_path_for_channel(channel))
+    format!(
+        "{UPDATE_MANIFEST_BASE_URL}/{}",
+        desktop_manifest_path_for_channel(channel)
+    )
 }
 
 fn release_notes_url_for_version(version: &str) -> String {
@@ -5246,6 +5514,10 @@ pub fn run() {
             account_notifications,
             account_notification_preferences,
             account_update_notification_preferences,
+            desktop_confirm_action,
+            desktop_trash_list,
+            desktop_trash_restore,
+            desktop_trash_delete_permanently,
             account_storage_breakdown,
             desktop_file_overview,
             // Task 0090 — selective sync
@@ -5848,8 +6120,8 @@ mod tests {
         subtree_file_ids, ManualUpdateCheckResult, UpdateAvailablePayload,
     };
     use crate::account_dto::AccountProfile;
-    use crate::config::ReleaseChannel;
     use crate::config::DesktopConfig;
+    use crate::config::ReleaseChannel;
     use std::collections::HashSet;
 
     fn folder(id: &str, parent: Option<&str>, name: &str) -> VaultEntryRow {
@@ -6077,9 +6349,18 @@ mod tests {
 
     #[test]
     fn release_channel_manifest_paths_keep_stable_latest_unchanged() {
-        assert_eq!(desktop_manifest_path_for_channel(ReleaseChannel::Stable), "desktop/latest.json");
-        assert_eq!(desktop_manifest_path_for_channel(ReleaseChannel::Beta), "desktop/beta.json");
-        assert_eq!(desktop_manifest_path_for_channel(ReleaseChannel::Alpha), "desktop/alpha.json");
+        assert_eq!(
+            desktop_manifest_path_for_channel(ReleaseChannel::Stable),
+            "desktop/latest.json"
+        );
+        assert_eq!(
+            desktop_manifest_path_for_channel(ReleaseChannel::Beta),
+            "desktop/beta.json"
+        );
+        assert_eq!(
+            desktop_manifest_path_for_channel(ReleaseChannel::Alpha),
+            "desktop/alpha.json"
+        );
     }
 
     #[test]

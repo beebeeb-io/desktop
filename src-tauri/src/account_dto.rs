@@ -423,17 +423,14 @@ impl StorageCategory {
     pub fn from_extension(ext: &str) -> Self {
         const MEDIA: &[&str] = &[
             // images
-            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "svg", "ico",
-            "raw", "cr2", "nef", "arw", "dng", "avif",
-            // video
-            "mp4", "mov", "avi", "mkv", "webm", "flv", "wmv", "m4v", "mpg", "mpeg", "3gp",
-            // audio
+            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "svg", "ico", "raw", "cr2",
+            "nef", "arw", "dng", "avif", // video
+            "mp4", "mov", "avi", "mkv", "webm", "flv", "wmv", "m4v", "mpg", "mpeg", "3gp", // audio
             "mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus", "aiff", "alac",
         ];
         const DOCUMENTS: &[&str] = &[
-            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt",
-            "md", "csv", "tsv", "epub", "pages", "numbers", "key", "tex", "json", "xml", "yaml",
-            "yml", "html", "htm",
+            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt", "md", "csv", "tsv",
+            "epub", "pages", "numbers", "key", "tex", "json", "xml", "yaml", "yml", "html", "htm",
         ];
         let ext = ext.to_ascii_lowercase();
         if MEDIA.contains(&ext.as_str()) {
@@ -590,6 +587,8 @@ pub struct RecentFile {
     pub status: String,
     pub pinned: bool,
     pub modified_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_type: Option<String>,
 }
 
 /// Result of [`compute_file_overview`]: the device sync-state dashboard.
@@ -628,9 +627,41 @@ pub struct FileOverviewInput {
     pub modified_at: i64,
 }
 
+/// Local-only activity entry to merge into the overview's recent list. These
+/// rows are not live files and must not affect totals or status buckets.
+#[derive(Debug, Clone)]
+pub struct FileOverviewActivityInput {
+    pub event_type: String,
+    pub file_name: String,
+    pub rel_path: Option<String>,
+    pub occurred_at: i64,
+}
+
+/// One server-side Trash row for the desktop Trash view. Names are decrypted in
+/// Rust before crossing the Tauri bridge.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DesktopTrashItem {
+    pub id: String,
+    pub name: String,
+    pub is_folder: bool,
+    pub size_bytes: i64,
+    pub updated_at: String,
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConfirmActionResult {
+    pub confirmation_token: String,
+    pub expires_at: String,
+}
+
 /// Pure file-overview computation. `files` should already exclude folders.
 /// `recent_limit` caps the `recent` list. Negative sizes are clamped to 0.
-pub fn compute_file_overview(files: &[FileOverviewInput], recent_limit: usize) -> FileOverview {
+pub fn compute_file_overview(
+    files: &[FileOverviewInput],
+    activity: &[FileOverviewActivityInput],
+    recent_limit: usize,
+) -> FileOverview {
     use std::collections::BTreeMap;
 
     // Group by status string. BTreeMap keeps a deterministic base order before
@@ -665,6 +696,26 @@ pub fn compute_file_overview(files: &[FileOverviewInput], recent_limit: usize) -
             status: f.status.clone(),
             pinned: f.pinned,
             modified_at: f.modified_at,
+            activity_type: None,
+        });
+    }
+
+    for event in activity {
+        if event.event_type != "moved_to_trash" {
+            continue;
+        }
+        let path = event
+            .rel_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .unwrap_or(&event.file_name);
+        ranked.push(RecentFile {
+            path: path.to_string(),
+            size_bytes: 0,
+            status: "moved_to_trash".to_string(),
+            pinned: false,
+            modified_at: event.occurred_at,
+            activity_type: Some("moved_to_trash".to_string()),
         });
     }
 
@@ -1224,7 +1275,7 @@ mod tests {
 
     #[test]
     fn file_overview_empty_is_zeroed() {
-        let o = compute_file_overview(&[], 5);
+        let o = compute_file_overview(&[], &[], 5);
         assert_eq!(o.total_files, 0);
         assert_eq!(o.total_bytes, 0);
         assert_eq!(o.pinned_count, 0);
@@ -1245,7 +1296,7 @@ mod tests {
             // Negative size is clamped to 0 in totals and the bucket.
             ovr("/e.bin", -50, "cloud_only", false, 50),
         ];
-        let o = compute_file_overview(&files, 10);
+        let o = compute_file_overview(&files, &[], 10);
 
         assert_eq!(o.total_files, 5);
         assert_eq!(o.total_bytes, 100 + 200 + 300 + 400); // -50 clamped to 0
@@ -1280,7 +1331,7 @@ mod tests {
             ovr("/new.txt", 1, "local", true, 300),
             ovr("/mid.txt", 1, "cloud_only", false, 200),
         ];
-        let o = compute_file_overview(&files, 10);
+        let o = compute_file_overview(&files, &[], 10);
 
         assert_eq!(o.recent.len(), 3);
         assert_eq!(o.recent[0].path, "/new.txt");
@@ -1295,7 +1346,7 @@ mod tests {
         let files: Vec<FileOverviewInput> = (0..10)
             .map(|i| ovr(&format!("/f{i}.txt"), 1, "local", false, i as i64))
             .collect();
-        let o = compute_file_overview(&files, 3);
+        let o = compute_file_overview(&files, &[], 3);
 
         // All ten counted in totals/buckets…
         assert_eq!(o.total_files, 10);
@@ -1304,5 +1355,28 @@ mod tests {
         assert_eq!(o.recent[0].modified_at, 9);
         assert_eq!(o.recent[1].modified_at, 8);
         assert_eq!(o.recent[2].modified_at, 7);
+    }
+
+    #[test]
+    fn file_overview_recent_includes_trash_activity_without_changing_totals() {
+        let files = vec![ovr("/live.txt", 100, "local", false, 10)];
+        let activity = vec![FileOverviewActivityInput {
+            event_type: "moved_to_trash".into(),
+            file_name: "deleted.txt".into(),
+            rel_path: Some("deleted.txt".into()),
+            occurred_at: 20,
+        }];
+        let o = compute_file_overview(&files, &activity, 10);
+
+        assert_eq!(o.total_files, 1);
+        assert_eq!(o.total_bytes, 100);
+        assert_eq!(o.by_status.len(), 1);
+        assert_eq!(o.by_status[0].status, "local");
+        assert_eq!(o.recent.len(), 2);
+        assert_eq!(o.recent[0].path, "deleted.txt");
+        assert_eq!(o.recent[0].status, "moved_to_trash");
+        assert_eq!(o.recent[0].activity_type.as_deref(), Some("moved_to_trash"));
+        assert_eq!(o.recent[0].size_bytes, 0);
+        assert_eq!(o.recent[1].path, "/live.txt");
     }
 }

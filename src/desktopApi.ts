@@ -493,6 +493,7 @@ export interface RecentFile {
   status: string
   pinned: boolean
   modified_at: number
+  activity_type?: 'moved_to_trash'
 }
 
 /** Per-PC sync-state overview for the Files tab. */
@@ -509,6 +510,20 @@ export interface FileOverview {
   pinned_count: number
   /** Sum of effectively-pinned file sizes. */
   pinned_bytes: number
+}
+
+export interface DesktopTrashItem {
+  id: string
+  name: string
+  is_folder: boolean
+  size_bytes: number
+  updated_at: string
+  parent_id?: string | null
+}
+
+export interface ConfirmActionResult {
+  confirmation_token: string
+  expires_at: string
 }
 
 // ── Data residency / region — GET /api/v1/me/region ──────────────────────────
@@ -675,6 +690,25 @@ export function desktopFileOverview(
   recentLimit?: number,
 ): Promise<CommandResult<FileOverview>> {
   return command<FileOverview>('desktop_file_overview', { recentLimit })
+}
+
+export function desktopConfirmAction(password: string): Promise<CommandResult<ConfirmActionResult>> {
+  return command<ConfirmActionResult>('desktop_confirm_action', { password })
+}
+
+export function desktopTrashList(): Promise<CommandResult<DesktopTrashItem[]>> {
+  return command<DesktopTrashItem[]>('desktop_trash_list')
+}
+
+export function desktopTrashRestore(fileId: string, fileName?: string): Promise<CommandResult<void>> {
+  return command<void>('desktop_trash_restore', { fileId, fileName })
+}
+
+export function desktopTrashDeletePermanently(
+  fileId: string,
+  confirmToken: string,
+): Promise<CommandResult<void>> {
+  return command<void>('desktop_trash_delete_permanently', { fileId, confirmToken })
 }
 
 /** Open the main Beebeeb app window (Windows). Falls back gracefully if the

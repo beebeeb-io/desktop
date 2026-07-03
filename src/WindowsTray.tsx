@@ -241,6 +241,8 @@ function statusSubline(status: string, folder: string): string {
       return `Needs review — ${folder}`
     case 'error':
       return `Sync error — ${folder}`
+    case 'moved_to_trash':
+      return 'Moved to trash'
     case 'local':
     case 'uploading':
     default:
@@ -366,7 +368,14 @@ export default function WindowsTray() {
   }
 
   const openRecycleBin = async () => {
-    await openUrl('https://app.beebeeb.io/trash')
+    try {
+      window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, 'trash')
+    } catch {
+      // Best effort only; already-open main windows still receive the Tauri
+      // event below.
+    }
+    await command<void>('show_main_app_window')
+    await emit(WINDOWS_APP_NAV_EVENT, 'trash').catch(() => undefined)
     void getCurrentWindow().hide()
   }
 
@@ -508,12 +517,13 @@ export default function WindowsTray() {
             const name = basename(file.path)
             const folder = parentFolder(file.path)
             const type = getFileType(name)
+            const deleted = file.activity_type === 'moved_to_trash' || file.status === 'moved_to_trash'
             const warn = WARN_STATUSES.has(file.status)
             return (
               <button
-                key={file.path}
-                title={`Open ${name}`}
-                onClick={() => void revealAndOpenFile(file.path)}
+                key={`${file.status}:${file.path}:${file.modified_at}`}
+                title={deleted ? `${name} moved to trash` : `Open ${name}`}
+                onClick={() => void (deleted ? openRecycleBin() : revealAndOpenFile(file.path))}
                 style={{
                   display: 'grid',
                   gridTemplateColumns: '30px 1fr auto',
@@ -548,7 +558,11 @@ export default function WindowsTray() {
                     flexShrink: 0,
                   }}
                 >
-                  <FileGlyph type={type} size={14} color={FILE_COLOR[type]} />
+                  {deleted ? (
+                    <ActionIcon name="trash" size={14} color={T.ink3} />
+                  ) : (
+                    <FileGlyph type={type} size={14} color={FILE_COLOR[type]} />
+                  )}
                 </div>
 
                 <div style={{ minWidth: 0 }}>

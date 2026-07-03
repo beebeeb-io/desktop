@@ -33,8 +33,8 @@ use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::{Zeroize, Zeroizing};
@@ -45,8 +45,9 @@ use serde::{Deserialize, Serialize};
 use crate::api_client::{ApiClient, DesktopUploadInitRequest};
 use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
-    FileContractState, FileEntry, FileStatus, ItemKind, Namespace, OperationKind, OperationPauseReason,
-    PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE, PendingOperation, QueueDiagnostics, StateDb,
+    FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput, LocalActivityKind, Namespace,
+    OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE,
+    PendingOperation, QueueDiagnostics, StateDb,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -350,7 +351,11 @@ struct SharedRootMapping {
 
 impl EngineBridge {
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
-        Self { db, api, wire: WireCounters::new() }
+        Self {
+            db,
+            api,
+            wire: WireCounters::new(),
+        }
     }
 
     /// Borrow the underlying state DB so callers (e.g. [`sync_tick`])
@@ -379,7 +384,7 @@ impl EngineBridge {
         let operations = self.db.list_due_operations(now)?;
 
         for op in operations {
-            let result = self.execute_operation(&op, sync_root).await;
+            let result = self.execute_operation(&op, sync_root, now).await;
             match result {
                 Ok(()) => {
                     self.db.remove_operation(&op.op_id)?;
@@ -412,7 +417,7 @@ impl EngineBridge {
         Ok(outcome)
     }
 
-    async fn execute_operation(&self, op: &PendingOperation, sync_root: &Path) -> anyhow::Result<()> {
+    async fn execute_operation(&self, op: &PendingOperation, sync_root: &Path, now: i64) -> anyhow::Result<()> {
         match op.kind {
             OperationKind::PinTree => Ok(()),
             OperationKind::HydrateFile => {
@@ -454,6 +459,7 @@ impl EngineBridge {
                     .file_id
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("trash operation missing file_id"))?;
+                let activity_entry = self.db.get_file(file_id)?;
                 // Server-authoritative deletion (task 0802). `trash_file` calls
                 // `.error_for_status()`, so an `Ok` here means the server returned
                 // HTTP 2xx for `DELETE /files/{id}` (it set `is_trashed=TRUE` and
@@ -476,8 +482,11 @@ impl EngineBridge {
                 // `file_trash` op echo arrives first, `apply_sync_op` deletes the
                 // row directly — either path converges.
                 self.api.trash_file(file_id).await?;
-                // Zero-knowledge: log the file_id (an opaque server id) only —
-                // NEVER the path. Lets the lead confirm the 2xx in the trace.
+                if let Some(entry) = activity_entry {
+                    record_moved_to_trash_activity(self.db.as_ref(), file_id, &entry.path, now)?;
+                }
+                // Trace logs keep only the opaque id; plaintext names stay in the
+                // local state DB, where file paths already live.
                 tracing::info!(
                     file_id = %file_id,
                     "trash op: server DELETE /files/{{id}} returned 2xx — keeping row Trashing, dropping op"
@@ -733,7 +742,11 @@ impl EngineBridge {
         let Some(target_path) = op.target_path.as_deref() else {
             return;
         };
-        let on_disk = sync_root.join(target_path.trim_start_matches('/').replace('/', std::path::MAIN_SEPARATOR_STR));
+        let on_disk = sync_root.join(
+            target_path
+                .trim_start_matches('/')
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
         if !on_disk.is_file() {
             // The user moved/deleted it between drop and upload — nothing to
             // convert; the placeholder seeder will mint a cloud-only stub on a
@@ -840,7 +853,11 @@ impl EngineBridge {
                 // upsert_file does not persist these; the contract update
                 // just below sets the authoritative parent_id/item_kind.
                 parent_id: None,
-                item_kind: if root.is_folder { ItemKind::Folder } else { ItemKind::File },
+                item_kind: if root.is_folder {
+                    ItemKind::Folder
+                } else {
+                    ItemKind::File
+                },
             })?;
 
             let mut contract = self
@@ -896,7 +913,10 @@ impl EngineBridge {
         // local row under a known id and needs the server CreateFolder to reuse
         // it — the server accepts a client `folder_id`). The file path and the
         // legacy IPC always pass `None`, getting a fresh uuid as before.
-        let file_id = target.file_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let file_id = target
+            .file_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // Full server-relative key for this item: the FULL nested path when the
         // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
         // legacy IPC). This is stored as the row's `path` AND threaded as the
@@ -1771,8 +1791,8 @@ impl EngineBridge {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
                 }
-                let write_result = std::fs::write(dest_path, &*buf)
-                    .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                let write_result =
+                    std::fs::write(dest_path, &*buf).map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
@@ -1824,8 +1844,7 @@ impl EngineBridge {
                 // INSIDE the placeholder (the CF runtime writes them there after
                 // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
                 // file. Byte count is still recorded for smart-cache accounting.
-                self.db
-                    .mark_cached(file_id, "", buf.len() as i64, now_secs())?;
+                self.db.mark_cached(file_id, "", buf.len() as i64, now_secs())?;
                 let _ = self.enforce_smart_cache(CachePolicy::default());
                 Ok(buf)
             }
@@ -2086,11 +2105,7 @@ impl EngineBridge {
     /// caller can fall back to the file-type icon — it is never reported as a
     /// success with empty bytes.
     #[cfg(target_os = "windows")]
-    pub async fn fetch_thumbnail_to_memory(
-        &self,
-        file_id: &str,
-        variant: &str,
-    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    pub async fn fetch_thumbnail_to_memory(&self, file_id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 
@@ -2154,7 +2169,8 @@ impl EngineBridge {
             .as_ref()
             .and_then(|contract| contract.content_type.clone())
             .or_else(|| beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string));
-        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
+        let name_encrypted =
+            encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
         let staged_path = stage_finder_payload(&local_path.to_string_lossy())?;
@@ -2839,7 +2855,10 @@ fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::
     if rel.is_empty() {
         return Err(anyhow::anyhow!("conflict row has an empty local path"));
     }
-    if rel.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..") {
+    if rel
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
         return Err(anyhow::anyhow!("conflict row has an unsafe local path"));
     }
     Ok(sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
@@ -2922,6 +2941,17 @@ fn display_name_for_path(path: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(path)
         .to_string()
+}
+
+fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, occurred_at: i64) -> anyhow::Result<()> {
+    db.record_local_activity(LocalActivityEventInput {
+        event_type: LocalActivityKind::MovedToTrash,
+        file_id: Some(file_id.to_string()),
+        file_name: display_name_for_path(rel_path),
+        rel_path: Some(rel_path.to_string()),
+        occurred_at,
+    })?;
+    Ok(())
 }
 
 fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
@@ -3267,7 +3297,11 @@ fn apply_metadata_file_row(
     let path = if parent_rel_path.is_empty() || leaf.is_empty() {
         leaf
     } else {
-        format!("{}/{}", parent_rel_path.trim_end_matches('/'), leaf.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            parent_rel_path.trim_end_matches('/'),
+            leaf.trim_start_matches('/')
+        )
     };
     let status = existing
         .as_ref()
@@ -3586,9 +3620,7 @@ fn apply_snapshot(
             .cloned()
             .unwrap_or_default();
 
-        if let Some((rel_path, _kind)) =
-            process_metadata_row(bridge, f, &parent_rel_path, now_secs, conflicts)?
-        {
+        if let Some((rel_path, _kind)) = process_metadata_row(bridge, f, &parent_rel_path, now_secs, conflicts)? {
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
@@ -4130,7 +4162,10 @@ mod tests {
         let root = std::path::PathBuf::from("/sync");
         assert!(path_is_engine_internal(&root, &root.join(".beebeeb").join("state.db")));
         assert!(path_is_engine_internal(&root, &root.join(".beebeeb-sync.lock")));
-        assert!(path_is_engine_internal(&root, &root.join("sub").join(".beebeeb").join("x")));
+        assert!(path_is_engine_internal(
+            &root,
+            &root.join("sub").join(".beebeeb").join("x")
+        ));
         assert!(!path_is_engine_internal(&root, &root.join("photo.jpg")));
         assert!(!path_is_engine_internal(&root, &root.join("docs").join("a.txt")));
     }
@@ -4143,10 +4178,7 @@ mod tests {
             relative_db_path(&root, &root.join("docs").join("b.md")).as_deref(),
             Some("docs/b.md")
         );
-        assert_eq!(
-            relative_db_path(&root, &std::path::PathBuf::from("/other/c.txt")),
-            None
-        );
+        assert_eq!(relative_db_path(&root, &std::path::PathBuf::from("/other/c.txt")), None);
     }
 
     #[test]
@@ -4889,6 +4921,22 @@ mod tests {
         assert!(queued[0].payload_path.is_none());
     }
 
+    #[test]
+    fn record_moved_to_trash_activity_writes_deletion_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        record_moved_to_trash_activity(&db, "server-file-1", "docs/doomed.txt", 200).unwrap();
+
+        let events = db.list_recent_local_activity(5).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, LocalActivityKind::MovedToTrash);
+        assert_eq!(events[0].file_id.as_deref(), Some("server-file-1"));
+        assert_eq!(events[0].file_name, "doomed.txt");
+        assert_eq!(events[0].rel_path.as_deref(), Some("docs/doomed.txt"));
+        assert_eq!(events[0].occurred_at, 200);
+    }
+
     #[tokio::test]
     async fn test_process_due_operations_trash_calls_api_and_keeps_row_trashing() {
         // task 0802 (server-authoritative deletion): a locally-deleted file is
@@ -4957,6 +5005,13 @@ mod tests {
             FileStatus::Trashing,
             "row stays Trashing after a successful trash — the durable hidden-locally marker"
         );
+        let events = bridge.db.list_recent_local_activity(5).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, crate::state_db::LocalActivityKind::MovedToTrash);
+        assert_eq!(events[0].file_id.as_deref(), Some("server-file-1"));
+        assert_eq!(events[0].file_name, "doomed.txt");
+        assert_eq!(events[0].rel_path.as_deref(), Some("doomed.txt"));
+        assert_eq!(events[0].occurred_at, 200);
 
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
@@ -5221,8 +5276,7 @@ mod tests {
         // Encrypt the name exactly as every client does (shared core path).
         let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
         let name_encrypted =
-            beebeeb_core::encrypt::encrypt_name(&mk, file_id, "Quarterly Report.pdf", Some("application/pdf"))
-                .unwrap();
+            beebeeb_core::encrypt::encrypt_name(&mk, file_id, "Quarterly Report.pdf", Some("application/pdf")).unwrap();
 
         let metadata = serde_json::json!({
             "id": file_id,
@@ -5420,14 +5474,7 @@ mod tests {
     async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(
-            &bridge,
-            "file-1",
-            "Draft.txt",
-            None,
-            FileStatus::Uploading,
-            0,
-        );
+        seed_bridge_row(&bridge, "file-1", "Draft.txt", None, FileStatus::Uploading, 0);
         bridge
             .db
             .enqueue_operation(&PendingOperation {
@@ -5593,10 +5640,7 @@ mod tests {
         bridge.db.set_file_contract_state(&contract).unwrap();
 
         let before = now_secs();
-        bridge
-            .resolve_keep_mine("server-file-1", &sync_root)
-            .await
-            .unwrap();
+        bridge.resolve_keep_mine("server-file-1", &sync_root).await.unwrap();
 
         let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
@@ -6089,7 +6133,11 @@ mod tests {
                     stream.write_all(response.as_bytes()).unwrap();
                 }
             });
-            Self { base_url, requests, handle }
+            Self {
+                base_url,
+                requests,
+                handle,
+            }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
@@ -6177,17 +6225,20 @@ mod tests {
         let stale = "22222222-0000-4000-8000-000000000002";
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
         // Pre-seed a settled own-tree row that the snapshot will NOT mention.
-        bridge.db().upsert_file(&FileEntry {
-            file_id: stale.into(),
-            path: "deleted-server-side.txt".into(),
-            status: FileStatus::CloudOnly,
-            size_bytes: 1,
-            modified_at: 0,
-            content_hash: None,
-            remote_updated_at: 0,
-            parent_id: None,
-            item_kind: ItemKind::File,
-        }).unwrap();
+        bridge
+            .db()
+            .upsert_file(&FileEntry {
+                file_id: stale.into(),
+                path: "deleted-server-side.txt".into(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 1,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
 
         let snapshot = serde_json::json!({
             "seq_id": 5,
@@ -6201,7 +6252,10 @@ mod tests {
         server.finish();
 
         assert!(bridge.db().get_file(kept).unwrap().is_some());
-        assert!(bridge.db().get_file(stale).unwrap().is_none(), "snapshot-absent row pruned");
+        assert!(
+            bridge.db().get_file(stale).unwrap().is_none(),
+            "snapshot-absent row pruned"
+        );
     }
 
     #[tokio::test]
@@ -6250,7 +6304,10 @@ mod tests {
         server.finish();
 
         let row = bridge.db().get_file(trashing).unwrap();
-        assert!(row.is_some(), "Trashing row must NOT be pruned while still listed in the snapshot");
+        assert!(
+            row.is_some(),
+            "Trashing row must NOT be pruned while still listed in the snapshot"
+        );
         assert_eq!(
             row.unwrap().status,
             FileStatus::Trashing,
@@ -6332,10 +6389,7 @@ mod tests {
             ],
         });
 
-        let server = SyncMockServer::start(vec![
-            ("200 OK".into(), boot),
-            ("200 OK".into(), ops),
-        ]);
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot), ("200 OK".into(), ops)]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
         // Tick 1: bootstrap (cursor 0 → snapshot). Tick 2: ops?since=1.
@@ -6353,8 +6407,15 @@ mod tests {
         assert!(bridge.db().get_file(keep).unwrap().is_some());
         assert!(bridge.db().get_file(created).unwrap().is_some(), "file_create applied");
         assert_eq!(bridge.db().get_file(created).unwrap().unwrap().path, "fresh.txt");
-        assert!(bridge.db().get_file(doomed).unwrap().is_none(), "file_trash removed the row");
-        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(3), "cursor advanced to max seq_id");
+        assert!(
+            bridge.db().get_file(doomed).unwrap().is_none(),
+            "file_trash removed the row"
+        );
+        assert_eq!(
+            bridge.db().get_sync_cursor().unwrap(),
+            Some(3),
+            "cursor advanced to max seq_id"
+        );
     }
 
     #[tokio::test]
@@ -6389,7 +6450,11 @@ mod tests {
         for r in &requests {
             assert_eq!(r.path, "/api/v1/sync/ops?since=8");
         }
-        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(8), "cursor preserved across 429");
+        assert_eq!(
+            bridge.db().get_sync_cursor().unwrap(),
+            Some(8),
+            "cursor preserved across 429"
+        );
     }
 
     #[tokio::test]
@@ -6480,10 +6545,7 @@ mod tests {
             ],
         });
 
-        let server = SyncMockServer::start(vec![
-            ("200 OK".into(), boot),
-            ("200 OK".into(), ops),
-        ]);
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot), ("200 OK".into(), ops)]);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
         sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
@@ -6572,17 +6634,20 @@ mod tests {
         // cutoff would otherwise allow pruning it).
         {
             let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
-            bridge.db().upsert_file(&FileEntry {
-                file_id: kept.into(),
-                path: "important.txt".into(),
-                status: FileStatus::CloudOnly,
-                size_bytes: 1,
-                modified_at: 0,
-                content_hash: None,
-                remote_updated_at: 0,
-                parent_id: None,
-                item_kind: ItemKind::File,
-            }).unwrap();
+            bridge
+                .db()
+                .upsert_file(&FileEntry {
+                    file_id: kept.into(),
+                    path: "important.txt".into(),
+                    status: FileStatus::CloudOnly,
+                    size_bytes: 1,
+                    modified_at: 0,
+                    content_hash: None,
+                    remote_updated_at: 0,
+                    parent_id: None,
+                    item_kind: ItemKind::File,
+                })
+                .unwrap();
         }
 
         // Bootstrap with an EMPTY snapshot.

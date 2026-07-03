@@ -53,6 +53,14 @@ export function NavIcon({ name, size = 13, color = 'currentColor' }: { name: str
           <path d="M2 5 L2 13 L14 13 L14 6 L7 6 L5.5 4 L2 4 Z" strokeLinejoin="round" />
         </svg>
       )
+    case 'trash':
+      return (
+        <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 4.5 L13 4.5" />
+          <path d="M5.5 4.5 L5.5 3 L10.5 3 L10.5 4.5" />
+          <path d="M4.2 4.5 L4.8 13.5 L11.2 13.5 L11.8 4.5" />
+        </svg>
+      )
     case 'bolt':
       return (
         <svg width={s} height={s} viewBox="0 0 16 16" fill={color}>
