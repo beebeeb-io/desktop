@@ -5321,17 +5321,25 @@ fn release_notes_url_for_version(version: &str) -> String {
     format!("{DESKTOP_RELEASE_REPO_URL}/{DESKTOP_RELEASE_TAG_PREFIX}{version}")
 }
 
+fn compare_channel_release_to_current(
+    current_version: &str,
+    remote_version: &str,
+) -> Option<std::cmp::Ordering> {
+    Some(parse_release_version(remote_version)?.cmp(&parse_release_version(current_version)?))
+}
+
+fn is_channel_downgrade(current_version: &str, remote_version: &str) -> bool {
+    compare_channel_release_to_current(current_version, remote_version)
+        == Some(std::cmp::Ordering::Less)
+}
+
 /// Return true only when the selected channel's manifest points to a version
-/// newer than the installed app. This deliberately chooses the "hold current
-/// build until the selected channel catches up" behavior for users switching
-/// from Beta/Alpha back to Stable: a stable manifest older than the installed
-/// prerelease is ignored instead of being offered as a downgrade.
+/// newer than the installed app. Background checks deliberately hold the current
+/// build until the selected channel catches up; the manual Settings path uses a
+/// separate manifest check so it can report older channel builds as downgrades.
 fn should_offer_channel_update(current_version: &str, remote_version: &str) -> bool {
-    match (
-        parse_release_version(current_version),
-        parse_release_version(remote_version),
-    ) {
-        (Some(current), Some(remote)) => remote > current,
+    match compare_channel_release_to_current(current_version, remote_version) {
+        Some(ordering) => ordering == std::cmp::Ordering::Greater,
         _ => remote_version != current_version,
     }
 }
@@ -5346,10 +5354,10 @@ fn configured_release_channel() -> ReleaseChannel {
     }
 }
 
-fn updater_for_release_channel(
+fn updater_builder_for_release_channel(
     app: &tauri::AppHandle,
     channel: ReleaseChannel,
-) -> Result<tauri_plugin_updater::Updater, String> {
+) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
     use tauri_plugin_updater::UpdaterExt;
 
     let endpoint = update_manifest_url_for_channel(channel);
@@ -5359,7 +5367,14 @@ fn updater_for_release_channel(
                 .parse()
                 .map_err(|e| format!("parse update manifest URL {endpoint}: {e}"))?,
         ])
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+fn updater_for_release_channel(
+    app: &tauri::AppHandle,
+    channel: ReleaseChannel,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    updater_builder_for_release_channel(app, channel)?
         .version_comparator(|_current, release| {
             // Deliberately ignore Tauri's own `_current` — it's read from
             // tauri.conf.json's `version`, which release.yml keeps in an
@@ -5371,6 +5386,18 @@ fn updater_for_release_channel(
             // for this comparison instead. See real_app_version() below.
             should_offer_channel_update(real_app_version(), &release.version.to_string())
         })
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn manifest_updater_for_release_channel(
+    app: &tauri::AppHandle,
+    channel: ReleaseChannel,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    updater_builder_for_release_channel(app, channel)?
+        // Manual checks need to see the selected channel's latest manifest
+        // version even when it is equal to or older than the running app.
+        .version_comparator(|_current, _release| true)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -5405,6 +5432,14 @@ enum ManualUpdateCheckResult {
         body: String,
         release_notes_url: String,
     },
+    DowngradeAvailable {
+        current_version: String,
+        current_channel: String,
+        channel: String,
+        version: String,
+        body: String,
+        release_notes_url: String,
+    },
 }
 
 fn manual_update_up_to_date_result(channel: ReleaseChannel) -> ManualUpdateCheckResult {
@@ -5416,6 +5451,7 @@ fn manual_update_up_to_date_result(channel: ReleaseChannel) -> ManualUpdateCheck
 
 fn manual_update_available_result(
     channel: ReleaseChannel,
+    current_version: &str,
     version: String,
     body: Option<&str>,
 ) -> (ManualUpdateCheckResult, UpdateAvailablePayload) {
@@ -5431,7 +5467,7 @@ fn manual_update_available_result(
 
     (
         ManualUpdateCheckResult::UpdateAvailable {
-            current_version: real_app_version().to_string(),
+            current_version: current_version.to_string(),
             channel,
             version,
             body,
@@ -5439,6 +5475,60 @@ fn manual_update_available_result(
         },
         payload,
     )
+}
+
+fn manual_update_downgrade_result(
+    channel: ReleaseChannel,
+    current_version: &str,
+    version: String,
+    body: Option<&str>,
+) -> ManualUpdateCheckResult {
+    ManualUpdateCheckResult::DowngradeAvailable {
+        current_version: current_version.to_string(),
+        current_channel: release_channel_from_version(current_version).as_str().to_string(),
+        channel: channel.as_str().to_string(),
+        version: version.clone(),
+        body: body.unwrap_or("").to_string(),
+        release_notes_url: release_notes_url_for_version(&version),
+    }
+}
+
+fn manual_update_result_for_remote(
+    channel: ReleaseChannel,
+    current_version: &str,
+    version: String,
+    body: Option<&str>,
+) -> (ManualUpdateCheckResult, Option<UpdateAvailablePayload>) {
+    match compare_channel_release_to_current(current_version, &version) {
+        Some(std::cmp::Ordering::Less) => (
+            manual_update_downgrade_result(channel, current_version, version, body),
+            None,
+        ),
+        Some(std::cmp::Ordering::Equal) => (
+            ManualUpdateCheckResult::UpToDate {
+                current_version: current_version.to_string(),
+                channel: channel.as_str().to_string(),
+            },
+            None,
+        ),
+        Some(std::cmp::Ordering::Greater) => {
+            let (result, payload) =
+                manual_update_available_result(channel, current_version, version, body);
+            (result, Some(payload))
+        }
+        None if version == current_version => (
+            ManualUpdateCheckResult::UpToDate {
+                current_version: current_version.to_string(),
+                channel: channel.as_str().to_string(),
+            },
+            None,
+        ),
+        None => {
+            let (result, payload) =
+                manual_update_available_result(channel, current_version, version, body);
+            (result, Some(payload))
+        }
+    }
 }
 
 /// Returns the app version string — displayed in the web UI Settings page.
@@ -5453,25 +5543,51 @@ fn app_version() -> &'static str {
 #[tauri::command]
 async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateCheckResult, String> {
     let channel = configured_release_channel();
-    let updater = updater_for_release_channel(&app, channel)
+    let updater = manifest_updater_for_release_channel(&app, channel)
         .map_err(|e| format!("Could not prepare the {} update check: {e}", channel.as_str()))?;
 
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.to_string();
-            tracing::info!(
-                version = %version,
-                channel = %channel.as_str(),
-                "manual update check found an update"
+            let (result, payload) = manual_update_result_for_remote(
+                channel,
+                real_app_version(),
+                version.clone(),
+                update.body.as_deref(),
             );
 
-            let (result, payload) =
-                manual_update_available_result(channel, version, update.body.as_deref());
-            let _ = app.emit("update-available", payload);
+            match &result {
+                ManualUpdateCheckResult::UpdateAvailable { .. } => {
+                    tracing::info!(
+                        version = %version,
+                        channel = %channel.as_str(),
+                        "manual update check found an update"
+                    );
+                }
+                ManualUpdateCheckResult::DowngradeAvailable { .. } => {
+                    tracing::info!(
+                        current_version = %real_app_version(),
+                        version = %version,
+                        channel = %channel.as_str(),
+                        "manual update check found a downgrade"
+                    );
+                }
+                ManualUpdateCheckResult::UpToDate { .. } => {
+                    tracing::info!(channel = %channel.as_str(), "manual update check found no update");
+                }
+            }
+
+            if let Some(payload) = payload {
+                let _ = app.emit("update-available", payload);
+            }
+
             Ok(result)
         }
         Ok(None) => {
-            tracing::info!(channel = %channel.as_str(), "manual update check found no update");
+            tracing::info!(
+                channel = %channel.as_str(),
+                "manual update check found no manifest release"
+            );
             Ok(manual_update_up_to_date_result(channel))
         }
         Err(error) => Err(format!(
@@ -5519,6 +5635,62 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Download and install the selected channel's currently advertised older
+/// release. The version argument is checked against the manifest before any
+/// install attempt so a stale Settings view cannot install a different build.
+#[tauri::command]
+async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    let channel = configured_release_channel();
+    let updater = manifest_updater_for_release_channel(&app, channel)?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+
+    let Some(u) = update else {
+        return Err(format!(
+            "The {} channel does not currently advertise a desktop release.",
+            channel.as_str()
+        ));
+    };
+
+    if u.version != version {
+        return Err(format!(
+            "The {} channel now points to version {}. Check for updates again before downgrading.",
+            channel.as_str(),
+            u.version
+        ));
+    }
+
+    if !is_channel_downgrade(real_app_version(), &u.version) {
+        return Err(format!(
+            "Version {} is not older than the running version {}.",
+            u.version,
+            real_app_version()
+        ));
+    }
+
+    tracing::info!(
+        current_version = %real_app_version(),
+        version = %u.version,
+        channel = %channel.as_str(),
+        "downloading downgrade"
+    );
+
+    u.download_and_install(
+        |downloaded, total| {
+            let pct = total
+                .map(|t| if t > 0 { (downloaded as u64) * 100 / t } else { 0 })
+                .unwrap_or(0);
+            tracing::debug!("downgrade download progress: {pct}%");
+        },
+        || {
+            tracing::info!("downgrade installed — relaunching");
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    app.restart()
 }
 
 /// Toggle "Start at login" autostart setting.
@@ -5627,6 +5799,7 @@ pub fn run() {
             app_version,
             check_for_updates_now,
             install_update,
+            install_channel_downgrade,
             toggle_autostart,
             autostart_enabled,
             set_session,
@@ -6276,8 +6449,8 @@ mod tests {
     use super::{
         AppState, VaultEntryRow, build_vault_tree, classify_finder_install_error, clear_cached_profile,
         desktop_manifest_path_for_channel, finder_install_state_from_config, folder_leaf_name,
-        is_disposable_cache_path, manual_update_available_result, manual_update_up_to_date_result,
-        newly_excluded_ids, normalize_recovery_phrase_input, real_app_version,
+        is_disposable_cache_path, manual_update_available_result, manual_update_result_for_remote,
+        manual_update_up_to_date_result, newly_excluded_ids, normalize_recovery_phrase_input, real_app_version,
         release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
         should_show_conflict_notification, subtree_file_ids, ManualUpdateCheckResult, UpdateAvailablePayload,
     };
@@ -6571,6 +6744,7 @@ mod tests {
     fn manual_update_available_result_reuses_banner_payload_shape() {
         let (result, payload) = manual_update_available_result(
             ReleaseChannel::Alpha,
+            real_app_version(),
             "0.2.0-alpha.3".to_string(),
             Some("Alpha notes"),
         );
@@ -6592,6 +6766,29 @@ mod tests {
                 version: "0.2.0-alpha.3".to_string(),
                 body: "Alpha notes".to_string(),
                 release_notes_url: release_notes_url_for_version("0.2.0-alpha.3"),
+            }
+        );
+    }
+
+    #[test]
+    fn manual_update_result_reports_downgrade_without_banner_payload() {
+        let (result, payload) = manual_update_result_for_remote(
+            ReleaseChannel::Stable,
+            "0.2.0-beta.1",
+            "0.1.9".to_string(),
+            Some("Stable notes"),
+        );
+
+        assert_eq!(payload, None);
+        assert_eq!(
+            result,
+            ManualUpdateCheckResult::DowngradeAvailable {
+                current_version: "0.2.0-beta.1".to_string(),
+                current_channel: "beta".to_string(),
+                channel: "stable".to_string(),
+                version: "0.1.9".to_string(),
+                body: "Stable notes".to_string(),
+                release_notes_url: release_notes_url_for_version("0.1.9"),
             }
         );
     }

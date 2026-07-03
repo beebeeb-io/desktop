@@ -7,6 +7,8 @@ import {
   command,
   commandUnavailableLabel,
   formatBytes,
+  installDesktopChannelDowngrade,
+  openUrl,
   type AppActivitySnapshot,
   type DesktopConfig,
   type DesktopTheme,
@@ -25,6 +27,7 @@ import {
 } from '../settingsNavigation'
 import {
   buildUpdateCheckViewModel,
+  releaseChannelLabel,
   stateFromManualUpdateResult,
   type ManualUpdateCheckState,
 } from '../updateCheckViewModel'
@@ -675,11 +678,14 @@ function UpdatesPanel({
 }) {
   const [version, setVersion] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
+  const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
+  const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
   const updateCheckRequestRef = useRef(0)
   const releaseChannel = config.release_channel ?? 'stable'
   const updateCheckView = buildUpdateCheckViewModel(updateCheckState, version, releaseChannel)
   const updateCheckBusy = updateCheckState.kind === 'checking'
   const updateCheckError = updateCheckState.kind === 'error'
+  const downgradeInstallBusy = downgradeInstallState === 'installing'
 
   useEffect(() => {
     let cancelled = false
@@ -693,6 +699,8 @@ function UpdatesPanel({
     if (channel === releaseChannel) return
     updateCheckRequestRef.current += 1
     setUpdateCheckState({ kind: 'idle' })
+    setDowngradeInstallState('idle')
+    setDowngradeInstallError(null)
     onConfigChange({ release_channel: channel })
   }
 
@@ -700,6 +708,8 @@ function UpdatesPanel({
     const requestId = updateCheckRequestRef.current + 1
     updateCheckRequestRef.current = requestId
     setUpdateCheckState({ kind: 'checking' })
+    setDowngradeInstallState('idle')
+    setDowngradeInstallError(null)
 
     const result = await checkForDesktopUpdatesNow()
     if (updateCheckRequestRef.current !== requestId) return
@@ -712,6 +722,25 @@ function UpdatesPanel({
         reason: result.unsupported ? commandUnavailableLabel('check_for_updates_now') : result.reason,
       })
     }
+  }
+
+  const handleDowngrade = async () => {
+    if (updateCheckState.kind !== 'downgrade_available') return
+
+    const selectedChannel = releaseChannelLabel(updateCheckState.channel)
+    const confirmed = window.confirm(
+      `Downgrade Beebeeb from ${updateCheckState.currentVersion} to ${updateCheckState.version} on the ${selectedChannel} channel? The signed installer will run and Beebeeb will restart if it succeeds.`,
+    )
+    if (!confirmed) return
+
+    setDowngradeInstallState('installing')
+    setDowngradeInstallError(null)
+
+    const result = await installDesktopChannelDowngrade(updateCheckState.version)
+    if (result.ok) return
+
+    setDowngradeInstallState('error')
+    setDowngradeInstallError(result.reason)
   }
 
   return (
@@ -735,7 +764,7 @@ function UpdatesPanel({
         <button
           type="button"
           onClick={() => void handleCheckForUpdates()}
-          disabled={updateCheckBusy}
+          disabled={updateCheckBusy || downgradeInstallBusy}
           aria-busy={updateCheckBusy}
           style={{
             minWidth: 142,
@@ -761,6 +790,80 @@ function UpdatesPanel({
           <NavIcon name="download" size={12} color={T.ink} />
           {updateCheckBusy ? 'Checking...' : 'Check for updates'}
         </button>
+        {updateCheckState.kind === 'downgrade_available' && (
+          <div style={{ gridColumn: '2 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, minWidth: 0 }}>
+            <div
+              role={downgradeInstallState === 'error' ? 'alert' : undefined}
+              style={{
+                minWidth: 0,
+                fontSize: 11.5,
+                color: downgradeInstallState === 'error' ? RED : T.ink3,
+                lineHeight: 1.45,
+                fontFamily: T.fontMono,
+                wordBreak: 'break-word' as const,
+              }}
+            >
+              {downgradeInstallState === 'error' && downgradeInstallError
+                ? `Downgrade failed: ${downgradeInstallError}`
+                : updateCheckState.body || 'The selected channel is behind this install. Downgrade only after confirming.'}
+            </div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <button
+                type="button"
+                onClick={() => void openUrl(updateCheckState.releaseNotesUrl)}
+                disabled={downgradeInstallBusy}
+                style={{
+                  height: 30,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  padding: '0 11px',
+                  fontSize: 11.5,
+                  fontFamily: T.fontSans,
+                  fontWeight: 600,
+                  borderRadius: 6,
+                  border: `1px solid ${T.line2}`,
+                  background: T.paper,
+                  color: T.ink2,
+                  cursor: downgradeInstallBusy ? 'not-allowed' : 'pointer',
+                  opacity: downgradeInstallBusy ? 0.6 : 1,
+                  whiteSpace: 'nowrap' as const,
+                }}
+              >
+                <NavIcon name="external" size={11} color={T.ink3} />
+                Release notes
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDowngrade()}
+                disabled={downgradeInstallBusy || updateCheckBusy}
+                aria-busy={downgradeInstallBusy}
+                style={{
+                  height: 30,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  padding: '0 12px',
+                  fontSize: 11.5,
+                  fontFamily: T.fontSans,
+                  fontWeight: 700,
+                  borderRadius: 6,
+                  border: `1px solid ${T.amberDeep}`,
+                  background: downgradeInstallBusy ? T.amberBg : T.amber,
+                  color: T.ink,
+                  cursor: downgradeInstallBusy || updateCheckBusy ? 'progress' : 'pointer',
+                  opacity: downgradeInstallBusy ? 0.72 : 1,
+                  whiteSpace: 'nowrap' as const,
+                }}
+              >
+                <NavIcon name="download" size={11} color={T.ink} />
+                {downgradeInstallBusy ? 'Downgrading...' : `Downgrade to ${updateCheckState.version}`}
+              </button>
+            </div>
+          </div>
+        )}
       </Card>
 
       <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>

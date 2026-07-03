@@ -33,6 +33,15 @@ export type ManualUpdateCheckResult =
       body: string
       release_notes_url: string
     }
+  | {
+      status: 'downgrade_available'
+      current_version: string
+      current_channel: ReleaseChannel
+      channel: ReleaseChannel
+      version: string
+      body: string
+      release_notes_url: string
+    }
 
 export interface DesktopConfig {
   upload_kbps_limit: number
@@ -218,6 +227,10 @@ export async function checkForDesktopUpdatesNow(): Promise<CommandResult<ManualU
 
 export async function appActivitySnapshot(): Promise<CommandResult<AppActivitySnapshot>> {
   return command<AppActivitySnapshot>('app_activity_snapshot')
+}
+
+export async function installDesktopChannelDowngrade(version: string): Promise<CommandResult<void>> {
+  return command<void>('install_channel_downgrade', { version })
 }
 
 export function formatBytes(bytes: number): string {

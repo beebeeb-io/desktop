@@ -5,6 +5,15 @@ export type ManualUpdateCheckState =
   | { kind: 'checking' }
   | { kind: 'up_to_date'; currentVersion: string; channel: ReleaseChannel }
   | { kind: 'update_available'; currentVersion: string; channel: ReleaseChannel; version: string }
+  | {
+      kind: 'downgrade_available'
+      currentVersion: string
+      currentChannel: ReleaseChannel
+      channel: ReleaseChannel
+      version: string
+      body: string
+      releaseNotesUrl: string
+    }
   | { kind: 'error'; reason: string }
 
 export type UpdateCheckTone = 'neutral' | 'amber' | 'green'
@@ -32,6 +41,18 @@ export function stateFromManualUpdateResult(result: ManualUpdateCheckResult): Ma
       kind: 'up_to_date',
       currentVersion: result.current_version,
       channel: result.channel,
+    }
+  }
+
+  if (result.status === 'downgrade_available') {
+    return {
+      kind: 'downgrade_available',
+      currentVersion: result.current_version,
+      currentChannel: result.current_channel,
+      channel: result.channel,
+      version: result.version,
+      body: result.body,
+      releaseNotesUrl: result.release_notes_url,
     }
   }
 
@@ -74,6 +95,17 @@ export function buildUpdateCheckViewModel(
       title: `Version ${state.version} is available`,
       detail: `Use the update banner to restart and apply the ${label} update.`,
       chip: 'Update available',
+      tone: 'amber',
+    }
+  }
+
+  if (state.kind === 'downgrade_available') {
+    const selectedLabel = releaseChannelLabel(state.channel)
+    const currentLabel = releaseChannelLabel(state.currentChannel)
+    return {
+      title: `${selectedLabel} is at version ${state.version}`,
+      detail: `You are running ${state.currentVersion} from the ${currentLabel} channel. Confirm before downgrading.`,
+      chip: 'Downgrade available',
       tone: 'amber',
     }
   }
