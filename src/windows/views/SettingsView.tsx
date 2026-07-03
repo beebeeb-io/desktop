@@ -15,8 +15,8 @@ import {
 } from '../../desktopApi'
 import {
   ALWAYS_ACCESSIBLE_SETTINGS,
+  availableSettingsSections,
   defaultSettingsPage,
-  filterSettingsSections,
   settingLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
@@ -774,36 +774,22 @@ function AdvancedPanel() {
 function SettingsNav({
   activeNav,
   loggedIn,
-  searchQuery,
-  onSearchChange,
   onChange,
 }: {
   activeNav: SettingsNavId
   loggedIn: boolean
-  searchQuery: string
-  onSearchChange: (query: string) => void
   onChange: (id: SettingsNavId) => void
 }) {
-  const filteredSections = filterSettingsSections(loggedIn, searchQuery)
+  const sections = availableSettingsSections(loggedIn)
 
   return (
     <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px', overflow: 'auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-      <div style={{ padding: '4px 8px 14px' }}>
+      <div style={{ padding: '4px 8px 10px' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 3 }}>Settings</div>
         <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.4 }}>Device, sync, updates, and notifications.</div>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '6px 10px', background: T.paper, border: `1px solid ${T.line2}`, borderRadius: 6, marginBottom: 14 }}>
-        <NavIcon name="search" size={11} color={T.ink4} />
-        <input
-          placeholder="Find a setting..."
-          value={searchQuery}
-          onChange={(e) => onSearchChange(e.currentTarget.value)}
-          style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 11.5, color: T.ink, fontFamily: T.fontSans, width: '100%' }}
-        />
-      </div>
-
-      {filteredSections.map((section) => (
+      {sections.map((section) => (
         <div key={section.heading} style={{ marginBottom: 10 }}>
           <div style={{ fontSize: 9.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, padding: '4px 10px', marginBottom: 2 }}>
             {section.heading}
@@ -841,12 +827,6 @@ function SettingsNav({
           })}
         </div>
       ))}
-
-      {filteredSections.length === 0 && (
-        <div style={{ padding: '8px 10px', fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-          No settings match that search.
-        </div>
-      )}
     </div>
   )
 }
@@ -854,7 +834,6 @@ function SettingsNav({
 export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps) {
   const loggedIn = status?.logged_in ?? false
   const [activeNav, setActiveNav] = useState<SettingsNavId>(() => defaultSettingsPage(loggedIn))
-  const [searchQuery, setSearchQuery] = useState('')
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [config, setConfig] = useState<DesktopConfig>(DEFAULT_CONFIG)
   const configRef = useRef<DesktopConfig>(DEFAULT_CONFIG)
@@ -937,8 +916,6 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       <SettingsNav
         activeNav={activeNav}
         loggedIn={loggedIn}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
         onChange={setActiveNav}
       />
       {renderPanel()}

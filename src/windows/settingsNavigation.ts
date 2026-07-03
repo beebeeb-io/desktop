@@ -12,6 +12,11 @@ export interface SettingsNavItem {
   icon: string
 }
 
+export interface SettingsNavSection {
+  heading: string
+  items: SettingsNavItem[]
+}
+
 export const ALWAYS_ACCESSIBLE_SETTINGS: ReadonlySet<SettingsNavId> = new Set([
   'launch',
   'explorer-integration',
@@ -19,7 +24,7 @@ export const ALWAYS_ACCESSIBLE_SETTINGS: ReadonlySet<SettingsNavId> = new Set([
   'advanced',
 ])
 
-export const SETTINGS_SECTIONS: Array<{ heading: string; items: SettingsNavItem[] }> = [
+export const SETTINGS_SECTIONS: SettingsNavSection[] = [
   {
     heading: 'Beebeeb',
     items: [
@@ -46,21 +51,11 @@ export function settingLabel(id: SettingsNavId): string {
   return SETTINGS_SECTIONS.flatMap((section) => section.items).find((item) => item.id === id)?.label ?? id
 }
 
-export function filterSettingsSections(
-  loggedIn: boolean,
-  searchQuery: string,
-): Array<{ heading: string; items: SettingsNavItem[] }> {
-  const query = searchQuery.trim().toLowerCase()
+export function availableSettingsSections(loggedIn: boolean): SettingsNavSection[] {
+  if (loggedIn) return SETTINGS_SECTIONS
+
   return SETTINGS_SECTIONS.map((section) => ({
     ...section,
-    items: section.items.filter(
-      (item) =>
-        (loggedIn || ALWAYS_ACCESSIBLE_SETTINGS.has(item.id)) &&
-        (
-          !query ||
-          item.label.toLowerCase().includes(query) ||
-          section.heading.toLowerCase().includes(query)
-        ),
-    ),
+    items: section.items.filter((item) => ALWAYS_ACCESSIBLE_SETTINGS.has(item.id)),
   })).filter((section) => section.items.length > 0)
 }
