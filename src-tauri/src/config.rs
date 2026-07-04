@@ -28,7 +28,8 @@ const APP_CONFIG_DIR: &str = "beebeeb";
 /// User-facing cache limit unit. The UI labels these as GB, so use decimal
 /// bytes to keep "100 GB" displaying as exactly that.
 pub const LOCAL_CACHE_LIMIT_GB: i64 = 1_000_000_000;
-pub const DEFAULT_LOCAL_CACHE_LIMIT_BYTES: i64 = 100 * LOCAL_CACHE_LIMIT_GB;
+pub const LOCAL_CACHE_LIMIT_100_GB_BYTES: i64 = 100 * LOCAL_CACHE_LIMIT_GB;
+pub const DEFAULT_LOCAL_CACHE_LIMIT_BYTES: i64 = 0;
 
 /// Top-level desktop config persisted on disk.
 ///
@@ -574,9 +575,7 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_LOCAL_CACHE_LIMIT_BYTES, DesktopConfig, DesktopSettings, DesktopTheme, default_sync_root_suggestion,
-    };
+    use super::{DesktopConfig, DesktopSettings, DesktopTheme, default_sync_root_suggestion};
 
     // ── Task 0800 — multi-account Phase 1: persisted account id ────────────
 
@@ -754,10 +753,12 @@ mod tests {
     #[test]
     fn advanced_settings_defaults_and_round_trips() {
         // Missing keys from older desktop.toml files pick the new Advanced
-        // defaults: follow the OS theme and keep a 100 GB local cache cap.
+        // defaults: follow the OS theme and keep local cache Unlimited.
         let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
         assert_eq!(cfg.theme, DesktopTheme::System);
-        assert_eq!(cfg.local_cache_limit_bytes, DEFAULT_LOCAL_CACHE_LIMIT_BYTES);
+        assert_eq!(cfg.local_cache_limit_bytes, 0);
+        assert_eq!(cfg.local_cache_limit_for_eviction(), None);
+        assert_eq!(DesktopConfig::default().local_cache_limit_bytes, 0);
 
         let mut settings = DesktopSettings::from(&DesktopConfig::default());
         settings.theme = Some(DesktopTheme::Dark);

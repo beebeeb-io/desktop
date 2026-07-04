@@ -1,12 +1,13 @@
 export type ThemePreference = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
 
-export const DEFAULT_LOCAL_CACHE_LIMIT_BYTES = 100_000_000_000
+export const DEFAULT_LOCAL_CACHE_LIMIT_BYTES = 0
+export const LOCAL_CACHE_LIMIT_100_GB_BYTES = 100_000_000_000
 
 export const CACHE_LIMIT_OPTIONS: Array<{ value: number; label: string }> = [
   { value: 5_000_000_000, label: '5 GB' },
   { value: 25_000_000_000, label: '25 GB' },
-  { value: DEFAULT_LOCAL_CACHE_LIMIT_BYTES, label: '100 GB' },
+  { value: LOCAL_CACHE_LIMIT_100_GB_BYTES, label: '100 GB' },
   { value: 0, label: 'Unlimited' },
 ]
 

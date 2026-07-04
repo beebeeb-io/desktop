@@ -268,7 +268,7 @@ pub struct CachePolicy {
 impl Default for CachePolicy {
     fn default() -> Self {
         Self {
-            max_unpinned_cache_bytes: crate::config::DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
+            max_unpinned_cache_bytes: crate::config::LOCAL_CACHE_LIMIT_100_GB_BYTES,
             disk_pressure_min_free_bytes: 5 * 1024 * 1024 * 1024,
         }
     }

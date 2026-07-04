@@ -20,8 +20,9 @@ describe('advancedSettingsModel', () => {
   })
 
   test('builds total local cache usage and warns when pinned bytes exceed the cap', () => {
-    expect(DEFAULT_LOCAL_CACHE_LIMIT_BYTES).toBe(100_000_000_000)
+    expect(DEFAULT_LOCAL_CACHE_LIMIT_BYTES).toBe(0)
     expect(CACHE_LIMIT_OPTIONS.map((option) => option.label)).toEqual(['5 GB', '25 GB', '100 GB', 'Unlimited'])
+    expect(CACHE_LIMIT_OPTIONS.map((option) => option.value)).toContain(100_000_000_000)
 
     const overPinned = buildCacheLimitView({
       cacheBytes: 3_000_000_000,

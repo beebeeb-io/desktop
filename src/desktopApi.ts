@@ -179,7 +179,7 @@ export const DEFAULT_CONFIG: DesktopConfig = {
   notify_sync_complete: false,
   notify_quota_warnings: true,
   theme: 'system',
-  local_cache_limit_bytes: 100_000_000_000,
+  local_cache_limit_bytes: 0,
   release_channel: 'stable',
 }
 
