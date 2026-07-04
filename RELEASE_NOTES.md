@@ -1,6 +1,6 @@
-# Beebeeb Desktop 0.2.1-beta.1 — fixes a Windows update bug that's likely been duplicating installs since day one
+# Beebeeb Desktop 0.2.1 — fixes a Windows update bug that's likely been duplicating installs since day one
 
-0.2.1-alpha.1 fixed a real bug found while investigating a duplicate-install report: the update manifest had never told Windows which installer type (NSIS vs. MSI) a client is actually running, so every NSIS-installed client's auto-update was silently applying an MSI update on top — and Windows treats those as two separate apps. It also finished wiring up two notification preferences and changed the local cache limit's default. This beta promotes the same build to the wider beta channel — confirmed the fixed manifest now correctly publishes both `windows-x86_64-nsis` and `windows-x86_64-msi` entries.
+This release fixes a real bug found while investigating a duplicate-install report: the update manifest had never told Windows which installer type (NSIS vs. MSI) a client is actually running, so every NSIS-installed client's auto-update was silently applying an MSI update on top — and Windows treats those as two separate apps. It also finishes wiring up two notification preferences and changes the local cache limit's default. Confirmed via both 0.2.1-alpha.1 and 0.2.1-beta.1 that the fixed manifest correctly publishes both `windows-x86_64-nsis` and `windows-x86_64-msi` entries before promoting straight to Stable.
 
 ### What's New
 
@@ -20,4 +20,4 @@
 
 ### Install / Update
 
-Existing desktop installs on the Beta channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
+Existing desktop installs on the Stable channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
