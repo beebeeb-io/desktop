@@ -1,30 +1,23 @@
-# Beebeeb Desktop 0.2.0 — Trash, a real menu bar, and a working Advanced page
+# Beebeeb Desktop 0.2.1-alpha.1 — fixes a Windows update bug that's likely been duplicating installs since day one
 
-Everything built since 0.1.2-beta.2: local Trash support, a fully wired native menu bar, and four new Advanced/Settings features (theme, local cache limit, App Activity, and a notification audit). This is the same build as 0.2.0-alpha.1 and 0.2.0-beta.1, promoted straight to Stable — the default channel every install auto-updates to. Every change below passed its full local test suite, but none has yet been confirmed on real hardware; if you hit something that doesn't look right, that's exactly what the in-app "Report a problem" menu item (new in this release) is for.
+This release fixes a real bug found while investigating a duplicate-install report: the update manifest has never told Windows which installer type (NSIS vs. MSI) a client is actually running, so every NSIS-installed client's auto-update has been silently applying an MSI update on top — and Windows treats those as two separate apps. It also finishes wiring up two notification preferences and changes the local cache limit's default.
 
 ### What's New
 
-- **Trash support.** Deleting a file now moves it to Trash instead of vanishing — the tray's recent-activity feed shows deletions for the first time, and a new Trash view (with the same restore/permanent-delete affordances as the web app) is reachable from the sidebar. Permanent delete asks for a password re-confirmation.
-- **A real native menu bar.** Beebeeb / File / Edit / View / Help replace the previous default/placeholder menu on every platform (not just macOS). Every item does something real — About, Preferences/Settings, Check for updates, Pause/Resume syncing, Sign out, Quit, Open folder, Upload files, New folder, Open web app, view switches, zoom, and help links — each with a sensible keyboard accelerator.
-- **Theme.** Settings → Advanced now has a Light / Dark / System control. It applies immediately, no restart, and persists across launches.
-- **Local cache limit.** Also in Advanced: cap how much disk space cached/pinned file content may use on this device (5GB / 25GB / 100GB / Unlimited). Exceeding the cap evicts the least-recently-used unpinned files first; if pinned content alone exceeds the cap, you get a clear warning instead of a silent failure.
-- **App Activity.** A live CPU/memory/network panel for the Beebeeb process itself, in Advanced — it only samples while you have the panel open, no background cost otherwise.
-- **Desktop alerts, decoupled from account notifications.** Notifications settings now separates account-level alerts (new device sign-in, share received, etc.) from device-level alerts. The conflict-alert toggle was already enforced in the sync engine but had no UI control until now.
-- **Update downgrade detection.** Switching your release channel to one behind your currently-installed version (e.g. Beta → Stable when Beta is ahead) now tells you honestly and offers a confirmed downgrade, instead of silently claiming "up to date." The downgrade path re-verifies the target version against the channel manifest immediately before installing.
+- **Local cache limit now defaults to Unlimited**, not 100GB. The 100GB choice is still available in Settings → Advanced; only the out-of-the-box behavior for a fresh install changed — existing installs upgrading from before this default are unaffected either way.
+- **Sync-complete and local-cache-warning notifications are real now.** Both showed up as toggles in a previous release but did nothing. "Sync complete" fires once when the device genuinely finishes catching up (waits for conflicts and errors to clear, not just the queue draining). "Local cache warning" fires once when local cache usage crosses 90% of your configured limit, and never fires if the limit is Unlimited.
 
 ### Bug Fixes / Hardening
 
-- **Menu bar review caught a fake placeholder before it shipped:** the first implementation pass added a "Shared" page to the Windows app purely so the View menu's Shared item had somewhere to go — no such feature exists yet. Fixed to fall back to Files instead, the same pattern already used for Trash on the compact macOS/Linux shell.
-- **Storage total was double-counting pinned bytes:** the existing "on this PC" figure (Settings) and the Status page's cache/pinned line were adding `pinned_bytes` on top of a `cache_bytes` value that already included pinned bytes. Fixed as part of the cache-limit work; both figures are now accurate.
-- **"Find a setting" search removed.** It only matched the 6 settings-page names, never the individual controls inside a page, so it returned nothing useful for almost any real query.
+- **Fixed the root cause of duplicate Windows installs.** The update channel manifest has only ever published one untyped Windows entry, pointing at the MSI installer. Tauri's updater looks for an installer-type-specific entry first (matching however the app was actually installed) before falling back to the untyped one — so an NSIS-installed client (the documented fresh-install path) always missed the specific entry and fell through to the untyped one, silently installing MSI on top of its NSIS install. NSIS and MSI keep separate Windows registry bookkeeping, so this created a second Programs-and-Features entry on update. The manifest now publishes both installer types distinctly, with the untyped fallback kept on NSIS. This only prevents *future* duplication — if you already have two Beebeeb entries in Windows Settings → Apps, uninstall the older-dated one manually; this release can't merge them retroactively.
 
 ### Verification
 
-- Rust test suite: `cargo test --lib` — 279 passed, 0 failed.
+- Rust test suite: `cargo test --lib` — 285 passed, 0 failed.
 - TypeScript: `bunx tsc --noEmit` clean; `bun test` 13/13 passing.
-- Real UI screenshots (Vite dev server running the actual React settings code, no Tauri runtime): confirmed the search box is gone, the Advanced page's theme and cache-limit controls render and the theme switch re-themes the whole window live, and the Updates page shows the new Check-for-updates button and channel picker.
-- Not verified: the native menu bar itself (OS chrome, invisible in a browser), native OS notifications, and an actual channel-downgrade install — all genuinely need real Windows/macOS hardware. Neither the alpha nor the beta closed this gap before this stable cut; that was a deliberate, informed call to release all three channels together rather than wait for a hardware pass.
+- The manifest fix was verified against the actual pinned dependency source, not assumed: fetched `tauri-plugin-updater` 2.10.1's `updater.rs` and `tauri-utils` 2.11.3's `platform.rs` directly from their tagged GitHub source, confirmed the updater's target-search order (`{os}-{arch}-{installer}` before the untyped fallback) and that bundle-type detection is a genuine build-time binary patch rather than runtime guesswork. The workflow's manifest-generation `jq` expression was run standalone with mock inputs to confirm it produces the correct installer-typed shape.
+- Not verified: an actual end-to-end update cycle on a real NSIS-installed Windows machine going through this fix — that's exactly what this alpha is for. The two prior duplicate-install entries on Guus's machine (from before this fix existed) still need manual cleanup regardless of this release.
 
 ### Install / Update
 
-Existing desktop installs on the Stable channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
+Existing desktop installs on the Alpha channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
