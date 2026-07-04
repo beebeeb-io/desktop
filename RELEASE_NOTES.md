@@ -1,6 +1,6 @@
-# Beebeeb Desktop 0.2.1-alpha.1 — fixes a Windows update bug that's likely been duplicating installs since day one
+# Beebeeb Desktop 0.2.1-beta.1 — fixes a Windows update bug that's likely been duplicating installs since day one
 
-This release fixes a real bug found while investigating a duplicate-install report: the update manifest has never told Windows which installer type (NSIS vs. MSI) a client is actually running, so every NSIS-installed client's auto-update has been silently applying an MSI update on top — and Windows treats those as two separate apps. It also finishes wiring up two notification preferences and changes the local cache limit's default.
+0.2.1-alpha.1 fixed a real bug found while investigating a duplicate-install report: the update manifest had never told Windows which installer type (NSIS vs. MSI) a client is actually running, so every NSIS-installed client's auto-update was silently applying an MSI update on top — and Windows treats those as two separate apps. It also finished wiring up two notification preferences and changed the local cache limit's default. This beta promotes the same build to the wider beta channel — confirmed the fixed manifest now correctly publishes both `windows-x86_64-nsis` and `windows-x86_64-msi` entries.
 
 ### What's New
 
@@ -16,8 +16,8 @@ This release fixes a real bug found while investigating a duplicate-install repo
 - Rust test suite: `cargo test --lib` — 285 passed, 0 failed.
 - TypeScript: `bunx tsc --noEmit` clean; `bun test` 13/13 passing.
 - The manifest fix was verified against the actual pinned dependency source, not assumed: fetched `tauri-plugin-updater` 2.10.1's `updater.rs` and `tauri-utils` 2.11.3's `platform.rs` directly from their tagged GitHub source, confirmed the updater's target-search order (`{os}-{arch}-{installer}` before the untyped fallback) and that bundle-type detection is a genuine build-time binary patch rather than runtime guesswork. The workflow's manifest-generation `jq` expression was run standalone with mock inputs to confirm it produces the correct installer-typed shape.
-- Not verified: an actual end-to-end update cycle on a real NSIS-installed Windows machine going through this fix — that's exactly what this alpha is for. The two prior duplicate-install entries on Guus's machine (from before this fix existed) still need manual cleanup regardless of this release.
+- Not verified: an actual end-to-end update cycle on a real NSIS-installed Windows machine going through this fix. The two prior duplicate-install entries on Guus's machine (from before this fix existed) still need manual cleanup regardless of this release.
 
 ### Install / Update
 
-Existing desktop installs on the Alpha channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
+Existing desktop installs on the Beta channel receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
