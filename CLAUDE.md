@@ -8,6 +8,12 @@ Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus
 https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.1.0 — signed MSI + NSIS installer
 for Windows, AppImage/.deb/.rpm for Linux, each with a minisign `.sig` for the auto-updater.
 
+Windows updater manifests must preserve installer type. Fresh Windows installs are documented as
+NSIS `setup.exe` installs, so publish `windows-x86_64-nsis` and the generic `windows-x86_64`
+fallback to the NSIS asset, and publish `windows-x86_64-msi` to the MSI asset for MSI-installed
+clients. Sending an NSIS-installed client to an MSI update creates a second Windows Installed Apps
+entry instead of updating the existing NSIS entry.
+
 `release.yml` builds Windows and Linux only. **macOS is deliberately disabled** in the build
 matrix (commented out, not deleted) — two separate gaps block it:
 - `scripts/build-fileprovider-extension.sh`'s arch-detection doesn't support

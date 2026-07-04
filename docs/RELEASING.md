@@ -35,6 +35,12 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
 ```
 
+Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
+by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
+point at the MSI asset, and the generic `windows-x86_64` fallback should stay on NSIS because
+fresh installs are documented as NSIS installs. Mixing installer types during an update creates
+separate Windows Installed Apps entries.
+
 ## Procedure
 
 1. Author `RELEASE_NOTES.md` at the repository root for the version being cut. The file must contain the exact version string passed to the release workflow, such as `0.1.2-beta.2`; do not use the Windows MSI-safe rewritten version.

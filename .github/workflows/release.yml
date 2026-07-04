@@ -399,13 +399,20 @@ jobs:
           # verified. Missing macOS signatures omit darwin entries instead of
           # blocking Windows/Linux manifest publishing.
           #
-          # Windows is the one platform whose artifact filename does NOT use
+          # Windows is the one platform whose artifact filenames do NOT use
           # $VER verbatim: the "Set app version for this release" build step
           # rewrites tauri.conf.json's version to an MSI-safe numeric-only
           # encoding for Windows only (WiX rejects text pre-release
           # identifiers like "beta.1" — see that step's comments), so the
-          # actual .msi filename carries that rewritten value. Mirror the
-          # exact same transform here to compute the real filename.
+          # actual .msi and NSIS .exe filenames carry that rewritten value.
+          # Mirror the exact same transform here to compute the real filenames.
+          #
+          # Keep the Windows updater targets split by installer type. The
+          # Tauri updater first searches windows-x86_64-{nsis,msi} based on
+          # the bundle type patched into the installed app, then falls back to
+          # windows-x86_64. Fresh Windows installs are documented as NSIS
+          # setup.exe installs, so the generic fallback intentionally points at
+          # NSIS; MSI-installed clients still receive MSI through the typed key.
           if [[ "$VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
             WINDOWS_VER="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
           elif [[ "$VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
@@ -416,7 +423,8 @@ jobs:
 
           MACOS_BUNDLE="Beebeeb_${VER}_universal.app.tar.gz"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
-          WINDOWS_BUNDLE="Beebeeb_${WINDOWS_VER}_x64_en-US.msi"
+          WINDOWS_NSIS_BUNDLE="Beebeeb_${WINDOWS_VER}_x64-setup.exe"
+          WINDOWS_MSI_BUNDLE="Beebeeb_${WINDOWS_VER}_x64_en-US.msi"
 
           fetch_sig() {
             curl --proto '=https' --tlsv1.2 -fsSL "$1"
@@ -432,7 +440,8 @@ jobs:
 
           SIG_MACOS=$(fetch_optional_sig "${BASE_URL}/${MACOS_BUNDLE}.sig")
           SIG_LINUX=$(fetch_sig "${BASE_URL}/${LINUX_BUNDLE}.sig")
-          SIG_WINDOWS=$(fetch_sig "${BASE_URL}/${WINDOWS_BUNDLE}.sig")
+          SIG_WINDOWS_NSIS=$(fetch_sig "${BASE_URL}/${WINDOWS_NSIS_BUNDLE}.sig")
+          SIG_WINDOWS_MSI=$(fetch_sig "${BASE_URL}/${WINDOWS_MSI_BUNDLE}.sig")
 
           mkdir -p releases-repo/desktop
 
@@ -443,10 +452,12 @@ jobs:
             --arg base_url "$BASE_URL" \
             --arg macos_bundle "$MACOS_BUNDLE" \
             --arg linux_bundle "$LINUX_BUNDLE" \
-            --arg windows_bundle "$WINDOWS_BUNDLE" \
+            --arg windows_nsis_bundle "$WINDOWS_NSIS_BUNDLE" \
+            --arg windows_msi_bundle "$WINDOWS_MSI_BUNDLE" \
             --arg sig_macos "$SIG_MACOS" \
             --arg sig_linux "$SIG_LINUX" \
-            --arg sig_windows "$SIG_WINDOWS" \
+            --arg sig_windows_nsis "$SIG_WINDOWS_NSIS" \
+            --arg sig_windows_msi "$SIG_WINDOWS_MSI" \
             '{
               version: $ver,
               notes: $notes,
@@ -458,8 +469,16 @@ jobs:
                     signature: $sig_linux
                   },
                   "windows-x86_64": {
-                    url: ($base_url + "/" + $windows_bundle),
-                    signature: $sig_windows
+                    url: ($base_url + "/" + $windows_nsis_bundle),
+                    signature: $sig_windows_nsis
+                  },
+                  "windows-x86_64-nsis": {
+                    url: ($base_url + "/" + $windows_nsis_bundle),
+                    signature: $sig_windows_nsis
+                  },
+                  "windows-x86_64-msi": {
+                    url: ($base_url + "/" + $windows_msi_bundle),
+                    signature: $sig_windows_msi
                   }
                 }
                 + (
