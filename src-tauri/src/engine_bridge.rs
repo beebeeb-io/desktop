@@ -1583,6 +1583,12 @@ impl EngineBridge {
         })
     }
 
+    pub fn local_cache_usage_bytes(&self) -> anyhow::Result<i64> {
+        let pinned_bytes = self.db.cache_bytes_by_effective_pin(true)?.max(0);
+        let unpinned_bytes = self.db.cache_bytes_by_effective_pin(false)?.max(0);
+        Ok(pinned_bytes.saturating_add(unpinned_bytes))
+    }
+
     pub fn enforce_configured_cache_limit(&self) -> anyhow::Result<CacheCleanupOutcome> {
         let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
         self.enforce_local_cache_limit(cfg.local_cache_limit_for_eviction())
@@ -5200,6 +5206,20 @@ mod tests {
             bridge.db.get_file("old").unwrap().unwrap().status,
             FileStatus::CloudOnly
         );
+    }
+
+    #[test]
+    fn test_local_cache_usage_bytes_sums_pinned_and_unpinned_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "pinned", "/Pinned.txt", None, FileStatus::Local, 700);
+        seed_bridge_row(&bridge, "unpinned", "/Unpinned.txt", None, FileStatus::Local, 600);
+
+        bridge.db.set_recursive_pin("pinned", true, 1).unwrap();
+        bridge.db.mark_cached("pinned", "/cache/pinned", 700, 10).unwrap();
+        bridge.db.mark_cached("unpinned", "/cache/unpinned", 600, 20).unwrap();
+
+        assert_eq!(bridge.local_cache_usage_bytes().unwrap(), 1_300);
     }
 
     #[test]

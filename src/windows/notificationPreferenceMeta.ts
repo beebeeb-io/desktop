@@ -4,7 +4,10 @@ import type {
 } from '../desktopApi'
 
 export type AccountNotificationPrefKey = keyof NotificationPreferenceValues
-export type DesktopNotificationPrefKey = Extract<keyof DesktopConfig, 'notify_conflicts'>
+export type DesktopNotificationPrefKey = Extract<
+  keyof DesktopConfig,
+  'notify_conflicts' | 'notify_sync_complete' | 'notify_quota_warnings'
+>
 
 export interface NotificationPreferenceMeta<Key extends string> {
   key: Key
@@ -25,5 +28,15 @@ export const DESKTOP_NOTIFICATION_PREF_META: Array<NotificationPreferenceMeta<De
     key: 'notify_conflicts',
     label: 'Conflict alerts',
     hint: 'When local and remote edits diverge and need your choice.',
+  },
+  {
+    key: 'notify_sync_complete',
+    label: 'Sync complete',
+    hint: 'When this device finishes syncing and is all caught up.',
+  },
+  {
+    key: 'notify_quota_warnings',
+    label: 'Local cache warnings',
+    hint: 'When this device is close to its local cache limit.',
   },
 ]

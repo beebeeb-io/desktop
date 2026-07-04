@@ -5218,6 +5218,14 @@ fn should_show_conflict_notification(config: Result<DesktopConfig, String>) -> b
     config.map(|c| c.notify_conflicts).unwrap_or(true)
 }
 
+fn should_show_sync_complete_notification(config: Result<DesktopConfig, String>) -> bool {
+    config.map(|c| c.notify_sync_complete).unwrap_or(false)
+}
+
+fn should_show_quota_warning_notification(config: Result<DesktopConfig, String>) -> bool {
+    config.map(|c| c.notify_quota_warnings).unwrap_or(true)
+}
+
 pub(crate) fn notify_conflict_impl(app: &tauri::AppHandle, file_name: &str) -> Result<(), String> {
     use tauri_plugin_notification::NotificationExt;
 
@@ -5234,6 +5242,67 @@ pub(crate) fn notify_conflict_impl(app: &tauri::AppHandle, file_name: &str) -> R
         .body(format!("Conflict in {file_name} — open Beebeeb to resolve"))
         .show()
         .map_err(|e| e.to_string())
+}
+
+pub(crate) fn notify_sync_complete_impl(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    if !should_show_sync_complete_notification(DesktopConfig::load()) {
+        return Ok(());
+    }
+
+    app.notification()
+        .builder()
+        .title("All caught up")
+        .body("Your Beebeeb files are up to date.")
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn notify_quota_warning_impl(
+    app: &tauri::AppHandle,
+    local_cache_bytes: i64,
+    local_cache_limit_bytes: i64,
+) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    if local_cache_limit_bytes <= 0 {
+        return Ok(());
+    }
+    if !should_show_quota_warning_notification(DesktopConfig::load()) {
+        return Ok(());
+    }
+
+    let used = local_cache_bytes.max(0);
+    let cap = local_cache_limit_bytes.max(1);
+    let percent = ((used as f64 / cap as f64) * 100.0).round() as i64;
+
+    app.notification()
+        .builder()
+        .title("Local cache nearly full")
+        .body(format!(
+            "{} used of {} local cache limit ({}%).",
+            format_notification_bytes(used),
+            format_notification_bytes(cap),
+            percent
+        ))
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+fn format_notification_bytes(bytes: i64) -> String {
+    let bytes = bytes.max(0) as f64;
+    if bytes < 1_000.0 {
+        format!("{} B", bytes as i64)
+    } else if bytes < 1_000_000.0 {
+        format!("{:.0} KB", bytes / 1_000.0)
+    } else if bytes < 1_000_000_000.0 {
+        format!("{:.0} MB", bytes / 1_000_000.0)
+    } else if bytes < 1_000_000_000_000.0 {
+        format!("{:.0} GB", bytes / 1_000_000_000.0)
+    } else {
+        format!("{:.1} TB", bytes / 1_000_000_000_000.0)
+    }
 }
 
 /// IPC wrapper around [`notify_conflict_impl`]. Mostly here so the
@@ -7082,7 +7151,8 @@ mod tests {
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
         next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, real_app_version,
         release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
-        should_show_conflict_notification, subtree_file_ids, unused_child_path,
+        should_show_conflict_notification, should_show_quota_warning_notification,
+        should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
@@ -7318,6 +7388,38 @@ mod tests {
     #[test]
     fn conflict_notification_gate_fails_open_when_config_unreadable() {
         assert!(should_show_conflict_notification(Err("config unreadable".to_string())));
+    }
+
+    #[test]
+    fn sync_complete_notification_gate_honors_preference_and_default() {
+        let enabled = DesktopConfig {
+            notify_sync_complete: true,
+            ..DesktopConfig::default()
+        };
+        let disabled = DesktopConfig {
+            notify_sync_complete: false,
+            ..DesktopConfig::default()
+        };
+
+        assert!(should_show_sync_complete_notification(Ok(enabled)));
+        assert!(!should_show_sync_complete_notification(Ok(disabled)));
+        assert!(!should_show_sync_complete_notification(Err(
+            "config unreadable".to_string()
+        )));
+    }
+
+    #[test]
+    fn quota_warning_notification_gate_honors_disabled_preference() {
+        let disabled = DesktopConfig {
+            notify_quota_warnings: false,
+            ..DesktopConfig::default()
+        };
+
+        assert!(!should_show_quota_warning_notification(Ok(disabled)));
+        assert!(should_show_quota_warning_notification(Ok(DesktopConfig::default())));
+        assert!(should_show_quota_warning_notification(Err(
+            "config unreadable".to_string()
+        )));
     }
 
     #[test]

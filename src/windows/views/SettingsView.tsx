@@ -502,6 +502,12 @@ function DesktopNotificationPreferencesPanel({
       case 'notify_conflicts':
         onConfigChange({ notify_conflicts: value })
         break
+      case 'notify_sync_complete':
+        onConfigChange({ notify_sync_complete: value })
+        break
+      case 'notify_quota_warnings':
+        onConfigChange({ notify_quota_warnings: value })
+        break
     }
   }
 

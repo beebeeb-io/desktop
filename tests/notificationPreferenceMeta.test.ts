@@ -22,6 +22,16 @@ describe('notificationPreferenceMeta', () => {
         label: 'Conflict alerts',
         hint: 'When local and remote edits diverge and need your choice.',
       },
+      {
+        key: 'notify_sync_complete',
+        label: 'Sync complete',
+        hint: 'When this device finishes syncing and is all caught up.',
+      },
+      {
+        key: 'notify_quota_warnings',
+        label: 'Local cache warnings',
+        hint: 'When this device is close to its local cache limit.',
+      },
     ])
   })
 })

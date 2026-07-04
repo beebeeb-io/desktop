@@ -54,6 +54,8 @@ use crate::state_paths;
 /// snapshot+ops delta path lands (task 0789) refresh becomes
 /// event-driven and this fixed poll goes away.
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
+const LOCAL_CACHE_WARNING_THRESHOLD_NUMERATOR: i128 = 9;
+const LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR: i128 = 10;
 
 /// Known-folder backup (task 0797): run the source→vault mirror every Nth sync
 /// tick. With a 30s `TICK_INTERVAL` that is ~60s. Lowered from 10 (~5 min) to 2
@@ -169,6 +171,55 @@ struct TelemetryState {
     /// The name of a file actively transferring, if the loop knows one. `None`
     /// when nothing is in flight (the producer then omits `current_file`).
     current_file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SyncCompleteNotificationState {
+    saw_active_sync: bool,
+}
+
+impl SyncCompleteNotificationState {
+    fn observe(&mut self, sync_activity_seen: bool, in_flight_after: u32, unresolved_after: u32) -> bool {
+        if sync_activity_seen {
+            self.saw_active_sync = true;
+        }
+
+        let caught_up = in_flight_after == 0 && unresolved_after == 0;
+        if self.saw_active_sync && caught_up {
+            self.saw_active_sync = false;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct QuotaWarningNotificationState {
+    was_over_threshold: bool,
+}
+
+impl QuotaWarningNotificationState {
+    fn observe(&mut self, local_cache_limit_bytes: Option<i64>, local_cache_bytes: i64) -> bool {
+        let over_threshold = local_cache_over_warning_threshold(local_cache_limit_bytes, local_cache_bytes);
+        let should_notify = over_threshold && !self.was_over_threshold;
+        self.was_over_threshold = over_threshold;
+        should_notify
+    }
+}
+
+fn local_cache_over_warning_threshold(local_cache_limit_bytes: Option<i64>, local_cache_bytes: i64) -> bool {
+    let Some(limit) = local_cache_limit_bytes else {
+        return false;
+    };
+    if limit <= 0 {
+        return false;
+    }
+
+    let usage = local_cache_bytes.max(0) as i128;
+    let limit = limit as i128;
+    usage.saturating_mul(LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR)
+        >= limit.saturating_mul(LOCAL_CACHE_WARNING_THRESHOLD_NUMERATOR)
 }
 
 /// Map the runner's internal engine-state string to the lowercase heartbeat
@@ -694,6 +745,8 @@ async fn run(
     emit_status(&app, "running", Some(&sync_root), None);
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
+    let mut sync_complete_notifications = SyncCompleteNotificationState::default();
+    let mut quota_warning_notifications = QuotaWarningNotificationState::default();
 
     // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
     // SLOW cadence relative to the 30s sync tick — every `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS`
@@ -735,6 +788,8 @@ async fn run(
                     tick_count = tick_count.wrapping_add(1);
                 }
 
+                let syncing_before_tick = sync_in_flight_count(&db);
+
                 match bridge.refresh_shared_roots().await {
                     Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
                         tracing::info!(
@@ -769,8 +824,9 @@ async fn run(
                         // (timestamp ≈ now) doesn't get auto-resolved
                         // on the very same tick.
                         sweep_auto_resolutions(&app, &bridge, &sync_root).await;
-                        match bridge.process_due_operations(&sync_root, now_secs()).await {
+                        let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
                             Ok(outcome) => {
+                                let completed = outcome.completed_op_ids.len() as u32;
                                 if !outcome.invalidated_item_ids.is_empty() {
                                     emit_file_provider_invalidation(
                                         &app,
@@ -785,12 +841,14 @@ async fn run(
                                         "sync operation queue processed with deferred work"
                                     );
                                 }
+                                completed
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "operation queue processing failed");
+                                0
                             }
-                        }
-                        enforce_cache_budget(&bridge);
+                        };
+                        enforce_cache_budget(&app, &bridge, &mut quota_warning_notifications);
 
                         // Windows Cloud Files: the one-shot `seed_placeholders`
                         // at engine spawn ran against a (usually empty) DB, so
@@ -819,6 +877,14 @@ async fn run(
                         #[cfg(target_os = "windows")]
                         crate::windows_cf::stamp_local_files_in_sync(&sync_root);
 
+                        let syncing_after_tick = sync_in_flight_count(&db);
+                        let unresolved_after_tick = unresolved_sync_issue_count(&db);
+                        let should_notify_sync_complete = sync_complete_notifications.observe(
+                            syncing_before_tick > 0 || completed_sync_work > 0,
+                            syncing_after_tick,
+                            unresolved_after_tick,
+                        );
+
                         emit_status(&app, "idle", Some(&sync_root), None);
                         // Feed the heartbeat producer the post-tick state. It
                         // promotes this to "syncing" itself when the DB snapshot
@@ -830,6 +896,12 @@ async fn run(
                         // error on a successful tick.
                         #[cfg(target_os = "windows")]
                         refresh_status_ui_snapshot(&db, false, false);
+
+                        if should_notify_sync_complete
+                            && let Err(e) = crate::notify_sync_complete_impl(&app)
+                        {
+                            tracing::warn!(error = %e, "notify_sync_complete failed");
+                        }
                     }
                     Err(e) => {
                         // Network blips and 401s during token rotation
@@ -949,13 +1021,22 @@ fn set_telemetry_state(telemetry: &Arc<Mutex<TelemetryState>>, state: &str) {
 /// this cached snapshot (cheap atomics), so it never opens the DB or blocks the
 /// shell. Counting reuses the `db` the loop already holds, so this adds one
 /// indexed count query per tick. No-op on non-Windows.
+fn file_status_count(db: &StateDb, status: FileStatus) -> u32 {
+    db.list_by_status(status).ok().map(|v| v.len() as u32).unwrap_or(0)
+}
+
+fn sync_in_flight_count(db: &StateDb) -> u32 {
+    file_status_count(db, FileStatus::Downloading).saturating_add(file_status_count(db, FileStatus::Uploading))
+}
+
+fn unresolved_sync_issue_count(db: &StateDb) -> u32 {
+    file_status_count(db, FileStatus::Conflict).saturating_add(file_status_count(db, FileStatus::Error))
+}
+
 #[cfg(target_os = "windows")]
 fn refresh_status_ui_snapshot(db: &StateDb, paused: bool, engine_error: bool) {
-    let count = |status: FileStatus| -> u32 {
-        db.list_by_status(status).ok().map(|v| v.len() as u32).unwrap_or(0)
-    };
-    let syncing = count(FileStatus::Downloading).saturating_add(count(FileStatus::Uploading));
-    let conflicts = count(FileStatus::Conflict);
+    let syncing = sync_in_flight_count(db);
+    let conflicts = file_status_count(db, FileStatus::Conflict);
     crate::windows_cf::status_ui::set_engine_state(paused, syncing, conflicts, engine_error);
 }
 
@@ -1008,7 +1089,11 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
+fn enforce_cache_budget(
+    app: &AppHandle,
+    bridge: &Arc<EngineBridge>,
+    quota_warning_notifications: &mut QuotaWarningNotificationState,
+) {
     // Honor the Windows "Files On-Demand" toggle. When the user has turned
     // it OFF (`Some(false)`), they want every file kept fully local — so we
     // must NOT evict unpinned cached files down to the budget. Unset
@@ -1016,6 +1101,22 @@ fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
     // A missing/unreadable config defaults to on-demand (the safe, low-disk
     // behaviour). This is one cheap TOML read per 5s tick.
     let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
+    let local_cache_limit = cfg.local_cache_limit_for_eviction();
+    match local_cache_limit {
+        Some(limit) => match bridge.local_cache_usage_bytes() {
+            Ok(usage) if quota_warning_notifications.observe(Some(limit), usage) => {
+                if let Err(e) = crate::notify_quota_warning_impl(app, usage, limit) {
+                    tracing::warn!(error = %e, "notify_quota_warning failed");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "local cache usage check failed"),
+        },
+        None => {
+            quota_warning_notifications.observe(None, 0);
+        }
+    }
+
     let files_on_demand = cfg.files_on_demand.unwrap_or(true);
     if !files_on_demand {
         // User opted into keeping everything local — skip eviction.
@@ -1027,7 +1128,7 @@ fn enforce_cache_budget(bridge: &Arc<EngineBridge>) {
     // has no metered-network detection on Windows yet, so this toggle is
     // persisted only for now (see DesktopConfig::metered).
 
-    match bridge.enforce_local_cache_limit(cfg.local_cache_limit_for_eviction()) {
+    match bridge.enforce_local_cache_limit(local_cache_limit) {
         Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
             tracing::info!(
                 evicted = outcome.evicted_file_ids.len(),
@@ -1164,6 +1265,36 @@ mod tests {
         assert_eq!(payload["item_ids"][1], "shared-root");
         assert!(payload.get("path").is_none());
         assert!(payload.get("token").is_none());
+    }
+
+    #[test]
+    fn sync_complete_notification_state_fires_once_on_sync_to_idle_transition() {
+        let mut state = SyncCompleteNotificationState::default();
+
+        assert!(!state.observe(false, 0, 0), "idle no-op ticks are ignored");
+        assert!(!state.observe(true, 2, 0), "active sync does not fire until caught up");
+        assert!(state.observe(false, 0, 0), "transition back to caught up fires once");
+        assert!(!state.observe(false, 0, 0), "dedupes repeated idle ticks");
+    }
+
+    #[test]
+    fn sync_complete_notification_state_waits_for_conflicts_to_clear() {
+        let mut state = SyncCompleteNotificationState::default();
+
+        assert!(!state.observe(true, 0, 1), "conflicted sync is not caught up");
+        assert!(state.observe(false, 0, 0), "clearing conflicts completes the run");
+    }
+
+    #[test]
+    fn quota_warning_notification_state_fires_once_per_threshold_crossing() {
+        let mut state = QuotaWarningNotificationState::default();
+
+        assert!(!state.observe(None, 10_000), "unlimited cache caps never warn");
+        assert!(!state.observe(Some(1_000), 899), "below 90 percent is quiet");
+        assert!(state.observe(Some(1_000), 900), "90 percent crossing warns");
+        assert!(!state.observe(Some(1_000), 950), "remaining over threshold dedupes");
+        assert!(!state.observe(Some(1_000), 100), "dropping below threshold resets");
+        assert!(state.observe(Some(1_000), 901), "a later crossing warns again");
     }
 
     // ── Heartbeat telemetry mapping ───────────────────────────────────────────
