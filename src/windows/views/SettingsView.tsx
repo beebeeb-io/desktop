@@ -37,7 +37,7 @@ import {
   type AccountNotificationPrefKey,
   type DesktopNotificationPrefKey,
 } from '../notificationPreferenceMeta'
-import { T, Card, Chip, NavIcon, PageHeader, PrimaryBtn, Skeleton } from '../ui'
+import { T, Card, Chip, Modal, NavIcon, PageHeader, PrimaryBtn, Skeleton } from '../ui'
 import { useRegionCity } from '../useRegion'
 import {
   CACHE_LIMIT_OPTIONS,
@@ -686,6 +686,7 @@ function UpdatesPanel({
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
   const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const updateCheckRequestRef = useRef(0)
   const releaseChannel = config.release_channel ?? 'stable'
   const updateCheckView = buildUpdateCheckViewModel(updateCheckState, version, releaseChannel)
@@ -707,6 +708,7 @@ function UpdatesPanel({
     setUpdateCheckState({ kind: 'idle' })
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
+    setReleaseNotesOpen(false)
     onConfigChange({ release_channel: channel })
   }
 
@@ -716,6 +718,7 @@ function UpdatesPanel({
     setUpdateCheckState({ kind: 'checking' })
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
+    setReleaseNotesOpen(false)
 
     const result = await checkForDesktopUpdatesNow()
     if (updateCheckRequestRef.current !== requestId) return
@@ -811,9 +814,34 @@ function UpdatesPanel({
             >
               {downgradeInstallState === 'error' && downgradeInstallError
                 ? `Downgrade failed: ${downgradeInstallError}`
-                : updateCheckState.body || 'The selected channel is behind this install. Downgrade only after confirming.'}
+                : `Read the release notes before downgrading to ${updateCheckState.version}.`}
             </div>
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <button
+                type="button"
+                onClick={() => setReleaseNotesOpen(true)}
+                disabled={downgradeInstallBusy}
+                style={{
+                  height: 30,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  padding: '0 11px',
+                  fontSize: 11.5,
+                  fontFamily: T.fontSans,
+                  fontWeight: 600,
+                  borderRadius: 6,
+                  border: `1px solid ${T.line2}`,
+                  background: T.paper,
+                  color: T.ink2,
+                  cursor: downgradeInstallBusy ? 'not-allowed' : 'pointer',
+                  opacity: downgradeInstallBusy ? 0.6 : 1,
+                  whiteSpace: 'nowrap' as const,
+                }}
+              >
+                Release notes
+              </button>
               <button
                 type="button"
                 onClick={() => void openUrl(updateCheckState.releaseNotesUrl)}
@@ -838,7 +866,7 @@ function UpdatesPanel({
                 }}
               >
                 <NavIcon name="external" size={11} color={T.ink3} />
-                Release notes
+                View on GitHub
               </button>
               <button
                 type="button"
@@ -871,6 +899,18 @@ function UpdatesPanel({
           </div>
         )}
       </Card>
+
+      {updateCheckState.kind === 'downgrade_available' && (
+        <Modal
+          open={releaseNotesOpen}
+          onClose={() => setReleaseNotesOpen(false)}
+          title={`Beebeeb Desktop ${updateCheckState.version}`}
+        >
+          <div style={{ whiteSpace: 'pre-wrap' as const, fontFamily: T.fontSans, fontSize: 12.5, color: T.ink2, lineHeight: 1.65 }}>
+            {updateCheckState.body || 'No release notes were provided for this version.'}
+          </div>
+        </Modal>
+      )}
 
       <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '15px 18px', alignItems: 'center', borderBottom: `1px solid ${T.line}` }}>
