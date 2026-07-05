@@ -3,6 +3,8 @@
  * consumed by WindowsApp + src/windows/views/*.
  */
 
+import { useEffect } from 'react'
+
 // ── Design tokens ───────────────────────────────────────────────────────────
 
 export const T = {
@@ -234,6 +236,139 @@ export function Card({ children, style }: { children: React.ReactNode; style?: R
   return (
     <div style={{ background: T.paper, border: `1px solid ${T.line}`, borderRadius: 10, boxShadow: 'var(--shadow-1)', ...style }}>
       {children}
+    </div>
+  )
+}
+
+// A small reusable modal primitive — extracted from the ad-hoc dialogs already
+// used in WindowsApp.tsx (delete confirmation) and KnownFolderOnboarding.tsx
+// (the fuller `role="dialog"` pattern this follows): fixed translucent
+// backdrop, centered panel, scrollable body, footer close button. Backdrop
+// click and Escape both close.
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  maxWidth = 480,
+  ariaLabel,
+}: {
+  open: boolean
+  onClose: () => void
+  title: React.ReactNode
+  children: React.ReactNode
+  maxWidth?: number
+  ariaLabel?: string
+}) {
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        background: 'rgba(24, 20, 10, 0.38)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+        fontFamily: T.fontSans,
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={ariaLabel ?? (typeof title === 'string' ? title : undefined)}
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          width: '100%',
+          maxWidth,
+          maxHeight: 'calc(100vh - 48px)',
+          display: 'flex',
+          flexDirection: 'column',
+          background: T.paper,
+          border: `1px solid ${T.line}`,
+          borderRadius: 14,
+          boxShadow: 'var(--shadow-3)',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            padding: '18px 20px',
+            borderBottom: `1px solid ${T.line}`,
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.ink, letterSpacing: '-0.01em', minWidth: 0 }}>{title}</div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              width: 26,
+              height: 26,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              border: `1px solid ${T.line2}`,
+              background: T.paper2,
+              color: T.ink3,
+              cursor: 'pointer',
+              flexShrink: 0,
+              fontSize: 14,
+              lineHeight: 1,
+            }}
+          >
+            &times;
+          </button>
+        </div>
+        <div style={{ padding: '18px 20px', overflowY: 'auto', flex: 1, minHeight: 0 }}>{children}</div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            padding: '12px 20px',
+            borderTop: `1px solid ${T.line}`,
+            flexShrink: 0,
+          }}
+        >
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              height: 30,
+              padding: '0 14px',
+              fontSize: 12,
+              fontFamily: T.fontSans,
+              fontWeight: 600,
+              borderRadius: 6,
+              border: `1px solid ${T.line2}`,
+              background: T.paper,
+              color: T.ink2,
+              cursor: 'pointer',
+            }}
+          >
+            Close
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
