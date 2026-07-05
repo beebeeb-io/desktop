@@ -1,6 +1,6 @@
-# Beebeeb Desktop 0.2.2-beta.1 — a working Release notes button on the Updates page
+# Beebeeb Desktop 0.2.2 — a working Release notes button on the Updates page
 
-0.2.2-alpha.1 fixed a Settings page bug: whenever a downgrade was available, the Updates panel dumped the entire release-notes Markdown body inline as wrapped monospace text — literal `#`/`##`/`-` characters visible, pushing everything below it (including the release-channel picker) far down the page. It's now a compact summary line plus a "Release notes" button that opens a modal with the same text, readable and scrollable. This beta promotes the same build to the wider beta channel.
+This release fixes a Settings page bug: whenever a downgrade was available, the Updates panel dumped the entire release-notes Markdown body inline as wrapped monospace text — literal `#`/`##`/`-` characters visible, pushing everything below it (including the release-channel picker) far down the page. It's now a compact summary line plus a "Release notes" button that opens a modal with the same text, readable and scrollable. Confirmed via both 0.2.2-alpha.1 and 0.2.2-beta.1 before promoting straight to Stable.
 
 ### Bug Fixes / Hardening
 
