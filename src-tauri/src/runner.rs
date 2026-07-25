@@ -96,8 +96,7 @@ const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 /// Packaged release builds ship without this variable set, so they always hit
 /// `https://api.beebeeb.io`.
 pub(crate) fn api_base_url() -> String {
-    let base = std::env::var("BB_API_BASE")
-        .unwrap_or_default();
+    let base = std::env::var("BB_API_BASE").unwrap_or_default();
     let trimmed = base.trim();
     if trimmed.is_empty() {
         return "https://api.beebeeb.io".to_string();
@@ -747,6 +746,7 @@ async fn run(
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
+    let mut last_search_index_signature: Option<u64> = None;
 
     // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
     // SLOW cadence relative to the 30s sync tick — every `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS`
@@ -896,6 +896,32 @@ async fn run(
                         // error on a successful tick.
                         #[cfg(target_os = "windows")]
                         refresh_status_ui_snapshot(&db, false, false);
+
+                        match crate::desktop_search::local_index_signature(&db) {
+                            Ok(signature) if last_search_index_signature != Some(signature) => {
+                                match crate::desktop_search::sync_local_index_to_remote(&db, &api).await {
+                                    Ok(summary) => {
+                                        last_search_index_signature = Some(signature);
+                                        tracing::debug!(
+                                            indexed_file_count = summary.indexed_file_count,
+                                            put_count = summary.put_count,
+                                            delete_count = summary.delete_count,
+                                            "desktop search index shards synced"
+                                        );
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            error = %error,
+                                            "desktop search index shard sync failed; will retry after the next local mirror change"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!(error = %error, "desktop search index signature failed");
+                            }
+                        }
 
                         if should_notify_sync_complete
                             && let Err(e) = crate::notify_sync_complete_impl(&app)

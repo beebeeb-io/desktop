@@ -22,6 +22,7 @@ mod api_client;
 mod browser_login;
 mod config;
 mod conflict;
+mod desktop_search;
 mod engine_bridge;
 // Unix-domain-socket IPC (macOS File Provider extension + Linux FUSE). Unix
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
@@ -5035,6 +5036,41 @@ async fn desktop_file_overview(
     Ok(overview)
 }
 
+/// Query the local desktop file-name search index.
+///
+/// The index is built from the local StateDb mirror and queried in-process, so
+/// typing into the desktop quick-open never waits on the network. When the sync
+/// root is not configured or the local mirror has not been created yet, return a
+/// typed `syncing` response instead of an empty-looking "no matches" result.
+#[tauri::command]
+async fn desktop_search_files(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<desktop_search::DesktopSearchResponse, String> {
+    {
+        let acct = state.active_account()?;
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        if guard.is_none() {
+            return Err("vault is locked".to_string());
+        }
+    }
+
+    let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
+        return Ok(desktop_search::syncing_response(query));
+    };
+
+    let max_results = limit.unwrap_or(12).clamp(1, 50);
+    let response = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let local = desktop_search::build_local_index(&db).map_err(|e| format!("build search index: {e}"))?;
+        Ok(desktop_search::query_local_index(&local, &query, max_results))
+    })
+    .await
+    .map_err(|e| format!("search task failed: {e}"))??;
+
+    Ok(response)
+}
+
 // ── IPC commands: App Activity — local process resources (task 1191) ─────────
 
 static APP_ACTIVITY_MONITOR: LazyLock<Mutex<AppActivityMonitor>> =
@@ -5740,16 +5776,12 @@ fn release_notes_url_for_version(version: &str) -> String {
     format!("{DESKTOP_RELEASE_REPO_URL}/{DESKTOP_RELEASE_TAG_PREFIX}{version}")
 }
 
-fn compare_channel_release_to_current(
-    current_version: &str,
-    remote_version: &str,
-) -> Option<std::cmp::Ordering> {
+fn compare_channel_release_to_current(current_version: &str, remote_version: &str) -> Option<std::cmp::Ordering> {
     Some(parse_release_version(remote_version)?.cmp(&parse_release_version(current_version)?))
 }
 
 fn is_channel_downgrade(current_version: &str, remote_version: &str) -> bool {
-    compare_channel_release_to_current(current_version, remote_version)
-        == Some(std::cmp::Ordering::Less)
+    compare_channel_release_to_current(current_version, remote_version) == Some(std::cmp::Ordering::Less)
 }
 
 /// Return true only when the selected channel's manifest points to a version
@@ -5773,10 +5805,7 @@ fn configured_release_channel() -> ReleaseChannel {
     }
 }
 
-fn installed_release_channel_from_config(
-    config: Result<DesktopConfig, String>,
-    version: &str,
-) -> ReleaseChannel {
+fn installed_release_channel_from_config(config: Result<DesktopConfig, String>, version: &str) -> ReleaseChannel {
     match config {
         Ok(cfg) => cfg
             .installed_release_channel
@@ -5944,13 +5973,7 @@ fn manual_update_result_for_remote(
 ) -> (ManualUpdateCheckResult, Option<UpdateAvailablePayload>) {
     match compare_channel_release_to_current(current_version, &version) {
         Some(std::cmp::Ordering::Less) => (
-            manual_update_downgrade_result(
-                channel,
-                current_channel,
-                current_version,
-                version,
-                body,
-            ),
+            manual_update_downgrade_result(channel, current_channel, current_version, version, body),
             None,
         ),
         Some(std::cmp::Ordering::Equal) => (
@@ -5961,8 +5984,7 @@ fn manual_update_result_for_remote(
             None,
         ),
         Some(std::cmp::Ordering::Greater) => {
-            let (result, payload) =
-                manual_update_available_result(channel, current_version, version, body);
+            let (result, payload) = manual_update_available_result(channel, current_version, version, body);
             (result, Some(payload))
         }
         None if version == current_version => (
@@ -5973,8 +5995,7 @@ fn manual_update_result_for_remote(
             None,
         ),
         None => {
-            let (result, payload) =
-                manual_update_available_result(channel, current_version, version, body);
+            let (result, payload) = manual_update_available_result(channel, current_version, version, body);
             (result, Some(payload))
         }
     }
@@ -6077,8 +6098,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
 
-            record_installed_release_channel(channel)
-                .map_err(|e| format!("record installed release channel: {e}"))?;
+            record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
             app.restart();
         }
         None => {
@@ -6142,8 +6162,7 @@ async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Re
     .await
     .map_err(|e| e.to_string())?;
 
-    record_installed_release_channel(channel)
-        .map_err(|e| format!("record installed release channel: {e}"))?;
+    record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
     app.restart()
 }
 
@@ -6305,6 +6324,7 @@ pub fn run() {
             desktop_trash_delete_permanently,
             account_storage_breakdown,
             desktop_file_overview,
+            desktop_search_files,
             app_activity_snapshot,
             // Task 0090 — selective sync
             get_selective_sync,
@@ -7360,14 +7380,14 @@ mod tests {
         MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
         MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
         UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
-        classify_finder_install_error, clear_cached_profile, compact_menu_page_for_view, desktop_manifest_path_for_channel,
-        desktop_menu_specs, finder_install_state_from_config, folder_leaf_name, installed_release_channel_from_config,
-        is_disposable_cache_path, manual_update_available_result, manual_update_result_for_remote,
-        manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids, next_menu_zoom_scale,
-        normalize_recovery_phrase_input, now_unix_seconds, real_app_version, release_channel_from_version,
-        release_notes_url_for_version, shared_roots_from_db, should_offer_channel_update, should_show_conflict_notification,
-        should_show_quota_warning_notification, should_show_sync_complete_notification, subtree_file_ids,
-        unused_child_path,
+        classify_finder_install_error, clear_cached_profile, compact_menu_page_for_view,
+        desktop_manifest_path_for_channel, desktop_menu_specs, finder_install_state_from_config, folder_leaf_name,
+        installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
+        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
+        next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, real_app_version,
+        release_channel_from_version, release_notes_url_for_version, shared_roots_from_db, should_offer_channel_update,
+        should_show_conflict_notification, should_show_quota_warning_notification,
+        should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
@@ -7829,10 +7849,7 @@ mod tests {
             ReleaseChannel::Alpha
         );
         assert_eq!(
-            installed_release_channel_from_config(
-                Err("config unreadable".to_string()),
-                "0.2.0-beta.1",
-            ),
+            installed_release_channel_from_config(Err("config unreadable".to_string()), "0.2.0-beta.1",),
             ReleaseChannel::Beta
         );
     }

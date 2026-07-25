@@ -9,6 +9,7 @@ import Notifications from './pages/Notifications'
 import Account from './pages/Account'
 import VersionCenter from './pages/VersionCenter'
 import UpdateBanner from './UpdateBanner'
+import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
 import { COMPACT_NAV_ITEMS, compactPageFromString, type CompactPage as Page } from './compactNavigation'
 
 const COMPACT_APP_NAV_EVENT = 'compact-app:navigate'
@@ -23,6 +24,7 @@ export default function App() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [version, setVersion] = useState<string | null>(null)
   const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)
+  const [searchOpen, setSearchOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -98,6 +100,11 @@ export default function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <UpdateBanner />
+      <DesktopQuickSearch
+        open={searchOpen}
+        onOpen={() => setSearchOpen(true)}
+        onClose={() => setSearchOpen(false)}
+      />
       <div className="app-shell" style={{ flex: 1 }}>
         <aside className="sidebar">
           <div className="brand">
@@ -107,6 +114,8 @@ export default function App() {
               <div className="brand-subtitle">macOS Drive</div>
             </div>
           </div>
+
+          <DesktopQuickSearchTrigger onOpen={() => setSearchOpen(true)} />
 
           <div className="nav-group">
             {COMPACT_NAV_ITEMS.map((item) => (
