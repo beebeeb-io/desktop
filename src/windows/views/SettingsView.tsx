@@ -788,34 +788,40 @@ function DataResidencyPanel() {
 function LaunchPanel() {
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   useEffect(() => {
     let cancelled = false
     command<boolean>('autostart_enabled').then((r) => {
       if (cancelled) return
       if (r.ok) setEnabled(r.value)
-      else setError(r.unsupported ? commandUnavailableLabel('autostart_enabled') : r.reason)
+      else showToast({
+        variant: 'error',
+        title: 'Couldn’t read launch setting',
+        message: r.unsupported ? commandUnavailableLabel('autostart_enabled') : r.reason,
+      })
     })
     return () => { cancelled = true }
-  }, [])
+  }, [showToast])
 
   const toggle = async () => {
     setBusy(true)
-    setError(null)
     const r = await command<boolean>('toggle_autostart')
     setBusy(false)
     if (r.ok) {
       setEnabled(r.value)
       return
     }
-    setError(r.unsupported ? commandUnavailableLabel('toggle_autostart') : r.reason)
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t change launch setting',
+      message: r.unsupported ? commandUnavailableLabel('toggle_autostart') : r.reason,
+    })
   }
 
   return (
     <SettingsSectionShell>
       <PageHeader title="Launch" subtitle="Control how Beebeeb starts on this PC." />
-      {error && <div style={{ padding: '10px 12px', borderRadius: 6, marginBottom: 16, border: '1px solid oklch(0.88 0.05 25)', background: 'oklch(0.98 0.02 25)', color: RED, fontSize: 12 }}>{error}</div>}
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Start at login</div>
@@ -831,16 +837,19 @@ function ExplorerIntegrationPanel() {
   const [state, setState] = useState<ShellIntegrationState | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
   const regionCity = useRegionCity()
 
   const refresh = async () => {
     const r = await command<ShellIntegrationState>('windows_shell_integration_state')
     if (r.ok) {
       setState(r.value)
-      setError(null)
     } else {
-      setError(r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t check Explorer integration',
+        message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
+      })
     }
     setLoading(false)
   }
@@ -851,15 +860,18 @@ function ExplorerIntegrationPanel() {
       const r = await command<ShellIntegrationState>('windows_shell_integration_state')
       if (cancelled) return
       if (r.ok) setState(r.value)
-      else setError(r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason)
+      else showToast({
+        variant: 'error',
+        title: 'Couldn’t check Explorer integration',
+        message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
+      })
       setLoading(false)
     })()
     return () => { cancelled = true }
-  }, [])
+  }, [showToast])
 
   const enable = async () => {
     setBusy(true)
-    setError(null)
     const r = await command<ShellIntegrationState>('install_windows_shell_integration')
     setBusy(false)
     if (r.ok) {
@@ -867,7 +879,11 @@ function ExplorerIntegrationPanel() {
       void refresh()
       return
     }
-    setError(r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason)
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t enable Explorer integration',
+      message: r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason,
+    })
   }
 
   const active = state?.installed === true
@@ -878,8 +894,6 @@ function ExplorerIntegrationPanel() {
         title="Explorer integration"
         subtitle={`Beebeeb appears in File Explorer as a sync folder. Files are encrypted on this PC before they leave for ${regionCity}.`}
       />
-
-      {error && <div style={{ padding: '10px 12px', borderRadius: 6, marginBottom: 16, border: '1px solid oklch(0.88 0.05 25)', background: 'oklch(0.98 0.02 25)', color: RED, fontSize: 12, lineHeight: 1.5 }}>{error}</div>}
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div style={{ minWidth: 0 }}>
