@@ -1,12 +1,12 @@
 # Graph Report - desktop  (2026-07-25)
 
 ## Corpus Check
-- 122 files · ~301,857 words
+- 122 files · ~304,150 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2013 nodes · 4114 edges · 27 communities detected
-- Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 658 edges (avg confidence: 0.8)
+- 2062 nodes · 4245 edges · 27 communities detected
+- Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 670 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -39,16 +39,16 @@
 - [[_COMMUNITY_Community 73|Community 73]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `ApiClient` - 66 edges
-2. `load()` - 63 edges
-3. `StateDb` - 50 edges
-4. `command()` - 44 edges
-5. `EngineBridge` - 42 edges
+1. `ApiClient` - 68 edges
+2. `load()` - 65 edges
+3. `EngineBridge` - 50 edges
+4. `StateDb` - 50 edges
+5. `command()` - 44 edges
 6. `load()` - 36 edges
 7. `run()` - 30 edges
 8. `test_bridge_with_api()` - 29 edges
-9. `api_client_from_session()` - 24 edges
-10. `commandUnavailableLabel()` - 24 edges
+9. `commandUnavailableLabel()` - 25 edges
+10. `api_client_from_session()` - 24 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `get_known_folder_onboarding_seen()` --calls--> `load()`  [INFERRED]
@@ -66,39 +66,39 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
-Nodes (264): load(), ensure_directory(), legacy_platform_keychain_store(), migrate_legacy_keychain_to_account(), platform_keychain_store_for(), about_metadata(), account_activity(), account_activity_feed() (+256 more)
+Nodes (275): load(), ensure_account_id_mints_persists_and_is_stable_across_relaunch(), ensure_directory(), legacy_platform_keychain_store(), migrate_legacy_keychain_to_account(), platform_keychain_store_for(), about_metadata(), account_activity() (+267 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.02
-Nodes (159): is_conflict(), is_text_file(), apply_metadata_file_row(), apply_shared_context(), apply_snapshot(), apply_sync_op(), audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner(), audit_1244_auto_resolve_keep_both_preserves_local_copy_when_remote_hydrate_fails() (+151 more)
+Nodes (175): is_conflict(), is_text_file(), apply_metadata_file_row(), apply_shared_context(), apply_shared_metadata_file_row(), apply_snapshot(), apply_sync_op(), audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner() (+167 more)
 
 ### Community 2 - "Community 2"
+Cohesion: 0.03
+Nodes (106): account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity, AccountActivityEvent, AccountActivitySummary, AccountProfile (+98 more)
+
+### Community 3 - "Community 3"
 Cohesion: 0.04
 Nodes (40): AndroidKeyboard(), IOSKeyboard(), account_email_absent_returns_none(), account_email_round_trips(), AuthSecretStore, AuthStoreError, AuthVault, AuthVault<S> (+32 more)
 
-### Community 3 - "Community 3"
-Cohesion: 0.03
-Nodes (61): bandwidth_samples_insert_and_history(), bandwidth_samples_prune(), BandwidthSample, count_queue_groups(), decode_os_state(), decode_os_state_status_only_for_user_owned_states(), delete_file_subtree_of_a_plain_file_removes_only_that_row(), delete_file_subtree_prunes_descendants_when_folder_row_has_leading_slash() (+53 more)
-
 ### Community 4 - "Community 4"
 Cohesion: 0.03
-Nodes (91): account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity, AccountActivityEvent, AccountActivitySummary, AccountProfile (+83 more)
+Nodes (63): tray_recent_activity_from_db_returns_more_than_eight_rows(), bandwidth_samples_insert_and_history(), bandwidth_samples_prune(), BandwidthSample, count_queue_groups(), decode_os_state(), decode_os_state_status_only_for_user_owned_states(), delete_file_subtree_of_a_plain_file_removes_only_that_row() (+55 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.03
-Nodes (81): engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), session_zeroizes_master_key_on_drop(), build_macos_file_provider_bridge(), main(), db_placeholder_path(), decide_size_action(), fail_transfer() (+73 more)
+Nodes (75): engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), build_macos_file_provider_bridge(), main(), db_placeholder_path(), decide_size_action(), fail_transfer(), fetch_data_callback() (+67 more)
 
 ### Community 6 - "Community 6"
+Cohesion: 0.03
+Nodes (62): diagnostics(), lock(), refresh(), runAction(), toggleStartAtLogin(), unlock(), toggleFolder(), openRoot() (+54 more)
+
+### Community 7 - "Community 7"
 Cohesion: 0.04
 Nodes (18): ApiClient, CreatedSession, DesktopUploadInitRequest, DesktopUploadInitResponse, header_secs(), header_secs_parses_numeric_and_rejects_dates(), HeartbeatBody, ListFilesScope (+10 more)
 
-### Community 7 - "Community 7"
-Cohesion: 0.03
-Nodes (60): diagnostics(), lock(), refresh(), runAction(), toggleStartAtLogin(), unlock(), toggleFolder(), formatBytes() (+52 more)
-
 ### Community 8 - "Community 8"
-Cohesion: 0.03
-Nodes (61): AccountConfig, AccountId, AccountRuntime, active_account_after_synthesis_is_default_shape(), active_account_empty_registry_errs(), fixed_id(), synthesize_is_idempotent(), synthesize_single_account() (+53 more)
+Cohesion: 0.04
+Nodes (57): AccountConfig, AccountId, AccountRuntime, active_account_after_synthesis_is_default_shape(), active_account_empty_registry_errs(), fixed_id(), synthesize_is_idempotent(), synthesize_single_account() (+49 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.04
@@ -117,16 +117,16 @@ Cohesion: 0.08
 Nodes (33): BeebeebFS, dir_attr(), file_attr(), mount(), reply_read_slice(), Session, Args, b64() (+25 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.12
-Nodes (22): ApiClient, parse_response(), capabilities_for_status(), file_entry_payload(), file_entry_payload_for_db(), file_entry_payload_without_contract(), file_status_string(), filename_from_path() (+14 more)
+Cohesion: 0.11
+Nodes (18): decrypt_payload(), device_code_recv_errors_immediately_on_closed_connection(), device_code_recv_returns_promptly_on_healthy_connection(), device_code_recv_times_out_when_server_stalls_after_connect(), emit(), HealthyStream, open_browser(), recv_text() (+10 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.11
-Nodes (19): decrypt_payload(), device_code_recv_errors_immediately_on_closed_connection(), device_code_recv_returns_promptly_on_healthy_connection(), device_code_recv_times_out_when_server_stalls_after_connect(), emit(), HealthyStream, open_browser(), recv_text() (+11 more)
+Cohesion: 0.17
+Nodes (20): capabilities_for_status(), file_entry_payload(), file_entry_payload_for_db(), file_entry_payload_without_contract(), file_status_string(), filename_from_path(), FileProviderItemPayload, handle_connection() (+12 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.17
-Nodes (22): assert_uploading_row(), debounce_loop(), dispatch_local_create(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths(), engine_delete_suppression_is_consumed_once(), engine_delete_suppression_prunes_stale_entries(), NotifyEvent (+14 more)
+Cohesion: 0.18
+Nodes (21): assert_uploading_row(), dispatch_local_create(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths(), engine_delete_suppression_is_consumed_once(), engine_delete_suppression_prunes_stale_entries(), NotifyEvent, prune_stale_engine_suppressions() (+13 more)
 
 ### Community 16 - "Community 16"
 Cohesion: 0.17
@@ -173,7 +173,7 @@ Cohesion: 1.0
 Nodes (1): StatusUiSourceFactory_Impl
 
 ## Knowledge Gaps
-- **128 isolated node(s):** `namespace`, `folder`, `file`, `myFiles`, `sharedWithMe` (+123 more)
+- **129 isolated node(s):** `namespace`, `folder`, `file`, `myFiles`, `sharedWithMe` (+124 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 45`** (7 nodes): `SelectiveSyncView.tsx`, `collectExcludedIds()`, `computeTotals()`, `hasExcludedDescendant()`, `setsEqual()`, `TriCheckbox()`, `triStateFor()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -187,17 +187,17 @@ Nodes (1): StatusUiSourceFactory_Impl
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `commandUnavailableLabel()` connect `Community 7` to `Community 0`, `Community 9`, `Community 10`?**
-  _High betweenness centrality (0.109) - this node is a cross-community bridge._
-- **Why does `load()` connect `Community 0` to `Community 7`?**
-  _High betweenness centrality (0.107) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 0` to `Community 1`, `Community 2`, `Community 4`, `Community 8`, `Community 9`, `Community 12`?**
-  _High betweenness centrality (0.103) - this node is a cross-community bridge._
-- **Are the 62 inferred relationships involving `load()` (e.g. with `.do_upload_version()` and `.enforce_configured_cache_limit()`) actually correct?**
-  _`load()` has 62 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `commandUnavailableLabel()` connect `Community 6` to `Community 0`, `Community 9`, `Community 10`?**
+  _High betweenness centrality (0.108) - this node is a cross-community bridge._
+- **Why does `load()` connect `Community 0` to `Community 6`?**
+  _High betweenness centrality (0.108) - this node is a cross-community bridge._
+- **Why does `run()` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 8`, `Community 9`, `Community 12`?**
+  _High betweenness centrality (0.106) - this node is a cross-community bridge._
+- **Are the 64 inferred relationships involving `load()` (e.g. with `.do_upload_version()` and `.enforce_configured_cache_limit()`) actually correct?**
+  _`load()` has 64 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 2 inferred relationships involving `command()` (e.g. with `handleInstall()` and `refresh()`) actually correct?**
   _`command()` has 2 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `namespace`, `folder`, `file` to the rest of the system?**
-  _128 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _129 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.02 - nodes in this community are weakly interconnected._
