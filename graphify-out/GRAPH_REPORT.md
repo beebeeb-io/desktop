@@ -1,11 +1,11 @@
-# Graph Report - desktop  (2026-07-05)
+# Graph Report - desktop-1240  (2026-07-25)
 
 ## Corpus Check
-- 119 files · ~298,524 words
+- 120 files · ~299,537 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1978 nodes · 4026 edges · 26 communities detected
+- 1992 nodes · 4057 edges · 26 communities detected
 - Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 655 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
@@ -27,7 +27,7 @@
 - [[_COMMUNITY_Community 14|Community 14]]
 - [[_COMMUNITY_Community 15|Community 15]]
 - [[_COMMUNITY_Community 16|Community 16]]
-- [[_COMMUNITY_Community 28|Community 28]]
+- [[_COMMUNITY_Community 25|Community 25]]
 - [[_COMMUNITY_Community 34|Community 34]]
 - [[_COMMUNITY_Community 42|Community 42]]
 - [[_COMMUNITY_Community 43|Community 43]]
@@ -50,6 +50,8 @@
 10. `commandUnavailableLabel()` - 24 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `set_known_folder_backup()` --calls--> `load()`  [INFERRED]
+  src-tauri/src/lib.rs → src/windows/views/ActivityView.tsx
 - `get_known_folder_onboarding_seen()` --calls--> `load()`  [INFERRED]
   src-tauri/src/lib.rs → src/windows/views/ActivityView.tsx
 - `mark_known_folder_onboarding_seen()` --calls--> `load()`  [INFERRED]
@@ -58,38 +60,36 @@
   windows/src/main.rs → src-tauri/src/runner.rs
 - `handle_connection()` --calls--> `load()`  [INFERRED]
   src-tauri/src/ipc_socket.rs → src/windows/views/ActivityView.tsx
-- `run_known_folder_mirror()` --calls--> `load()`  [INFERRED]
-  src-tauri/src/runner.rs → src/windows/views/ActivityView.tsx
 
 ## Communities
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
-Nodes (267): load(), ensure_directory(), ipc_socket_path(), serve_ipc(), legacy_platform_keychain_store(), migrate_legacy_keychain_to_account(), platform_keychain_store_for(), about_metadata() (+259 more)
+Nodes (264): load(), ensure_directory(), ipc_socket_path(), serve_ipc(), legacy_platform_keychain_store(), migrate_legacy_keychain_to_account(), platform_keychain_store_for(), about_metadata() (+256 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.02
-Nodes (159): is_conflict(), is_text_file(), apply_metadata_file_row(), apply_shared_context(), apply_snapshot(), apply_sync_op(), blurhash_for_source(), bootstrap_from_snapshot() (+151 more)
+Nodes (177): is_conflict(), is_text_file(), apply_metadata_file_row(), apply_shared_context(), apply_snapshot(), apply_sync_op(), blurhash_for_source(), bootstrap_from_snapshot() (+169 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.04
-Nodes (40): AndroidKeyboard(), IOSKeyboard(), account_email_absent_returns_none(), account_email_round_trips(), AuthSecretStore, AuthStoreError, AuthVault, AuthVault<S> (+32 more)
+Cohesion: 0.03
+Nodes (46): AndroidKeyboard(), IOSKeyboard(), account_email_absent_returns_none(), account_email_round_trips(), AuthSecretStore, AuthStoreError, AuthVault, AuthVault<S> (+38 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.03
-Nodes (96): account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity, AccountActivityEvent, AccountActivitySummary, AccountProfile (+88 more)
+Nodes (61): bandwidth_samples_insert_and_history(), bandwidth_samples_prune(), BandwidthSample, count_queue_groups(), decode_os_state(), decode_os_state_status_only_for_user_owned_states(), delete_file_subtree_of_a_plain_file_removes_only_that_row(), delete_file_subtree_prunes_descendants_when_folder_row_has_leading_slash() (+53 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.03
-Nodes (61): bandwidth_samples_insert_and_history(), bandwidth_samples_prune(), BandwidthSample, count_queue_groups(), decode_os_state(), decode_os_state_status_only_for_user_owned_states(), delete_file_subtree_of_a_plain_file_removes_only_that_row(), delete_file_subtree_prunes_descendants_when_folder_row_has_leading_slash() (+53 more)
+Nodes (93): account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity, AccountActivityEvent, AccountActivitySummary, AccountProfile (+85 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.03
-Nodes (72): engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), session_zeroizes_master_key_on_drop(), build_macos_file_provider_bridge(), main(), db_placeholder_path(), decide_size_action(), fail_transfer() (+64 more)
+Nodes (73): DesktopSettings, engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), session_zeroizes_master_key_on_drop(), build_macos_file_provider_bridge(), main(), db_placeholder_path(), decide_size_action() (+65 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.04
-Nodes (20): ApiClient, CreatedSession, DesktopUploadInitRequest, DesktopUploadInitResponse, header_secs(), header_secs_parses_numeric_and_rejects_dates(), heartbeat_body_minimal_serializes_status_only(), heartbeat_body_skips_none_optionals_but_keeps_zero() (+12 more)
+Nodes (18): ApiClient, CreatedSession, DesktopUploadInitRequest, DesktopUploadInitResponse, header_secs(), header_secs_parses_numeric_and_rejects_dates(), HeartbeatBody, ListFilesScope (+10 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.03
@@ -109,31 +109,31 @@ Nodes (54): accountActivity(), accountActivityFeed(), accountClientSessions(), a
 
 ### Community 11 - "Community 11"
 Cohesion: 0.06
-Nodes (29): backup_dest_root(), backup_source_key_for_rel_path(), backup_source_key_for_this_device(), classify_copy(), classify_skip_when_size_and_mtime_match(), copy_preserving_mtime(), CopyDecision, dest_root_builds_backup_device_folder() (+21 more)
+Nodes (31): backup_dest_root(), backup_source_key_for_rel_path(), backup_source_key_for_this_device(), classify_copy(), classify_skip_when_size_and_mtime_match(), copy_preserving_mtime(), CopyDecision, dest_root_builds_backup_device_folder() (+23 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.08
 Nodes (33): BeebeebFS, dir_attr(), file_attr(), mount(), reply_read_slice(), Session, Args, b64() (+25 more)
 
 ### Community 13 - "Community 13"
+Cohesion: 0.12
+Nodes (22): ApiClient, parse_response(), capabilities_for_status(), file_entry_payload(), file_entry_payload_for_db(), file_entry_payload_without_contract(), file_status_string(), filename_from_path() (+14 more)
+
+### Community 14 - "Community 14"
 Cohesion: 0.11
 Nodes (18): decrypt_payload(), device_code_recv_errors_immediately_on_closed_connection(), device_code_recv_returns_promptly_on_healthy_connection(), device_code_recv_times_out_when_server_stalls_after_connect(), emit(), HealthyStream, open_browser(), recv_text() (+10 more)
 
-### Community 14 - "Community 14"
-Cohesion: 0.17
-Nodes (20): capabilities_for_status(), file_entry_payload(), file_entry_payload_for_db(), file_entry_payload_without_contract(), file_status_string(), filename_from_path(), FileProviderItemPayload, handle_connection() (+12 more)
-
 ### Community 15 - "Community 15"
-Cohesion: 0.17
-Nodes (22): assert_uploading_row(), debounce_loop(), dispatch_local_create(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths(), engine_delete_suppression_is_consumed_once(), engine_delete_suppression_prunes_stale_entries(), NotifyEvent (+14 more)
-
-### Community 16 - "Community 16"
 Cohesion: 0.17
 Nodes (10): auto_resolution_deadline(), ConflictRecord, Resolution, test_conflict_detected_when_both_sides_changed(), test_no_conflict_when_both_sides_landed_on_same_hash(), test_no_conflict_when_only_local_changed(), test_no_conflict_when_only_remote_changed(), v() (+2 more)
 
-### Community 28 - "Community 28"
-Cohesion: 0.33
-Nodes (3): DomainControlTool, file_provider_installed(), install_file_provider_domain()
+### Community 16 - "Community 16"
+Cohesion: 0.34
+Nodes (13): commandForTauriCli(), decodeMinisignBase64Line(), decodeTauriBase64Text(), fail(), generateKeypair(), main(), parseTauriPubkey(), parseTauriSignature() (+5 more)
+
+### Community 25 - "Community 25"
+Cohesion: 0.29
+Nodes (4): DomainControlTool, file_provider_installed(), install_file_provider_domain(), remove_file_provider_domain()
 
 ### Community 34 - "Community 34"
 Cohesion: 0.39
@@ -182,12 +182,12 @@ Nodes (1): StatusUiSourceFactory_Impl
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `run()` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 8`, `Community 9`, `Community 12`?**
-  _High betweenness centrality (0.120) - this node is a cross-community bridge._
 - **Why does `commandUnavailableLabel()` connect `Community 7` to `Community 0`, `Community 9`, `Community 10`?**
   _High betweenness centrality (0.111) - this node is a cross-community bridge._
 - **Why does `load()` connect `Community 0` to `Community 7`?**
   _High betweenness centrality (0.109) - this node is a cross-community bridge._
+- **Why does `run()` connect `Community 0` to `Community 1`, `Community 2`, `Community 4`, `Community 8`, `Community 9`, `Community 12`?**
+  _High betweenness centrality (0.105) - this node is a cross-community bridge._
 - **Are the 60 inferred relationships involving `load()` (e.g. with `.do_upload_version()` and `.enforce_configured_cache_limit()`) actually correct?**
   _`load()` has 60 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 2 inferred relationships involving `command()` (e.g. with `handleInstall()` and `refresh()`) actually correct?**

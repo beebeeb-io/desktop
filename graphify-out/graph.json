@@ -13,6 +13,132 @@
       "norm_label": "vite.config.ts"
     },
     {
+      "label": "verify-updater-key-rotation.mjs",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L1",
+      "id": "scripts_verify_updater_key_rotation_mjs",
+      "community": 16,
+      "norm_label": "verify-updater-key-rotation.mjs"
+    },
+    {
+      "label": "fail()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L20",
+      "id": "scripts_verify_updater_key_rotation_fail",
+      "community": 16,
+      "norm_label": "fail()"
+    },
+    {
+      "label": "commandForTauriCli()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L24",
+      "id": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "community": 16,
+      "norm_label": "commandfortauricli()"
+    },
+    {
+      "label": "run()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L43",
+      "id": "scripts_verify_updater_key_rotation_run",
+      "community": 16,
+      "norm_label": "run()"
+    },
+    {
+      "label": "runTauri()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L67",
+      "id": "scripts_verify_updater_key_rotation_runtauri",
+      "community": 16,
+      "norm_label": "runtauri()"
+    },
+    {
+      "label": "generateKeypair()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L72",
+      "id": "scripts_verify_updater_key_rotation_generatekeypair",
+      "community": 16,
+      "norm_label": "generatekeypair()"
+    },
+    {
+      "label": "signPayload()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L78",
+      "id": "scripts_verify_updater_key_rotation_signpayload",
+      "community": 16,
+      "norm_label": "signpayload()"
+    },
+    {
+      "label": "decodeTauriBase64Text()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L86",
+      "id": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "community": 16,
+      "norm_label": "decodetauribase64text()"
+    },
+    {
+      "label": "decodeMinisignBase64Line()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L90",
+      "id": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "community": 16,
+      "norm_label": "decodeminisignbase64line()"
+    },
+    {
+      "label": "parseTauriPubkey()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L96",
+      "id": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "community": 16,
+      "norm_label": "parsetauripubkey()"
+    },
+    {
+      "label": "parseTauriSignature()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L114",
+      "id": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "community": 16,
+      "norm_label": "parsetaurisignature()"
+    },
+    {
+      "label": "signedPayloadBytes()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L132",
+      "id": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "community": 16,
+      "norm_label": "signedpayloadbytes()"
+    },
+    {
+      "label": "verifyTauriUpdaterSignature()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L142",
+      "id": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "community": 16,
+      "norm_label": "verifytauriupdatersignature()"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L169",
+      "id": "scripts_verify_updater_key_rotation_main",
+      "community": 16,
+      "norm_label": "main()"
+    },
+    {
       "label": "before-bundle.mjs",
       "file_type": "code",
       "source_file": "scripts/before-bundle.mjs",
@@ -504,7 +630,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L1",
       "id": "design_hifi_design_canvas_jsx",
-      "community": 25,
+      "community": 26,
       "norm_label": "design-canvas.jsx"
     },
     {
@@ -513,7 +639,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L71",
       "id": "hifi_design_canvas_designcanvas",
-      "community": 25,
+      "community": 26,
       "norm_label": "designcanvas()"
     },
     {
@@ -522,7 +648,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L182",
       "id": "hifi_design_canvas_dcviewport",
-      "community": 25,
+      "community": 26,
       "norm_label": "dcviewport()"
     },
     {
@@ -531,7 +657,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L333",
       "id": "hifi_design_canvas_dcsection",
-      "community": 25,
+      "community": 26,
       "norm_label": "dcsection()"
     },
     {
@@ -540,7 +666,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L372",
       "id": "hifi_design_canvas_dcartboard",
-      "community": 25,
+      "community": 26,
       "norm_label": "dcartboard()"
     },
     {
@@ -549,7 +675,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L374",
       "id": "hifi_design_canvas_dcartboardframe",
-      "community": 25,
+      "community": 26,
       "norm_label": "dcartboardframe()"
     },
     {
@@ -558,7 +684,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L464",
       "id": "hifi_design_canvas_dceditable",
-      "community": 25,
+      "community": 26,
       "norm_label": "dceditable()"
     },
     {
@@ -567,7 +693,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L480",
       "id": "hifi_design_canvas_dcfocusoverlay",
-      "community": 25,
+      "community": 26,
       "norm_label": "dcfocusoverlay()"
     },
     {
@@ -576,7 +702,7 @@
       "source_file": "design/hifi/design-canvas.jsx",
       "source_location": "L607",
       "id": "hifi_design_canvas_dcpostit",
-      "community": 25,
+      "community": 26,
       "norm_label": "dcpostit()"
     },
     {
@@ -2196,7 +2322,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_ios_app_jsx",
-      "community": 26,
+      "community": 27,
       "norm_label": "hifi-ios-app.jsx"
     },
     {
@@ -2205,7 +2331,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L6",
       "id": "hifi_hifi_ios_app_ioshome",
-      "community": 26,
+      "community": 27,
       "norm_label": "ioshome()"
     },
     {
@@ -2214,7 +2340,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L83",
       "id": "hifi_hifi_ios_app_iostabbar",
-      "community": 26,
+      "community": 27,
       "norm_label": "iostabbar()"
     },
     {
@@ -2223,7 +2349,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L106",
       "id": "hifi_hifi_ios_app_iosphotos",
-      "community": 26,
+      "community": 27,
       "norm_label": "iosphotos()"
     },
     {
@@ -2232,7 +2358,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L181",
       "id": "hifi_hifi_ios_app_iospreview",
-      "community": 26,
+      "community": 27,
       "norm_label": "iospreview()"
     },
     {
@@ -2241,7 +2367,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L234",
       "id": "hifi_hifi_ios_app_iossharesheet",
-      "community": 26,
+      "community": 27,
       "norm_label": "iossharesheet()"
     },
     {
@@ -2250,7 +2376,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L306",
       "id": "hifi_hifi_ios_app_iossettings",
-      "community": 26,
+      "community": 27,
       "norm_label": "iossettings()"
     },
     {
@@ -2259,7 +2385,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L393",
       "id": "hifi_hifi_ios_app_iosbiometriclock",
-      "community": 26,
+      "community": 27,
       "norm_label": "iosbiometriclock()"
     },
     {
@@ -2268,7 +2394,7 @@
       "source_file": "design/hifi/hifi-ios-app.jsx",
       "source_location": "L440",
       "id": "hifi_hifi_ios_app_iosautobackup",
-      "community": 26,
+      "community": 27,
       "norm_label": "iosautobackup()"
     },
     {
@@ -2430,7 +2556,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L1",
       "id": "design_hifi_hifi_desktop_jsx",
-      "community": 27,
+      "community": 28,
       "norm_label": "hifi-desktop.jsx"
     },
     {
@@ -2439,7 +2565,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L4",
       "id": "hifi_hifi_desktop_desktopwin",
-      "community": 27,
+      "community": 28,
       "norm_label": "desktopwin()"
     },
     {
@@ -2448,7 +2574,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L44",
       "id": "hifi_hifi_desktop_hidesktopprefs",
-      "community": 27,
+      "community": 28,
       "norm_label": "hidesktopprefs()"
     },
     {
@@ -2457,7 +2583,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L103",
       "id": "hifi_hifi_desktop_hiselectivesync",
-      "community": 27,
+      "community": 28,
       "norm_label": "hiselectivesync()"
     },
     {
@@ -2466,7 +2592,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L173",
       "id": "hifi_hifi_desktop_hiconflict",
-      "community": 27,
+      "community": 28,
       "norm_label": "hiconflict()"
     },
     {
@@ -2475,7 +2601,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L242",
       "id": "hifi_hifi_desktop_hifirstrun",
-      "community": 27,
+      "community": 28,
       "norm_label": "hifirstrun()"
     },
     {
@@ -2484,7 +2610,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L328",
       "id": "hifi_hifi_desktop_hiwindowsexplorer",
-      "community": 27,
+      "community": 28,
       "norm_label": "hiwindowsexplorer()"
     },
     {
@@ -2493,7 +2619,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L442",
       "id": "hifi_hifi_desktop_hiwindowstray",
-      "community": 27,
+      "community": 28,
       "norm_label": "hiwindowstray()"
     },
     {
@@ -2502,7 +2628,7 @@
       "source_file": "design/hifi/hifi-desktop.jsx",
       "source_location": "L531",
       "id": "hifi_hifi_desktop_hiwindowssettings",
-      "community": 27,
+      "community": 28,
       "norm_label": "hiwindowssettings()"
     },
     {
@@ -3195,7 +3321,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L1",
       "id": "src_tauri_tests_keychain_rs",
-      "community": 8,
+      "community": 2,
       "norm_label": "keychain.rs"
     },
     {
@@ -3204,7 +3330,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L8",
       "id": "tests_keychain_memorystore",
-      "community": 8,
+      "community": 2,
       "norm_label": "memorystore"
     },
     {
@@ -3213,7 +3339,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L14",
       "id": "tests_keychain_memorystore_save_session_token",
-      "community": 8,
+      "community": 2,
       "norm_label": ".save_session_token()"
     },
     {
@@ -3222,7 +3348,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L19",
       "id": "tests_keychain_memorystore_load_session_token",
-      "community": 8,
+      "community": 2,
       "norm_label": ".load_session_token()"
     },
     {
@@ -3231,7 +3357,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L23",
       "id": "tests_keychain_memorystore_delete_session_token",
-      "community": 8,
+      "community": 2,
       "norm_label": ".delete_session_token()"
     },
     {
@@ -3240,7 +3366,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L28",
       "id": "tests_keychain_memorystore_save_wrapped_master_key",
-      "community": 8,
+      "community": 2,
       "norm_label": ".save_wrapped_master_key()"
     },
     {
@@ -3249,7 +3375,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L33",
       "id": "tests_keychain_memorystore_load_wrapped_master_key",
-      "community": 8,
+      "community": 2,
       "norm_label": ".load_wrapped_master_key()"
     },
     {
@@ -3258,7 +3384,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L42",
       "id": "tests_keychain_memorystore_delete_wrapped_master_key",
-      "community": 8,
+      "community": 2,
       "norm_label": ".delete_wrapped_master_key()"
     },
     {
@@ -3267,7 +3393,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L49",
       "id": "tests_keychain_vault_starts_locked_and_fails_closed",
-      "community": 8,
+      "community": 2,
       "norm_label": "vault_starts_locked_and_fails_closed()"
     },
     {
@@ -3276,7 +3402,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L61",
       "id": "tests_keychain_install_and_clear_session_round_trips_through_store",
-      "community": 8,
+      "community": 2,
       "norm_label": "install_and_clear_session_round_trips_through_store()"
     },
     {
@@ -3285,7 +3411,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L89",
       "id": "tests_keychain_unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked",
-      "community": 8,
+      "community": 2,
       "norm_label": "unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked()"
     },
     {
@@ -3294,7 +3420,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L109",
       "id": "tests_keychain_unlock_rejects_wrong_sized_master_key_and_remains_locked",
-      "community": 8,
+      "community": 2,
       "norm_label": "unlock_rejects_wrong_sized_master_key_and_remains_locked()"
     },
     {
@@ -3303,7 +3429,7 @@
       "source_file": "src-tauri/tests/keychain.rs",
       "source_location": "L125",
       "id": "tests_keychain_debug_output_redacts_session_token_and_key_material",
-      "community": 8,
+      "community": 2,
       "norm_label": "debug_output_redacts_session_token_and_key_material()"
     },
     {
@@ -3402,7 +3528,7 @@
       "source_file": "src-tauri/src/keychain.rs",
       "source_location": "L85",
       "id": "src_keychain_secretbytes_new_master_key",
-      "community": 8,
+      "community": 2,
       "norm_label": ".new_master_key()"
     },
     {
@@ -4959,7 +5085,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L1601",
       "id": "src_engine_bridge_enginebridge_queue_restore_version",
-      "community": 1,
+      "community": 4,
       "norm_label": ".queue_restore_version()"
     },
     {
@@ -5544,7 +5670,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L3244",
       "id": "src_engine_bridge_now_secs",
-      "community": 1,
+      "community": 4,
       "norm_label": "now_secs()"
     },
     {
@@ -5976,7 +6102,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L4859",
       "id": "src_engine_bridge_test_create_file_queues_upload_version_and_preserves_payload",
-      "community": 1,
+      "community": 4,
       "norm_label": "test_create_file_queues_upload_version_and_preserves_payload()"
     },
     {
@@ -5985,7 +6111,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L4905",
       "id": "src_engine_bridge_test_metadata_modify_does_not_queue_content_version",
-      "community": 1,
+      "community": 4,
       "norm_label": "test_metadata_modify_does_not_queue_content_version()"
     },
     {
@@ -6201,7 +6327,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L5966",
       "id": "src_engine_bridge_test_editable_shared_write_queues_actor_and_share_metadata",
-      "community": 1,
+      "community": 4,
       "norm_label": "test_editable_shared_write_queues_actor_and_share_metadata()"
     },
     {
@@ -6219,7 +6345,7 @@
       "source_file": "src-tauri/src/engine_bridge.rs",
       "source_location": "L6117",
       "id": "src_engine_bridge_test_restore_version_routes_to_durable_operation_for_review",
-      "community": 3,
+      "community": 4,
       "norm_label": "test_restore_version_routes_to_durable_operation_for_review()"
     },
     {
@@ -7236,7 +7362,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1499",
       "id": "src_lib_file_provider_installed",
-      "community": 28,
+      "community": 25,
       "norm_label": "file_provider_installed()"
     },
     {
@@ -7245,7 +7371,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1509",
       "id": "src_lib_install_file_provider_domain",
-      "community": 28,
+      "community": 25,
       "norm_label": "install_file_provider_domain()"
     },
     {
@@ -7254,7 +7380,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L1519",
       "id": "src_lib_remove_file_provider_domain",
-      "community": 0,
+      "community": 25,
       "norm_label": "remove_file_provider_domain()"
     },
     {
@@ -7722,7 +7848,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L2929",
       "id": "src_lib_default_sync_root",
-      "community": 3,
+      "community": 4,
       "norm_label": "default_sync_root()"
     },
     {
@@ -7992,7 +8118,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L3566",
       "id": "src_lib_set_known_folder_backup",
-      "community": 0,
+      "community": 11,
       "norm_label": "set_known_folder_backup()"
     },
     {
@@ -9153,7 +9279,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L6861",
       "id": "src_lib_attach_tray_status_listener",
-      "community": 3,
+      "community": 4,
       "norm_label": "attach_tray_status_listener()"
     },
     {
@@ -9324,7 +9450,7 @@
       "source_file": "src-tauri/src/lib.rs",
       "source_location": "L7368",
       "id": "src_lib_disposable_cache_path_check_accepts_temp_files_only",
-      "community": 3,
+      "community": 4,
       "norm_label": "disposable_cache_path_check_accepts_temp_files_only()"
     },
     {
@@ -9567,7 +9693,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L1",
       "id": "src_tauri_src_ipc_socket_rs",
-      "community": 14,
+      "community": 13,
       "norm_label": "ipc_socket.rs"
     },
     {
@@ -9576,7 +9702,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L15",
       "id": "src_ipc_socket_ipcrequest",
-      "community": 14,
+      "community": 13,
       "norm_label": "ipcrequest"
     },
     {
@@ -9585,7 +9711,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L67",
       "id": "src_ipc_socket_ipcresponse",
-      "community": 14,
+      "community": 13,
       "norm_label": "ipcresponse"
     },
     {
@@ -9594,7 +9720,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L96",
       "id": "src_ipc_socket_fileprovideritempayload",
-      "community": 14,
+      "community": 13,
       "norm_label": "fileprovideritempayload"
     },
     {
@@ -9621,7 +9747,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L158",
       "id": "src_ipc_socket_handle_connection",
-      "community": 14,
+      "community": 13,
       "norm_label": "handle_connection()"
     },
     {
@@ -9630,7 +9756,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L321",
       "id": "src_ipc_socket_write_ipc_response",
-      "community": 14,
+      "community": 13,
       "norm_label": "write_ipc_response()"
     },
     {
@@ -9639,7 +9765,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L325",
       "id": "src_ipc_socket_parse_write_kind",
-      "community": 14,
+      "community": 13,
       "norm_label": "parse_write_kind()"
     },
     {
@@ -9648,7 +9774,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L333",
       "id": "src_ipc_socket_normalize_parent_id",
-      "community": 14,
+      "community": 13,
       "norm_label": "normalize_parent_id()"
     },
     {
@@ -9657,7 +9783,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L344",
       "id": "src_ipc_socket_write_outcome_response",
-      "community": 14,
+      "community": 13,
       "norm_label": "write_outcome_response()"
     },
     {
@@ -9666,7 +9792,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L371",
       "id": "src_ipc_socket_list_file_provider_items",
-      "community": 14,
+      "community": 13,
       "norm_label": "list_file_provider_items()"
     },
     {
@@ -9675,7 +9801,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L438",
       "id": "src_ipc_socket_namespace_payload",
-      "community": 14,
+      "community": 13,
       "norm_label": "namespace_payload()"
     },
     {
@@ -9684,7 +9810,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L452",
       "id": "src_ipc_socket_is_file_provider_root",
-      "community": 14,
+      "community": 13,
       "norm_label": "is_file_provider_root()"
     },
     {
@@ -9693,7 +9819,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L460",
       "id": "src_ipc_socket_file_entry_payload_for_db",
-      "community": 14,
+      "community": 13,
       "norm_label": "file_entry_payload_for_db()"
     },
     {
@@ -9702,7 +9828,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L471",
       "id": "src_ipc_socket_file_entry_payload",
-      "community": 14,
+      "community": 13,
       "norm_label": "file_entry_payload()"
     },
     {
@@ -9711,7 +9837,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L518",
       "id": "src_ipc_socket_file_entry_payload_without_contract",
-      "community": 14,
+      "community": 13,
       "norm_label": "file_entry_payload_without_contract()"
     },
     {
@@ -9720,7 +9846,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L541",
       "id": "src_ipc_socket_capabilities_for_status",
-      "community": 14,
+      "community": 13,
       "norm_label": "capabilities_for_status()"
     },
     {
@@ -9729,7 +9855,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L557",
       "id": "src_ipc_socket_file_status_string",
-      "community": 14,
+      "community": 13,
       "norm_label": "file_status_string()"
     },
     {
@@ -9738,7 +9864,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L569",
       "id": "src_ipc_socket_filename_from_path",
-      "community": 14,
+      "community": 13,
       "norm_label": "filename_from_path()"
     },
     {
@@ -9747,7 +9873,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L579",
       "id": "src_ipc_socket_is_top_level_path",
-      "community": 14,
+      "community": 13,
       "norm_label": "is_top_level_path()"
     },
     {
@@ -9756,7 +9882,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L591",
       "id": "src_ipc_socket_test_shared_namespace_lists_roots_with_permission_capabilities",
-      "community": 14,
+      "community": 13,
       "norm_label": "test_shared_namespace_lists_roots_with_permission_capabilities()"
     },
     {
@@ -9765,7 +9891,7 @@
       "source_file": "src-tauri/src/ipc_socket.rs",
       "source_location": "L615",
       "id": "src_ipc_socket_seed_shared_root",
-      "community": 14,
+      "community": 13,
       "norm_label": "seed_shared_root()"
     },
     {
@@ -9774,7 +9900,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1",
       "id": "src_tauri_src_account_dto_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_dto.rs"
     },
     {
@@ -9783,7 +9909,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L38",
       "id": "src_account_dto_accountprofile",
-      "community": 3,
+      "community": 4,
       "norm_label": "accountprofile"
     },
     {
@@ -9792,7 +9918,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L69",
       "id": "src_account_dto_subscription",
-      "community": 3,
+      "community": 4,
       "norm_label": "subscription"
     },
     {
@@ -9801,7 +9927,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L108",
       "id": "src_account_dto_billingusage",
-      "community": 3,
+      "community": 4,
       "norm_label": "billingusage"
     },
     {
@@ -9810,7 +9936,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L126",
       "id": "src_account_dto_regioninfo",
-      "community": 3,
+      "community": 4,
       "norm_label": "regioninfo"
     },
     {
@@ -9819,7 +9945,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L137",
       "id": "src_account_dto_userregionresponse",
-      "community": 3,
+      "community": 4,
       "norm_label": "userregionresponse"
     },
     {
@@ -9828,7 +9954,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L153",
       "id": "src_account_dto_accountactivityevent",
-      "community": 3,
+      "community": 4,
       "norm_label": "accountactivityevent"
     },
     {
@@ -9837,7 +9963,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L170",
       "id": "src_account_dto_accountactivitysummary",
-      "community": 3,
+      "community": 4,
       "norm_label": "accountactivitysummary"
     },
     {
@@ -9846,7 +9972,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L184",
       "id": "src_account_dto_accountactivity",
-      "community": 3,
+      "community": 4,
       "norm_label": "accountactivity"
     },
     {
@@ -9855,7 +9981,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L190",
       "id": "src_account_dto_securityfactor",
-      "community": 3,
+      "community": 4,
       "norm_label": "securityfactor"
     },
     {
@@ -9864,7 +9990,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L198",
       "id": "src_account_dto_securityscore",
-      "community": 3,
+      "community": 4,
       "norm_label": "securityscore"
     },
     {
@@ -9873,7 +9999,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L218",
       "id": "src_account_dto_accountsession",
-      "community": 3,
+      "community": 4,
       "norm_label": "accountsession"
     },
     {
@@ -9882,7 +10008,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L233",
       "id": "src_account_dto_accountsessionlist",
-      "community": 3,
+      "community": 4,
       "norm_label": "accountsessionlist"
     },
     {
@@ -9891,7 +10017,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L239",
       "id": "src_account_dto_revokeallresult",
-      "community": 3,
+      "community": 4,
       "norm_label": "revokeallresult"
     },
     {
@@ -9900,7 +10026,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L251",
       "id": "src_account_dto_clientdevice",
-      "community": 3,
+      "community": 4,
       "norm_label": "clientdevice"
     },
     {
@@ -9909,7 +10035,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L265",
       "id": "src_account_dto_clientdevicelist",
-      "community": 3,
+      "community": 4,
       "norm_label": "clientdevicelist"
     },
     {
@@ -9918,7 +10044,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L270",
       "id": "src_account_dto_clientsyncsession",
-      "community": 3,
+      "community": 4,
       "norm_label": "clientsyncsession"
     },
     {
@@ -9927,7 +10053,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L311",
       "id": "src_account_dto_clientsyncsessionlist",
-      "community": 3,
+      "community": 4,
       "norm_label": "clientsyncsessionlist"
     },
     {
@@ -9936,7 +10062,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L322",
       "id": "src_account_dto_activityfeedevent",
-      "community": 3,
+      "community": 4,
       "norm_label": "activityfeedevent"
     },
     {
@@ -9945,7 +10071,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L338",
       "id": "src_account_dto_activityfeed",
-      "community": 3,
+      "community": 4,
       "norm_label": "activityfeed"
     },
     {
@@ -9954,7 +10080,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L351",
       "id": "src_account_dto_notification",
-      "community": 3,
+      "community": 4,
       "norm_label": "notification"
     },
     {
@@ -9963,7 +10089,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L367",
       "id": "src_account_dto_notificationlist",
-      "community": 3,
+      "community": 4,
       "norm_label": "notificationlist"
     },
     {
@@ -9972,7 +10098,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L373",
       "id": "src_account_dto_notificationpreferencevalues",
-      "community": 3,
+      "community": 4,
       "norm_label": "notificationpreferencevalues"
     },
     {
@@ -9981,7 +10107,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L383",
       "id": "src_account_dto_notificationpreferences",
-      "community": 3,
+      "community": 4,
       "norm_label": "notificationpreferences"
     },
     {
@@ -9990,7 +10116,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L390",
       "id": "src_account_dto_notificationpreferencesupdate",
-      "community": 3,
+      "community": 4,
       "norm_label": "notificationpreferencesupdate"
     },
     {
@@ -9999,7 +10125,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L413",
       "id": "src_account_dto_storagecategory",
-      "community": 3,
+      "community": 4,
       "norm_label": "storagecategory"
     },
     {
@@ -10008,7 +10134,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L423",
       "id": "src_account_dto_storagecategory_from_extension",
-      "community": 3,
+      "community": 4,
       "norm_label": ".from_extension()"
     },
     {
@@ -10017,7 +10143,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L448",
       "id": "src_account_dto_storagecategorytotal",
-      "community": 3,
+      "community": 4,
       "norm_label": "storagecategorytotal"
     },
     {
@@ -10026,7 +10152,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L456",
       "id": "src_account_dto_largestfile",
-      "community": 3,
+      "community": 4,
       "norm_label": "largestfile"
     },
     {
@@ -10035,7 +10161,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L465",
       "id": "src_account_dto_storagebreakdown",
-      "community": 3,
+      "community": 4,
       "norm_label": "storagebreakdown"
     },
     {
@@ -10044,7 +10170,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L483",
       "id": "src_account_dto_breakdowninput",
-      "community": 3,
+      "community": 4,
       "norm_label": "breakdowninput"
     },
     {
@@ -10053,7 +10179,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L492",
       "id": "src_account_dto_compute_storage_breakdown",
-      "community": 3,
+      "community": 4,
       "norm_label": "compute_storage_breakdown()"
     },
     {
@@ -10062,7 +10188,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L549",
       "id": "src_account_dto_extension_of",
-      "community": 3,
+      "community": 4,
       "norm_label": "extension_of()"
     },
     {
@@ -10071,7 +10197,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L574",
       "id": "src_account_dto_statusbucket",
-      "community": 3,
+      "community": 4,
       "norm_label": "statusbucket"
     },
     {
@@ -10080,7 +10206,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L584",
       "id": "src_account_dto_recentfile",
-      "community": 3,
+      "community": 4,
       "norm_label": "recentfile"
     },
     {
@@ -10089,7 +10215,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L596",
       "id": "src_account_dto_fileoverview",
-      "community": 3,
+      "community": 4,
       "norm_label": "fileoverview"
     },
     {
@@ -10098,7 +10224,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L621",
       "id": "src_account_dto_fileoverviewinput",
-      "community": 3,
+      "community": 4,
       "norm_label": "fileoverviewinput"
     },
     {
@@ -10107,7 +10233,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L633",
       "id": "src_account_dto_fileoverviewactivityinput",
-      "community": 3,
+      "community": 4,
       "norm_label": "fileoverviewactivityinput"
     },
     {
@@ -10116,7 +10242,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L643",
       "id": "src_account_dto_desktoptrashitem",
-      "community": 3,
+      "community": 4,
       "norm_label": "desktoptrashitem"
     },
     {
@@ -10125,7 +10251,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L653",
       "id": "src_account_dto_confirmactionresult",
-      "community": 3,
+      "community": 4,
       "norm_label": "confirmactionresult"
     },
     {
@@ -10134,7 +10260,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L660",
       "id": "src_account_dto_compute_file_overview",
-      "community": 3,
+      "community": 4,
       "norm_label": "compute_file_overview()"
     },
     {
@@ -10143,7 +10269,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L745",
       "id": "src_account_dto_account_profile_parses_full_shape",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_profile_parses_full_shape()"
     },
     {
@@ -10152,7 +10278,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L769",
       "id": "src_account_dto_account_profile_parses_minimal_shape",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_profile_parses_minimal_shape()"
     },
     {
@@ -10161,7 +10287,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L783",
       "id": "src_account_dto_subscription_paid_branch_parses",
-      "community": 3,
+      "community": 4,
       "norm_label": "subscription_paid_branch_parses()"
     },
     {
@@ -10170,7 +10296,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L815",
       "id": "src_account_dto_subscription_free_branch_has_null_dates",
-      "community": 3,
+      "community": 4,
       "norm_label": "subscription_free_branch_has_null_dates()"
     },
     {
@@ -10179,7 +10305,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L841",
       "id": "src_account_dto_user_region_parses_full_shape",
-      "community": 3,
+      "community": 4,
       "norm_label": "user_region_parses_full_shape()"
     },
     {
@@ -10188,7 +10314,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L862",
       "id": "src_account_dto_user_region_null_preferred_parses",
-      "community": 3,
+      "community": 4,
       "norm_label": "user_region_null_preferred_parses()"
     },
     {
@@ -10197,7 +10323,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L883",
       "id": "src_account_dto_billing_usage_parses_percentage",
-      "community": 3,
+      "community": 4,
       "norm_label": "billing_usage_parses_percentage()"
     },
     {
@@ -10206,7 +10332,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L891",
       "id": "src_account_dto_account_activity_parses_events_and_summary",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_activity_parses_events_and_summary()"
     },
     {
@@ -10215,7 +10341,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L933",
       "id": "src_account_dto_security_score_parses",
-      "community": 3,
+      "community": 4,
       "norm_label": "security_score_parses()"
     },
     {
@@ -10224,7 +10350,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L953",
       "id": "src_account_dto_security_score_db_error_fallback_parses",
-      "community": 3,
+      "community": 4,
       "norm_label": "security_score_db_error_fallback_parses()"
     },
     {
@@ -10233,7 +10359,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L963",
       "id": "src_account_dto_account_sessions_parse",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_sessions_parse()"
     },
     {
@@ -10242,7 +10368,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L994",
       "id": "src_account_dto_revoke_all_result_parses",
-      "community": 3,
+      "community": 4,
       "norm_label": "revoke_all_result_parses()"
     },
     {
@@ -10251,7 +10377,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1001",
       "id": "src_account_dto_devices_parse",
-      "community": 3,
+      "community": 4,
       "norm_label": "devices_parse()"
     },
     {
@@ -10260,7 +10386,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1031",
       "id": "src_account_dto_client_sync_sessions_parse",
-      "community": 3,
+      "community": 4,
       "norm_label": "client_sync_sessions_parse()"
     },
     {
@@ -10269,7 +10395,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1067",
       "id": "src_account_dto_client_sync_session_tolerates_missing_speed_bps",
-      "community": 3,
+      "community": 4,
       "norm_label": "client_sync_session_tolerates_missing_speed_bps()"
     },
     {
@@ -10278,7 +10404,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1090",
       "id": "src_account_dto_activity_feed_parses",
-      "community": 3,
+      "community": 4,
       "norm_label": "activity_feed_parses()"
     },
     {
@@ -10287,7 +10413,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1122",
       "id": "src_account_dto_notifications_parse",
-      "community": 3,
+      "community": 4,
       "norm_label": "notifications_parse()"
     },
     {
@@ -10296,7 +10422,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1145",
       "id": "src_account_dto_notification_preferences_parse_and_serialize_partial",
-      "community": 3,
+      "community": 4,
       "norm_label": "notification_preferences_parse_and_serialize_partial()"
     },
     {
@@ -10305,7 +10431,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1169",
       "id": "src_account_dto_storage_category_classifies_by_extension",
-      "community": 3,
+      "community": 4,
       "norm_label": "storage_category_classifies_by_extension()"
     },
     {
@@ -10314,7 +10440,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1179",
       "id": "src_account_dto_extension_of_handles_edge_cases",
-      "community": 3,
+      "community": 4,
       "norm_label": "extension_of_handles_edge_cases()"
     },
     {
@@ -10323,7 +10449,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1189",
       "id": "src_account_dto_storage_breakdown_computes_buckets_and_largest",
-      "community": 3,
+      "community": 4,
       "norm_label": "storage_breakdown_computes_buckets_and_largest()"
     },
     {
@@ -10332,7 +10458,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1256",
       "id": "src_account_dto_storage_breakdown_all_categories_present_when_empty",
-      "community": 3,
+      "community": 4,
       "norm_label": "storage_breakdown_all_categories_present_when_empty()"
     },
     {
@@ -10341,7 +10467,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1266",
       "id": "src_account_dto_ovr",
-      "community": 3,
+      "community": 4,
       "norm_label": "ovr()"
     },
     {
@@ -10350,7 +10476,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1277",
       "id": "src_account_dto_file_overview_empty_is_zeroed",
-      "community": 3,
+      "community": 4,
       "norm_label": "file_overview_empty_is_zeroed()"
     },
     {
@@ -10359,7 +10485,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1290",
       "id": "src_account_dto_file_overview_groups_mixed_statuses_and_clamps_negative",
-      "community": 3,
+      "community": 4,
       "norm_label": "file_overview_groups_mixed_statuses_and_clamps_negative()"
     },
     {
@@ -10368,7 +10494,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1328",
       "id": "src_account_dto_file_overview_recent_is_ordered_by_modified_desc",
-      "community": 3,
+      "community": 4,
       "norm_label": "file_overview_recent_is_ordered_by_modified_desc()"
     },
     {
@@ -10377,7 +10503,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1345",
       "id": "src_account_dto_file_overview_recent_limit_caps_list",
-      "community": 3,
+      "community": 4,
       "norm_label": "file_overview_recent_limit_caps_list()"
     },
     {
@@ -10386,7 +10512,7 @@
       "source_file": "src-tauri/src/account_dto.rs",
       "source_location": "L1361",
       "id": "src_account_dto_file_overview_recent_includes_trash_activity_without_changing_totals",
-      "community": 3,
+      "community": 4,
       "norm_label": "file_overview_recent_includes_trash_activity_without_changing_totals()"
     },
     {
@@ -10719,7 +10845,7 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L1188",
       "id": "src_runner_sweep_auto_resolutions",
-      "community": 16,
+      "community": 15,
       "norm_label": "sweep_auto_resolutions()"
     },
     {
@@ -10890,7 +11016,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L1",
       "id": "src_tauri_src_config_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "config.rs"
     },
     {
@@ -10899,7 +11025,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L40",
       "id": "src_config_desktopconfig",
-      "community": 3,
+      "community": 4,
       "norm_label": "desktopconfig"
     },
     {
@@ -10908,7 +11034,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L232",
       "id": "src_config_default_true",
-      "community": 3,
+      "community": 4,
       "norm_label": "default_true()"
     },
     {
@@ -10917,7 +11043,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L236",
       "id": "src_config_default_local_cache_limit_bytes",
-      "community": 3,
+      "community": 4,
       "norm_label": "default_local_cache_limit_bytes()"
     },
     {
@@ -10926,7 +11052,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L242",
       "id": "src_config_desktoptheme",
-      "community": 3,
+      "community": 4,
       "norm_label": "desktoptheme"
     },
     {
@@ -10935,7 +11061,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L249",
       "id": "src_config_desktoptheme_default",
-      "community": 3,
+      "community": 4,
       "norm_label": ".default()"
     },
     {
@@ -10944,7 +11070,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L256",
       "id": "src_config_releasechannel",
-      "community": 3,
+      "community": 4,
       "norm_label": "releasechannel"
     },
     {
@@ -10953,7 +11079,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L263",
       "id": "src_config_releasechannel_default",
-      "community": 3,
+      "community": 4,
       "norm_label": ".default()"
     },
     {
@@ -10962,7 +11088,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L269",
       "id": "src_config_releasechannel_as_str",
-      "community": 3,
+      "community": 4,
       "norm_label": ".as_str()"
     },
     {
@@ -10971,7 +11097,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L286",
       "id": "src_config_desktopconfig_default",
-      "community": 3,
+      "community": 4,
       "norm_label": ".default()"
     },
     {
@@ -10980,7 +11106,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L325",
       "id": "src_config_desktopsettings",
-      "community": 3,
+      "community": 5,
       "norm_label": "desktopsettings"
     },
     {
@@ -10998,7 +11124,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L383",
       "id": "src_config_desktopconfig_apply_settings",
-      "community": 3,
+      "community": 4,
       "norm_label": ".apply_settings()"
     },
     {
@@ -11007,7 +11133,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L419",
       "id": "src_config_desktopconfig_local_cache_limit_for_eviction",
-      "community": 3,
+      "community": 4,
       "norm_label": ".local_cache_limit_for_eviction()"
     },
     {
@@ -11016,7 +11142,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L430",
       "id": "src_config_desktopconfig_known_folder_enabled",
-      "community": 3,
+      "community": 4,
       "norm_label": ".known_folder_enabled()"
     },
     {
@@ -11025,7 +11151,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L438",
       "id": "src_config_desktopconfig_set_known_folder",
-      "community": 3,
+      "community": 4,
       "norm_label": ".set_known_folder()"
     },
     {
@@ -11034,7 +11160,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L452",
       "id": "src_config_desktopconfig_path",
-      "community": 3,
+      "community": 4,
       "norm_label": ".path()"
     },
     {
@@ -11052,7 +11178,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L497",
       "id": "src_config_desktopconfig_ensure_account_id",
-      "community": 3,
+      "community": 4,
       "norm_label": ".ensure_account_id()"
     },
     {
@@ -11061,7 +11187,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L511",
       "id": "src_config_desktopconfig_save",
-      "community": 3,
+      "community": 4,
       "norm_label": ".save()"
     },
     {
@@ -11070,7 +11196,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L533",
       "id": "src_config_user_visible_home_dir",
-      "community": 3,
+      "community": 4,
       "norm_label": "user_visible_home_dir()"
     },
     {
@@ -11079,7 +11205,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L545",
       "id": "src_config_default_sync_root_suggestion",
-      "community": 3,
+      "community": 4,
       "norm_label": "default_sync_root_suggestion()"
     },
     {
@@ -11097,7 +11223,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L583",
       "id": "src_config_account_id_defaults_none_and_is_omitted_when_unset",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_id_defaults_none_and_is_omitted_when_unset()"
     },
     {
@@ -11106,7 +11232,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L594",
       "id": "src_config_account_id_none_is_byte_identical_to_pre_phase1_serialisation",
-      "community": 3,
+      "community": 4,
       "norm_label": "account_id_none_is_byte_identical_to_pre_phase1_serialisation()"
     },
     {
@@ -11115,7 +11241,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L617",
       "id": "src_config_ensure_account_id_is_idempotent_when_already_set",
-      "community": 3,
+      "community": 4,
       "norm_label": "ensure_account_id_is_idempotent_when_already_set()"
     },
     {
@@ -11124,7 +11250,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L634",
       "id": "src_config_ensure_account_id_mints_persists_and_is_stable_across_relaunch",
-      "community": 3,
+      "community": 4,
       "norm_label": "ensure_account_id_mints_persists_and_is_stable_across_relaunch()"
     },
     {
@@ -11133,7 +11259,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L688",
       "id": "src_config_known_folder_backup_defaults_empty",
-      "community": 3,
+      "community": 4,
       "norm_label": "known_folder_backup_defaults_empty()"
     },
     {
@@ -11142,7 +11268,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L696",
       "id": "src_config_known_folder_backup_set_is_idempotent_and_dedupes",
-      "community": 3,
+      "community": 4,
       "norm_label": "known_folder_backup_set_is_idempotent_and_dedupes()"
     },
     {
@@ -11151,7 +11277,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L719",
       "id": "src_config_known_folder_onboarding_seen_defaults_false_and_round_trips",
-      "community": 3,
+      "community": 4,
       "norm_label": "known_folder_onboarding_seen_defaults_false_and_round_trips()"
     },
     {
@@ -11160,7 +11286,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L737",
       "id": "src_config_known_folder_backup_round_trips_through_toml",
-      "community": 3,
+      "community": 4,
       "norm_label": "known_folder_backup_round_trips_through_toml()"
     },
     {
@@ -11169,7 +11295,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L754",
       "id": "src_config_advanced_settings_defaults_and_round_trips",
-      "community": 3,
+      "community": 4,
       "norm_label": "advanced_settings_defaults_and_round_trips()"
     },
     {
@@ -11178,7 +11304,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L781",
       "id": "src_config_default_sync_root_uses_private_file_provider_state_folder",
-      "community": 3,
+      "community": 4,
       "norm_label": "default_sync_root_uses_private_file_provider_state_folder()"
     },
     {
@@ -11187,7 +11313,7 @@
       "source_file": "src-tauri/src/config.rs",
       "source_location": "L793",
       "id": "src_config_default_sync_root_uses_user_facing_beebeeb_folder",
-      "community": 3,
+      "community": 4,
       "norm_label": "default_sync_root_uses_user_facing_beebeeb_folder()"
     },
     {
@@ -11934,7 +12060,7 @@
       "source_file": "src-tauri/src/api_client.rs",
       "source_location": "L1136",
       "id": "src_api_client_heartbeat_body_minimal_serializes_status_only",
-      "community": 6,
+      "community": 8,
       "norm_label": "heartbeat_body_minimal_serializes_status_only()"
     },
     {
@@ -11952,7 +12078,7 @@
       "source_file": "src-tauri/src/api_client.rs",
       "source_location": "L1172",
       "id": "src_api_client_heartbeat_body_skips_none_optionals_but_keeps_zero",
-      "community": 6,
+      "community": 8,
       "norm_label": "heartbeat_body_skips_none_optionals_but_keeps_zero()"
     },
     {
@@ -11961,7 +12087,7 @@
       "source_file": "src-tauri/src/api_client.rs",
       "source_location": "L1191",
       "id": "src_api_client_registered_device_parses_and_tolerates_extra_fields",
-      "community": 3,
+      "community": 4,
       "norm_label": "registered_device_parses_and_tolerates_extra_fields()"
     },
     {
@@ -11970,7 +12096,7 @@
       "source_file": "src-tauri/src/api_client.rs",
       "source_location": "L1206",
       "id": "src_api_client_created_session_parses_minimal",
-      "community": 3,
+      "community": 4,
       "norm_label": "created_session_parses_minimal()"
     },
     {
@@ -12078,7 +12204,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L57",
       "id": "src_lockfile_lockfile",
-      "community": 0,
+      "community": 11,
       "norm_label": "lockfile"
     },
     {
@@ -12087,7 +12213,7 @@
       "source_file": "src-tauri/src/lockfile.rs",
       "source_location": "L70",
       "id": "src_lockfile_lockfile_acquire",
-      "community": 0,
+      "community": 11,
       "norm_label": ".acquire()"
     },
     {
@@ -12249,7 +12375,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1",
       "id": "src_tauri_src_state_db_rs",
-      "community": 4,
+      "community": 3,
       "norm_label": "state_db.rs"
     },
     {
@@ -12258,7 +12384,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L33",
       "id": "src_state_db_filestatus",
-      "community": 14,
+      "community": 13,
       "norm_label": "filestatus"
     },
     {
@@ -12267,7 +12393,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L53",
       "id": "src_state_db_filestatus_as_str",
-      "community": 14,
+      "community": 13,
       "norm_label": ".as_str()"
     },
     {
@@ -12276,7 +12402,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L64",
       "id": "src_state_db_filestatus_from_str",
-      "community": 3,
+      "community": 13,
       "norm_label": ".from_str()"
     },
     {
@@ -12285,7 +12411,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L83",
       "id": "src_state_db_namespace",
-      "community": 4,
+      "community": 3,
       "norm_label": "namespace"
     },
     {
@@ -12294,7 +12420,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L91",
       "id": "src_state_db_namespace_as_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".as_str()"
     },
     {
@@ -12303,7 +12429,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L100",
       "id": "src_state_db_namespace_from_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".from_str()"
     },
     {
@@ -12312,7 +12438,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L111",
       "id": "src_state_db_itemkind",
-      "community": 4,
+      "community": 3,
       "norm_label": "itemkind"
     },
     {
@@ -12321,7 +12447,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L117",
       "id": "src_state_db_itemkind_as_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".as_str()"
     },
     {
@@ -12330,7 +12456,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L124",
       "id": "src_state_db_itemkind_from_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".from_str()"
     },
     {
@@ -12339,7 +12465,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L133",
       "id": "src_state_db_pinstate",
-      "community": 4,
+      "community": 3,
       "norm_label": "pinstate"
     },
     {
@@ -12348,7 +12474,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L140",
       "id": "src_state_db_pinstate_as_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".as_str()"
     },
     {
@@ -12357,7 +12483,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L148",
       "id": "src_state_db_pinstate_from_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".from_str()"
     },
     {
@@ -12366,7 +12492,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L189",
       "id": "src_state_db_decode_os_state",
-      "community": 4,
+      "community": 3,
       "norm_label": "decode_os_state()"
     },
     {
@@ -12375,7 +12501,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L226",
       "id": "src_state_db_operationkind",
-      "community": 3,
+      "community": 4,
       "norm_label": "operationkind"
     },
     {
@@ -12384,7 +12510,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L240",
       "id": "src_state_db_operationkind_as_str",
-      "community": 3,
+      "community": 4,
       "norm_label": ".as_str()"
     },
     {
@@ -12393,7 +12519,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L255",
       "id": "src_state_db_operationkind_from_str",
-      "community": 3,
+      "community": 4,
       "norm_label": ".from_str()"
     },
     {
@@ -12402,7 +12528,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L280",
       "id": "src_state_db_prunedrow",
-      "community": 4,
+      "community": 3,
       "norm_label": "prunedrow"
     },
     {
@@ -12411,7 +12537,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L288",
       "id": "src_state_db_fileentry",
-      "community": 4,
+      "community": 3,
       "norm_label": "fileentry"
     },
     {
@@ -12420,7 +12546,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L337",
       "id": "src_state_db_fileentry_is_dir",
-      "community": 4,
+      "community": 3,
       "norm_label": ".is_dir()"
     },
     {
@@ -12429,7 +12555,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L343",
       "id": "src_state_db_filecontractstate",
-      "community": 4,
+      "community": 3,
       "norm_label": "filecontractstate"
     },
     {
@@ -12438,7 +12564,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L364",
       "id": "src_state_db_filecontractstate_effective_pin_state",
-      "community": 4,
+      "community": 3,
       "norm_label": ".effective_pin_state()"
     },
     {
@@ -12447,7 +12573,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L371",
       "id": "src_state_db_filecontractstate_can_read",
-      "community": 4,
+      "community": 3,
       "norm_label": ".can_read()"
     },
     {
@@ -12456,7 +12582,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L375",
       "id": "src_state_db_filecontractstate_can_write",
-      "community": 4,
+      "community": 3,
       "norm_label": ".can_write()"
     },
     {
@@ -12465,7 +12591,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L379",
       "id": "src_state_db_filecontractstate_is_shared",
-      "community": 4,
+      "community": 3,
       "norm_label": ".is_shared()"
     },
     {
@@ -12474,7 +12600,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L385",
       "id": "src_state_db_revokedsharedcache",
-      "community": 4,
+      "community": 3,
       "norm_label": "revokedsharedcache"
     },
     {
@@ -12483,7 +12609,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L392",
       "id": "src_state_db_localactivitykind",
-      "community": 3,
+      "community": 4,
       "norm_label": "localactivitykind"
     },
     {
@@ -12492,7 +12618,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L398",
       "id": "src_state_db_localactivitykind_as_str",
-      "community": 3,
+      "community": 4,
       "norm_label": ".as_str()"
     },
     {
@@ -12501,7 +12627,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L405",
       "id": "src_state_db_localactivitykind_from_str",
-      "community": 3,
+      "community": 4,
       "norm_label": ".from_str()"
     },
     {
@@ -12510,7 +12636,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L414",
       "id": "src_state_db_localactivityeventinput",
-      "community": 4,
+      "community": 3,
       "norm_label": "localactivityeventinput"
     },
     {
@@ -12519,7 +12645,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L423",
       "id": "src_state_db_localactivityevent",
-      "community": 4,
+      "community": 3,
       "norm_label": "localactivityevent"
     },
     {
@@ -12528,7 +12654,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L433",
       "id": "src_state_db_pendingoperation",
-      "community": 4,
+      "community": 3,
       "norm_label": "pendingoperation"
     },
     {
@@ -12537,7 +12663,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L457",
       "id": "src_state_db_operationpausereason",
-      "community": 4,
+      "community": 3,
       "norm_label": "operationpausereason"
     },
     {
@@ -12546,7 +12672,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L465",
       "id": "src_state_db_operationpausereason_as_str",
-      "community": 4,
+      "community": 3,
       "norm_label": ".as_str()"
     },
     {
@@ -12555,7 +12681,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L476",
       "id": "src_state_db_queuediagnostics",
-      "community": 4,
+      "community": 3,
       "norm_label": "queuediagnostics"
     },
     {
@@ -12564,7 +12690,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L494",
       "id": "src_state_db_statedb",
-      "community": 4,
+      "community": 3,
       "norm_label": "statedb"
     },
     {
@@ -12582,7 +12708,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L623",
       "id": "src_state_db_statedb_upsert_file",
-      "community": 4,
+      "community": 3,
       "norm_label": ".upsert_file()"
     },
     {
@@ -12591,7 +12717,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L647",
       "id": "src_state_db_statedb_get_file",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_file()"
     },
     {
@@ -12600,7 +12726,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L687",
       "id": "src_state_db_statedb_get_file_by_path",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_file_by_path()"
     },
     {
@@ -12609,7 +12735,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L702",
       "id": "src_state_db_statedb_get_file_by_exact_path",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_file_by_exact_path()"
     },
     {
@@ -12618,7 +12744,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L727",
       "id": "src_state_db_statedb_delete_file",
-      "community": 4,
+      "community": 3,
       "norm_label": ".delete_file()"
     },
     {
@@ -12627,7 +12753,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L748",
       "id": "src_state_db_statedb_delete_file_subtree",
-      "community": 4,
+      "community": 3,
       "norm_label": ".delete_file_subtree()"
     },
     {
@@ -12636,7 +12762,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L814",
       "id": "src_state_db_statedb_record_local_activity",
-      "community": 4,
+      "community": 3,
       "norm_label": ".record_local_activity()"
     },
     {
@@ -12645,7 +12771,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L842",
       "id": "src_state_db_statedb_list_recent_local_activity",
-      "community": 4,
+      "community": 3,
       "norm_label": ".list_recent_local_activity()"
     },
     {
@@ -12654,7 +12780,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L907",
       "id": "src_state_db_statedb_delete_orphaned_children_of_absent_folder",
-      "community": 4,
+      "community": 3,
       "norm_label": ".delete_orphaned_children_of_absent_folder()"
     },
     {
@@ -12663,7 +12789,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L994",
       "id": "src_state_db_statedb_get_sync_cursor",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_sync_cursor()"
     },
     {
@@ -12672,7 +12798,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1008",
       "id": "src_state_db_statedb_set_sync_cursor",
-      "community": 4,
+      "community": 3,
       "norm_label": ".set_sync_cursor()"
     },
     {
@@ -12681,7 +12807,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1024",
       "id": "src_state_db_statedb_request_resnapshot",
-      "community": 4,
+      "community": 3,
       "norm_label": ".request_resnapshot()"
     },
     {
@@ -12690,7 +12816,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1039",
       "id": "src_state_db_statedb_take_needs_resnapshot",
-      "community": 4,
+      "community": 3,
       "norm_label": ".take_needs_resnapshot()"
     },
     {
@@ -12699,7 +12825,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1125",
       "id": "src_state_db_statedb_prune_absent",
-      "community": 4,
+      "community": 3,
       "norm_label": ".prune_absent()"
     },
     {
@@ -12708,7 +12834,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1238",
       "id": "src_state_db_statedb_set_status",
-      "community": 4,
+      "community": 3,
       "norm_label": ".set_status()"
     },
     {
@@ -12717,7 +12843,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1256",
       "id": "src_state_db_statedb_reconcile_stale_in_flight_on_startup",
-      "community": 4,
+      "community": 3,
       "norm_label": ".reconcile_stale_in_flight_on_startup()"
     },
     {
@@ -12726,7 +12852,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1291",
       "id": "src_state_db_statedb_reconcile_os_state",
-      "community": 4,
+      "community": 3,
       "norm_label": ".reconcile_os_state()"
     },
     {
@@ -12735,7 +12861,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1332",
       "id": "src_state_db_statedb_set_size_bytes",
-      "community": 4,
+      "community": 3,
       "norm_label": ".set_size_bytes()"
     },
     {
@@ -12744,7 +12870,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1344",
       "id": "src_state_db_statedb_list_by_status",
-      "community": 4,
+      "community": 3,
       "norm_label": ".list_by_status()"
     },
     {
@@ -12753,7 +12879,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1369",
       "id": "src_state_db_statedb_list_files",
-      "community": 4,
+      "community": 3,
       "norm_label": ".list_files()"
     },
     {
@@ -12762,7 +12888,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1404",
       "id": "src_state_db_statedb_file_overview_rows",
-      "community": 4,
+      "community": 3,
       "norm_label": ".file_overview_rows()"
     },
     {
@@ -12771,7 +12897,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1437",
       "id": "src_state_db_statedb_set_file_contract_state",
-      "community": 4,
+      "community": 3,
       "norm_label": ".set_file_contract_state()"
     },
     {
@@ -12780,7 +12906,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1481",
       "id": "src_state_db_statedb_get_file_contract_state",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_file_contract_state()"
     },
     {
@@ -12789,7 +12915,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1516",
       "id": "src_state_db_statedb_list_contract_states_by_namespace",
-      "community": 4,
+      "community": 3,
       "norm_label": ".list_contract_states_by_namespace()"
     },
     {
@@ -12798,7 +12924,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1549",
       "id": "src_state_db_statedb_purge_revoked_shared_content",
-      "community": 4,
+      "community": 3,
       "norm_label": ".purge_revoked_shared_content()"
     },
     {
@@ -12807,7 +12933,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1583",
       "id": "src_state_db_statedb_enqueue_operation",
-      "community": 4,
+      "community": 3,
       "norm_label": ".enqueue_operation()"
     },
     {
@@ -12816,7 +12942,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1630",
       "id": "src_state_db_statedb_list_due_operations",
-      "community": 4,
+      "community": 3,
       "norm_label": ".list_due_operations()"
     },
     {
@@ -12825,7 +12951,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1667",
       "id": "src_state_db_statedb_list_review_operations",
-      "community": 4,
+      "community": 3,
       "norm_label": ".list_review_operations()"
     },
     {
@@ -12834,7 +12960,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1709",
       "id": "src_state_db_statedb_purge_backup_source_ops",
-      "community": 4,
+      "community": 3,
       "norm_label": ".purge_backup_source_ops()"
     },
     {
@@ -12843,7 +12969,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1718",
       "id": "src_state_db_statedb_record_operation_attempt",
-      "community": 4,
+      "community": 3,
       "norm_label": ".record_operation_attempt()"
     },
     {
@@ -12852,7 +12978,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1740",
       "id": "src_state_db_statedb_record_operation_pause",
-      "community": 4,
+      "community": 3,
       "norm_label": ".record_operation_pause()"
     },
     {
@@ -12861,7 +12987,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1760",
       "id": "src_state_db_statedb_queue_diagnostics",
-      "community": 4,
+      "community": 3,
       "norm_label": ".queue_diagnostics()"
     },
     {
@@ -12870,7 +12996,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1799",
       "id": "src_state_db_statedb_remove_operation",
-      "community": 4,
+      "community": 3,
       "norm_label": ".remove_operation()"
     },
     {
@@ -12879,7 +13005,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1805",
       "id": "src_state_db_statedb_set_recursive_pin",
-      "community": 4,
+      "community": 3,
       "norm_label": ".set_recursive_pin()"
     },
     {
@@ -12888,7 +13014,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1884",
       "id": "src_state_db_statedb_cloud_only_file_descendants",
-      "community": 4,
+      "community": 3,
       "norm_label": ".cloud_only_file_descendants()"
     },
     {
@@ -12897,7 +13023,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1924",
       "id": "src_state_db_statedb_mark_cached",
-      "community": 4,
+      "community": 3,
       "norm_label": ".mark_cached()"
     },
     {
@@ -12906,7 +13032,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1941",
       "id": "src_state_db_statedb_unpinned_cache_bytes",
-      "community": 4,
+      "community": 3,
       "norm_label": ".unpinned_cache_bytes()"
     },
     {
@@ -12915,7 +13041,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1956",
       "id": "src_state_db_statedb_cache_bytes_by_effective_pin",
-      "community": 4,
+      "community": 3,
       "norm_label": ".cache_bytes_by_effective_pin()"
     },
     {
@@ -12924,7 +13050,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L1978",
       "id": "src_state_db_statedb_evict_unpinned_cache_until_under",
-      "community": 4,
+      "community": 3,
       "norm_label": ".evict_unpinned_cache_until_under()"
     },
     {
@@ -12933,7 +13059,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2034",
       "id": "src_state_db_statedb_disposable_unpinned_cache_paths",
-      "community": 4,
+      "community": 3,
       "norm_label": ".disposable_unpinned_cache_paths()"
     },
     {
@@ -12942,7 +13068,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2063",
       "id": "src_state_db_statedb_unpinned_local_files_for_dehydration",
-      "community": 4,
+      "community": 3,
       "norm_label": ".unpinned_local_files_for_dehydration()"
     },
     {
@@ -12951,7 +13077,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2091",
       "id": "src_state_db_statedb_mark_cloud_only_after_dehydrate",
-      "community": 4,
+      "community": 3,
       "norm_label": ".mark_cloud_only_after_dehydrate()"
     },
     {
@@ -12960,7 +13086,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2115",
       "id": "src_state_db_statedb_clear_cache_metadata_for_paths",
-      "community": 4,
+      "community": 3,
       "norm_label": ".clear_cache_metadata_for_paths()"
     },
     {
@@ -12969,7 +13095,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2148",
       "id": "src_state_db_statedb_insert_bandwidth_sample",
-      "community": 4,
+      "community": 3,
       "norm_label": ".insert_bandwidth_sample()"
     },
     {
@@ -12978,7 +13104,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2167",
       "id": "src_state_db_statedb_get_bandwidth_history_since",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_bandwidth_history_since()"
     },
     {
@@ -12987,7 +13113,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2187",
       "id": "src_state_db_statedb_get_bandwidth_history",
-      "community": 4,
+      "community": 3,
       "norm_label": ".get_bandwidth_history()"
     },
     {
@@ -12996,7 +13122,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2196",
       "id": "src_state_db_statedb_latest_bandwidth_sample",
-      "community": 4,
+      "community": 3,
       "norm_label": ".latest_bandwidth_sample()"
     },
     {
@@ -13005,7 +13131,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2217",
       "id": "src_state_db_statedb_prune_bandwidth_samples",
-      "community": 4,
+      "community": 3,
       "norm_label": ".prune_bandwidth_samples()"
     },
     {
@@ -13014,7 +13140,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2229",
       "id": "src_state_db_bandwidthsample",
-      "community": 4,
+      "community": 3,
       "norm_label": "bandwidthsample"
     },
     {
@@ -13023,7 +13149,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2240",
       "id": "src_state_db_ensure_column",
-      "community": 4,
+      "community": 3,
       "norm_label": "ensure_column()"
     },
     {
@@ -13032,7 +13158,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2247",
       "id": "src_state_db_has_column",
-      "community": 4,
+      "community": 3,
       "norm_label": "has_column()"
     },
     {
@@ -13041,7 +13167,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2256",
       "id": "src_state_db_count_queue_groups",
-      "community": 4,
+      "community": 3,
       "norm_label": "count_queue_groups()"
     },
     {
@@ -13050,7 +13176,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2264",
       "id": "src_state_db_redact_diagnostic_error",
-      "community": 4,
+      "community": 3,
       "norm_label": "redact_diagnostic_error()"
     },
     {
@@ -13059,7 +13185,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2294",
       "id": "src_state_db_has_table",
-      "community": 4,
+      "community": 3,
       "norm_label": "has_table()"
     },
     {
@@ -13068,7 +13194,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2306",
       "id": "src_state_db_test_upsert_and_get_file",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_upsert_and_get_file()"
     },
     {
@@ -13077,7 +13203,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2328",
       "id": "src_state_db_local_activity_round_trips_newest_first",
-      "community": 4,
+      "community": 3,
       "norm_label": "local_activity_round_trips_newest_first()"
     },
     {
@@ -13086,7 +13212,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2361",
       "id": "src_state_db_local_activity_prunes_to_cap",
-      "community": 4,
+      "community": 3,
       "norm_label": "local_activity_prunes_to_cap()"
     },
     {
@@ -13095,7 +13221,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2383",
       "id": "src_state_db_get_file_by_path_matches_across_leading_slash",
-      "community": 4,
+      "community": 3,
       "norm_label": "get_file_by_path_matches_across_leading_slash()"
     },
     {
@@ -13104,7 +13230,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2441",
       "id": "src_state_db_test_list_by_status",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_list_by_status()"
     },
     {
@@ -13113,7 +13239,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2462",
       "id": "src_state_db_decode_os_state_status_only_for_user_owned_states",
-      "community": 4,
+      "community": 3,
       "norm_label": "decode_os_state_status_only_for_user_owned_states()"
     },
     {
@@ -13122,7 +13248,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2508",
       "id": "src_state_db_trashing_status_round_trips_and_is_not_seeded_as_cloud_only",
-      "community": 4,
+      "community": 3,
       "norm_label": "trashing_status_round_trips_and_is_not_seeded_as_cloud_only()"
     },
     {
@@ -13131,7 +13257,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2571",
       "id": "src_state_db_reconcile_os_state_applies_status_and_pin_deltas",
-      "community": 4,
+      "community": 3,
       "norm_label": "reconcile_os_state_applies_status_and_pin_deltas()"
     },
     {
@@ -13140,7 +13266,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2632",
       "id": "src_state_db_set_size_bytes_corrects_row_to_decrypted_length",
-      "community": 4,
+      "community": 3,
       "norm_label": "set_size_bytes_corrects_row_to_decrypted_length()"
     },
     {
@@ -13149,7 +13275,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2670",
       "id": "src_state_db_test_migrates_drive_contract_columns_and_operation_queue",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_migrates_drive_contract_columns_and_operation_queue()"
     },
     {
@@ -13158,7 +13284,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2743",
       "id": "src_state_db_test_persists_drive_contract_state",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_persists_drive_contract_state()"
     },
     {
@@ -13167,7 +13293,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2800",
       "id": "src_state_db_test_operation_queue_persists_retry_state",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_operation_queue_persists_retry_state()"
     },
     {
@@ -13176,7 +13302,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2840",
       "id": "src_state_db_test_purge_backup_source_ops_is_surgical",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_purge_backup_source_ops_is_surgical()"
     },
     {
@@ -13185,7 +13311,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2896",
       "id": "src_state_db_test_backup_source_key_survives_restart",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_backup_source_key_survives_restart()"
     },
     {
@@ -13203,7 +13329,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L2981",
       "id": "src_state_db_test_revoked_shared_content_is_removed_and_cache_paths_returned",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_revoked_shared_content_is_removed_and_cache_paths_returned()"
     },
     {
@@ -13212,7 +13338,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3017",
       "id": "src_state_db_test_recursive_pin_inheritance_persists_for_folder_tree",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_recursive_pin_inheritance_persists_for_folder_tree()"
     },
     {
@@ -13221,7 +13347,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3071",
       "id": "src_state_db_test_cache_eviction_preserves_pinned_and_uploading_files",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_cache_eviction_preserves_pinned_and_uploading_files()"
     },
     {
@@ -13230,7 +13356,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3094",
       "id": "src_state_db_test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files",
-      "community": 4,
+      "community": 3,
       "norm_label": "test_disposable_cache_cleanup_candidates_skip_pinned_and_uploading_files()"
     },
     {
@@ -13239,7 +13365,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3135",
       "id": "src_state_db_seed_contract_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "seed_contract_row()"
     },
     {
@@ -13248,7 +13374,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3164",
       "id": "src_state_db_seed_own_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "seed_own_row()"
     },
     {
@@ -13257,7 +13383,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3182",
       "id": "src_state_db_prune_absent_deletes_settled_cloud_only_row_absent_from_snapshot",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_deletes_settled_cloud_only_row_absent_from_snapshot()"
     },
     {
@@ -13266,7 +13392,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3198",
       "id": "src_state_db_prune_absent_keeps_row_with_pending_operation",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_keeps_row_with_pending_operation()"
     },
     {
@@ -13275,7 +13401,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3235",
       "id": "src_state_db_prune_absent_keeps_trashing_row_with_pending_trash_op_present_in_snapshot",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_keeps_trashing_row_with_pending_trash_op_present_in_snapshot()"
     },
     {
@@ -13284,7 +13410,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3276",
       "id": "src_state_db_prune_absent_deletes_trashing_row_absent_from_snapshot_after_op_cleared",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_deletes_trashing_row_absent_from_snapshot_after_op_cleared()"
     },
     {
@@ -13293,7 +13419,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3304",
       "id": "src_state_db_prune_absent_keeps_uploading_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_keeps_uploading_row()"
     },
     {
@@ -13302,7 +13428,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3319",
       "id": "src_state_db_reconcile_stale_in_flight_on_startup_resets_transient_rows",
-      "community": 4,
+      "community": 3,
       "norm_label": "reconcile_stale_in_flight_on_startup_resets_transient_rows()"
     },
     {
@@ -13311,7 +13437,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3342",
       "id": "src_state_db_prune_absent_keeps_shared_with_me_row_absent_from_snapshot",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_keeps_shared_with_me_row_absent_from_snapshot()"
     },
     {
@@ -13320,7 +13446,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3364",
       "id": "src_state_db_prune_absent_keeps_row_touched_at_or_after_snapshot_fetch",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_keeps_row_touched_at_or_after_snapshot_fetch()"
     },
     {
@@ -13329,7 +13455,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3390",
       "id": "src_state_db_prune_absent_refuses_empty_snapshot_against_non_empty_tree",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_refuses_empty_snapshot_against_non_empty_tree()"
     },
     {
@@ -13338,7 +13464,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3405",
       "id": "src_state_db_prune_absent_empty_snapshot_with_only_protected_rows_is_a_noop",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_empty_snapshot_with_only_protected_rows_is_a_noop()"
     },
     {
@@ -13347,7 +13473,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3422",
       "id": "src_state_db_seed_own_at",
-      "community": 4,
+      "community": 3,
       "norm_label": "seed_own_at()"
     },
     {
@@ -13356,7 +13482,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3462",
       "id": "src_state_db_prune_absent_removes_orphaned_descendants_of_a_trashed_folder",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_removes_orphaned_descendants_of_a_trashed_folder()"
     },
     {
@@ -13365,7 +13491,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3504",
       "id": "src_state_db_prune_absent_prunes_descendants_when_folder_row_has_leading_slash",
-      "community": 4,
+      "community": 3,
       "norm_label": "prune_absent_prunes_descendants_when_folder_row_has_leading_slash()"
     },
     {
@@ -13374,7 +13500,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3529",
       "id": "src_state_db_delete_file_subtree_prunes_descendants_when_folder_row_has_leading_slash",
-      "community": 4,
+      "community": 3,
       "norm_label": "delete_file_subtree_prunes_descendants_when_folder_row_has_leading_slash()"
     },
     {
@@ -13383,7 +13509,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3549",
       "id": "src_state_db_delete_file_subtree_removes_folder_and_descendants_children_first",
-      "community": 4,
+      "community": 3,
       "norm_label": "delete_file_subtree_removes_folder_and_descendants_children_first()"
     },
     {
@@ -13392,7 +13518,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3584",
       "id": "src_state_db_delete_file_subtree_of_a_plain_file_removes_only_that_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "delete_file_subtree_of_a_plain_file_removes_only_that_row()"
     },
     {
@@ -13401,7 +13527,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3602",
       "id": "src_state_db_needs_resnapshot_flag_is_take_once",
-      "community": 4,
+      "community": 3,
       "norm_label": "needs_resnapshot_flag_is_take_once()"
     },
     {
@@ -13410,7 +13536,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3621",
       "id": "src_state_db_bandwidth_samples_insert_and_history",
-      "community": 4,
+      "community": 3,
       "norm_label": "bandwidth_samples_insert_and_history()"
     },
     {
@@ -13419,7 +13545,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3650",
       "id": "src_state_db_latest_bandwidth_sample_returns_newest_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "latest_bandwidth_sample_returns_newest_row()"
     },
     {
@@ -13428,7 +13554,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3669",
       "id": "src_state_db_bandwidth_samples_prune",
-      "community": 4,
+      "community": 3,
       "norm_label": "bandwidth_samples_prune()"
     },
     {
@@ -13437,7 +13563,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3695",
       "id": "src_state_db_mbps_to_kbps_conversion",
-      "community": 4,
+      "community": 3,
       "norm_label": "mbps_to_kbps_conversion()"
     },
     {
@@ -13446,7 +13572,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3734",
       "id": "src_state_db_orphaned_children_of_absent_folder_are_swept",
-      "community": 4,
+      "community": 3,
       "norm_label": "orphaned_children_of_absent_folder_are_swept()"
     },
     {
@@ -13455,7 +13581,7 @@
       "source_file": "src-tauri/src/state_db.rs",
       "source_location": "L3840",
       "id": "src_state_db_orphaned_children_sweep_is_noop_when_no_children",
-      "community": 4,
+      "community": 3,
       "norm_label": "orphaned_children_sweep_is_noop_when_no_children()"
     },
     {
@@ -13464,7 +13590,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L1",
       "id": "src_tauri_src_conflict_rs",
-      "community": 16,
+      "community": 15,
       "norm_label": "conflict.rs"
     },
     {
@@ -13473,7 +13599,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L45",
       "id": "src_conflict_versioninfo",
-      "community": 16,
+      "community": 15,
       "norm_label": "versioninfo"
     },
     {
@@ -13491,7 +13617,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L63",
       "id": "src_conflict_conflictrecord",
-      "community": 16,
+      "community": 15,
       "norm_label": "conflictrecord"
     },
     {
@@ -13500,7 +13626,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L77",
       "id": "src_conflict_resolution",
-      "community": 16,
+      "community": 15,
       "norm_label": "resolution"
     },
     {
@@ -13509,7 +13635,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L91",
       "id": "src_conflict_auto_resolution_deadline",
-      "community": 16,
+      "community": 15,
       "norm_label": "auto_resolution_deadline()"
     },
     {
@@ -13527,7 +13653,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L120",
       "id": "src_conflict_v",
-      "community": 16,
+      "community": 15,
       "norm_label": "v()"
     },
     {
@@ -13536,7 +13662,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L128",
       "id": "src_conflict_test_conflict_detected_when_both_sides_changed",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_conflict_detected_when_both_sides_changed()"
     },
     {
@@ -13545,7 +13671,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L137",
       "id": "src_conflict_test_no_conflict_when_only_remote_changed",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_no_conflict_when_only_remote_changed()"
     },
     {
@@ -13554,7 +13680,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L147",
       "id": "src_conflict_test_no_conflict_when_only_local_changed",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_no_conflict_when_only_local_changed()"
     },
     {
@@ -13563,7 +13689,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L157",
       "id": "src_conflict_test_no_conflict_when_both_sides_landed_on_same_hash",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_no_conflict_when_both_sides_landed_on_same_hash()"
     },
     {
@@ -13572,7 +13698,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L168",
       "id": "src_conflict_test_auto_resolution_deadline_is_24h",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_auto_resolution_deadline_is_24h()"
     },
     {
@@ -13581,7 +13707,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L175",
       "id": "src_conflict_test_auto_resolve_fires_after_24h",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_auto_resolve_fires_after_24h()"
     },
     {
@@ -13590,7 +13716,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L183",
       "id": "src_conflict_test_auto_resolve_does_not_fire_early",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_auto_resolve_does_not_fire_early()"
     },
     {
@@ -13599,7 +13725,7 @@
       "source_file": "src-tauri/src/conflict.rs",
       "source_location": "L191",
       "id": "src_conflict_test_text_classification",
-      "community": 16,
+      "community": 15,
       "norm_label": "test_text_classification()"
     },
     {
@@ -13797,7 +13923,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L1",
       "id": "src_tauri_src_browser_login_rs",
-      "community": 13,
+      "community": 14,
       "norm_label": "browser_login.rs"
     },
     {
@@ -13806,7 +13932,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L90",
       "id": "src_browser_login_emit",
-      "community": 13,
+      "community": 14,
       "norm_label": "emit()"
     },
     {
@@ -13815,7 +13941,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L99",
       "id": "src_browser_login_ws_url",
-      "community": 13,
+      "community": 14,
       "norm_label": "ws_url()"
     },
     {
@@ -13824,7 +13950,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L134",
       "id": "src_browser_login_webpki_rustls_connector",
-      "community": 13,
+      "community": 14,
       "norm_label": "webpki_rustls_connector()"
     },
     {
@@ -13833,7 +13959,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L167",
       "id": "src_browser_login_signin_log",
-      "community": 13,
+      "community": 14,
       "norm_label": "signin_log()"
     },
     {
@@ -13842,7 +13968,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L190",
       "id": "src_browser_login_start_browser_login",
-      "community": 13,
+      "community": 14,
       "norm_label": "start_browser_login()"
     },
     {
@@ -13851,7 +13977,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L203",
       "id": "src_browser_login_run_handoff",
-      "community": 13,
+      "community": 14,
       "norm_label": "run_handoff()"
     },
     {
@@ -13860,7 +13986,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L378",
       "id": "src_browser_login_decrypt_payload",
-      "community": 13,
+      "community": 14,
       "norm_label": "decrypt_payload()"
     },
     {
@@ -13869,7 +13995,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L416",
       "id": "src_browser_login_recv_text",
-      "community": 13,
+      "community": 14,
       "norm_label": "recv_text()"
     },
     {
@@ -13878,7 +14004,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L435",
       "id": "src_browser_login_open_browser",
-      "community": 13,
+      "community": 14,
       "norm_label": "open_browser()"
     },
     {
@@ -13887,7 +14013,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L463",
       "id": "src_browser_login_stalledstream",
-      "community": 13,
+      "community": 14,
       "norm_label": "stalledstream"
     },
     {
@@ -13896,7 +14022,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L467",
       "id": "src_browser_login_stalledstream_poll_next",
-      "community": 13,
+      "community": 14,
       "norm_label": ".poll_next()"
     },
     {
@@ -13905,7 +14031,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L475",
       "id": "src_browser_login_healthystream",
-      "community": 13,
+      "community": 14,
       "norm_label": "healthystream"
     },
     {
@@ -13914,7 +14040,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L481",
       "id": "src_browser_login_healthystream_poll_next",
-      "community": 13,
+      "community": 14,
       "norm_label": ".poll_next()"
     },
     {
@@ -13923,7 +14049,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L496",
       "id": "src_browser_login_device_code_recv_times_out_when_server_stalls_after_connect",
-      "community": 13,
+      "community": 14,
       "norm_label": "device_code_recv_times_out_when_server_stalls_after_connect()"
     },
     {
@@ -13932,7 +14058,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L513",
       "id": "src_browser_login_device_code_recv_returns_promptly_on_healthy_connection",
-      "community": 13,
+      "community": 14,
       "norm_label": "device_code_recv_returns_promptly_on_healthy_connection()"
     },
     {
@@ -13941,7 +14067,7 @@
       "source_file": "src-tauri/src/browser_login.rs",
       "source_location": "L535",
       "id": "src_browser_login_device_code_recv_errors_immediately_on_closed_connection",
-      "community": 13,
+      "community": 14,
       "norm_label": "device_code_recv_errors_immediately_on_closed_connection()"
     },
     {
@@ -13950,7 +14076,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L1",
       "id": "src_tauri_src_watcher_rs",
-      "community": 15,
+      "community": 1,
       "norm_label": "watcher.rs"
     },
     {
@@ -13959,7 +14085,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L131",
       "id": "src_watcher_engine_delete_suppress",
-      "community": 15,
+      "community": 1,
       "norm_label": "engine_delete_suppress()"
     },
     {
@@ -13968,7 +14094,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L139",
       "id": "src_watcher_suppress_engine_delete",
-      "community": 15,
+      "community": 1,
       "norm_label": "suppress_engine_delete()"
     },
     {
@@ -13977,7 +14103,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L149",
       "id": "src_watcher_take_engine_delete_suppressed",
-      "community": 15,
+      "community": 1,
       "norm_label": "take_engine_delete_suppressed()"
     },
     {
@@ -13986,7 +14112,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L164",
       "id": "src_watcher_prune_stale_engine_suppressions",
-      "community": 15,
+      "community": 1,
       "norm_label": "prune_stale_engine_suppressions()"
     },
     {
@@ -13995,7 +14121,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L224",
       "id": "src_watcher_notifyevent",
-      "community": 15,
+      "community": 1,
       "norm_label": "notifyevent"
     },
     {
@@ -14004,7 +14130,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L242",
       "id": "src_watcher_watcherhandle",
-      "community": 15,
+      "community": 1,
       "norm_label": "watcherhandle"
     },
     {
@@ -14022,7 +14148,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L297",
       "id": "src_watcher_debounce_loop",
-      "community": 15,
+      "community": 1,
       "norm_label": "debounce_loop()"
     },
     {
@@ -14031,7 +14157,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L392",
       "id": "src_watcher_scan_loop",
-      "community": 15,
+      "community": 1,
       "norm_label": "scan_loop()"
     },
     {
@@ -14040,7 +14166,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L445",
       "id": "src_watcher_run_one_scan",
-      "community": 15,
+      "community": 1,
       "norm_label": "run_one_scan()"
     },
     {
@@ -14049,7 +14175,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L586",
       "id": "src_watcher_walk_dir",
-      "community": 15,
+      "community": 1,
       "norm_label": "walk_dir()"
     },
     {
@@ -14067,7 +14193,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L706",
       "id": "src_watcher_dispatch_local_create",
-      "community": 15,
+      "community": 1,
       "norm_label": "dispatch_local_create()"
     },
     {
@@ -14094,7 +14220,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L883",
       "id": "src_watcher_engine_delete_suppression_is_consumed_once",
-      "community": 15,
+      "community": 1,
       "norm_label": "engine_delete_suppression_is_consumed_once()"
     },
     {
@@ -14103,7 +14229,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L901",
       "id": "src_watcher_engine_delete_suppression_distinguishes_paths",
-      "community": 15,
+      "community": 1,
       "norm_label": "engine_delete_suppression_distinguishes_paths()"
     },
     {
@@ -14112,7 +14238,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L915",
       "id": "src_watcher_engine_delete_suppression_prunes_stale_entries",
-      "community": 15,
+      "community": 1,
       "norm_label": "engine_delete_suppression_prunes_stale_entries()"
     },
     {
@@ -14121,7 +14247,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L934",
       "id": "src_watcher_walked_rel",
-      "community": 15,
+      "community": 1,
       "norm_label": "walked_rel()"
     },
     {
@@ -14130,7 +14256,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L949",
       "id": "src_watcher_walk_visits_nested_files_and_skips_engine_internals",
-      "community": 15,
+      "community": 1,
       "norm_label": "walk_visits_nested_files_and_skips_engine_internals()"
     },
     {
@@ -14139,7 +14265,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L984",
       "id": "src_watcher_walk_skips_empty_root",
-      "community": 15,
+      "community": 1,
       "norm_label": "walk_skips_empty_root()"
     },
     {
@@ -14148,7 +14274,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L990",
       "id": "src_watcher_test_bridge",
-      "community": 15,
+      "community": 1,
       "norm_label": "test_bridge()"
     },
     {
@@ -14157,7 +14283,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L1001",
       "id": "src_watcher_assert_uploading_row",
-      "community": 15,
+      "community": 1,
       "norm_label": "assert_uploading_row()"
     },
     {
@@ -14166,7 +14292,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L1020",
       "id": "src_watcher_scan_queues_direct_explorer_drop_as_uploading_row",
-      "community": 15,
+      "community": 1,
       "norm_label": "scan_queues_direct_explorer_drop_as_uploading_row()"
     },
     {
@@ -14175,7 +14301,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L1038",
       "id": "src_watcher_scan_queues_atomic_temp_rename_explorer_drop_as_uploading_row",
-      "community": 15,
+      "community": 1,
       "norm_label": "scan_queues_atomic_temp_rename_explorer_drop_as_uploading_row()"
     },
     {
@@ -14184,7 +14310,7 @@
       "source_file": "src-tauri/src/watcher.rs",
       "source_location": "L1065",
       "id": "src_watcher_walk_does_not_follow_symlinks",
-      "community": 15,
+      "community": 1,
       "norm_label": "walk_does_not_follow_symlinks()"
     },
     {
@@ -15228,7 +15354,7 @@
       "source_file": "src-tauri/src/windows_cf/status_ui.rs",
       "source_location": "L270",
       "id": "windows_cf_status_ui_infocommand_impl_icon",
-      "community": 9,
+      "community": 5,
       "norm_label": ".icon()"
     },
     {
@@ -15489,7 +15615,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L1",
       "id": "src_windowstray_tsx",
-      "community": 13,
+      "community": 14,
       "norm_label": "windowstray.tsx"
     },
     {
@@ -15498,7 +15624,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L49",
       "id": "src_windowstray_getfiletype",
-      "community": 13,
+      "community": 14,
       "norm_label": "getfiletype()"
     },
     {
@@ -15507,7 +15633,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L86",
       "id": "src_windowstray_fileglyph",
-      "community": 13,
+      "community": 14,
       "norm_label": "fileglyph()"
     },
     {
@@ -15516,7 +15642,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L147",
       "id": "src_windowstray_actionicon",
-      "community": 13,
+      "community": 14,
       "norm_label": "actionicon()"
     },
     {
@@ -15525,7 +15651,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L188",
       "id": "src_windowstray_brandmark",
-      "community": 13,
+      "community": 14,
       "norm_label": "brandmark()"
     },
     {
@@ -15543,7 +15669,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L355",
       "id": "src_windowstray_opensettings",
-      "community": 13,
+      "community": 14,
       "norm_label": "opensettings()"
     },
     {
@@ -15552,7 +15678,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L360",
       "id": "src_windowstray_openfolder",
-      "community": 13,
+      "community": 14,
       "norm_label": "openfolder()"
     },
     {
@@ -15561,7 +15687,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L365",
       "id": "src_windowstray_viewonline",
-      "community": 13,
+      "community": 14,
       "norm_label": "viewonline()"
     },
     {
@@ -15570,7 +15696,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L370",
       "id": "src_windowstray_openrecyclebin",
-      "community": 13,
+      "community": 14,
       "norm_label": "openrecyclebin()"
     },
     {
@@ -15579,7 +15705,7 @@
       "source_file": "src/WindowsTray.tsx",
       "source_location": "L382",
       "id": "src_windowstray_openactivity",
-      "community": 13,
+      "community": 14,
       "norm_label": "openactivity()"
     },
     {
@@ -15867,7 +15993,7 @@
       "source_file": "src/desktopApi.ts",
       "source_location": "L217",
       "id": "src_desktopapi_openurl",
-      "community": 13,
+      "community": 14,
       "norm_label": "openurl()"
     },
     {
@@ -17514,7 +17640,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L1",
       "id": "windows_src_api_rs",
-      "community": 3,
+      "community": 13,
       "norm_label": "api.rs"
     },
     {
@@ -17523,7 +17649,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L8",
       "id": "src_api_apiclient",
-      "community": 3,
+      "community": 13,
       "norm_label": "apiclient"
     },
     {
@@ -17541,7 +17667,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L23",
       "id": "src_api_apiclient_require_auth",
-      "community": 3,
+      "community": 13,
       "norm_label": ".require_auth()"
     },
     {
@@ -17550,7 +17676,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L29",
       "id": "src_api_apiclient_url",
-      "community": 3,
+      "community": 13,
       "norm_label": ".url()"
     },
     {
@@ -17559,7 +17685,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L34",
       "id": "src_api_apiclient_list_files",
-      "community": 3,
+      "community": 13,
       "norm_label": ".list_files()"
     },
     {
@@ -17568,7 +17694,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L56",
       "id": "src_api_apiclient_upload_encrypted",
-      "community": 3,
+      "community": 13,
       "norm_label": ".upload_encrypted()"
     },
     {
@@ -17577,7 +17703,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L87",
       "id": "src_api_apiclient_create_folder",
-      "community": 3,
+      "community": 13,
       "norm_label": ".create_folder()"
     },
     {
@@ -17586,7 +17712,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L114",
       "id": "src_api_apiclient_verify_session",
-      "community": 3,
+      "community": 13,
       "norm_label": ".verify_session()"
     },
     {
@@ -17595,7 +17721,7 @@
       "source_file": "windows/src/api.rs",
       "source_location": "L128",
       "id": "src_api_parse_response",
-      "community": 3,
+      "community": 13,
       "norm_label": "parse_response()"
     },
     {
@@ -17694,7 +17820,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L1",
       "id": "windows_src_config_rs",
-      "community": 3,
+      "community": 8,
       "norm_label": "config.rs"
     },
     {
@@ -17703,7 +17829,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L11",
       "id": "src_config_config",
-      "community": 3,
+      "community": 8,
       "norm_label": "config"
     },
     {
@@ -17721,7 +17847,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L43",
       "id": "src_config_config_path",
-      "community": 3,
+      "community": 8,
       "norm_label": "config_path()"
     },
     {
@@ -17730,7 +17856,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L57",
       "id": "src_config_load_config",
-      "community": 3,
+      "community": 8,
       "norm_label": "load_config()"
     },
     {
@@ -17739,7 +17865,7 @@
       "source_file": "windows/src/config.rs",
       "source_location": "L69",
       "id": "src_config_save_config",
-      "community": 3,
+      "community": 8,
       "norm_label": "save_config()"
     },
     {
@@ -17748,7 +17874,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L1",
       "id": "beebeebfileprovidertools_domaincontroltool_swift",
-      "community": 28,
+      "community": 25,
       "norm_label": "domaincontroltool.swift"
     },
     {
@@ -17757,7 +17883,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L4",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool",
-      "community": 28,
+      "community": 25,
       "norm_label": "domaincontroltool"
     },
     {
@@ -17766,7 +17892,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L13",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_main",
-      "community": 28,
+      "community": 25,
       "norm_label": ".main()"
     },
     {
@@ -17775,7 +17901,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L30",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_status",
-      "community": 28,
+      "community": 25,
       "norm_label": ".status()"
     },
     {
@@ -17784,7 +17910,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L51",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_install",
-      "community": 28,
+      "community": 25,
       "norm_label": ".install()"
     },
     {
@@ -17793,7 +17919,7 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L69",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_remove",
-      "community": 28,
+      "community": 25,
       "norm_label": ".remove()"
     },
     {
@@ -17802,11 +17928,383 @@
       "source_file": "BeebeebFileProviderTools/DomainControlTool.swift",
       "source_location": "L87",
       "id": "beebeebfileprovidertools_domaincontroltool_domaincontroltool_signalroot",
-      "community": 28,
+      "community": 25,
       "norm_label": ".signalroot()"
     }
   ],
   "links": [
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L20",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_fail",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_fail",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L24",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L43",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_run",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L67",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_runtauri",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_runtauri",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L72",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_generatekeypair",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_generatekeypair",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L78",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_signpayload",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_signpayload",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L86",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L90",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L96",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L114",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L132",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L142",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L169",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_mjs",
+      "_tgt": "scripts_verify_updater_key_rotation_main",
+      "source": "scripts_verify_updater_key_rotation_mjs",
+      "target": "scripts_verify_updater_key_rotation_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L33",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "_tgt": "scripts_verify_updater_key_rotation_fail",
+      "source": "scripts_verify_updater_key_rotation_fail",
+      "target": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L52",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_run",
+      "_tgt": "scripts_verify_updater_key_rotation_fail",
+      "source": "scripts_verify_updater_key_rotation_fail",
+      "target": "scripts_verify_updater_key_rotation_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L139",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "_tgt": "scripts_verify_updater_key_rotation_fail",
+      "source": "scripts_verify_updater_key_rotation_fail",
+      "target": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L68",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_runtauri",
+      "_tgt": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "source": "scripts_verify_updater_key_rotation_commandfortauricli",
+      "target": "scripts_verify_updater_key_rotation_runtauri",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L69",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_runtauri",
+      "_tgt": "scripts_verify_updater_key_rotation_run",
+      "source": "scripts_verify_updater_key_rotation_run",
+      "target": "scripts_verify_updater_key_rotation_runtauri",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L74",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_generatekeypair",
+      "_tgt": "scripts_verify_updater_key_rotation_runtauri",
+      "source": "scripts_verify_updater_key_rotation_runtauri",
+      "target": "scripts_verify_updater_key_rotation_generatekeypair",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L81",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_signpayload",
+      "_tgt": "scripts_verify_updater_key_rotation_runtauri",
+      "source": "scripts_verify_updater_key_rotation_runtauri",
+      "target": "scripts_verify_updater_key_rotation_signpayload",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L207",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_main",
+      "_tgt": "scripts_verify_updater_key_rotation_runtauri",
+      "source": "scripts_verify_updater_key_rotation_runtauri",
+      "target": "scripts_verify_updater_key_rotation_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L175",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_main",
+      "_tgt": "scripts_verify_updater_key_rotation_generatekeypair",
+      "source": "scripts_verify_updater_key_rotation_generatekeypair",
+      "target": "scripts_verify_updater_key_rotation_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L183",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_main",
+      "_tgt": "scripts_verify_updater_key_rotation_signpayload",
+      "source": "scripts_verify_updater_key_rotation_signpayload",
+      "target": "scripts_verify_updater_key_rotation_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L97",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "_tgt": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "source": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "target": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L115",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "_tgt": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "source": "scripts_verify_updater_key_rotation_decodetauribase64text",
+      "target": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L100",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "_tgt": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "source": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "target": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L119",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "_tgt": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "source": "scripts_verify_updater_key_rotation_decodeminisignbase64line",
+      "target": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L143",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "_tgt": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "source": "scripts_verify_updater_key_rotation_parsetauripubkey",
+      "target": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L144",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "_tgt": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "source": "scripts_verify_updater_key_rotation_parsetaurisignature",
+      "target": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L152",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "_tgt": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "source": "scripts_verify_updater_key_rotation_signedpayloadbytes",
+      "target": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/verify-updater-key-rotation.mjs",
+      "source_location": "L187",
+      "weight": 1.0,
+      "_src": "scripts_verify_updater_key_rotation_main",
+      "_tgt": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "source": "scripts_verify_updater_key_rotation_verifytauriupdatersignature",
+      "target": "scripts_verify_updater_key_rotation_main",
+      "confidence_score": 1.0
+    },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
@@ -44394,8 +44892,8 @@
       "source_file": "src-tauri/src/runner.rs",
       "source_location": "L1108",
       "weight": 1.0,
-      "_src": "src_runner_enforce_cache_budget",
-      "_tgt": "src_lib_notify_quota_warning_impl",
+      "_src": "src_lib_notify_quota_warning_impl",
+      "_tgt": "src_runner_enforce_cache_budget",
       "source": "src_lib_notify_quota_warning_impl",
       "target": "src_runner_enforce_cache_budget"
     },
@@ -63390,8 +63888,8 @@
       "source_file": "src/windows/views/SettingsView.tsx",
       "source_location": "L1054",
       "weight": 1.0,
-      "_src": "views_settingsview_load",
-      "_tgt": "src_desktopapi_appactivitysnapshot",
+      "_src": "src_desktopapi_appactivitysnapshot",
+      "_tgt": "views_settingsview_load",
       "source": "src_desktopapi_appactivitysnapshot",
       "target": "views_settingsview_load"
     },
@@ -63402,8 +63900,8 @@
       "source_file": "src/windows/views/SettingsView.tsx",
       "source_location": "L748",
       "weight": 1.0,
-      "_src": "views_settingsview_handledowngrade",
-      "_tgt": "src_desktopapi_installdesktopchanneldowngrade",
+      "_src": "src_desktopapi_installdesktopchanneldowngrade",
+      "_tgt": "views_settingsview_handledowngrade",
       "source": "src_desktopapi_installdesktopchanneldowngrade",
       "target": "views_settingsview_handledowngrade"
     },
@@ -64554,8 +65052,8 @@
       "source_file": "src/windows/views/SettingsView.tsx",
       "source_location": "L122",
       "weight": 1.0,
-      "_src": "views_settingsview_formatrate",
-      "_tgt": "windows_advancedsettingsmodel_formatbytes",
+      "_src": "windows_advancedsettingsmodel_formatbytes",
+      "_tgt": "views_settingsview_formatrate",
       "source": "windows_advancedsettingsmodel_formatbytes",
       "target": "views_settingsview_formatrate"
     },
@@ -64626,8 +65124,8 @@
       "source_file": "src/windows/views/SettingsView.tsx",
       "source_location": "L739",
       "weight": 1.0,
-      "_src": "views_settingsview_handledowngrade",
-      "_tgt": "windows_updatecheckviewmodel_releasechannellabel",
+      "_src": "windows_updatecheckviewmodel_releasechannellabel",
+      "_tgt": "views_settingsview_handledowngrade",
       "source": "windows_updatecheckviewmodel_releasechannellabel",
       "target": "views_settingsview_handledowngrade"
     },
