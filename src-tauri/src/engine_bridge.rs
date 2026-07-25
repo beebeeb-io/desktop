@@ -1723,6 +1723,8 @@ impl EngineBridge {
         let evicted = self
             .db
             .evict_unpinned_cache_until_under(policy.max_unpinned_cache_bytes, now_secs())?;
+        #[cfg(target_os = "linux")]
+        self.remove_linux_freedesktop_thumbnails_for_file_ids(&evicted);
         Ok(CacheCleanupOutcome {
             evicted_file_ids: evicted,
         })
@@ -1757,6 +1759,69 @@ impl EngineBridge {
     pub fn enforce_configured_cache_limit(&self) -> anyhow::Result<CacheCleanupOutcome> {
         let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
         self.enforce_local_cache_limit(cfg.local_cache_limit_for_eviction())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn write_linux_freedesktop_thumbnails(&self, file_id: &str, dest_path: &Path) {
+        let entry = match self.db.get_file(file_id) {
+            Ok(Some(entry)) if !entry.is_dir() => entry,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::debug!(file_id = %file_id, error = %error, "linux thumbnail skipped: state row unavailable");
+                return;
+            }
+        };
+
+        let source_path = linux_thumbnail_source_path_for_entry(&entry).unwrap_or_else(|| dest_path.to_path_buf());
+        let thumbnail = match tokio::time::timeout(
+            Duration::from_secs(8),
+            self.fetch_thumbnail_to_memory(file_id, "medium"),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                tracing::debug!(file_id = %file_id, error = %error, "linux thumbnail skipped: server thumbnail unavailable");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!(file_id = %file_id, "linux thumbnail skipped: server thumbnail fetch timed out");
+                return;
+            }
+        };
+
+        match crate::linux_thumbnail::write_freedesktop_thumbnails(&source_path, entry.modified_at, &thumbnail) {
+            Ok(paths) => {
+                tracing::debug!(
+                    file_id = %file_id,
+                    count = paths.len(),
+                    "linux freedesktop thumbnails written"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(file_id = %file_id, error = %error, "linux freedesktop thumbnail write failed");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_linux_freedesktop_thumbnails_for_file_ids(&self, file_ids: &[String]) {
+        for file_id in file_ids {
+            let entry = match self.db.get_file(file_id) {
+                Ok(Some(entry)) if !entry.is_dir() => entry,
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::debug!(file_id = %file_id, error = %error, "linux thumbnail cleanup skipped: state row unavailable");
+                    continue;
+                }
+            };
+            let Some(source_path) = linux_thumbnail_source_path_for_entry(&entry) else {
+                continue;
+            };
+            if let Err(error) = crate::linux_thumbnail::remove_freedesktop_thumbnails(&source_path) {
+                tracing::warn!(file_id = %file_id, error = %error, "linux freedesktop thumbnail cleanup failed");
+            }
+        }
     }
 
     pub fn version_conflict_feed(&self) -> anyhow::Result<Vec<VersionConflictEntry>> {
@@ -2000,6 +2065,8 @@ impl EngineBridge {
                 let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
                 self.db
                     .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+                #[cfg(target_os = "linux")]
+                self.write_linux_freedesktop_thumbnails(file_id, dest_path).await;
                 let _ = self.enforce_configured_cache_limit();
                 Ok(())
             }
@@ -2342,13 +2409,13 @@ impl EngineBridge {
     /// memory only**, and return the decoded image bytes (WebP / JPEG / PNG)
     /// inside a [`Zeroizing`] wrapper.
     ///
-    /// This is the read path for the Windows Explorer `IThumbnailProvider`
-    /// (task 0823). It mirrors [`Self::do_hydrate`]'s per-file-key derivation but
-    /// hits `GET /files/:id/thumbnail/{variant}` instead of the chunk range and
-    /// reuses the **existing** encrypted thumbnail the original uploading client
-    /// generated (a downscaled still for images, a poster frame for video). The
-    /// Windows side never regenerates a thumbnail and never decodes the original
-    /// media — it just decrypts this small blob.
+    /// This is the shared read path for OS thumbnail consumers. It mirrors
+    /// [`Self::do_hydrate`]'s per-file-key derivation but hits
+    /// `GET /files/:id/thumbnail/{variant}` instead of the chunk range and reuses
+    /// the **existing** encrypted thumbnail the original uploading client
+    /// generated (a downscaled still for images, a poster frame for video). OS
+    /// integrations never regenerate a thumbnail and never decode the original
+    /// media just to preview it — they decrypt this small blob.
     ///
     /// ## Wire envelope (NOT the chunk envelope)
     ///
@@ -2363,16 +2430,15 @@ impl EngineBridge {
     /// ## Zero-knowledge
     ///
     /// The decrypted bytes live ONLY in the returned `Zeroizing<Vec<u8>>`, which
-    /// is wiped on drop (normal return, `?`, or panic unwind). Nothing is written
-    /// to disk — the caller decodes straight to an in-memory `HBITMAP` and the
-    /// shell's own thumbnail cache holds the *derivative* bitmap, exactly the
-    /// same privacy posture as the web client's decrypted-thumbnail cache.
+    /// is wiped on drop (normal return, `?`, or panic unwind). Callers decide how
+    /// to consume the decoded image bytes: Windows decodes straight to an
+    /// in-memory `HBITMAP`; Linux writes the freedesktop.org cache PNG derivative
+    /// required by file managers.
     ///
     /// `variant` is `small` / `medium` / `large`. Any error (no thumbnail for
     /// this file, network failure, decrypt failure) bubbles as `Err` so the
     /// caller can fall back to the file-type icon — it is never reported as a
     /// success with empty bytes.
-    #[cfg(target_os = "windows")]
     pub async fn fetch_thumbnail_to_memory(&self, file_id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -3118,6 +3184,12 @@ fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
+    let sync_root = crate::config::DesktopConfig::load().ok()?.sync_root?;
+    crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
 fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) -> anyhow::Result<String> {

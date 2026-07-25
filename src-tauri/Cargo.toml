@@ -83,6 +83,8 @@ zeroize = { version = "1", features = ["derive"] }
 # Windows thumbnail provider dependency below; promoted to all desktop targets
 # because upload-time thumbnail generation is cross-platform sync-engine logic.
 image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
+# PNG encoder/decoder access for freedesktop.org thumbnail tEXt chunks.
+png = "0.18"
 # On-demand process telemetry for the Settings > Advanced > App Activity panel.
 # The command refreshes only the current process when the panel polls; there is
 # no always-on background sampler.
