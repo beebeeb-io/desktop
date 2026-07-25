@@ -3,7 +3,7 @@
  * consumed by WindowsApp + src/windows/views/*.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 
 // ── Design tokens ───────────────────────────────────────────────────────────
 
@@ -252,6 +252,8 @@ export function Modal({
   children,
   maxWidth = 480,
   ariaLabel,
+  footer,
+  initialFocusRef,
 }: {
   open: boolean
   onClose: () => void
@@ -259,7 +261,11 @@ export function Modal({
   children: React.ReactNode
   maxWidth?: number
   ariaLabel?: string
+  footer?: React.ReactNode
+  initialFocusRef?: RefObject<HTMLElement | null>
 }) {
+  const fallbackFocusRef = useRef<HTMLButtonElement | null>(null)
+
   useEffect(() => {
     if (!open) return
     const onKeyDown = (event: KeyboardEvent) => {
@@ -268,6 +274,15 @@ export function Modal({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [open, onClose])
+
+  useEffect(() => {
+    if (!open) return
+    const focusTimer = window.setTimeout(() => {
+      const target = initialFocusRef?.current ?? fallbackFocusRef.current
+      target?.focus()
+    }, 0)
+    return () => window.clearTimeout(focusTimer)
+  }, [open, initialFocusRef])
 
   if (!open) return null
 
@@ -317,6 +332,7 @@ export function Modal({
         >
           <div style={{ fontSize: 15, fontWeight: 700, color: T.ink, letterSpacing: '-0.01em', minWidth: 0 }}>{title}</div>
           <button
+            ref={fallbackFocusRef}
             type="button"
             onClick={onClose}
             aria-label="Close"
@@ -340,34 +356,38 @@ export function Modal({
           </button>
         </div>
         <div style={{ padding: '18px 20px', overflowY: 'auto', flex: 1, minHeight: 0 }}>{children}</div>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'flex-end',
-            padding: '12px 20px',
-            borderTop: `1px solid ${T.line}`,
-            flexShrink: 0,
-          }}
-        >
-          <button
-            type="button"
-            onClick={onClose}
+        {footer !== undefined ? (
+          footer
+        ) : (
+          <div
             style={{
-              height: 30,
-              padding: '0 14px',
-              fontSize: 12,
-              fontFamily: T.fontSans,
-              fontWeight: 600,
-              borderRadius: 6,
-              border: `1px solid ${T.line2}`,
-              background: T.paper,
-              color: T.ink2,
-              cursor: 'pointer',
+              display: 'flex',
+              justifyContent: 'flex-end',
+              padding: '12px 20px',
+              borderTop: `1px solid ${T.line}`,
+              flexShrink: 0,
             }}
           >
-            Close
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                height: 30,
+                padding: '0 14px',
+                fontSize: 12,
+                fontFamily: T.fontSans,
+                fontWeight: 600,
+                borderRadius: 6,
+                border: `1px solid ${T.line2}`,
+                background: T.paper,
+                color: T.ink2,
+                cursor: 'pointer',
+              }}
+            >
+              Close
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
   stateFromManualUpdateResult,
   type ManualUpdateCheckState,
@@ -83,6 +84,26 @@ describe('updateCheckViewModel', () => {
       detail: 'You are running 0.2.0-beta.1 from the Beta channel. Confirm before downgrading.',
       chip: 'Downgrade available',
       tone: 'amber',
+    })
+  })
+
+  test('keeps downgrade confirmation copy explicit about version channel and restart', () => {
+    const state: ManualUpdateCheckState = {
+      kind: 'downgrade_available',
+      currentVersion: '0.2.0-beta.1',
+      currentChannel: 'beta',
+      channel: 'stable',
+      version: '0.1.9',
+      body: 'Stable notes',
+      releaseNotesUrl: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.1.9',
+    }
+
+    expect(buildDowngradeConfirmationViewModel(state)).toEqual({
+      title: 'Confirm downgrade',
+      message:
+        'Downgrade Beebeeb from 0.2.0-beta.1 to 0.1.9 on the Stable channel? The signed installer will run and Beebeeb will restart if it succeeds.',
+      confirmLabel: 'Downgrade to 0.1.9',
+      cancelLabel: 'Cancel',
     })
   })
 

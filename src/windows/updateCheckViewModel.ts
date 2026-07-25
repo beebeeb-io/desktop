@@ -25,6 +25,13 @@ export interface UpdateCheckViewModel {
   tone: UpdateCheckTone
 }
 
+export interface DowngradeConfirmationViewModel {
+  title: string
+  message: string
+  confirmLabel: string
+  cancelLabel: string
+}
+
 const CHANNEL_LABELS: Record<ReleaseChannel, string> = {
   stable: 'Stable',
   beta: 'Beta',
@@ -33,6 +40,18 @@ const CHANNEL_LABELS: Record<ReleaseChannel, string> = {
 
 export function releaseChannelLabel(channel: ReleaseChannel): string {
   return CHANNEL_LABELS[channel]
+}
+
+export function buildDowngradeConfirmationViewModel(
+  state: Extract<ManualUpdateCheckState, { kind: 'downgrade_available' }>,
+): DowngradeConfirmationViewModel {
+  const selectedChannel = releaseChannelLabel(state.channel)
+  return {
+    title: 'Confirm downgrade',
+    message: `Downgrade Beebeeb from ${state.currentVersion} to ${state.version} on the ${selectedChannel} channel? The signed installer will run and Beebeeb will restart if it succeeds.`,
+    confirmLabel: `Downgrade to ${state.version}`,
+    cancelLabel: 'Cancel',
+  }
 }
 
 export function stateFromManualUpdateResult(result: ManualUpdateCheckResult): ManualUpdateCheckState {
