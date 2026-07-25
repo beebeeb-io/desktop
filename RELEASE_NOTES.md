@@ -1,21 +1,21 @@
-# Beebeeb Desktop 0.8.1 — consistent error messages everywhere
+# Beebeeb Desktop 0.8.2 — fixed a rare cause of stuck uploads
 
-A small consistency fix: every error message in the app now appears the same way, instead of three different ad hoc styles depending on which screen you were on.
+A subtle bug meant a small fraction of failed uploads could get stuck instead of automatically retrying. This release fixes it.
 
 ### What's New
 
-- Nothing new — this release is entirely about making existing errors look and behave consistently.
+- Nothing new — this release is a single reliability fix.
 
 ### Bug Fixes / Hardening
 
-- **Consistent error presentation.** Task 0.6.0 introduced a shared toast notification system but only migrated 4 of the files that still hand-rolled their own error UI. This release finishes that migration for sign-in, first-run setup, the known-folder backup onboarding flow, the Explorer/Windows integration and launch-at-login settings, and several actions in the main file view (opening the sync folder, toggling a backed-up folder, restoring a file from Trash). Errors that need to stay next to the thing you're fixing — like the recovery-phrase unlock screen, a folder still loading, or the Trash list itself failing to load — were deliberately left as they were; only genuine one-off action failures moved to a toast.
-- **Fixed a real bug along the way:** restoring a file from Trash that failed used to silently replace the entire Trash list with a "Could not load Trash" error card, even though the list had loaded fine — only the restore itself had failed. The restore failure is now its own toast, so the list stays visible.
+- **Fixed a rare misclassification that could permanently stall a failed upload.** When an upload step failed, desktop decides whether to retry automatically or pause and ask for your attention, based on reading the error message. A bug in that logic meant it was accidentally also reading part of the network address the request had been sent to. On the rare occasion that address happened to contain digits like "401" or "403" — the same digits used for "unauthorized" and "forbidden" errors — a perfectly ordinary, retryable failure (like a brief server hiccup) could be misread as an authorization problem and paused instead of automatically retried. This was rare enough that it surfaced only once in this project's entire test history, and only in our automated testing infrastructure — but the same bug could in principle affect a real upload, so it's fixed now: the retry logic no longer looks at any part of the network address, only the actual error itself.
+- This is also what was behind an intermittently failing automated test that came up during this release cycle — the test failure and the reliability issue were the same root cause, now both fixed together.
 
 ### Verification
 
-- `bunx tsc --noEmit` — clean. `bun run lint` — exits 0 (the accessibility/hooks gate from 0.6.0). `bun test` — 22 passed, 0 failed.
-- Every changed file was reviewed directly, not just the summary: confirmed each case kept inline is genuinely load-bearing (gates other UI, or is a load-failure state, or is a form the user retries in place), and confirmed no leftover unused code from the removed error states.
-- Not verified: this is a presentation-only change with no functional behavior change, so no real-hardware smoke test was run specifically for it — it ships alongside the existing outstanding real-hardware verification gate for this release cycle.
+- `cargo test --locked` — 321 passed, 0 failed, including a new test that specifically pins several previously-mismatched cases to the correct behavior.
+- The specific previously-flaky test was run 45 additional times (30 by the engineer, 15 independently by the lead) with zero failures, and the exact failure was independently reproduced and confirmed fixed by deliberately forcing the unlucky condition that caused it.
+- This fix ships specifically so it goes through a real GitHub Actions test-gate run, since the original bug only ever manifested in CI and never locally across 43+ attempts — local passing alone wasn't considered sufficient confidence.
 
 ### Install / Update
 
