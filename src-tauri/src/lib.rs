@@ -2849,6 +2849,30 @@ fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEn
     engine_bridge::version_conflict_feed_from_db(&db).map_err(|e| e.to_string())
 }
 
+fn file_versions_payload_for_frontend(body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let Some(versions) = body.get("versions") else {
+        return Err("list_file_versions response missing versions array".to_string());
+    };
+    if !versions.is_array() {
+        return Err("list_file_versions response versions field is not an array".to_string());
+    }
+    Ok(body)
+}
+
+fn queued_restore_version_response(
+    file_id: &str,
+    version_id: &str,
+    op: &state_db::PendingOperation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "queued",
+        "file_id": file_id,
+        "version_id": version_id,
+        "operation_id": op.op_id,
+        "operation": "restore_version",
+    })
+}
+
 #[tauri::command]
 async fn list_file_versions(state: State<'_, AppState>, file_id: String) -> Result<serde_json::Value, String> {
     let acct = state.active_account()?;
@@ -2861,7 +2885,8 @@ async fn list_file_versions(state: State<'_, AppState>, file_id: String) -> Resu
     };
 
     let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
-    api.list_versions(&file_id).await.map_err(|e| e.to_string())
+    let body = api.list_versions(&file_id).await.map_err(|e| e.to_string())?;
+    file_versions_payload_for_frontend(body)
 }
 
 #[tauri::command]
@@ -2887,44 +2912,21 @@ async fn restore_file_version(
     let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
     let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-    let bridge = engine_bridge::EngineBridge::new(db, api.clone());
-
-    match api.restore_version(&file_id, &version_id).await {
-        Ok(body) => {
-            let _ = app.emit(
-                "version-restored",
-                serde_json::json!({
-                    "file_id": file_id,
-                    "version_id": version_id,
-                }),
-            );
-            Ok(body)
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if let Err(queue_err) =
-                bridge.queue_restore_version(&file_id, &version_id, Some(format!("direct restore failed: {msg}")))
-            {
-                tracing::warn!(
-                    error = %queue_err,
-                    file_id = %file_id,
-                    version_id = %version_id,
-                    "failed to queue restore review operation"
-                );
-            }
-            let _ = app.emit(
-                "version-center-review",
-                serde_json::json!({
-                    "file_id": file_id,
-                    "version_id": version_id,
-                    "kind": "restore",
-                }),
-            );
-            Err(format!(
-                "restore failed; queued for review if state DB was available: {msg}"
-            ))
-        }
-    }
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+    let op = bridge
+        .queue_restore_version(&file_id, &version_id, None)
+        .map_err(|e| format!("queue restore version: {e}"))?;
+    let body = queued_restore_version_response(&file_id, &version_id, &op);
+    let _ = app.emit(
+        "version-center-review",
+        serde_json::json!({
+            "file_id": file_id,
+            "version_id": version_id,
+            "kind": "restore",
+            "operation_id": op.op_id,
+        }),
+    );
+    Ok(body)
 }
 
 // ── IPC commands: sync-root config ────────────────────────────────────────────
@@ -7383,10 +7385,11 @@ mod tests {
         classify_finder_install_error, clear_cached_profile, compact_menu_page_for_view,
         desktop_manifest_path_for_channel, desktop_menu_specs, finder_install_state_from_config, folder_leaf_name,
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
-        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
-        next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, real_app_version,
-        release_channel_from_version, release_notes_url_for_version, shared_roots_from_db, should_offer_channel_update,
-        should_show_conflict_notification, should_show_quota_warning_notification,
+        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target,
+        file_versions_payload_for_frontend, newly_excluded_ids, next_menu_zoom_scale,
+        normalize_recovery_phrase_input, now_unix_seconds, queued_restore_version_response, real_app_version,
+        release_channel_from_version, release_notes_url_for_version, shared_roots_from_db,
+        should_offer_channel_update, should_show_conflict_notification, should_show_quota_warning_notification,
         should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
     };
     use crate::account_dto::AccountProfile;
@@ -7446,6 +7449,91 @@ mod tests {
             acct.cached_profile.lock().unwrap().is_none(),
             "cached profile must be cleared on lock/logout"
         );
+    }
+
+    #[test]
+    fn file_versions_payload_for_frontend_accepts_fixture_shape() {
+        let payload = serde_json::json!({
+            "file_id": "file-123",
+            "current_version": 3,
+            "versions": [
+                {
+                    "id": "object-version-3",
+                    "object_version_id": "object-version-3",
+                    "file_version_id": null,
+                    "source": "object_version",
+                    "version_number": 3,
+                    "size_bytes": 9000,
+                    "chunk_count": 2,
+                    "chunk_size_bytes": 5000,
+                    "storage_pool_id": "pool-1",
+                    "created_by": "user-1",
+                    "uploaded_by": "user-1",
+                    "restorable": true,
+                    "created_at": "2026-07-25T12:03:00Z"
+                },
+                {
+                    "id": "file-version-2",
+                    "object_version_id": null,
+                    "file_version_id": "file-version-2",
+                    "source": "file_version",
+                    "version_number": 2,
+                    "size_bytes": 7000,
+                    "chunk_count": 2,
+                    "chunk_size_bytes": null,
+                    "storage_pool_id": "pool-1",
+                    "created_by": "user-1",
+                    "uploaded_by": "user-1",
+                    "restorable": true,
+                    "created_at": "2026-07-25T12:02:00Z"
+                }
+            ]
+        });
+
+        let got = file_versions_payload_for_frontend(payload).expect("fixture payload is accepted");
+
+        assert_eq!(got["file_id"], "file-123");
+        assert_eq!(got["current_version"], 3);
+        assert_eq!(got["versions"][0]["id"], "object-version-3");
+        assert_eq!(got["versions"][0]["object_version_id"], "object-version-3");
+        assert_eq!(got["versions"][1]["id"], "file-version-2");
+        assert_eq!(got["versions"][1]["file_version_id"], "file-version-2");
+    }
+
+    #[test]
+    fn queued_restore_version_response_reports_durable_operation() {
+        let op = crate::state_db::PendingOperation {
+            op_id: "op-restore-1".to_string(),
+            kind: crate::state_db::OperationKind::RestoreVersion,
+            file_id: Some("file-123".to_string()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "restore_version",
+                    "version_id": "version-2"
+                })
+                .to_string(),
+            ),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: Some("version-2".to_string()),
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 123,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 123,
+            updated_at: 123,
+        };
+
+        let got = queued_restore_version_response("file-123", "version-2", &op);
+
+        assert_eq!(got["status"], "queued");
+        assert_eq!(got["file_id"], "file-123");
+        assert_eq!(got["version_id"], "version-2");
+        assert_eq!(got["operation_id"], "op-restore-1");
+        assert_eq!(got["operation"], "restore_version");
     }
 
     #[test]

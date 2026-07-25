@@ -144,12 +144,33 @@ export interface VersionConflictEntry {
 
 export interface FileVersionEntry {
   id: string
-  version?: number | null
+  version_number: number | null
   object_version_id?: string | null
+  file_version_id?: string | null
+  source?: string | null
   created_at?: string | number | null
   size_bytes?: number | null
-  is_current?: boolean
+  chunk_count?: number | null
+  chunk_size_bytes?: number | null
+  storage_pool_id?: string | null
+  restorable?: boolean
+  is_current: boolean
   created_by?: string | null
+  uploaded_by?: string | null
+}
+
+export interface FileVersionListResponse {
+  file_id: string | null
+  current_version: number | null
+  versions: FileVersionEntry[]
+}
+
+export interface RestoreFileVersionQueuedResponse {
+  status: 'queued'
+  file_id: string
+  version_id: string
+  operation_id: string
+  operation: 'restore_version'
 }
 
 export interface FinderInstallState {
@@ -199,6 +220,103 @@ function isUnsupported(reason: string): boolean {
     lower.includes('__tauri') ||
     lower.includes('not implemented')
   )
+}
+
+type RawObject = Record<string, unknown>
+
+function asObject(value: unknown): RawObject | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as RawObject) : null
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
+function normalizeFileVersion(value: unknown, currentVersion: number | null): FileVersionEntry | null {
+  const raw = asObject(value)
+  if (!raw) return null
+  const id =
+    asString(raw.id) ??
+    asString(raw.version_id) ??
+    asString(raw.object_version_id) ??
+    asString(raw.objectVersionId) ??
+    asString(raw.file_version_id) ??
+    asString(raw.fileVersionId)
+  if (!id) return null
+
+  const versionNumber = asNumber(raw.version_number) ?? asNumber(raw.versionNumber) ?? asNumber(raw.version)
+  const createdAt = asString(raw.created_at) ?? asString(raw.createdAt) ?? asNumber(raw.created_at)
+  const restorable = asBoolean(raw.restorable)
+  const explicitCurrent = raw.is_current === true || raw.current === true
+  const isCurrent = explicitCurrent || (currentVersion != null && versionNumber === currentVersion)
+
+  return {
+    id,
+    version_number: versionNumber,
+    object_version_id: asString(raw.object_version_id) ?? asString(raw.objectVersionId) ?? null,
+    file_version_id: asString(raw.file_version_id) ?? asString(raw.fileVersionId) ?? null,
+    source: asString(raw.source),
+    created_at: createdAt,
+    size_bytes: asNumber(raw.size_bytes) ?? asNumber(raw.sizeBytes),
+    chunk_count: asNumber(raw.chunk_count) ?? asNumber(raw.chunkCount),
+    chunk_size_bytes: asNumber(raw.chunk_size_bytes) ?? asNumber(raw.chunkSizeBytes),
+    storage_pool_id: asString(raw.storage_pool_id) ?? asString(raw.storagePoolId),
+    created_by: asString(raw.created_by) ?? asString(raw.createdBy),
+    uploaded_by: asString(raw.uploaded_by) ?? asString(raw.uploadedBy),
+    restorable: restorable ?? true,
+    is_current: isCurrent,
+  }
+}
+
+function timestampSortValue(value: string | number | null | undefined): number {
+  if (typeof value === 'number') return value > 10_000_000_000 ? value : value * 1000
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+  return 0
+}
+
+export function normalizeFileVersionListResponse(value: unknown): FileVersionListResponse {
+  const raw = asObject(value)
+  const currentVersion = asNumber(raw?.current_version) ?? asNumber(raw?.currentVersion)
+  const list = Array.isArray(value)
+    ? value
+    : Array.isArray(raw?.versions)
+      ? raw.versions
+      : Array.isArray(raw?.file_versions)
+        ? raw.file_versions
+        : []
+  const versions = list
+    .map((version) => normalizeFileVersion(version, currentVersion))
+    .filter((version): version is FileVersionEntry => version !== null)
+    .sort((a, b) => {
+      const versionDelta = (b.version_number ?? Number.NEGATIVE_INFINITY) - (a.version_number ?? Number.NEGATIVE_INFINITY)
+      if (versionDelta !== 0) return versionDelta
+      return timestampSortValue(b.created_at) - timestampSortValue(a.created_at)
+    })
+
+  return {
+    file_id: asString(raw?.file_id) ?? asString(raw?.fileId),
+    current_version: currentVersion,
+    versions,
+  }
+}
+
+export function restorableFileVersions(versions: FileVersionEntry[]): FileVersionEntry[] {
+  return versions.filter((version) => !version.is_current && version.restorable !== false)
+}
+
+export function restoreVersionId(version: FileVersionEntry): string {
+  return version.id
 }
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
@@ -751,6 +869,19 @@ export function desktopSearchFiles(
   limit?: number,
 ): Promise<CommandResult<DesktopSearchResponse>> {
   return command<DesktopSearchResponse>('desktop_search_files', { query, limit })
+}
+
+export async function desktopListFileVersions(fileId: string): Promise<CommandResult<FileVersionListResponse>> {
+  const result = await command<unknown>('list_file_versions', { fileId })
+  if (!result.ok) return result
+  return { ok: true, value: normalizeFileVersionListResponse(result.value) }
+}
+
+export function desktopRestoreFileVersion(
+  fileId: string,
+  versionId: string,
+): Promise<CommandResult<RestoreFileVersionQueuedResponse>> {
+  return command<RestoreFileVersionQueuedResponse>('restore_file_version', { fileId, versionId })
 }
 
 export function desktopConfirmAction(password: string): Promise<CommandResult<ConfirmActionResult>> {

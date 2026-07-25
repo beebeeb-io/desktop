@@ -57,6 +57,7 @@ import {
 } from './desktopApi'
 import UpdateBanner from './UpdateBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
+import DesktopVersionHistory, { DesktopVersionHistoryTrigger } from './DesktopVersionHistory'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card } from './windows/ui'
 import KnownFolderOnboarding from './windows/KnownFolderOnboarding'
 import AccountView from './windows/views/AccountView'
@@ -1608,6 +1609,7 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
 export default function WindowsApp() {
   const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
   const [searchOpen, setSearchOpen] = useState(false)
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [usage, setUsage] = useState<BillingUsage | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -1789,6 +1791,11 @@ export default function WindowsApp() {
         onOpen={() => setSearchOpen(true)}
         onClose={() => setSearchOpen(false)}
       />
+      <DesktopVersionHistory
+        open={versionHistoryOpen}
+        onOpen={() => setVersionHistoryOpen(true)}
+        onClose={() => setVersionHistoryOpen(false)}
+      />
 
       {/* Known-folder backup onboarding (task 0804). Only meaningful once signed
           in (it enables backup into the signed-in vault). 'auto' self-gates on
@@ -1817,6 +1824,8 @@ export default function WindowsApp() {
 
           <div style={{ padding: '0 2px 10px' }}>
             <DesktopQuickSearchTrigger onOpen={() => setSearchOpen(true)} />
+            <div style={{ height: 7 }} />
+            <DesktopVersionHistoryTrigger onOpen={() => setVersionHistoryOpen(true)} />
           </div>
 
           {/* Nav sections */}
