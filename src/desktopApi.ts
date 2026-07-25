@@ -716,6 +716,10 @@ export interface UserRegionResponse {
   regions: RegionInfo[]
 }
 
+export interface SetPreferredRegionResponse {
+  preferred_region: string | null
+}
+
 /** Live default city — the only acceptable fallback (no provider, ever). */
 const FALLBACK_CITY = 'Falkenstein'
 
@@ -778,6 +782,11 @@ export function fetchRegion(): Promise<UserRegionResponse | null> {
   return regionPromise
 }
 
+function updateCachedRegionPreference(preferredRegion: string | null): void {
+  if (!regionPromise) return
+  regionPromise = regionPromise.then(resp => (resp ? { ...resp, preferred_region: preferredRegion } : resp))
+}
+
 // ── Wrappers ────────────────────────────────────────────────────────────────
 // Each returns a CommandResult so callers can distinguish "unsupported in this
 // build" from "the server / session failed", matching the existing idiom.
@@ -796,6 +805,12 @@ export function accountUsage(): Promise<CommandResult<BillingUsage>> {
 
 export function accountRegion(): Promise<CommandResult<UserRegionResponse>> {
   return command<UserRegionResponse>('account_region')
+}
+
+export async function setAccountRegion(preferredRegion: string | null): Promise<CommandResult<SetPreferredRegionResponse>> {
+  const result = await command<SetPreferredRegionResponse>('account_set_region', { preferredRegion })
+  if (result.ok) updateCachedRegionPreference(result.value.preferred_region)
+  return result
 }
 
 export function accountActivity(): Promise<CommandResult<AccountActivity>> {

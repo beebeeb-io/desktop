@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
+  accountRegion,
   accountNotificationPreferences,
   accountUpdateNotificationPreferences,
   appActivitySnapshot,
@@ -9,11 +10,13 @@ import {
   formatBytes,
   installDesktopChannelDowngrade,
   openUrl,
+  setAccountRegion,
   type AppActivitySnapshot,
   type DesktopConfig,
   type DesktopTheme,
   type FinderInstallState,
   type NotificationPreferenceValues,
+  type RegionInfo,
   type StorageSummary,
   type SyncStatus,
   DEFAULT_CONFIG,
@@ -37,7 +40,7 @@ import {
   type AccountNotificationPrefKey,
   type DesktopNotificationPrefKey,
 } from '../notificationPreferenceMeta'
-import { T, Card, Chip, Modal, NavIcon, PageHeader, PrimaryBtn, Skeleton } from '../ui'
+import { T, Card, Chip, Modal, NavIcon, PageHeader, PrimaryBtn, Skeleton, useToast } from '../ui'
 import { useRegionCity } from '../useRegion'
 import {
   CACHE_LIMIT_OPTIONS,
@@ -45,6 +48,11 @@ import {
   normalizeCacheLimitBytes,
   normalizeThemePreference,
 } from '../advancedSettingsModel'
+import {
+  DATA_RESIDENCY_FALLBACK_REGIONS,
+  buildDataResidencyViewState,
+  commitPreferredRegionSelection,
+} from '../dataResidencySettingsModel'
 import { setDesktopThemePreference } from '../theme'
 
 type ShellIntegrationState = FinderInstallState
@@ -559,6 +567,220 @@ function NotificationsSettingsPanel({
         <DesktopNotificationPreferencesPanel config={config} onConfigChange={onConfigChange} notice={notice} />
         <NotificationPreferencesPanel />
       </div>
+    </SettingsSectionShell>
+  )
+}
+
+function RegionSelectionCard({
+  item,
+  onSelect,
+}: {
+  item: ReturnType<typeof buildDataResidencyViewState>['items'][number]
+  onSelect: (continent: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(item.continent)}
+      disabled={item.disabled}
+      aria-pressed={item.selected}
+      style={{
+        width: '100%',
+        textAlign: 'left',
+        display: 'grid',
+        gridTemplateColumns: '16px minmax(0, 1fr) 16px',
+        gap: 12,
+        alignItems: 'flex-start',
+        padding: '14px 16px',
+        borderRadius: 8,
+        border: item.selected ? `1px solid ${T.amberDeep}` : `1px solid ${T.line}`,
+        background: item.selected ? T.amberBg : item.disabled ? T.paper2 : T.paper,
+        boxShadow: item.selected ? '0 0 0 1px color-mix(in oklch, var(--amber) 28%, transparent)' : 'none',
+        opacity: item.disabled && !item.selected ? 0.58 : 1,
+        cursor: item.disabled ? 'default' : 'pointer',
+        transition: 'border-color 140ms ease, background 140ms ease, opacity 140ms ease',
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 999,
+          border: item.selected ? `1.5px solid ${T.amberDeep}` : `1.5px solid ${T.line2}`,
+          background: item.selected ? T.amber : 'transparent',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          marginTop: 1,
+        }}
+      >
+        {item.selected && <span style={{ width: 6, height: 6, borderRadius: 999, background: T.ink }} />}
+      </span>
+
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' as const, gap: 7, marginBottom: 3 }}>
+          <span style={{ fontSize: 13.5, fontWeight: 650, color: item.selected ? T.ink : T.ink2, lineHeight: 1.35 }}>
+            {item.displayName}
+          </span>
+          {item.isDefault && <Chip>Default</Chip>}
+        </span>
+        <span style={{ display: 'block', fontFamily: T.fontMono, fontSize: 11.5, color: T.ink3, lineHeight: 1.45 }}>
+          {item.locationLabel}
+        </span>
+      </span>
+
+      {item.selected && <NavIcon name="check" size={14} color={T.amberDeep} />}
+    </button>
+  )
+}
+
+function DataResidencyPanel() {
+  const { showToast } = useToast()
+  const [regions, setRegions] = useState<RegionInfo[]>(DATA_RESIDENCY_FALLBACK_REGIONS)
+  const [preferredRegion, setPreferredRegion] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  const load = () => {
+    let cancelled = false
+    setLoading(true)
+    setLoadError(null)
+    void (async () => {
+      const result = await accountRegion()
+      if (cancelled) return
+      if (result.ok) {
+        setRegions(result.value.regions.length ? result.value.regions : DATA_RESIDENCY_FALLBACK_REGIONS)
+        setPreferredRegion(result.value.preferred_region ?? null)
+      } else {
+        setRegions(DATA_RESIDENCY_FALLBACK_REGIONS)
+        setPreferredRegion(null)
+        setLoadError(result.unsupported ? commandUnavailableLabel('account_region') : result.reason)
+      }
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }
+
+  useEffect(() => load(), [])
+
+  const view = buildDataResidencyViewState({
+    preferredRegion,
+    regions,
+    saving,
+  })
+
+  const handleSelect = async (continent: string) => {
+    if (view.onlyOneRegion || saving) return
+
+    setSaving(true)
+    const result = await commitPreferredRegionSelection({
+      continent,
+      preferredRegion,
+      saving,
+      setPreferredRegion,
+      savePreferredRegion: async next => {
+        const response = await setAccountRegion(next)
+        if (!response.ok) {
+          throw new Error(response.unsupported ? commandUnavailableLabel('account_set_region') : response.reason)
+        }
+        return response.value
+      },
+    })
+    setSaving(false)
+
+    if (result.status === 'saved') {
+      showToast({
+        variant: 'success',
+        title: 'Region updated',
+        message: 'New uploads will use your preferred region.',
+      })
+      return
+    }
+
+    if (result.status === 'error') {
+      showToast({
+        variant: 'error',
+        title: 'Failed to save region',
+        message: result.message || 'Please try again.',
+      })
+    }
+  }
+
+  const currentCity = regions.find(region => region.continent === view.effectiveRegion)?.city ?? regions[0]?.city ?? 'Falkenstein'
+
+  return (
+    <SettingsSectionShell>
+      <PageHeader
+        title="Data residency"
+        subtitle="Choose where new uploads are stored. Existing files stay where they are."
+      />
+
+      {loading ? (
+        <Card style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Skeleton width={170} height={13} />
+          <Skeleton width="100%" height={48} radius={8} />
+        </Card>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {loadError && (
+            <Card style={{ padding: 14, background: T.paper2, borderColor: 'oklch(0.88 0.05 25)' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <NavIcon name="external" size={14} color={RED} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Could not refresh region list</div>
+                  <div style={{ fontSize: 11.5, lineHeight: 1.5, color: T.ink3, marginTop: 3, wordBreak: 'break-word' as const }}>
+                    {loadError}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={load}
+                  style={{
+                    border: `1px solid ${T.line2}`,
+                    borderRadius: 6,
+                    background: T.paper,
+                    color: T.ink2,
+                    padding: '6px 10px',
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
+            </Card>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {view.items.map(item => (
+              <RegionSelectionCard
+                key={item.continent}
+                item={item}
+                onSelect={(continent) => void handleSelect(continent)}
+              />
+            ))}
+          </div>
+
+          {view.onlyOneRegion && (
+            <div style={{ fontSize: 11.5, color: T.ink4, lineHeight: 1.55 }}>
+              More regions are coming soon. Your files are stored in {currentCity}.
+            </div>
+          )}
+
+          <Card style={{ padding: 14, background: T.paper2 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+              <NavIcon name="shield" size={14} color={T.amberDeep} />
+              <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55 }}>
+                <strong style={{ color: T.ink2 }}>Existing files stay where they are.</strong>{' '}
+                Only new uploads use your preferred region.
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
     </SettingsSectionShell>
   )
 }
@@ -1601,6 +1823,8 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
             notice={notice}
           />
         )
+      case 'data-residency':
+        return <DataResidencyPanel />
       case 'launch':
         return <LaunchPanel />
       case 'explorer-integration':

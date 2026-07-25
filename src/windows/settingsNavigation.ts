@@ -1,5 +1,6 @@
 export type SettingsNavId =
   | 'sync'
+  | 'data-residency'
   | 'notifications'
   | 'launch'
   | 'explorer-integration'
@@ -29,6 +30,7 @@ export const SETTINGS_SECTIONS: SettingsNavSection[] = [
     heading: 'Beebeeb',
     items: [
       { id: 'sync', label: 'Sync', icon: 'cloud' },
+      { id: 'data-residency', label: 'Data residency', icon: 'shield' },
       { id: 'notifications', label: 'Notifications', icon: 'cog' },
     ],
   },

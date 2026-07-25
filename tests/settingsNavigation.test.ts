@@ -14,6 +14,7 @@ describe('settingsNavigation', () => {
         heading: 'Beebeeb',
         items: [
           { id: 'sync', label: 'Sync', icon: 'cloud' },
+          { id: 'data-residency', label: 'Data residency', icon: 'shield' },
           { id: 'notifications', label: 'Notifications', icon: 'cog' },
         ],
       },
@@ -51,6 +52,7 @@ describe('settingsNavigation', () => {
         heading: 'Beebeeb',
         items: [
           { id: 'sync', label: 'Sync', icon: 'cloud' },
+          { id: 'data-residency', label: 'Data residency', icon: 'shield' },
           { id: 'notifications', label: 'Notifications', icon: 'cog' },
         ],
       },
