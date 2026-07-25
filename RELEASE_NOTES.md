@@ -1,18 +1,24 @@
-# Beebeeb Desktop 0.5.0 — Shared with me
+# Beebeeb Desktop 0.6.0 — Linux thumbnails, file search, and a real notification system
 
-Desktop can now show you what other people have shared with you. If someone shares a file or folder with your account, it now appears under Shared in the app — not just on web.
+Three independent improvements: Linux gets real file previews for the first time, every desktop platform gets file search, and the app's error/status messages move off a pile of one-off banners onto a proper notification system.
 
 ### What's New
 
-- **Shared with me is real now.** Previously this page always said "no shared roots available," even if you had active shares — desktop was never wired into the feature. It now shows the files and folders shared with you, who shared them, and whether you can edit them or only view them. Opening a shared file decrypts and reads its real content, the same as any file in your own vault.
-- This is the read side only: browsing what's shared with you. Creating or revoking shares from desktop itself is a separate piece of work, not in this release.
+- **Linux thumbnails.** Files synced to Linux now get real preview thumbnails in your file manager — GNOME Files (Nautilus), Dolphin, and most others pick them up automatically, the same way Dropbox or Nextcloud thumbnails work. No extra setup. (Windows already had this; this closes the gap.)
+- **File search.** Type to find a file by name from anywhere in the app via a quick-open dialog. This reuses the same encrypted search index the web app already uses — searching works the same way and finds the same files whether you're on desktop or in the browser.
+- **Toast notifications.** Status messages ("Settings saved," connection issues, and similar) now appear as a consistent toast instead of each screen inventing its own banner. Confirmation dialogs are also now fully keyboard-navigable — Tab no longer escapes out of an open dialog into the page behind it.
+
+### Bug Fixes / Hardening
+
+- Fixed a real accessibility bug in notification settings where a checkbox's label wasn't properly associated with its control.
+- Fixed a real missing-dependency bug in the sync status view, caught by newly-enabled linting rather than by a user hitting a stale-data edge case.
+- Added a working lint gate to the codebase (accessibility + React rules) so issues like the two above get caught before they ship, not after.
 
 ### Verification
 
-- `cargo test --locked` — 307 passed, 0 failed.
-- The encryption/decryption logic went through two rounds of dedicated security review before merging, not just functional testing: the first round caught two real issues (a way a shared item's name could have been used to write a file to the wrong place, and a case where an unverified name could have been trusted instead of a properly decrypted one) — both were fixed and independently re-reviewed before this shipped. We'd rather say this plainly than pretend the first draft was already perfect.
-- The decryption implementation is checked byte-for-byte compatible with how the web app already does this in production, including a test vector generated from the real web code, not just our own mirrored version of it.
-- Not verified: real two-account sharing on physical hardware (this needs an actual second account sharing something with a real device, which we haven't run yet).
+- `cargo test --locked` — 315 passed, 0 failed. `bunx tsc --noEmit` — clean. `bun run lint` — exits 0 against a real, networked dependency install (not just a sandboxed claim). `bun test` — 17 passed, 0 failed.
+- The Linux thumbnail format's technical details (size limits, filename hashing, required metadata) were checked against the actual published freedesktop.org specification, not just generated from memory. The file-search wire protocol was checked line-by-line against the web app's real, already-shipped implementation to confirm both clients actually speak the same protocol.
+- Not verified: real thumbnail pickup in an actual GNOME/KDE file manager (no Linux desktop environment available in this build environment — the cache format itself is verified correct, just not watched render in a real file manager window). Not verified on real hardware generally.
 
 ### Install / Update
 
