@@ -4541,6 +4541,18 @@ async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserR
         .map_err(|e| e.to_string())
 }
 
+/// `PUT /api/v1/me/region` — set or clear the preferred storage region.
+#[tauri::command]
+async fn account_set_region(
+    state: State<'_, AppState>,
+    preferred_region: Option<String>,
+) -> Result<account_dto::SetPreferredRegionResponse, String> {
+    api_client_from_session(&state)?
+        .set_preferred_region(preferred_region.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// `GET /api/v1/account/activity` — recent events + security summary.
 #[tauri::command]
 async fn account_activity(state: State<'_, AppState>) -> Result<account_dto::AccountActivity, String> {
@@ -6309,6 +6321,7 @@ pub fn run() {
             account_subscription,
             account_usage,
             account_region,
+            account_set_region,
             account_activity,
             account_security_score,
             account_session_list,

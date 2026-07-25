@@ -1000,6 +1000,22 @@ impl ApiClient {
         self.get_typed("/api/v1/me/region").await
     }
 
+    /// `PUT /api/v1/me/region` — set or clear the user's preferred region.
+    pub async fn set_preferred_region(
+        &self,
+        preferred_region: Option<&str>,
+    ) -> anyhow::Result<crate::account_dto::SetPreferredRegionResponse> {
+        #[cfg(test)]
+        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, preferred_region)? {
+            return Ok(response);
+        }
+
+        let url = self.url("/api/v1/me/region");
+        let body = serde_json::json!({ "preferred_region": preferred_region });
+        let resp = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
+        Ok(resp.json().await?)
+    }
+
     /// `GET /api/v1/account/activity` — events + summary.
     pub async fn account_activity(&self) -> anyhow::Result<crate::account_dto::AccountActivity> {
         self.get_typed("/api/v1/account/activity").await
@@ -1214,8 +1230,125 @@ impl ApiClient {
 }
 
 #[cfg(test)]
+mod region_set_fixture {
+    use crate::account_dto::SetPreferredRegionResponse;
+    use anyhow::Context;
+    use serde_json::Value;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct RegionRequest {
+        pub method: String,
+        pub path: String,
+        pub authorization: Option<String>,
+        pub body: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RegionFixtureResponse {
+        status_line: String,
+        body: Value,
+    }
+
+    #[derive(Debug)]
+    struct RegionFixture {
+        responses: VecDeque<RegionFixtureResponse>,
+        requests: Vec<RegionRequest>,
+    }
+
+    pub(super) struct RegionFixtureHandle {
+        id: String,
+        pub base_url: String,
+    }
+
+    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(1);
+    static FIXTURES: OnceLock<Mutex<HashMap<String, Arc<Mutex<RegionFixture>>>>> = OnceLock::new();
+
+    impl RegionFixtureHandle {
+        pub fn start(responses: Vec<(String, Value)>) -> Self {
+            let id = format!("set-region-fixture-{}", FIXTURE_ID.fetch_add(1, Ordering::Relaxed));
+            let fixture = RegionFixture {
+                responses: responses
+                    .into_iter()
+                    .map(|(status_line, body)| RegionFixtureResponse { status_line, body })
+                    .collect(),
+                requests: Vec::new(),
+            };
+            registry()
+                .lock()
+                .unwrap()
+                .insert(id.clone(), Arc::new(Mutex::new(fixture)));
+            Self {
+                base_url: format!("fixture://{id}"),
+                id,
+            }
+        }
+
+        pub fn finish(self) -> Vec<RegionRequest> {
+            let fixture = registry()
+                .lock()
+                .unwrap()
+                .remove(&self.id)
+                .expect("region fixture should still be registered");
+            fixture.lock().unwrap().requests.clone()
+        }
+    }
+
+    pub(super) fn try_handle(
+        base_url: &str,
+        token: &str,
+        preferred_region: Option<&str>,
+    ) -> anyhow::Result<Option<SetPreferredRegionResponse>> {
+        let Some(id) = base_url.strip_prefix("fixture://") else {
+            return Ok(None);
+        };
+        let fixture = registry()
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .with_context(|| format!("region fixture {id} missing"))?;
+        let mut fixture = fixture.lock().unwrap();
+        let body = serde_json::json!({ "preferred_region": preferred_region });
+        fixture.requests.push(RegionRequest {
+            method: "PUT".to_string(),
+            path: "/api/v1/me/region".to_string(),
+            authorization: Some(format!("Bearer {token}")),
+            body: body.to_string(),
+        });
+
+        let response = fixture
+            .responses
+            .pop_front()
+            .context("region fixture has no response left")?;
+        if !response.status_line.starts_with('2') {
+            let snippet: String = response.body.to_string().chars().take(300).collect();
+            anyhow::bail!("HTTP {}: {}", response.status_line, snippet);
+        }
+
+        Ok(Some(serde_json::from_value(response.body)?))
+    }
+
+    fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<RegionFixture>>>> {
+        FIXTURES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use region_set_fixture::RegionFixtureHandle as RegionMockServer;
+    use std::future::Future;
+
+    fn run_async<T>(future: impl Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
 
     #[test]
     fn test_chunk_url() {
@@ -1255,6 +1388,49 @@ mod tests {
             client.thumbnail_upload_url("file/one", "large", Some("ignored")),
             "https://api.beebeeb.io/api/v1/files/file%2Fone/thumbnail/large"
         );
+    }
+
+    #[test]
+    fn set_preferred_region_puts_region_and_parses_response() {
+        let server = RegionMockServer::start(vec![(
+            "200 OK".to_string(),
+            serde_json::json!({ "preferred_region": "us" }),
+        )]);
+        let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
+
+        let result = run_async(client.set_preferred_region(Some("us"))).unwrap();
+
+        assert_eq!(result.preferred_region.as_deref(), Some("us"));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].path, "/api/v1/me/region");
+        assert_eq!(requests[0].authorization.as_deref(), Some("Bearer tok"));
+        let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
+        assert_eq!(body, serde_json::json!({ "preferred_region": "us" }));
+    }
+
+    #[test]
+    fn set_preferred_region_surfaces_server_error_for_frontend_rollback() {
+        let server = RegionMockServer::start(vec![(
+            "400 Bad Request".to_string(),
+            serde_json::json!({
+                "error": "region_unavailable",
+                "continent": "mars"
+            }),
+        )]);
+        let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
+
+        let err = run_async(client.set_preferred_region(Some("mars")))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("400 Bad Request"));
+        assert!(err.contains("region_unavailable"));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
+        assert_eq!(body, serde_json::json!({ "preferred_region": "mars" }));
     }
 
     #[test]

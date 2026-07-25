@@ -126,6 +126,7 @@ pub struct BillingUsage {
 pub struct RegionInfo {
     pub continent: String,
     pub display_name: String,
+    #[serde(alias = "example_city")]
     pub city: String,
     /// Captured to match the server shape — NEVER shown to users (brand rule:
     /// name the city, never the provider).
@@ -139,7 +140,14 @@ pub struct UserRegionResponse {
     /// region's continent.
     #[serde(default)]
     pub preferred_region: Option<String>,
+    #[serde(default, alias = "available_regions")]
     pub regions: Vec<RegionInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SetPreferredRegionResponse {
+    #[serde(default)]
+    pub preferred_region: Option<String>,
 }
 
 // ── 3. Account activity & security score ──────────────────────────────────────
@@ -877,6 +885,27 @@ mod tests {
         let r: UserRegionResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.preferred_region, None);
         assert_eq!(r.regions[0].continent, "europe");
+    }
+
+    #[test]
+    fn user_region_parses_server_available_regions_alias() {
+        let json = r#"{
+            "preferred_region": null,
+            "available_regions": [
+                {
+                    "continent": "europe",
+                    "display_name": "Europe",
+                    "example_city": "Falkenstein",
+                    "provider": "Hetzner",
+                    "is_default": true
+                }
+            ]
+        }"#;
+        let r: UserRegionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.preferred_region, None);
+        assert_eq!(r.regions.len(), 1);
+        assert_eq!(r.regions[0].city, "Falkenstein");
+        assert!(r.regions[0].is_default);
     }
 
     #[test]
