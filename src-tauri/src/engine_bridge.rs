@@ -3418,7 +3418,20 @@ fn operation_metadata(op: &PendingOperation) -> anyhow::Result<serde_json::Value
 }
 
 pub fn classify_operation_error(error: &str) -> OperationFailureClass {
-    let lower = error.to_ascii_lowercase();
+    // Classify on the failure MESSAGE only, never on the request URL. reqwest's
+    // Display appends `" for url (…)"` (for both HTTP-status and connection
+    // errors), and that URL carries the random ephemeral port plus opaque path
+    // ids. Those digits are not status codes, but the bare-code substring checks
+    // below ("401", "403") would happily match them — so a plain HTTP 500 sent
+    // to, say, `127.0.0.1:45401` was being misread as an Auth failure and
+    // *paused* (never retried). That is the entire flake in task 1252: it fired
+    // only when the OS handed the mock server a port whose digits contained
+    // "401"/"403", which is why it reproduced in CI but ~never locally. Dropping
+    // the URL suffix keeps classification keyed on reqwest's status reason phrase
+    // ("401 Unauthorized", "403 Forbidden", "507 Insufficient Storage", …) and
+    // on our own descriptive errors, none of which live past `" for url ("`.
+    let message = error.split(" for url (").next().unwrap_or(error);
+    let lower = message.to_ascii_lowercase();
     if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid token") {
         OperationFailureClass::Auth
     } else if lower.contains("quota") || lower.contains("insufficient storage") || lower.contains("storage limit") {
@@ -6109,6 +6122,40 @@ mod tests {
         assert_eq!(retry_delay_seconds(1), 30);
         assert_eq!(retry_delay_seconds(2), 60);
         assert_eq!(retry_delay_seconds(10), 960);
+    }
+
+    #[test]
+    fn classify_ignores_status_like_digits_in_the_request_url() {
+        // Task 1252: reqwest's Display suffixes `" for url (…)"`, and the URL's
+        // ephemeral port / path ids can contain "401", "403", etc. Those are not
+        // status codes and must never flip a retryable failure into a pausable
+        // one. A real 5xx to such a port must stay Retryable.
+        for port in ["45401", "40113", "34012", "50403", "44039"] {
+            let err = format!(
+                "HTTP status server error (500 Internal Server Error) for url (http://127.0.0.1:{port}/api/v1/uploads/upload-session-1/chunks/0)"
+            );
+            assert_eq!(
+                classify_operation_error(&err),
+                OperationFailureClass::Retryable,
+                "500 to port {port} must stay Retryable, not be misread from the URL"
+            );
+        }
+        // A connection error to the same kind of port is likewise Retryable.
+        assert_eq!(
+            classify_operation_error("error sending request for url (http://127.0.0.1:45401/api/v1/uploads/upload-session-1/chunks/0)"),
+            OperationFailureClass::Retryable
+        );
+        // Genuine auth/permission failures still classify from reqwest's status
+        // reason phrase (which sits BEFORE the stripped URL), even when the URL
+        // also carries unrelated digits.
+        assert_eq!(
+            classify_operation_error("HTTP status client error (401 Unauthorized) for url (http://127.0.0.1:8080/api/v1/uploads/init)"),
+            OperationFailureClass::Auth
+        );
+        assert_eq!(
+            classify_operation_error("HTTP status client error (403 Forbidden) for url (http://127.0.0.1:8080/api/v1/files/abc)"),
+            OperationFailureClass::Permission
+        );
     }
 
     #[test]
