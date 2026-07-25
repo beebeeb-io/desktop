@@ -46,9 +46,10 @@ separate Windows Installed Apps entries.
 1. Author `RELEASE_NOTES.md` at the repository root for the version being cut. The file must contain the exact version string passed to the release workflow, such as `0.1.2-beta.2`; do not use the Windows MSI-safe rewritten version.
 2. Commit `RELEASE_NOTES.md` with the release preparation changes.
 3. Trigger `.github/workflows/release.yml` with the same semver value.
-4. The workflow fails closed before the Windows/Linux build matrix if `RELEASE_NOTES.md` is missing or does not mention the exact version string.
-5. The GitHub release body is the authored notes from `RELEASE_NOTES.md` plus the auto-generated changelog appended by GitHub.
-6. The `publish-manifest` job reads that release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows.
+4. The workflow first validates `RELEASE_NOTES.md`, then runs the release test gate on `ubuntu-latest`: `bun test` for the frontend suite and `cargo test --locked` from `src-tauri` for the Rust crate.
+5. The workflow fails closed before the Windows/Linux build matrix if `RELEASE_NOTES.md` is missing, the notes do not mention the exact version string, or either test command fails. No installer artifacts are produced until the gate is green.
+6. The GitHub release body is the authored notes from `RELEASE_NOTES.md` plus the auto-generated changelog appended by GitHub.
+7. The `publish-manifest` job reads that release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows.
 
 ## Style Notes
 
