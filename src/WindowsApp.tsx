@@ -58,7 +58,7 @@ import {
 import UpdateBanner from './UpdateBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
 import DesktopVersionHistory, { DesktopVersionHistoryTrigger } from './DesktopVersionHistory'
-import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card } from './windows/ui'
+import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card, useToast } from './windows/ui'
 import KnownFolderOnboarding from './windows/KnownFolderOnboarding'
 import AccountView from './windows/views/AccountView'
 import InsightsView from './windows/views/InsightsView'
@@ -623,7 +623,7 @@ function StatusPill({ status }: { status: string }) {
 function SyncFolderCard() {
   const [root, setRoot] = useState<string | null>(null)
   const [opening, setOpening] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   useEffect(() => {
     let cancelled = false
@@ -635,10 +635,15 @@ function SyncFolderCard() {
 
   const openInExplorer = async () => {
     setOpening(true)
-    setError(null)
     const r = await command<void>('open_finder_location', { path: root })
     setOpening(false)
-    if (!r.ok) setError(r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason)
+    if (!r.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open folder',
+        message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
+      })
+    }
   }
 
   return (
@@ -657,7 +662,6 @@ function SyncFolderCard() {
           <NavIcon name="external" size={13} color={T.paper} /> {opening ? 'Opening…' : 'Open in Explorer'}
         </PrimaryBtn>
       </div>
-      {error && <div style={{ marginTop: 12, fontSize: 11.5, color: FILES_DANGER }}>{error}</div>}
     </Card>
   )
 }
@@ -1045,7 +1049,11 @@ function backupStatus(f: KnownFolderStatus, pending: boolean): { text: string; t
 function ManageBackupCard() {
   const [folders, setFolders] = useState<KnownFolderStatus[] | null>(null)
   const [unsupported, setUnsupported] = useState(false)
+  // Persistent load failure (get_known_folder_backup) keeps its inline notice —
+  // the card is stuck on skeletons until it loads, so a transient toast would
+  // leave no explanation. Per-toggle (set_known_folder_backup) failures toast.
   const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
   // Keys with an in-flight set_known_folder_backup call.
   const [pending, setPending] = useState<Set<string>>(new Set())
 
@@ -1085,7 +1093,6 @@ function ManageBackupCard() {
   const toggle = async (f: KnownFolderStatus) => {
     if (f.source_path == null) return
     const next = !f.enabled
-    setError(null)
     setPending((p) => new Set(p).add(f.key))
     // Optimistic flip.
     setFolders((prev) => prev?.map((x) => (x.key === f.key ? { ...x, enabled: next } : x)) ?? prev)
@@ -1098,7 +1105,11 @@ function ManageBackupCard() {
     if (!res.ok) {
       // Roll back the optimistic flip and surface the error.
       setFolders((prev) => prev?.map((x) => (x.key === f.key ? { ...x, enabled: f.enabled } : x)) ?? prev)
-      setError(res.unsupported ? commandUnavailableLabel('set_known_folder_backup') : res.reason)
+      showToast({
+        variant: 'error',
+        title: next ? 'Couldn’t start backup' : 'Couldn’t stop backup',
+        message: res.unsupported ? commandUnavailableLabel('set_known_folder_backup') : res.reason,
+      })
       return
     }
     // Refresh to pick up updated item counts after a mirror pass.
@@ -1333,10 +1344,16 @@ function GhostButton({ children, onClick, disabled, danger = false }: { children
 function TrashView() {
   const [items, setItems] = useState<DesktopTrashItem[]>([])
   const [loading, setLoading] = useState(true)
+  // `error` is the blocking list-load state (renders the full "Could not load
+  // Trash" card with Retry) — kept inline. A failed restore now toasts instead
+  // of setting `error`, so a transient action failure no longer nukes the list.
   const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
   const [busyId, setBusyId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<DesktopTrashItem | null>(null)
   const [password, setPassword] = useState('')
+  // Delete-confirmation error stays inline in the modal next to the password
+  // field the user is retrying — a transient toast is the wrong surface here.
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const load = async () => {
@@ -1361,7 +1378,11 @@ function TrashView() {
     const result = await desktopTrashRestore(item.id, item.name)
     setBusyId(null)
     if (!result.ok) {
-      setError(result.unsupported ? commandUnavailableLabel('desktop_trash_restore') : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'Restore failed',
+        message: result.unsupported ? commandUnavailableLabel('desktop_trash_restore') : result.reason,
+      })
       return
     }
     setItems((prev) => prev.filter((row) => row.id !== item.id))

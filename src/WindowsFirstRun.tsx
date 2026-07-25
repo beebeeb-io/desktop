@@ -43,6 +43,7 @@ import {
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
+import { useToast } from './windows/ui'
 
 // Progress event emitted by the Rust `start_browser_login` handoff.
 // `phase` keys the UI state machine; the other fields are populated on
@@ -830,18 +831,17 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
 function SyncModeStep({ onDone }: { onDone: () => void }) {
   const [selected, setSelected] = useState<SyncMode>('smart')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   const proceed = async () => {
     setBusy(true)
-    setError(null)
     const result = await command<void>('set_sync_mode', { mode: selected })
     setBusy(false)
     if (result.ok) {
       onDone()
       return
     }
-    setError(result.reason)
+    showToast({ variant: 'error', title: 'Couldn’t set sync mode', message: result.reason })
   }
 
   return (
@@ -855,7 +855,6 @@ function SyncModeStep({ onDone }: { onDone: () => void }) {
       <p style={{ margin: '0 0 18px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
         Keep everything, or only what you need. Online-only folders appear in File Explorer as placeholders — open them to download on demand.
       </p>
-      {error && <Notice kind="error">{error}</Notice>}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
         {SYNC_OPTIONS.map((opt) => {
           const active = selected === opt.mode

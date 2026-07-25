@@ -11,6 +11,7 @@ import {
   type VaultItem,
 } from './desktopApi'
 import logoFull from './assets/logo-full.svg'
+import { useToast } from './windows/ui'
 
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
 const RECOVERY_WORD_COUNT = 12
@@ -149,19 +150,22 @@ function SignInStep({ onDone }: { onDone: () => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true)
-    setError(null)
     const result = await command<void>('desktop_login', { email, password })
     setBusy(false)
     if (result.ok) {
       onDone()
       return
     }
-    setError(result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason)
+    showToast({
+      variant: 'error',
+      title: 'Sign-in failed',
+      message: result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason,
+    })
   }
 
   return (
@@ -169,7 +173,6 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       title="Welcome back"
       copy="Sign in to unlock your encrypted vault."
     >
-      {error && <div className="notice error">{error}</div>}
       <form onSubmit={submit} style={{ marginTop: 16 }}>
         <Field label="Email" type="email" value={email} onChange={setEmail} disabled={busy} placeholder="you@example.com" />
         <Field label="Password" type="password" value={password} onChange={setPassword} disabled={busy} placeholder="Your password" />

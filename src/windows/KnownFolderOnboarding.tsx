@@ -32,7 +32,7 @@ import {
   commandUnavailableLabel,
   type KnownFolderStatus,
 } from '../desktopApi'
-import { T, NavIcon } from './ui'
+import { T, NavIcon, useToast } from './ui'
 import { useRegionLabel } from './useRegion'
 
 /** Decision 0797's default-ON set: pre-checked on first run. */
@@ -161,7 +161,7 @@ export default function KnownFolderOnboarding({
   const [folders, setFolders] = useState<KnownFolderStatus[] | null>(null)
   const [checked, setChecked] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { showToast } = useToast()
   // false until we've confirmed this is a genuine first-run (or forced). Keeps
   // the overlay from flashing before the seen-flag/backup checks resolve.
   const [shouldShow, setShouldShow] = useState(forced)
@@ -254,7 +254,6 @@ export default function KnownFolderOnboarding({
    *  as the upload completes and are picked up by the reconcile flow), then
    *  record the prompt as seen so it never auto-shows again. */
   const confirm = async () => {
-    setError(null)
     setSubmitting(true)
 
     // 1. Enable each checked folder. Each enable persists the choice and (on
@@ -263,7 +262,11 @@ export default function KnownFolderOnboarding({
     for (const key of checkedKeys) {
       const res = await setKnownFolderBackup(key, true)
       if (!res.ok) {
-        setError(res.unsupported ? commandUnavailableLabel('set_known_folder_backup') : res.reason)
+        showToast({
+          variant: 'error',
+          title: 'Backup setup failed',
+          message: res.unsupported ? commandUnavailableLabel('set_known_folder_backup') : res.reason,
+        })
         setSubmitting(false)
         return
       }
@@ -383,10 +386,6 @@ export default function KnownFolderOnboarding({
               Encrypted before it leaves this PC · {regionLabel}
             </span>
           </div>
-
-          {error && (
-            <div style={{ fontSize: 11.5, color: T.amberDeep, marginBottom: 12, lineHeight: 1.5 }}>{error}</div>
-          )}
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center' }}>
             <button
