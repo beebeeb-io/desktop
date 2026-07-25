@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "macos:fileprovider": "scripts/build-fileprovider-extension.sh",
     "macos:sign-local": "scripts/sign-local-macos-app.sh",
+    "verify:updater-key-rotation": "node scripts/verify-updater-key-rotation.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
