@@ -26,8 +26,8 @@ import {
   type SettingsNavId,
 } from '../settingsNavigation'
 import {
+  buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
-  releaseChannelLabel,
   stateFromManualUpdateResult,
   type ManualUpdateCheckState,
 } from '../updateCheckViewModel'
@@ -686,10 +686,16 @@ function UpdatesPanel({
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
   const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
+  const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const updateCheckRequestRef = useRef(0)
+  const downgradeConfirmButtonRef = useRef<HTMLButtonElement | null>(null)
   const releaseChannel = config.release_channel ?? 'stable'
   const updateCheckView = buildUpdateCheckViewModel(updateCheckState, version, releaseChannel)
+  const downgradeConfirmationView =
+    updateCheckState.kind === 'downgrade_available'
+      ? buildDowngradeConfirmationViewModel(updateCheckState)
+      : null
   const updateCheckBusy = updateCheckState.kind === 'checking'
   const updateCheckError = updateCheckState.kind === 'error'
   const downgradeInstallBusy = downgradeInstallState === 'installing'
@@ -708,6 +714,7 @@ function UpdatesPanel({
     setUpdateCheckState({ kind: 'idle' })
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
+    setDowngradeConfirmOpen(false)
     setReleaseNotesOpen(false)
     onConfigChange({ release_channel: channel })
   }
@@ -718,6 +725,7 @@ function UpdatesPanel({
     setUpdateCheckState({ kind: 'checking' })
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
+    setDowngradeConfirmOpen(false)
     setReleaseNotesOpen(false)
 
     const result = await checkForDesktopUpdatesNow()
@@ -733,14 +741,15 @@ function UpdatesPanel({
     }
   }
 
-  const handleDowngrade = async () => {
+  const openDowngradeConfirmation = () => {
     if (updateCheckState.kind !== 'downgrade_available') return
+    setReleaseNotesOpen(false)
+    setDowngradeConfirmOpen(true)
+  }
 
-    const selectedChannel = releaseChannelLabel(updateCheckState.channel)
-    const confirmed = window.confirm(
-      `Downgrade Beebeeb from ${updateCheckState.currentVersion} to ${updateCheckState.version} on the ${selectedChannel} channel? The signed installer will run and Beebeeb will restart if it succeeds.`,
-    )
-    if (!confirmed) return
+  const handleConfirmDowngrade = async () => {
+    if (updateCheckState.kind !== 'downgrade_available') return
+    setDowngradeConfirmOpen(false)
 
     setDowngradeInstallState('installing')
     setDowngradeInstallError(null)
@@ -870,7 +879,7 @@ function UpdatesPanel({
               </button>
               <button
                 type="button"
-                onClick={() => void handleDowngrade()}
+                onClick={openDowngradeConfirmation}
                 disabled={downgradeInstallBusy || updateCheckBusy}
                 aria-busy={downgradeInstallBusy}
                 style={{
@@ -899,6 +908,100 @@ function UpdatesPanel({
           </div>
         )}
       </Card>
+
+      {downgradeConfirmationView && (
+        <Modal
+          open={downgradeConfirmOpen}
+          onClose={() => setDowngradeConfirmOpen(false)}
+          title={downgradeConfirmationView.title}
+          ariaLabel={downgradeConfirmationView.title}
+          maxWidth={520}
+          initialFocusRef={downgradeConfirmButtonRef}
+          footer={
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 8,
+                padding: '12px 20px',
+                borderTop: `1px solid ${T.line}`,
+                flexShrink: 0,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setDowngradeConfirmOpen(false)}
+                style={{
+                  height: 32,
+                  padding: '0 14px',
+                  fontSize: 12,
+                  fontFamily: T.fontSans,
+                  fontWeight: 600,
+                  borderRadius: 6,
+                  border: `1px solid ${T.line2}`,
+                  background: T.paper,
+                  color: T.ink2,
+                  cursor: 'pointer',
+                }}
+              >
+                {downgradeConfirmationView.cancelLabel}
+              </button>
+              <button
+                ref={downgradeConfirmButtonRef}
+                type="button"
+                onClick={() => void handleConfirmDowngrade()}
+                disabled={downgradeInstallBusy || updateCheckBusy}
+                aria-busy={downgradeInstallBusy}
+                style={{
+                  height: 32,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  padding: '0 13px',
+                  fontSize: 12,
+                  fontFamily: T.fontSans,
+                  fontWeight: 700,
+                  borderRadius: 6,
+                  border: `1px solid ${T.amberDeep}`,
+                  background: downgradeInstallBusy ? T.amberBg : T.amber,
+                  color: T.ink,
+                  cursor: downgradeInstallBusy || updateCheckBusy ? 'progress' : 'pointer',
+                  opacity: downgradeInstallBusy ? 0.72 : 1,
+                  whiteSpace: 'nowrap' as const,
+                }}
+              >
+                <NavIcon name="download" size={11} color={T.ink} />
+                {downgradeConfirmationView.confirmLabel}
+              </button>
+            </div>
+          }
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: '36px minmax(0, 1fr)', gap: 12, alignItems: 'start' }}>
+            <div
+              aria-hidden="true"
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 9,
+                background: T.amberBg,
+                border: `1px solid ${T.amberDeep}`,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <NavIcon name="download" size={15} color={T.amberDeep} />
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 12.5, color: T.ink2, lineHeight: 1.65 }}>
+                {downgradeConfirmationView.message}
+              </p>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {updateCheckState.kind === 'downgrade_available' && (
         <Modal
