@@ -3645,11 +3645,27 @@ fn apply_snapshot(
         // Parent's resolved path ("" at the vault root, or when the parent
         // didn't resolve — the leaf then sits at root, matching BFS behaviour
         // where an unresolved parent frame simply wasn't descended).
-        let parent_rel_path = f["parent_id"]
-            .as_str()
-            .and_then(|pid| resolved_paths.get(pid))
-            .cloned()
-            .unwrap_or_default();
+        let parent_rel_path = match f["parent_id"].as_str().filter(|pid| !pid.is_empty()) {
+            Some(pid) => resolved_paths.get(pid).cloned().unwrap_or_else(|| {
+                // If the parent is missing from this snapshot but the child already
+                // exists locally, keep its current parent prefix for this ingest.
+                // A concurrent folder trash can legitimately produce a partial
+                // snapshot that still lists the folder's children but not the folder;
+                // re-rooting those children before `prune_absent` runs would hide
+                // them from the absent-folder subtree sweep.
+                let existing_parent = existing_parent_rel_path(bridge, file_id);
+                if !existing_parent.is_empty() {
+                    tracing::debug!(
+                        file_id = %file_id,
+                        parent_id = %pid,
+                        parent_rel_path = %existing_parent,
+                        "sync_tick: preserving existing parent path for snapshot node whose parent is absent"
+                    );
+                }
+                existing_parent
+            }),
+            None => String::new(),
+        };
 
         if let Some((rel_path, _kind)) = process_metadata_row(bridge, f, &parent_rel_path, now_secs, conflicts)? {
             if !rel_path.is_empty() {
@@ -5802,6 +5818,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audit_1244_auto_resolve_keep_both_preserves_local_copy_when_remote_hydrate_fails() {
+        // Production mutation caught: hydrating before renaming, or leaving the row
+        // in Conflict after a hydrate failure, would either risk the local bytes or
+        // hide the retry state from the normal Error flow.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let original = sync_root.join("conflict.txt");
+        std::fs::write(&original, b"local conflict bytes").unwrap();
+
+        let file_id = "bbbb0000-0000-4000-8000-000000000010";
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), [15u8; 32]);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: "conflict.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 20,
+                modified_at: 100,
+                content_hash: Some("local-conflict-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let entry = bridge.db.get_file(file_id).unwrap().unwrap();
+
+        let err = bridge
+            .auto_resolve_keep_both(&sync_root, &entry)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("error sending request") || err.contains("Connection refused"));
+
+        let row = bridge.db.get_file(file_id).unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Error);
+        assert!(!original.exists(), "original path is left vacant for the remote retry");
+        let conflict_copy = std::fs::read_dir(&sync_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("conflict (conflict - ") && name.ends_with(".txt"))
+            })
+            .expect("local conflict copy should be renamed with a device/date suffix");
+        assert_eq!(std::fs::read(conflict_copy).unwrap(), b"local conflict bytes");
+    }
+
+    #[tokio::test]
     async fn test_process_due_operations_uploads_encrypted_image_thumbnails_after_complete() {
         let dir = tempfile::tempdir().unwrap();
         let payload = dir.path().join("photo.png");
@@ -6168,6 +6235,236 @@ mod tests {
         contract.parent_id = parent_id.map(str::to_string);
         contract.cache_bytes = cache_bytes;
         bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    fn seed_bridge_entry(
+        bridge: &EngineBridge,
+        file_id: &str,
+        path: &str,
+        parent_id: Option<&str>,
+        status: FileStatus,
+        is_folder: bool,
+        remote_updated_at: i64,
+    ) {
+        let item_kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: path.into(),
+                status,
+                size_bytes: if is_folder { 0 } else { 10 },
+                modified_at: remote_updated_at,
+                content_hash: None,
+                remote_updated_at,
+                parent_id: parent_id.map(str::to_string),
+                item_kind: item_kind.clone(),
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.namespace = Namespace::MyFiles;
+        contract.parent_id = parent_id.map(str::to_string);
+        contract.item_kind = item_kind;
+        contract.permission_bits = PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    fn enqueue_test_operation(bridge: &EngineBridge, op_id: &str, kind: OperationKind, file_id: &str, created_at: i64) {
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: op_id.into(),
+                kind,
+                file_id: Some(file_id.into()),
+                parent_id: None,
+                target_path: Some(format!("{file_id}.txt")),
+                metadata_json: None,
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at,
+                updated_at: created_at,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner() {
+        // Production mutation caught: removing a Trashing row on a file_trash echo
+        // would make the local-delete-in-flight path lose its durable owner state.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let file = "echo0000-0000-4000-8000-000000000001";
+        seed_bridge_entry(&bridge, file, "doomed.txt", None, FileStatus::Trashing, false, 10);
+        enqueue_test_operation(&bridge, "op-trash-echo", OperationKind::TrashFile, file, 100);
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 12,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": file }),
+        };
+        let mut conflicts = Vec::new();
+        apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Trashing);
+        let queued = bridge.db().list_due_operations(999).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].op_id, "op-trash-echo");
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn audit_1244_double_trash_restore_cycle_keeps_resnapshot_for_final_restore() {
+        // Production mutation caught: treating file_restore as a no-op, or clearing
+        // the resnapshot request during the same op batch, would leave the final
+        // restored row invisible after two fast trash+restore cycles.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [8u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let file = "cycle000-0000-4000-8000-000000000001";
+        seed_bridge_entry(&bridge, file, "doc.txt", None, FileStatus::CloudOnly, false, 10);
+
+        let mut conflicts = Vec::new();
+        for (seq_id, op_type) in [
+            (2, "file_trash"),
+            (3, "file_restore"),
+            (4, "file_trash"),
+            (5, "file_restore"),
+        ] {
+            let op = crate::api_client::SyncOp {
+                seq_id,
+                op_type: op_type.into(),
+                payload: serde_json::json!({ "id": file }),
+            };
+            apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        }
+
+        assert!(
+            bridge.db().get_file(file).unwrap().is_none(),
+            "trash ops remove the row until the forced snapshot re-materialises it"
+        );
+        assert!(
+            bridge.db().take_needs_resnapshot().unwrap(),
+            "at least one restore in the batch must force the next tick to snapshot"
+        );
+
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 5,
+            nodes: vec![snap_node(&mk, file, "doc.txt", None, false, 50)],
+        };
+        apply_snapshot(&bridge, dir.path(), &snapshot, 250, 250, &mut conflicts).unwrap();
+
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(row.path, "doc.txt");
+        assert_eq!(row.status, FileStatus::CloudOnly);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn audit_1244_gap_rebootstrap_keeps_offline_local_upload_when_remote_delete_absent() {
+        // Production mutation caught: pruning rows with pending UploadVersion work
+        // during a gap-recovery snapshot would silently delete a local offline edit
+        // just because another device remotely deleted the server row.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [4u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let local = "local000-0000-4000-8000-000000000001";
+        let other = "other000-0000-4000-8000-000000000002";
+        seed_bridge_entry(&bridge, local, "report.txt", None, FileStatus::Error, false, 10);
+        enqueue_test_operation(&bridge, "op-upload-offline", OperationKind::UploadVersion, local, 100);
+
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 77,
+            nodes: vec![snap_node(&mk, other, "other.txt", None, false, 80)],
+        };
+        let mut conflicts = Vec::new();
+        apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut conflicts).unwrap();
+
+        let row = bridge.db().get_file(local).unwrap().unwrap();
+        assert_eq!(row.path, "report.txt");
+        assert_eq!(row.status, FileStatus::Error);
+        assert_eq!(
+            bridge.db().list_due_operations(999).unwrap()[0].op_id,
+            "op-upload-offline",
+            "pending local upload remains durable after rebootstrap"
+        );
+        assert!(bridge.db().get_file(other).unwrap().is_some());
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn audit_1244_snapshot_partial_folder_trash_prunes_children_seen_without_parent() {
+        // Production mutation caught: re-rooting children whose parent folder is
+        // absent from the snapshot before prune_absent runs leaks ghost rows.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [6u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let folder = "fold0000-0000-4000-8000-000000000001";
+        let child = "fold0000-0000-4000-8000-000000000002";
+        let subfolder = "fold0000-0000-4000-8000-000000000003";
+        let grandchild = "fold0000-0000-4000-8000-000000000004";
+        let sibling = "fold0000-0000-4000-8000-000000000005";
+
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::CloudOnly, true, 10);
+        seed_bridge_entry(
+            &bridge,
+            child,
+            "docs/a.txt",
+            Some(folder),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
+        seed_bridge_entry(
+            &bridge,
+            subfolder,
+            "docs/sub",
+            Some(folder),
+            FileStatus::CloudOnly,
+            true,
+            10,
+        );
+        seed_bridge_entry(
+            &bridge,
+            grandchild,
+            "docs/sub/b.txt",
+            Some(subfolder),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
+        seed_bridge_entry(&bridge, sibling, "outside.txt", None, FileStatus::CloudOnly, false, 10);
+
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 88,
+            nodes: vec![
+                // Concurrent partial sync: the server snapshot still contains the
+                // folder's independent children, but the trashed folder node itself
+                // is absent. The local mirror must remove the subtree, not re-root it.
+                snap_node(&mk, child, "a.txt", Some(folder), false, 80),
+                snap_node(&mk, subfolder, "sub", Some(folder), true, 80),
+                snap_node(&mk, grandchild, "b.txt", Some(subfolder), false, 80),
+                snap_node(&mk, sibling, "outside.txt", None, false, 80),
+            ],
+        };
+        let mut conflicts = Vec::new();
+        apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut conflicts).unwrap();
+
+        assert!(bridge.db().get_file(folder).unwrap().is_none());
+        assert!(
+            bridge.db().get_file(child).unwrap().is_none(),
+            "child listed in a partial snapshot must still be pruned with its absent folder"
+        );
+        assert!(bridge.db().get_file(subfolder).unwrap().is_none());
+        assert!(bridge.db().get_file(grandchild).unwrap().is_none());
+        assert!(bridge.db().get_file(sibling).unwrap().is_some());
+        assert!(conflicts.is_empty());
     }
 
     // ── /sync delta engine tests (task 0789) ──────────────────────────────────
