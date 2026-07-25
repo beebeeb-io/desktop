@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{
     Emitter, Manager, State,
     menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu},
@@ -4897,14 +4897,19 @@ struct ThroughputSnapshot {
 struct AppActivityMonitor {
     system: System,
     pid: sysinfo::Pid,
+    logical_core_count: usize,
 }
 
 impl AppActivityMonitor {
     fn new() -> Self {
         let pid = sysinfo::get_current_pid().unwrap_or_else(|_| sysinfo::Pid::from_u32(std::process::id()));
+        let mut system = System::new();
+        system.refresh_cpu_list(CpuRefreshKind::nothing());
+        let logical_core_count = system.cpus().len().max(1);
         Self {
-            system: System::new(),
+            system,
             pid,
+            logical_core_count,
         }
     }
 
@@ -4919,19 +4924,24 @@ impl AppActivityMonitor {
             .system
             .process(self.pid)
             .ok_or_else(|| format!("current process {} not found", self.pid))?;
-        let cpu_percent = process.cpu_usage();
+        let cpu_percent = normalize_process_cpu_percent(process.cpu_usage(), self.logical_core_count);
 
         Ok(ProcessResourceSnapshot {
             pid: self.pid.as_u32(),
             process_name: process.name().to_string_lossy().into_owned(),
-            cpu_percent: if cpu_percent.is_finite() {
-                cpu_percent.max(0.0)
-            } else {
-                0.0
-            },
+            cpu_percent,
             memory_rss_bytes: process.memory(),
         })
     }
+}
+
+fn normalize_process_cpu_percent(raw_cpu_percent: f32, logical_core_count: usize) -> f32 {
+    if !raw_cpu_percent.is_finite() {
+        return 0.0;
+    }
+
+    let normalized = raw_cpu_percent.max(0.0) / logical_core_count.max(1) as f32;
+    (normalized.clamp(0.0, 100.0) * 10.0).round() / 10.0
 }
 
 fn bandwidth_sample_rates(up_bytes: u64, down_bytes: u64, period_secs: u32) -> (u64, u64) {
@@ -7666,6 +7676,16 @@ mod tests {
     fn bandwidth_sample_rates_convert_bytes_window_to_bytes_per_second() {
         assert_eq!(super::bandwidth_sample_rates(1_500, 3_000, 3), (500, 1_000));
         assert_eq!(super::bandwidth_sample_rates(1_500, 3_000, 0), (0, 0));
+    }
+
+    #[test]
+    fn normalized_process_cpu_percent_divides_by_logical_core_count_and_caps() {
+        assert_eq!(super::normalize_process_cpu_percent(200.0, 8), 25.0);
+        assert_eq!(super::normalize_process_cpu_percent(12.34, 1), 12.3);
+        assert_eq!(super::normalize_process_cpu_percent(900.0, 8), 100.0);
+        assert_eq!(super::normalize_process_cpu_percent(-4.0, 8), 0.0);
+        assert_eq!(super::normalize_process_cpu_percent(f32::NAN, 8), 0.0);
+        assert_eq!(super::normalize_process_cpu_percent(42.0, 0), 42.0);
     }
 
     #[test]
