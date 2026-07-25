@@ -1,24 +1,21 @@
-# Beebeeb Desktop 0.6.0 — Linux thumbnails, file search, and a real notification system
+# Beebeeb Desktop 0.7.0 — restore an old version of a file
 
-Three independent improvements: Linux gets real file previews for the first time, every desktop platform gets file search, and the app's error/status messages move off a pile of one-off banners onto a proper notification system.
+You can now browse and restore earlier versions of a file directly from desktop, without ever leaving the app.
 
 ### What's New
 
-- **Linux thumbnails.** Files synced to Linux now get real preview thumbnails in your file manager — GNOME Files (Nautilus), Dolphin, and most others pick them up automatically, the same way Dropbox or Nextcloud thumbnails work. No extra setup. (Windows already had this; this closes the gap.)
-- **File search.** Type to find a file by name from anywhere in the app via a quick-open dialog. This reuses the same encrypted search index the web app already uses — searching works the same way and finds the same files whether you're on desktop or in the browser.
-- **Toast notifications.** Status messages ("Settings saved," connection issues, and similar) now appear as a consistent toast instead of each screen inventing its own banner. Confirmation dialogs are also now fully keyboard-navigable — Tab no longer escapes out of an open dialog into the page behind it.
+- **Version history.** Open the version history dialog, find a file, and see every earlier version with its size and timestamp. Restoring an old version queues the restore through the same reliable background sync mechanism the rest of the app already uses — you'll get a confirmation the moment it's queued, and the file updates on the next sync tick, the same way any other change does.
+- This uses server infrastructure that already existed and already worked — desktop just never had a way to reach it until now.
 
 ### Bug Fixes / Hardening
 
-- Fixed a real accessibility bug in notification settings where a checkbox's label wasn't properly associated with its control.
-- Fixed a real missing-dependency bug in the sync status view, caught by newly-enabled linting rather than by a user hitting a stale-data edge case.
-- Added a working lint gate to the codebase (accessibility + React rules) so issues like the two above get caught before they ship, not after.
+- The existing conflict-resolution page's restore action now uses the same reliable, queued restore path as the new version history dialog, instead of racing an immediate request first. Its confirmation message was also corrected to accurately describe this (previously implied an instant result; now honestly says the restore is queued for the sync engine).
 
 ### Verification
 
-- `cargo test --locked` — 315 passed, 0 failed. `bunx tsc --noEmit` — clean. `bun run lint` — exits 0 against a real, networked dependency install (not just a sandboxed claim). `bun test` — 17 passed, 0 failed.
-- The Linux thumbnail format's technical details (size limits, filename hashing, required metadata) were checked against the actual published freedesktop.org specification, not just generated from memory. The file-search wire protocol was checked line-by-line against the web app's real, already-shipped implementation to confirm both clients actually speak the same protocol.
-- Not verified: real thumbnail pickup in an actual GNOME/KDE file manager (no Linux desktop environment available in this build environment — the cache format itself is verified correct, just not watched render in a real file manager window). Not verified on real hardware generally.
+- `cargo test --locked` — 317 passed, 0 failed. `bunx tsc --noEmit` — clean. `bun run lint` — exits 0. `bun test` — 19 passed, 0 failed.
+- Because this release changes the behavior of an existing command (used by an existing page, not just the new one), that change was checked specifically for side effects: every place in the app that listens for the events involved was read and confirmed to still behave correctly.
+- Not verified: this feature has not been exercised on real hardware, and no live two-device version-history scenario has been run against a production server.
 
 ### Install / Update
 
