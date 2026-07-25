@@ -115,6 +115,7 @@ export interface SharedRoot {
   name: string
   owner_email?: string
   permission: 'read' | 'write' | 'admin'
+  kind: 'file' | 'folder'
   finder_path?: string | null
 }
 

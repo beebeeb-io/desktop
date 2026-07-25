@@ -1,6 +1,16 @@
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, type SharedRoot } from '../desktopApi'
 
+function permissionLabel(permission: SharedRoot['permission']): string {
+  if (permission === 'admin') return 'Admin'
+  if (permission === 'write') return 'Editable'
+  return 'Read-only'
+}
+
+function kindLabel(kind: SharedRoot['kind']): string {
+  return kind === 'folder' ? 'Folder' : 'File'
+}
+
 export default function Shared() {
   const [roots, setRoots] = useState<SharedRoot[]>([])
   const [loading, setLoading] = useState(true)
@@ -52,9 +62,7 @@ export default function Shared() {
         <div className="empty-state">Loading shared roots…</div>
       ) : roots.length === 0 ? (
         <div className="empty-state">
-          No shared roots are available from the desktop daemon yet. This page is wired for
-          `list_shared_roots` and `open_in_finder` so accepted shares can appear here without
-          changing the UI contract.
+          No accepted shares are available locally yet.
         </div>
       ) : (
         <div className="panel">
@@ -63,11 +71,11 @@ export default function Shared() {
               <div>
                 <div className="row-title">{root.name}</div>
                 <div className="row-detail">
-                  {root.owner_email ?? 'Unknown owner'} · {root.permission}
+                  {root.owner_email ?? 'Unknown owner'} · {permissionLabel(root.permission)} · {kindLabel(root.kind)}
                 </div>
               </div>
               <button className="button" onClick={() => void openRoot(root)}>
-                Open in Finder
+                Open
               </button>
             </div>
           ))}

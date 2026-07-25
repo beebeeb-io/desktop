@@ -29,7 +29,7 @@
 //! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
 //! was a stub returning `anyhow::Err`.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,7 +39,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use beebeeb_types::EncryptedBlob;
+use base64::Engine;
+use beebeeb_types::{CipherSuite, EncryptedBlob};
 use serde::{Deserialize, Serialize};
 
 use crate::api_client::{ApiClient, DesktopUploadInitRequest};
@@ -345,6 +346,11 @@ struct SharedRootMapping {
     is_folder: bool,
     size_bytes: i64,
     content_type: Option<String>,
+    owner_email: Option<String>,
+    sender_public_key: Option<String>,
+    encrypted_file_key: Option<String>,
+    encrypted_folder_key: Option<String>,
+    file_name_encrypted: Option<String>,
     permission_bits: i64,
     approved_at: Option<i64>,
 }
@@ -426,9 +432,9 @@ impl EngineBridge {
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("hydrate operation missing file_id"))?;
                 let dest = if let Some(target_path) = op.target_path.as_deref() {
-                    sync_root.join(target_path.trim_start_matches('/'))
+                    local_file_path_under_sync_root(sync_root, target_path)?
                 } else if let Some(entry) = self.db.get_file(file_id)? {
-                    sync_root.join(entry.path.trim_start_matches('/'))
+                    local_file_path_under_sync_root(sync_root, &entry.path)?
                 } else {
                     return Err(anyhow::anyhow!("hydrate operation target missing from state"));
                 };
@@ -802,6 +808,7 @@ impl EngineBridge {
                 parent_id: None,
                 shared_root_id: None,
                 share_id: None,
+                owner_email: None,
                 permission_bits: PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
                 item_kind: ItemKind::File,
                 content_type: None,
@@ -835,6 +842,127 @@ impl EngineBridge {
         Ok(())
     }
 
+    fn decrypted_direct_shared_root_name(&self, root: &SharedRootMapping) -> Option<String> {
+        let sender_public_key = root.sender_public_key.as_deref()?;
+        let encrypted_file_key = root.encrypted_file_key.as_deref()?;
+        let name_encrypted = root.file_name_encrypted.as_deref()?;
+        let file_key = unwrap_direct_shared_file_key(
+            self.api.master_key(),
+            sender_public_key,
+            &root.file_id,
+            encrypted_file_key,
+        )
+        .ok()?;
+        decrypt_shared_name_with_key(&file_key, name_encrypted)
+    }
+
+    async fn shared_folder_material(
+        &self,
+        root: &SharedRootMapping,
+    ) -> anyhow::Result<(Zeroizing<[u8; 32]>, serde_json::Value)> {
+        let sender_public_key = root
+            .sender_public_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("folder share {} is missing sender_public_key", root.invite_id))?;
+        let encrypted_folder_key = root
+            .encrypted_folder_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("folder share {} is missing encrypted_folder_key", root.invite_id))?;
+        let folder_key = unwrap_folder_share_key(
+            self.api.master_key(),
+            sender_public_key,
+            &root.file_id,
+            encrypted_folder_key,
+        )?;
+        let folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
+        Ok((folder_key, folder_keys_response))
+    }
+
+    fn decrypted_folder_root_name(
+        &self,
+        root: &SharedRootMapping,
+        folder_key: &[u8; 32],
+        folder_keys_response: &serde_json::Value,
+    ) -> Option<String> {
+        let name_encrypted = root.file_name_encrypted.as_deref()?;
+        let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, &root.file_id)?;
+        let file_key = unwrap_child_file_key(folder_key, encrypted_file_key).ok()?;
+        decrypt_shared_name_with_key(&file_key, name_encrypted)
+    }
+
+    fn shared_root_display_name(
+        &self,
+        root: &SharedRootMapping,
+        folder_key: Option<&[u8; 32]>,
+        folder_keys_response: Option<&serde_json::Value>,
+    ) -> String {
+        let item_kind = if root.is_folder {
+            ItemKind::Folder
+        } else {
+            ItemKind::File
+        };
+        let decrypted = if root.is_folder {
+            folder_key
+                .zip(folder_keys_response)
+                .and_then(|(key, keys_response)| self.decrypted_folder_root_name(root, key, keys_response))
+        } else {
+            self.decrypted_direct_shared_root_name(root)
+        };
+
+        decrypted
+            .as_deref()
+            .and_then(safe_shared_leaf_name)
+            .unwrap_or_else(|| shared_placeholder_name(&item_kind).to_string())
+    }
+
+    async fn refresh_shared_folder_children(
+        &self,
+        root: &SharedRootMapping,
+        root_display_name: &str,
+        folder_key: &[u8; 32],
+        folder_keys_response: &serde_json::Value,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let key_map = folder_keys_map(folder_keys_response);
+        let root_path = format!("Shared with me/{root_display_name}");
+        let mut queue: VecDeque<(Option<String>, String, String)> =
+            VecDeque::from([(None, root.file_id.clone(), root_path)]);
+
+        while let Some((api_parent_id, db_parent_id, parent_path)) = queue.pop_front() {
+            let children = self
+                .api
+                .list_shared_folder_files(&root.file_id, api_parent_id.as_deref())
+                .await?;
+
+            for child in children {
+                let Some(child_id) = child["id"].as_str().map(str::to_string) else {
+                    continue;
+                };
+                let child_file_key = key_map
+                    .get(&child_id)
+                    .and_then(|encrypted| unwrap_child_file_key(folder_key, encrypted).ok());
+                let Some(entry) = apply_shared_metadata_file_row(
+                    &self.db,
+                    &child,
+                    root,
+                    now,
+                    Some(db_parent_id.clone()),
+                    &parent_path,
+                    child_file_key.as_ref(),
+                )?
+                else {
+                    continue;
+                };
+
+                if entry.item_kind == ItemKind::Folder {
+                    queue.push_back((Some(child_id.clone()), child_id, entry.path));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn refresh_shared_roots(&self) -> anyhow::Result<SharedRootRefreshOutcome> {
         let body = self.api.list_shared_roots().await?;
         let roots = shared_roots_from_invite_response(&body);
@@ -842,9 +970,33 @@ impl EngineBridge {
         let now = now_secs();
 
         for root in &roots {
+            let mut folder_material = None;
+            if root.is_folder {
+                match self.shared_folder_material(root).await {
+                    Ok((folder_key, folder_keys_response)) => {
+                        folder_material = Some((folder_key, folder_keys_response));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            invite_id = %root.invite_id,
+                            error = %e,
+                            "shared folder key unwrap failed during refresh"
+                        );
+                    }
+                }
+            }
+            let display_name = self.shared_root_display_name(
+                root,
+                folder_material.as_ref().map(|(folder_key, _)| &**folder_key),
+                folder_material.as_ref().map(|(_, keys_response)| keys_response),
+            );
+            let root_path = format!("Shared with me/{display_name}");
+            crate::reject_unsafe_rel_path(&root_path)
+                .map_err(|e| anyhow::anyhow!("unsafe shared root path for {}: {e}", root.file_id))?;
+
             self.db.upsert_file(&FileEntry {
                 file_id: root.file_id.clone(),
-                path: format!("Shared with me/{}", root.display_name),
+                path: root_path,
                 status: FileStatus::CloudOnly,
                 size_bytes: root.size_bytes,
                 modified_at: root.approved_at.unwrap_or(now),
@@ -868,6 +1020,7 @@ impl EngineBridge {
             contract.parent_id = None;
             contract.shared_root_id = Some(root.file_id.clone());
             contract.share_id = Some(root.invite_id.clone());
+            contract.owner_email = root.owner_email.clone();
             contract.permission_bits = root.permission_bits;
             contract.item_kind = if root.is_folder {
                 ItemKind::Folder
@@ -877,6 +1030,18 @@ impl EngineBridge {
             contract.content_type = root.content_type.clone();
             contract.last_sync_at = now;
             self.db.set_file_contract_state(&contract)?;
+
+            if let Some((folder_key, folder_keys_response)) = folder_material
+                && let Err(e) = self
+                    .refresh_shared_folder_children(root, &display_name, &folder_key, &folder_keys_response, now)
+                    .await
+            {
+                tracing::warn!(
+                    invite_id = %root.invite_id,
+                    error = %e,
+                    "shared folder child refresh failed"
+                );
+            }
         }
 
         let removed = self.db.purge_revoked_shared_content(&active_shared_root_ids)?;
@@ -1791,8 +1956,9 @@ impl EngineBridge {
     ///    shows a spinner immediately.
     /// 2. Fetch fresh metadata to learn `chunk_count` (the local
     ///    placeholder may not have it).
-    /// 3. Derive per-file key via `beebeeb_core::kdf::derive_file_key`
-    ///    over the file's UUID bytes (NOT the string).
+    /// 3. Resolve the per-file key. Owned files derive it from the master key;
+    ///    shared-with-me files unwrap the sender-provided key envelope using
+    ///    the share invite's X25519/HKDF contract.
     /// 4. For each chunk index: GET the bytes, parse as
     ///    `EncryptedBlob` JSON, decrypt with `decrypt_chunk`,
     ///    accumulate plaintext.
@@ -1808,6 +1974,7 @@ impl EngineBridge {
     /// instead** — that variant never writes plaintext to disk, satisfying the
     /// zero-knowledge requirement for on-demand CF hydration.
     pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
+        self.ensure_shared_hydrate_path_safe(file_id)?;
         // RAII-style: any early return below the status flip should
         // leave the file in `Error`, not `Downloading`. We do that by
         // wrapping the body in an inner async fn whose Err branch we
@@ -1843,6 +2010,23 @@ impl EngineBridge {
                 Err(e)
             }
         }
+    }
+
+    fn ensure_shared_hydrate_path_safe(&self, file_id: &str) -> anyhow::Result<()> {
+        let Some(contract) = self.db.get_file_contract_state(file_id)? else {
+            return Ok(());
+        };
+        if contract.namespace != Namespace::SharedWithMe {
+            return Ok(());
+        }
+
+        let entry = self
+            .db
+            .get_file(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("shared hydrate target missing state row for {file_id}"))?;
+        crate::reject_unsafe_rel_path(&entry.path)
+            .map_err(|e| anyhow::anyhow!("unsafe shared hydrate path for {file_id}: {e}"))?;
+        Ok(())
     }
 
     /// Download `file_id` from the vault, decrypt, and return the plaintext
@@ -1898,6 +2082,65 @@ impl EngineBridge {
     /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
     /// handle that themselves so the disk-write decision stays at the call site,
     /// not buried inside the crypto loop.
+    fn owned_file_key(&self, file_id: &str) -> beebeeb_core::kdf::FileKey {
+        let mk_bytes: [u8; 32] = *self.api.master_key();
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
+        beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes())
+    }
+
+    async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+        let Some(contract) = self.db.get_file_contract_state(file_id)? else {
+            return Ok(self.owned_file_key(file_id));
+        };
+        if contract.namespace != Namespace::SharedWithMe {
+            return Ok(self.owned_file_key(file_id));
+        }
+        if !contract.can_read() {
+            anyhow::bail!("shared item is not readable");
+        }
+
+        let share_id = contract
+            .share_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("shared item is missing invite id"))?;
+        let body = self.api.list_shared_roots().await?;
+        let invite = body
+            .get("invites")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .find(|invite| shared_invite_id_matches(invite, share_id))
+            .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} was not returned by the server"))?;
+        let mapping = shared_root_from_invite(invite)
+            .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} is not approved or is malformed"))?;
+        let sender_public_key = mapping
+            .sender_public_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} is missing sender_public_key"))?;
+
+        if mapping.is_folder {
+            let encrypted_folder_key = mapping
+                .encrypted_folder_key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("folder share {share_id} is missing encrypted_folder_key"))?;
+            let folder_keys = self.api.get_folder_keys(share_id).await?;
+            unwrap_folder_share_file_key(
+                self.api.master_key(),
+                sender_public_key,
+                &mapping.file_id,
+                encrypted_folder_key,
+                file_id,
+                &folder_keys,
+            )
+        } else {
+            let encrypted_file_key = mapping
+                .encrypted_file_key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("share invite {share_id} is missing encrypted_file_key"))?;
+            unwrap_direct_shared_file_key(self.api.master_key(), sender_public_key, file_id, encrypted_file_key)
+        }
+    }
+
     async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
@@ -1913,11 +2156,7 @@ impl EngineBridge {
             .and_then(|v| v.as_i64())
             .ok_or_else(|| anyhow::anyhow!("server response missing chunk_count"))? as u32;
 
-        // Derive the per-file key. MasterKey::from_bytes consumes the
-        // array (it zeroizes on drop), so we copy from the borrow.
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+        let file_key = self.file_key_for_download(file_id).await?;
 
         // Rate-limit ceiling for downloads.
         let download_kbps_limit = crate::config::DesktopConfig::load()
@@ -2061,9 +2300,7 @@ impl EngineBridge {
 
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+        let file_key = self.file_key_for_download(file_id).await?;
         let download_kbps_limit = crate::config::DesktopConfig::load()
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
@@ -2153,11 +2390,7 @@ impl EngineBridge {
             anyhow::bail!("thumbnail blob too short ({} bytes)", blob.len());
         }
 
-        // Derive the per-file key (MasterKey::from_bytes zeroizes the array on
-        // drop; we copy from the borrow exactly like do_hydrate).
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+        let file_key = self.file_key_for_download(file_id).await?;
 
         // Split nonce || ciphertext+tag and AES-256-GCM decrypt with no AAD.
         let (nonce_bytes, ciphertext) = blob.split_at(12);
@@ -2271,7 +2504,7 @@ impl EngineBridge {
             .db
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
-        let dest = sync_root.join(&entry.path);
+        let dest = local_file_path_under_sync_root(sync_root, &entry.path)?;
         // hydrate_file flips Conflict → Downloading → Local on success
         // (or Error on failure). We don't care about the intermediate
         // state for this path.
@@ -2307,7 +2540,7 @@ impl EngineBridge {
     /// `sync_root` is supplied by the caller because the bridge
     /// itself doesn't know it (the runner owns that).
     pub async fn auto_resolve_keep_both(&self, sync_root: &Path, entry: &FileEntry) -> anyhow::Result<String> {
-        let original = sync_root.join(&entry.path);
+        let original = local_file_path_under_sync_root(sync_root, &entry.path)?;
 
         // If the local file no longer exists on disk (user deleted it
         // outside the daemon), Keep Both collapses to Keep Remote.
@@ -2882,17 +3115,9 @@ fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
 }
 
 fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
-    let rel = rel_path.trim_matches('/');
-    if rel.is_empty() {
-        return Err(anyhow::anyhow!("conflict row has an empty local path"));
-    }
-    if rel
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err(anyhow::anyhow!("conflict row has an unsafe local path"));
-    }
-    Ok(sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+    crate::reject_unsafe_rel_path(rel_path)
+        .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
+    Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
 fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) -> anyhow::Result<String> {
@@ -3153,6 +3378,10 @@ fn shared_roots_from_invite_response(body: &serde_json::Value) -> Vec<SharedRoot
         .collect()
 }
 
+fn shared_invite_id_matches(invite: &serde_json::Value, share_id: &str) -> bool {
+    string_field(invite, &["id", "invite_id"]).as_deref() == Some(share_id)
+}
+
 fn shared_root_from_invite(invite: &serde_json::Value) -> Option<SharedRootMapping> {
     if invite.get("status").and_then(|value| value.as_str()) != Some("approved") {
         return None;
@@ -3160,16 +3389,13 @@ fn shared_root_from_invite(invite: &serde_json::Value) -> Option<SharedRootMappi
 
     let invite_id = string_field(invite, &["id", "invite_id"])?;
     let file_id = string_field(invite, &["file_id"])?;
-    let display_name = string_field(
-        invite,
-        &["display_name", "decrypted_name", "filename", "file_name", "name"],
-    )
-    .unwrap_or_else(|| format!("Shared item {}", file_id.chars().take(8).collect::<String>()));
     let is_folder = invite
         .get("is_folder_share")
         .and_then(|value| value.as_bool())
         .or_else(|| invite.get("is_folder").and_then(|value| value.as_bool()))
         .unwrap_or(false);
+    let item_kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
+    let display_name = shared_placeholder_name(&item_kind).to_string();
     let content_type = string_field(invite, &["mime_type", "content_type"]);
     let size_bytes = invite.get("size_bytes").and_then(|value| value.as_i64()).unwrap_or(0);
     let mut permission_bits = PERMISSION_READ;
@@ -3191,6 +3417,11 @@ fn shared_root_from_invite(invite: &serde_json::Value) -> Option<SharedRootMappi
         is_folder,
         size_bytes,
         content_type,
+        owner_email: string_field(invite, &["sender_email", "owner_email", "shared_by"]),
+        sender_public_key: string_field(invite, &["sender_public_key", "owner_public_key"]),
+        encrypted_file_key: string_field(invite, &["encrypted_file_key", "wrapped_file_key"]),
+        encrypted_folder_key: string_field(invite, &["encrypted_folder_key"]),
+        file_name_encrypted: string_field(invite, &["file_name_encrypted", "name_encrypted"]),
         permission_bits,
         approved_at: invite
             .get("approved_at")
@@ -3215,6 +3446,282 @@ fn shared_invite_allows_write(invite: &serde_json::Value) -> bool {
                 "write" | "edit" | "editable" | "editor" | "admin" | "owner"
             )
         })
+}
+
+fn decode_standard_b64(label: &str, value: &str) -> anyhow::Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|e| anyhow::anyhow!("{label} is not valid standard base64: {e}"))
+}
+
+fn decode_x25519_public_key(label: &str, value: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = decode_standard_b64(label, value)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("{label} must be 32 bytes, got {}", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn derive_recipient_share_key(
+    recipient_master_key: &[u8; 32],
+    sender_public_key_b64: &str,
+    file_id: &str,
+) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*recipient_master_key);
+    let recipient_private = beebeeb_core::opaque::derive_x25519_private(&master_key);
+    let sender_public = decode_x25519_public_key("sender_public_key", sender_public_key_b64)?;
+    let shared_secret = beebeeb_core::opaque::x25519_shared_secret(&recipient_private, &sender_public)
+        .map_err(|e| anyhow::anyhow!("derive X25519 shared secret: {e}"))?;
+    Ok(beebeeb_core::opaque::derive_share_key(
+        &shared_secret,
+        file_id.as_bytes(),
+    ))
+}
+
+fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, label: &str) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let raw = decode_standard_b64(label, encrypted_key_b64)?;
+    let frame_key = beebeeb_core::kdf::FileKey::from_bytes(*wrap_key);
+    let plaintext = Zeroizing::new(
+        beebeeb_core::encrypt::decrypt_chunk_raw(&frame_key, &raw)
+            .map_err(|_| anyhow::anyhow!("{label} decrypt failed"))?,
+    );
+    if plaintext.len() != 32 {
+        let len = plaintext.len();
+        anyhow::bail!("{label} decrypted key must be 32 bytes, got {len}");
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(&plaintext);
+    Ok(out)
+}
+
+fn unwrap_direct_shared_file_key(
+    recipient_master_key: &[u8; 32],
+    sender_public_key_b64: &str,
+    file_id: &str,
+    encrypted_file_key_b64: &str,
+) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    let share_key = derive_recipient_share_key(recipient_master_key, sender_public_key_b64, file_id)?;
+    let file_key = unwrap_key_frame(&share_key, encrypted_file_key_b64, "encrypted_file_key")?;
+    Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
+}
+
+fn unwrap_folder_share_key(
+    recipient_master_key: &[u8; 32],
+    sender_public_key_b64: &str,
+    folder_id: &str,
+    encrypted_folder_key_b64: &str,
+) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let share_key = derive_recipient_share_key(recipient_master_key, sender_public_key_b64, folder_id)?;
+    unwrap_key_frame(&share_key, encrypted_folder_key_b64, "encrypted_folder_key")
+}
+
+fn encrypted_file_key_from_folder_keys_response<'a>(
+    folder_keys_response: &'a serde_json::Value,
+    file_id: &str,
+) -> Option<&'a str> {
+    folder_keys_response
+        .get("keys")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .find(|entry| entry.get("file_id").and_then(|value| value.as_str()) == Some(file_id))
+        .and_then(|entry| entry.get("encrypted_file_key").and_then(|value| value.as_str()))
+}
+
+fn unwrap_child_file_key(
+    folder_key: &[u8; 32],
+    encrypted_file_key_b64: &str,
+) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
+    Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
+}
+
+fn unwrap_folder_share_file_key(
+    recipient_master_key: &[u8; 32],
+    sender_public_key_b64: &str,
+    folder_id: &str,
+    encrypted_folder_key_b64: &str,
+    file_id: &str,
+    folder_keys_response: &serde_json::Value,
+) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    let folder_key = unwrap_folder_share_key(
+        recipient_master_key,
+        sender_public_key_b64,
+        folder_id,
+        encrypted_folder_key_b64,
+    )?;
+    let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, file_id)
+        .ok_or_else(|| anyhow::anyhow!("folder share is missing encrypted_file_key for {file_id}"))?;
+    unwrap_child_file_key(&folder_key, encrypted_file_key)
+}
+
+fn folder_keys_map(folder_keys_response: &serde_json::Value) -> HashMap<String, String> {
+    folder_keys_response
+        .get("keys")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some((
+                entry.get("file_id")?.as_str()?.to_string(),
+                entry.get("encrypted_file_key")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn json_timestamp_secs(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        let field = value.get(*key)?;
+        field.as_i64().or_else(|| field.as_str().and_then(parse_rfc3339_secs))
+    })
+}
+
+fn item_kind_from_metadata(f: &serde_json::Value) -> ItemKind {
+    if f["is_folder"].as_bool().unwrap_or(false)
+        || f["kind"].as_str() == Some("folder")
+        || f["type"].as_str() == Some("folder")
+    {
+        ItemKind::Folder
+    } else {
+        ItemKind::File
+    }
+}
+
+fn shared_placeholder_name(item_kind: &ItemKind) -> &'static str {
+    match item_kind {
+        ItemKind::Folder => "Encrypted folder",
+        ItemKind::File => "Encrypted file",
+    }
+}
+
+fn safe_shared_leaf_name(name: &str) -> Option<String> {
+    let leaf = name.trim();
+    if crate::reject_unsafe_rel_path(leaf).is_err() || leaf.contains('/') || leaf.contains('\\') {
+        return None;
+    }
+    if leaf.is_empty() {
+        return None;
+    }
+    Some(leaf.to_string())
+}
+
+fn metadata_name_from_plaintext(plaintext: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(plaintext)
+        .ok()
+        .and_then(|value| value.get("name").and_then(|name| name.as_str()).map(str::to_string))
+        .unwrap_or_else(|| plaintext.to_string())
+}
+
+fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
+    if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted)
+        && let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob)
+    {
+        return Some(metadata_name_from_plaintext(&plaintext));
+    }
+
+    if let Ok((nonce, ciphertext)) = beebeeb_core::metadata_wire::parse_encrypted_metadata(name_encrypted) {
+        let blob = EncryptedBlob {
+            cipher_suite: CipherSuite::V1Aes256Gcm,
+            nonce,
+            ciphertext,
+        };
+        if let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
+            return Some(metadata_name_from_plaintext(&plaintext));
+        }
+    }
+
+    None
+}
+
+fn shared_name_from_metadata(
+    f: &serde_json::Value,
+    item_kind: &ItemKind,
+    file_key: Option<&beebeeb_core::kdf::FileKey>,
+) -> String {
+    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str()) {
+        if let Some(name) = decrypt_shared_name_with_key(key, name_encrypted) {
+            if let Some(leaf) = safe_shared_leaf_name(&name) {
+                return leaf;
+            }
+        }
+    }
+
+    shared_placeholder_name(item_kind).to_string()
+}
+
+fn apply_shared_metadata_file_row(
+    db: &StateDb,
+    f: &serde_json::Value,
+    root: &SharedRootMapping,
+    now: i64,
+    parent_id: Option<String>,
+    parent_rel_path: &str,
+    file_key: Option<&beebeeb_core::kdf::FileKey>,
+) -> anyhow::Result<Option<FileEntry>> {
+    let file_id = f["id"].as_str().unwrap_or_default();
+    if file_id.is_empty() {
+        return Ok(None);
+    }
+
+    let existing = db.get_file(file_id)?;
+    let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
+    let remote_updated = json_timestamp_secs(f, &["updated_at", "uploaded_at", "created_at"]).unwrap_or(now);
+    let item_kind = item_kind_from_metadata(f);
+    let leaf = shared_name_from_metadata(f, &item_kind, file_key);
+    let path = if parent_rel_path.is_empty() {
+        leaf
+    } else {
+        format!("{}/{}", parent_rel_path.trim_end_matches('/'), leaf)
+    };
+    crate::reject_unsafe_rel_path(&path).map_err(|e| anyhow::anyhow!("unsafe shared item path for {file_id}: {e}"))?;
+    let status = existing
+        .as_ref()
+        .map(|entry| entry.status.clone())
+        .unwrap_or(FileStatus::CloudOnly);
+
+    let entry = FileEntry {
+        file_id: file_id.to_string(),
+        path,
+        status,
+        size_bytes: size,
+        modified_at: remote_updated,
+        content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
+        remote_updated_at: remote_updated,
+        parent_id: parent_id.clone(),
+        item_kind: item_kind.clone(),
+    };
+    db.upsert_file(&entry)?;
+
+    let mut contract = db
+        .get_file_contract_state(file_id)?
+        .ok_or_else(|| anyhow::anyhow!("missing state row for shared item {file_id}"))?;
+    contract.namespace = Namespace::SharedWithMe;
+    contract.parent_id = parent_id;
+    contract.shared_root_id = Some(root.file_id.clone());
+    contract.share_id = Some(root.invite_id.clone());
+    contract.owner_email = root.owner_email.clone();
+    contract.permission_bits = root.permission_bits;
+    contract.item_kind = item_kind;
+    contract.content_type = f["content_type"]
+        .as_str()
+        .or_else(|| f["mime_type"].as_str())
+        .map(str::to_string);
+    contract.current_version = f["current_version"]
+        .as_i64()
+        .or_else(|| f["version"].as_i64())
+        .or_else(|| f["version_number"].as_i64())
+        .unwrap_or(contract.current_version);
+    contract.current_object_version_id = f["current_object_version_id"]
+        .as_str()
+        .or_else(|| f["object_version_id"].as_str())
+        .map(str::to_string)
+        .or(contract.current_object_version_id);
+    contract.last_sync_at = now;
+    db.set_file_contract_state(&contract)?;
+    Ok(Some(entry))
 }
 
 fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -3375,6 +3882,7 @@ fn apply_metadata_file_row(
             parent_id: None,
             shared_root_id: shared_root_id.clone(),
             share_id: share_id.clone(),
+            owner_email: None,
             permission_bits,
             item_kind: item_kind.clone(),
             content_type: None,
@@ -4179,6 +4687,7 @@ fn process_metadata_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::io::Write as _;
     use std::net::TcpListener;
     use std::sync::Mutex;
@@ -5268,9 +5777,242 @@ mod tests {
 
         let roots = shared_roots_from_invite_response(&body);
         assert_eq!(roots.len(), 2);
-        assert_eq!(roots[0].display_name, "Client dropbox");
+        assert_eq!(roots[0].display_name, "Encrypted folder");
         assert_eq!(roots[0].permission_bits, PERMISSION_READ | PERMISSION_SHARE);
         assert_eq!(roots[1].permission_bits, PERMISSION_READ | PERMISSION_WRITE);
+    }
+
+    #[test]
+    fn shared_invite_id_match_does_not_match_same_root_wrong_invite() {
+        let wrong_invite_same_root = serde_json::json!({
+            "id": "invite-wrong",
+            "file_id": "root-folder",
+            "status": "approved"
+        });
+        let right_invite_different_root = serde_json::json!({
+            "invite_id": "invite-target",
+            "file_id": "other-root",
+            "status": "approved"
+        });
+
+        assert!(!shared_invite_id_matches(&wrong_invite_same_root, "invite-target"));
+        assert!(shared_invite_id_matches(&right_invite_different_root, "invite-target"));
+    }
+
+    fn fixed_aes_gcm_frame(key: &[u8; 32], nonce_byte: u8, plaintext: &[u8]) -> Vec<u8> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+        let cipher = Aes256Gcm::new_from_slice(key).unwrap();
+        let nonce_bytes = [nonce_byte; 12];
+        let mut out = nonce_bytes.to_vec();
+        let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce_bytes), plaintext).unwrap();
+        out.extend_from_slice(&ciphertext);
+        out
+    }
+
+    #[test]
+    fn unwrap_folder_share_file_key_fixture_decrypts_content_chunk() {
+        let owner_master = [0x11u8; 32];
+        let recipient_master = [0x22u8; 32];
+        let folder_id = "0bb0f451-986d-43e0-bbef-f1e8acb27a01";
+        let child_id = "4a823d35-3ae2-4fc7-8266-762096405bc7";
+        let folder_key = [0x33u8; 32];
+        let child_file_key = [0x44u8; 32];
+        let plaintext = b"shared plaintext fixture";
+
+        let owner_mk = beebeeb_core::kdf::MasterKey::from_bytes(owner_master);
+        let owner_private = beebeeb_core::opaque::derive_x25519_private(&owner_mk);
+        let owner_public = beebeeb_core::opaque::derive_x25519_public(&owner_private);
+        let recipient_mk = beebeeb_core::kdf::MasterKey::from_bytes(recipient_master);
+        let recipient_private = beebeeb_core::opaque::derive_x25519_private(&recipient_mk);
+        let recipient_public = beebeeb_core::opaque::derive_x25519_public(&recipient_private);
+        let shared_secret = beebeeb_core::opaque::x25519_shared_secret(&owner_private, &recipient_public).unwrap();
+        let share_key = beebeeb_core::opaque::derive_share_key(&shared_secret, folder_id.as_bytes());
+
+        let encrypted_folder_key =
+            base64::engine::general_purpose::STANDARD.encode(fixed_aes_gcm_frame(&share_key, 0xa1, &folder_key));
+        let encrypted_child_file_key =
+            base64::engine::general_purpose::STANDARD.encode(fixed_aes_gcm_frame(&folder_key, 0xb2, &child_file_key));
+        let content_wire = fixed_aes_gcm_frame(&child_file_key, 0xc3, plaintext);
+
+        let unwrapped = unwrap_folder_share_file_key(
+            &recipient_master,
+            &base64::engine::general_purpose::STANDARD.encode(owner_public),
+            folder_id,
+            &encrypted_folder_key,
+            child_id,
+            &serde_json::json!({
+                "keys": [{ "file_id": child_id, "encrypted_file_key": encrypted_child_file_key }]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(unwrapped.as_bytes(), &child_file_key);
+        assert_eq!(decrypt_downloaded_chunk(&unwrapped, &content_wire).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn unwrap_folder_share_file_key_web_generated_vector_decrypts_child_key() {
+        // Generated from repos/web/src/lib/folder-share-crypto.ts using the real
+        // encryptFolderKeyForRecipient/encryptChildFileKey functions with
+        // fixed inputs and beebeeb-wasm backing their crypto worker proxy.
+        let recipient_master = [0x22u8; 32];
+        let folder_id = "0bb0f451-986d-43e0-bbef-f1e8acb27a01";
+        let child_id = "4a823d35-3ae2-4fc7-8266-762096405bc7";
+        let owner_public_key = "zr4yc0fCIWlQgKPrOGWQG25jB3Kbm13rDDezBBz61Uc=";
+        let encrypted_folder_key = "PVZ8a7JfzaV/m2p53h33xsIHsXtwaFmfcttbly6GoKnRVlnh8V5LbXiwCGFLbZhNLskOuwJX0NJQ3UzJ";
+        let encrypted_child_file_key = "xbKO8C1APBQytc8VqT0mfT5oSaP+8h02CWObRL2kegAOsBbzFE6N4ZLfRQy2m63bLsPBjmNXLEUaHlPu";
+
+        let folder_key =
+            unwrap_folder_share_key(&recipient_master, owner_public_key, folder_id, encrypted_folder_key).unwrap();
+        assert_eq!(&*folder_key, &[0x33u8; 32]);
+
+        let child_key = unwrap_folder_share_file_key(
+            &recipient_master,
+            owner_public_key,
+            folder_id,
+            encrypted_folder_key,
+            child_id,
+            &serde_json::json!({
+                "keys": [{ "file_id": child_id, "encrypted_file_key": encrypted_child_file_key }]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(child_key.as_bytes(), &[0x44u8; 32]);
+    }
+
+    #[test]
+    fn decrypt_shared_name_with_key_rejects_unauthenticated_plaintext_name() {
+        let file_key = beebeeb_core::kdf::FileKey::from_bytes([0x55u8; 32]);
+
+        assert_eq!(
+            decrypt_shared_name_with_key(&file_key, "../../../../.ssh/authorized_keys"),
+            None
+        );
+    }
+
+    #[test]
+    fn decrypt_shared_name_with_key_accepts_authenticated_metadata_name() {
+        let file_key = beebeeb_core::kdf::FileKey::from_bytes([0x55u8; 32]);
+        let plaintext = serde_json::json!({
+            "name": "Quarterly report.txt",
+            "mime_type": "text/plain"
+        })
+        .to_string();
+        let name_encrypted =
+            serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(&file_key, &plaintext).unwrap()).unwrap();
+
+        assert_eq!(
+            decrypt_shared_name_with_key(&file_key, &name_encrypted),
+            Some("Quarterly report.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn shared_metadata_ignores_raw_server_name_fields_when_decrypt_fails() {
+        let file_key = beebeeb_core::kdf::FileKey::from_bytes([0x55u8; 32]);
+        let metadata = serde_json::json!({
+            "id": "child-file",
+            "name_encrypted": "not authenticated ciphertext",
+            "display_name": "../../../../.ssh/authorized_keys",
+            "decrypted_name": "server-claimed.txt",
+            "path": "nested/server-claimed.txt"
+        });
+
+        assert_eq!(
+            shared_name_from_metadata(&metadata, &ItemKind::File, Some(&file_key)),
+            "Encrypted file"
+        );
+    }
+
+    #[test]
+    fn shared_metadata_uses_placeholder_for_authenticated_traversal_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        let root = SharedRootMapping {
+            invite_id: "invite-folder".into(),
+            file_id: "root-folder".into(),
+            display_name: "Shared folder".into(),
+            is_folder: true,
+            size_bytes: 0,
+            content_type: None,
+            owner_email: Some("owner@example.com".into()),
+            sender_public_key: None,
+            encrypted_file_key: None,
+            encrypted_folder_key: None,
+            file_name_encrypted: None,
+            permission_bits: PERMISSION_READ,
+            approved_at: None,
+        };
+        let file_key = beebeeb_core::kdf::FileKey::from_bytes([0x66u8; 32]);
+        let malicious_name = serde_json::json!({
+            "name": "../../../../.ssh/authorized_keys",
+            "mime_type": "text/plain"
+        })
+        .to_string();
+        let name_encrypted =
+            serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(&file_key, &malicious_name).unwrap())
+                .unwrap();
+
+        let entry = apply_shared_metadata_file_row(
+            &db,
+            &serde_json::json!({
+                "id": "child-file",
+                "name_encrypted": name_encrypted,
+                "size_bytes": 12,
+                "is_folder": false,
+            }),
+            &root,
+            1_700_000_000,
+            Some(root.file_id.clone()),
+            "Shared with me/Shared folder",
+            Some(&file_key),
+        )
+        .expect("apply shared metadata")
+        .expect("entry");
+
+        assert_eq!(entry.path, "Shared with me/Shared folder/Encrypted file");
+        crate::reject_unsafe_rel_path(&entry.path).expect("shared path must stay safe");
+    }
+
+    #[test]
+    fn shared_hydrate_write_guard_rejects_persisted_traversal_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "malicious-shared-file".into(),
+                path: "Shared with me/folder/../../outside.txt".into(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 12,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge
+            .db
+            .get_file_contract_state("malicious-shared-file")
+            .unwrap()
+            .unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("root-folder".into());
+        contract.share_id = Some("invite-folder".into());
+        contract.permission_bits = PERMISSION_READ;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+
+        let err = bridge
+            .ensure_shared_hydrate_path_safe("malicious-shared-file")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unsafe shared hydrate path"));
+        assert!(err.contains(".."));
     }
 
     #[test]
