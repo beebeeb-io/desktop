@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   command,
   commandUnavailableLabel,
@@ -10,6 +10,7 @@ import {
 
 const SEARCH_LIMIT = 12
 const SEARCH_DEBOUNCE_MS = 120
+const EMPTY_RESULTS: DesktopSearchResult[] = []
 
 export function SearchGlyph({ size = 14 }: { size?: number }) {
   return (
@@ -63,7 +64,7 @@ export default function DesktopQuickSearch({
   const requestId = useRef(0)
 
   const trimmedQuery = query.trim()
-  const results = response?.results ?? []
+  const results = response?.results ?? EMPTY_RESULTS
   const indexedFileCount = response?.indexed_file_count ?? 0
   const indexSyncing = response?.index_state === 'syncing'
 
@@ -128,7 +129,7 @@ export default function DesktopQuickSearch({
     }
   }, [open, trimmedQuery])
 
-  const revealResult = async (result: DesktopSearchResult) => {
+  const revealResult = useCallback(async (result: DesktopSearchResult) => {
     setOpeningId(result.file_id)
     setNotice(null)
     const opened = await command<void>('open_in_finder', {
@@ -141,7 +142,7 @@ export default function DesktopQuickSearch({
       setNotice(opened.unsupported ? commandUnavailableLabel('open_in_finder') : opened.reason)
     }
     setOpeningId(null)
-  }
+  }, [onClose])
 
   const onInputKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown' && results.length > 0) {
@@ -205,12 +206,14 @@ export default function DesktopQuickSearch({
         ))}
       </div>
     )
-  }, [activeIndex, indexedFileCount, indexSyncing, loading, notice, openingId, results, trimmedQuery])
+  }, [activeIndex, indexedFileCount, indexSyncing, loading, notice, openingId, results, revealResult, trimmedQuery])
 
   if (!open) return null
 
   return (
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- Escape already provides the keyboard-equivalent close action for this non-interactive backdrop click-outside-to-dismiss pattern.
     <div className="quick-search-overlay" onClick={onClose}>
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- This dialog container only stops backdrop clicks; Escape already provides the keyboard-equivalent close action. */}
       <div
         className="quick-search-dialog"
         role="dialog"
