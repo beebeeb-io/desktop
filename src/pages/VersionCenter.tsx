@@ -2,61 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   command,
   commandUnavailableLabel,
+  desktopListFileVersions,
+  desktopRestoreFileVersion,
   formatBytes,
+  restoreVersionId,
   type FileVersionEntry,
   type SyncStatus,
   type VersionConflictEntry,
 } from '../desktopApi'
-
-type RawObject = Record<string, unknown>
-
-function asObject(value: unknown): RawObject | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as RawObject) : null
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null
-}
-
-function asNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function normalizeVersion(value: unknown): FileVersionEntry | null {
-  const raw = asObject(value)
-  if (!raw) return null
-  const id =
-    asString(raw.id) ??
-    asString(raw.version_id) ??
-    asString(raw.object_version_id) ??
-    asString(raw.objectVersionId)
-  if (!id) return null
-
-  return {
-    id,
-    version: asNumber(raw.version) ?? asNumber(raw.version_number) ?? asNumber(raw.versionNumber),
-    object_version_id:
-      asString(raw.object_version_id) ?? asString(raw.objectVersionId) ?? asString(raw.version_id),
-    created_at: asString(raw.created_at) ?? asString(raw.createdAt) ?? asNumber(raw.created_at),
-    size_bytes: asNumber(raw.size_bytes) ?? asNumber(raw.sizeBytes),
-    is_current: raw.is_current === true || raw.current === true,
-    created_by: asString(raw.created_by) ?? asString(raw.createdBy),
-  }
-}
-
-function normalizeVersions(value: unknown): FileVersionEntry[] {
-  const raw = asObject(value)
-  const list = Array.isArray(value)
-    ? value
-    : Array.isArray(raw?.versions)
-      ? raw.versions
-      : Array.isArray(raw?.file_versions)
-        ? raw.file_versions
-        : []
-  return list
-    .map(normalizeVersion)
-    .filter((version): version is FileVersionEntry => version !== null)
-}
+import { useToast } from '../windows/ui'
 
 function formatTimestamp(value: string | number | null | undefined): string {
   if (typeof value === 'number') {
@@ -92,6 +46,7 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
 }
 
 export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: number }) {
+  const { showToast } = useToast()
   const [entries, setEntries] = useState<VersionConflictEntry[]>([])
   const [selected, setSelected] = useState<VersionConflictEntry | null>(null)
   const [versions, setVersions] = useState<FileVersionEntry[]>([])
@@ -140,10 +95,10 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
         return
       }
       setVersionNotice(null)
-      const result = await command<unknown>('list_file_versions', { fileId: selectedEntry.file_id })
+      const result = await desktopListFileVersions(selectedEntry.file_id)
       if (cancelled) return
       if (result.ok) {
-        setVersions(normalizeVersions(result.value))
+        setVersions(result.value.versions)
       } else {
         setVersions([])
         setVersionNotice(result.unsupported ? commandUnavailableLabel('list_file_versions') : result.reason)
@@ -169,19 +124,25 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
 
   const restoreVersion = async (version: FileVersionEntry) => {
     if (!selectedEntry) return
-    const versionId = version.object_version_id ?? version.id
+    const versionId = restoreVersionId(version)
     setRestoring(versionId)
     setVersionNotice(null)
-    const result = await command<unknown>('restore_file_version', {
-      fileId: selectedEntry.file_id,
-      versionId,
-    })
+    const result = await desktopRestoreFileVersion(selectedEntry.file_id, versionId)
     setRestoring(null)
     if (result.ok) {
-      setVersionNotice('Restore created a new current version. The daemon will refresh metadata on the next sync tick.')
+      showToast({
+        title: 'Restore queued',
+        message: `${selectedEntry.file_name} version ${version.version_number ?? version.id} will be restored by the sync engine.`,
+        variant: 'success',
+      })
       return
     }
-    setVersionNotice(result.unsupported ? commandUnavailableLabel('restore_file_version') : result.reason)
+    showToast({
+      title: 'Restore failed',
+      message: result.unsupported ? commandUnavailableLabel('restore_file_version') : result.reason,
+      variant: 'error',
+      durationMs: 9000,
+    })
   }
 
   const metrics = useMemo(() => {
@@ -276,12 +237,12 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                   </div>
                 ) : (
                   versions.map((version) => {
-                    const versionId = version.object_version_id ?? version.id
+                    const versionId = restoreVersionId(version)
                     return (
                       <div className="row" key={version.id}>
                         <div>
                           <div className="row-title">
-                            Version {version.version ?? version.id}
+                            Version {version.version_number ?? version.id}
                             {version.is_current ? ' · current' : ''}
                           </div>
                           <div className="row-detail">

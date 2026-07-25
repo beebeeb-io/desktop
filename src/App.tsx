@@ -10,6 +10,7 @@ import Account from './pages/Account'
 import VersionCenter from './pages/VersionCenter'
 import UpdateBanner from './UpdateBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
+import DesktopVersionHistory, { DesktopVersionHistoryTrigger } from './DesktopVersionHistory'
 import { COMPACT_NAV_ITEMS, compactPageFromString, type CompactPage as Page } from './compactNavigation'
 
 const COMPACT_APP_NAV_EVENT = 'compact-app:navigate'
@@ -25,6 +26,7 @@ export default function App() {
   const [version, setVersion] = useState<string | null>(null)
   const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -105,6 +107,11 @@ export default function App() {
         onOpen={() => setSearchOpen(true)}
         onClose={() => setSearchOpen(false)}
       />
+      <DesktopVersionHistory
+        open={versionHistoryOpen}
+        onOpen={() => setVersionHistoryOpen(true)}
+        onClose={() => setVersionHistoryOpen(false)}
+      />
       <div className="app-shell" style={{ flex: 1 }}>
         <aside className="sidebar">
           <div className="brand">
@@ -116,6 +123,7 @@ export default function App() {
           </div>
 
           <DesktopQuickSearchTrigger onOpen={() => setSearchOpen(true)} />
+          <DesktopVersionHistoryTrigger onOpen={() => setVersionHistoryOpen(true)} />
 
           <div className="nav-group">
             {COMPACT_NAV_ITEMS.map((item) => (
