@@ -46,11 +46,11 @@ describe('updateCheckViewModel', () => {
       kind: 'update_available',
       currentVersion: '0.1.1',
       channel: 'beta',
-      version: '0.1.2-beta.1',
+      version: '0.1.2',
     }
 
     expect(buildUpdateCheckViewModel(state, '0.1.1', 'stable')).toEqual({
-      title: 'Version 0.1.2-beta.1 is available',
+      title: 'Version 0.1.2 is available',
       detail: 'Use the update banner to restart and apply the Beta update.',
       chip: 'Update available',
       tone: 'amber',
@@ -60,7 +60,7 @@ describe('updateCheckViewModel', () => {
   test('maps and shows downgrade-available result without reusing update copy', () => {
     const result: ManualUpdateCheckResult = {
       status: 'downgrade_available',
-      current_version: '0.2.0-beta.1',
+      current_version: '0.2.0',
       current_channel: 'beta',
       channel: 'stable',
       version: '0.1.9',
@@ -72,16 +72,16 @@ describe('updateCheckViewModel', () => {
 
     expect(state).toEqual({
       kind: 'downgrade_available',
-      currentVersion: '0.2.0-beta.1',
+      currentVersion: '0.2.0',
       currentChannel: 'beta',
       channel: 'stable',
       version: '0.1.9',
       body: 'Stable notes',
       releaseNotesUrl: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.1.9',
     })
-    expect(buildUpdateCheckViewModel(state, '0.2.0-beta.1', 'stable')).toEqual({
+    expect(buildUpdateCheckViewModel(state, '0.2.0', 'stable')).toEqual({
       title: 'Stable is at version 0.1.9',
-      detail: 'You are running 0.2.0-beta.1 from the Beta channel. Confirm before downgrading.',
+      detail: 'You are running 0.2.0 from the Beta channel. Confirm before downgrading.',
       chip: 'Downgrade available',
       tone: 'amber',
     })
