@@ -1,21 +1,25 @@
-# Beebeeb Desktop 0.7.0 — restore an old version of a file
+# Beebeeb Desktop 0.8.0 — choose where your files live
 
-You can now browse and restore earlier versions of a file directly from desktop, without ever leaving the app.
+You can now choose which region stores your new uploads directly from desktop, and see the full list of available regions instead of just a passive mention of your current one.
+
+Desktop already showed your storage region in a few places (Settings, Activity, Insights, onboarding) as a simple inline label. What was missing was any way to see the full picture or change it — that gap is closed with a dedicated Data Residency settings section.
 
 ### What's New
 
-- **Version history.** Open the version history dialog, find a file, and see every earlier version with its size and timestamp. Restoring an old version queues the restore through the same reliable background sync mechanism the rest of the app already uses — you'll get a confirmation the moment it's queued, and the file updates on the next sync tick, the same way any other change does.
-- This uses server infrastructure that already existed and already worked — desktop just never had a way to reach it until now.
+- **Data residency settings.** A new "Data residency" section under Settings lists every available storage region with its location (city and country — never the underlying provider, per our brand rule), marks the current default, and lets you pick a different one when more than one is available. Selecting a region updates immediately with a confirmation toast; if the save fails, the selection rolls back and you get a clear error instead of a silently stuck UI.
+- Only one region (Falkenstein, Germany) is live in production today, so the section shows that clearly rather than offering a non-functional choice. The full selection flow is built, tested, and ready for the moment a second region goes live.
 
 ### Bug Fixes / Hardening
 
-- The existing conflict-resolution page's restore action now uses the same reliable, queued restore path as the new version history dialog, instead of racing an immediate request first. Its confirmation message was also corrected to accurately describe this (previously implied an instant result; now honestly says the restore is queued for the sync engine).
+- None this release — this is a pure feature addition. The existing passive region labels used elsewhere in the app (Settings, Activity, Insights, onboarding, Selective Sync) are untouched.
 
 ### Verification
 
-- `cargo test --locked` — 317 passed, 0 failed. `bunx tsc --noEmit` — clean. `bun run lint` — exits 0. `bun test` — 19 passed, 0 failed.
-- Because this release changes the behavior of an existing command (used by an existing page, not just the new one), that change was checked specifically for side effects: every place in the app that listens for the events involved was read and confirmed to still behave correctly.
-- Not verified: this feature has not been exercised on real hardware, and no live two-device version-history scenario has been run against a production server.
+- `cargo test --locked` — 320 passed, 0 failed (317 baseline + 3 new tests covering the set-region request/response shape and the server-error/rollback path).
+- `bunx tsc --noEmit` — clean. `bun run lint` — exits 0. `bun test` — 22 passed, 0 failed.
+- The new client request was checked directly against the real server route handler (`PUT /api/v1/me/region` in the server repo) rather than assumed — request shape, error codes, and response fields all confirmed to match exactly.
+- The optimistic-update-and-rollback logic and the "never show the storage provider name" brand rule were both confirmed by reading the actual UI source, not just a screenshot.
+- Not verified: this feature has not been exercised on real hardware, and there is no live second region to test an actual region switch against in production today.
 
 ### Install / Update
 
