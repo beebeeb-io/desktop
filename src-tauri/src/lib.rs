@@ -38,6 +38,8 @@ mod keychain;
 mod known_folder;
 #[cfg(target_os = "linux")]
 mod linux_fuse;
+#[cfg(target_os = "linux")]
+mod linux_thumbnail;
 #[cfg(all(test, not(target_os = "linux")))]
 mod linux_fuse {
     #[path = "inode_map.rs"]
@@ -2590,6 +2592,30 @@ fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> {
     roots
 }
 
+#[cfg(target_os = "linux")]
+fn remove_linux_freedesktop_thumbnails_for_evicted_files(
+    db: &state_db::StateDb,
+    sync_root: &std::path::Path,
+    file_ids: &[String],
+) {
+    for file_id in file_ids {
+        let entry = match db.get_file(file_id) {
+            Ok(Some(entry)) if !entry.is_dir() => entry,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::debug!(file_id = %file_id, error = %error, "linux thumbnail cleanup skipped: state row unavailable");
+                continue;
+            }
+        };
+        let Some(source_path) = linux_thumbnail::source_path_under_sync_root(sync_root, &entry.path) else {
+            continue;
+        };
+        if let Err(error) = linux_thumbnail::remove_freedesktop_thumbnails(&source_path) {
+            tracing::warn!(file_id = %file_id, error = %error, "linux freedesktop thumbnail cleanup failed");
+        }
+    }
+}
+
 // `pub(crate)` so the Windows Explorer status-flyout command
 // (`windows_cf::status_ui::FreeUpSpaceCommand::Invoke`) can reuse the exact same
 // reclaim path the `free_up_space` IPC uses — one implementation, two callers
@@ -2737,8 +2763,11 @@ fn free_up_space_unix(
     // Flip every unpinned local file to cloud_only in the DB. A budget of 0
     // means "evict everything unpinned."
     let now = now_unix_seconds();
-    db.evict_unpinned_cache_until_under(0, now)
+    let evicted_ids = db
+        .evict_unpinned_cache_until_under(0, now)
         .map_err(|e| format!("evict unpinned cache: {e}"))?;
+    #[cfg(target_os = "linux")]
+    remove_linux_freedesktop_thumbnails_for_evicted_files(db, sync_root, &evicted_ids);
 
     // Delete the actual cache files, bounded to paths under one of the allowed
     // engine cache roots so a bad cache_path can't delete outside the vault.
