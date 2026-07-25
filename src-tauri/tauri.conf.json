@@ -67,7 +67,7 @@
       "endpoints": [
         "https://releases.beebeeb.io/desktop/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk5QTVCOUQwQzA3NEFFQkMKUldTOHJuVEEwTG1sbWI5VjJEQ0tSY081Rm04UjFORnd0K0JXU0xZcW9PdGtqc1RuMzdEbzVUVDkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkFERkQ1OUQ3MzIxOTcKUldTWElYT2QxZC82eG1ocjBUK0ZUZUZqU25JbmFNdmJoZ0w1dnhidDUxREZMd2wycUlDOGpVNloK",
       "windows": {
         "installMode": "passive"
       }

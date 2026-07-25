@@ -62,7 +62,7 @@ is a two-release sequence:
    signed with the new key and verified by installs that already applied N.
 
 For the task-1240 rotation, the transition commit bakes in the new updater public key with minisign
-fingerprint `99A5B9D0C074AEBC`. The old pre-launch key baked into previously released builds had
+fingerprint `C6FADFD59D732197`. The old pre-launch key baked into previously released builds had
 fingerprint `545D7BA77EDEA7E1`. The replacement private key and passphrase must be delivered to
 Guus out of band; do not commit them and do not paste them into release notes, issues, PRs, logs,
 or chat. The CI secret change is deliberately not part of this commit.
@@ -70,7 +70,7 @@ or chat. The CI secret change is deliberately not part of this commit.
 Mechanical checklist for release N:
 
 1. Confirm `src-tauri/tauri.conf.json` contains the new public key fingerprint
-   `99A5B9D0C074AEBC`.
+   `C6FADFD59D732197`.
 2. Confirm repository/organization secrets still point at the old updater signing key. Do not
    update `TAURI_SIGNING_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` yet.
 3. Run the normal release workflow for release N. Its updater packages must be signed by the old
@@ -86,7 +86,7 @@ Mechanical checklist for release N+1:
    confidence that old installs have crossed N, an accepted manual-reinstall fallback, or a
    version-aware update feed that can keep serving N to old clients.
 2. Confirm the N+1 release commit still contains the new public key fingerprint
-   `99A5B9D0C074AEBC`.
+   `C6FADFD59D732197`.
 3. Update CI secrets out of band: `TAURI_SIGNING_PRIVATE_KEY` is the new private key contents, and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is the new passphrase.
 4. Run the normal release workflow for release N+1.
