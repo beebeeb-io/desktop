@@ -4,9 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to release, for example 0.1.0
+        description: Plain semver version to release or promote, for example 0.2.1
         required: true
         type: string
+      channel:
+        description: Channel manifest to publish
+        required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - beta
+          - stable
+      publish_existing:
+        description: Publish only the selected channel manifest for an existing desktop-v<version> release
+        required: true
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -16,9 +30,39 @@ env:
   BUNDLE_IDENTIFIER: io.beebeeb.desktop
 
 jobs:
+  validate-release-inputs:
+    name: Validate release inputs
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate version and channel
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Desktop release version '$RELEASE_VERSION' must be plain semver like 0.2.1. Build-once releases do not bake -alpha/-beta suffixes into artifacts."
+            exit 1
+          fi
+
+          case "$RELEASE_CHANNEL" in
+            alpha|beta|stable) ;;
+            *)
+              echo "::error::Desktop release channel '$RELEASE_CHANNEL' must be alpha, beta, or stable."
+              exit 1
+              ;;
+          esac
+
   validate-release-notes:
     name: Validate release notes
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
+    needs: validate-release-inputs
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,7 +109,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
     needs: validate-release-notes
     runs-on: ${{ matrix.os }}
     permissions:
@@ -129,68 +173,19 @@ jobs:
           # the substitution on the YAML side and the shell only ever sees it
           # as an ordinary, safely-quoted variable.
           RELEASE_VERSION: ${{ inputs.version }}
-          RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
           # Tauri's bundler names every artifact (.msi, .AppImage, .deb, .rpm,
-          # etc.) after tauri.conf.json's own `version` field — it has no idea
-          # about the workflow_dispatch `version` input used for the git tag
-          # and the release-channel manifest. Every prior run happened to use
-          # version=0.1.0, matching the hardcoded config value, so this drift
-          # was invisible; the first release-channel dispatch with a different
-          # version (0.1.1-beta.1) proved bundle filenames stayed "0.1.0"
-          # while the manifest looked for "0.1.1-beta.1" files that never
-          # existed (confirmed 2026-07-02, run 28594881966).
-          #
-          # Validate the shape regardless of platform — stable/beta.N/alpha.N
-          # only — so a malformed input fails fast on every runner, not just
-          # Windows.
-          if [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
-            BUILD_NUM="${BASH_REMATCH[2]}"
-            if (( BUILD_NUM > 49999 )); then
-              echo "::error::beta build number $BUILD_NUM exceeds the MSI-safe range (max 49999)."
-              exit 1
-            fi
-          elif [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
-            BUILD_NUM="${BASH_REMATCH[2]}"
-            if (( BUILD_NUM > 15535 )); then
-              echo "::error::alpha build number $BUILD_NUM exceeds the MSI-safe range (max 15535, offset by 50000)."
-              exit 1
-            fi
-          elif [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Desktop version '$RELEASE_VERSION' must be plain semver for Stable or use -beta.N / -alpha.N prerelease suffixes."
+          # etc.) after tauri.conf.json's own `version` field. Build-once
+          # channel promotion requires these filenames and the baked
+          # BEEBEEB_RELEASE_VERSION to be identical across alpha, beta, and
+          # stable, so the release version is plain semver on every platform.
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Desktop release version '$RELEASE_VERSION' must be plain semver like 0.2.1. Channel is selected separately by the workflow input."
             exit 1
           fi
 
-          # Only the WiX/MSI bundler additionally requires the package
-          # version's pre-release identifier to be numeric-only (<=65535) —
-          # "0.1.1-beta.1" fails Windows builds outright ("optional
-          # pre-release identifier... must be numeric-only", confirmed
-          # 2026-07-02, run 28596233300). Linux/macOS bundle the full text
-          # fine (Linux confirmed green in that same run) — applying the
-          # numeric-only rewrite to every platform would silently rename
-          # Linux/macOS artifacts too, breaking the exact filenames
-          # publish-manifest expects for those platforms (caught before this
-          # landed — the first version of this fix rewrote all three
-          # platforms uniformly). So the rewrite is Windows-only; Linux/macOS
-          # keep the human-readable version tauri.conf.json has always used.
-          #
-          # The REAL human-readable version — needed for correct
-          # update-availability comparison against the channel manifest
-          # (which keeps the full "beta.N"/"alpha.N" text on every platform)
-          # and for the in-app "current version" display — is carried
-          # separately via the $BEEBEEB_RELEASE_VERSION env var on all
-          # platforms, read at `cargo build` time by real_app_version() in
-          # src-tauri/src/lib.rs.
-          if [[ "$RUNNER_OS" == "Windows" && "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
-            MSI_VERSION="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
-          elif [[ "$RUNNER_OS" == "Windows" && "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
-            MSI_VERSION="${BASH_REMATCH[1]}-$((50000 + ${BASH_REMATCH[2]}))"
-          else
-            MSI_VERSION="$RELEASE_VERSION"
-          fi
-
-          jq --arg version "$MSI_VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
           mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           echo "BEEBEEB_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
@@ -306,7 +301,7 @@ jobs:
     # doesn't) would ship with a missing supported platform and no indication anything is wrong.
     # If macOS is re-enabled as an optional platform later, this needs a deliberate per-platform
     # required/optional check again, not a blanket `!cancelled()`.
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -342,11 +337,29 @@ jobs:
 
   publish-manifest:
     name: Publish update manifest
-    # Keep manifest publishing in this workflow instead of a separate `on: release`
-    # workflow. Releases created with the default GITHUB_TOKEN do not trigger other
-    # workflows, so the old publish-release.yml was unreachable and has been removed.
-    if: github.event_name == 'workflow_dispatch'
-    needs: release
+    # Keep manifest publishing in this workflow instead of a separate
+    # `on: release` workflow. Releases created with the default GITHUB_TOKEN do
+    # not trigger other workflows, and publish_existing=true must be able to
+    # promote an already-built desktop-vX.Y.Z release without running build.
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'workflow_dispatch' &&
+        needs.validate-release-inputs.result == 'success' &&
+        (
+          inputs.publish_existing ||
+          (
+            needs.validate-release-notes.result == 'success' &&
+            needs.build.result == 'success' &&
+            needs.release.result == 'success'
+          )
+        )
+      }}
+    needs:
+      - validate-release-inputs
+      - validate-release-notes
+      - build
+      - release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -365,8 +378,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: desktop-v${{ github.event.inputs.version }}
-          VER: ${{ github.event.inputs.version }}
+          TAG: desktop-v${{ inputs.version }}
+          VER: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
 
@@ -374,19 +388,20 @@ jobs:
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
           NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
 
-          if [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            CHANNEL="stable"
-            MANIFEST_PATH="desktop/latest.json"
-          elif [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
-            CHANNEL="beta"
-            MANIFEST_PATH="desktop/beta.json"
-          elif [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
-            CHANNEL="alpha"
-            MANIFEST_PATH="desktop/alpha.json"
-          else
-            echo "::error::Desktop version '$VER' must be plain semver for Stable or use -beta.N / -alpha.N prerelease suffixes."
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Desktop release version '$VER' must be plain semver like 0.2.1. Channel is selected separately by the workflow input."
             exit 1
           fi
+
+          case "$CHANNEL" in
+            stable) MANIFEST_PATH="desktop/latest.json" ;;
+            beta) MANIFEST_PATH="desktop/beta.json" ;;
+            alpha) MANIFEST_PATH="desktop/alpha.json" ;;
+            *)
+              echo "::error::Desktop release channel '$CHANNEL' must be alpha, beta, or stable."
+              exit 1
+              ;;
+          esac
 
           echo "DESKTOP_RELEASE_CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
           echo "DESKTOP_MANIFEST_PATH=$MANIFEST_PATH" >> "$GITHUB_ENV"
@@ -399,32 +414,16 @@ jobs:
           # verified. Missing macOS signatures omit darwin entries instead of
           # blocking Windows/Linux manifest publishing.
           #
-          # Windows is the one platform whose artifact filenames do NOT use
-          # $VER verbatim: the "Set app version for this release" build step
-          # rewrites tauri.conf.json's version to an MSI-safe numeric-only
-          # encoding for Windows only (WiX rejects text pre-release
-          # identifiers like "beta.1" — see that step's comments), so the
-          # actual .msi and NSIS .exe filenames carry that rewritten value.
-          # Mirror the exact same transform here to compute the real filenames.
-          #
           # Keep the Windows updater targets split by installer type. The
           # Tauri updater first searches windows-x86_64-{nsis,msi} based on
           # the bundle type patched into the installed app, then falls back to
           # windows-x86_64. Fresh Windows installs are documented as NSIS
           # setup.exe installs, so the generic fallback intentionally points at
           # NSIS; MSI-installed clients still receive MSI through the typed key.
-          if [[ "$VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
-            WINDOWS_VER="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
-          elif [[ "$VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
-            WINDOWS_VER="${BASH_REMATCH[1]}-$((50000 + ${BASH_REMATCH[2]}))"
-          else
-            WINDOWS_VER="$VER"
-          fi
-
           MACOS_BUNDLE="Beebeeb_${VER}_universal.app.tar.gz"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
-          WINDOWS_NSIS_BUNDLE="Beebeeb_${WINDOWS_VER}_x64-setup.exe"
-          WINDOWS_MSI_BUNDLE="Beebeeb_${WINDOWS_VER}_x64_en-US.msi"
+          WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
+          WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
 
           fetch_sig() {
             curl --proto '=https' --tlsv1.2 -fsSL "$1"
@@ -513,9 +512,9 @@ jobs:
           if git diff --cached --quiet; then
             echo "$DESKTOP_MANIFEST_PATH already up to date"
           else
-            git commit -m "desktop: update $DESKTOP_RELEASE_CHANNEL manifest $TAG"
+            git commit -m "desktop: publish $DESKTOP_RELEASE_CHANNEL manifest $TAG"
             git push
           fi
         env:
           RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
-          TAG: desktop-v${{ github.event.inputs.version }}
+          TAG: desktop-v${{ inputs.version }}

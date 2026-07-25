@@ -5589,6 +5589,31 @@ fn configured_release_channel() -> ReleaseChannel {
     }
 }
 
+fn installed_release_channel_from_config(
+    config: Result<DesktopConfig, String>,
+    version: &str,
+) -> ReleaseChannel {
+    match config {
+        Ok(cfg) => cfg
+            .installed_release_channel
+            .unwrap_or_else(|| release_channel_from_version(version)),
+        Err(error) => {
+            tracing::warn!(%error, "could not load installed release channel; deriving legacy channel from version");
+            release_channel_from_version(version)
+        }
+    }
+}
+
+fn installed_release_channel() -> ReleaseChannel {
+    installed_release_channel_from_config(DesktopConfig::load(), real_app_version())
+}
+
+fn record_installed_release_channel(channel: ReleaseChannel) -> Result<(), String> {
+    let mut cfg = DesktopConfig::load()?;
+    cfg.installed_release_channel = Some(channel);
+    cfg.save()
+}
+
 fn updater_builder_for_release_channel(
     app: &tauri::AppHandle,
     channel: ReleaseChannel,
@@ -5611,14 +5636,11 @@ fn updater_for_release_channel(
 ) -> Result<tauri_plugin_updater::Updater, String> {
     updater_builder_for_release_channel(app, channel)?
         .version_comparator(|_current, release| {
-            // Deliberately ignore Tauri's own `_current` — it's read from
-            // tauri.conf.json's `version`, which release.yml keeps in an
-            // MSI-safe numeric-only shape (WiX rejects text pre-release
-            // identifiers like "beta.1"). That shape can't be compared
-            // meaningfully against the channel manifest's full human-readable
-            // version, so real_app_version() (the actual release version,
-            // carried in via a build-time env var) is the correct "current"
-            // for this comparison instead. See real_app_version() below.
+            // Deliberately ignore Tauri's own `_current` and compare against
+            // real_app_version(), the workflow-provided release version baked
+            // in at compile time. That keeps comparisons aligned with the
+            // channel manifest and preserves legacy prerelease ordering for
+            // users upgrading from pre-build-once releases.
             should_offer_channel_update(real_app_version(), &release.version.to_string())
         })
         .build()
@@ -5637,10 +5659,10 @@ fn manifest_updater_for_release_channel(
         .map_err(|e| e.to_string())
 }
 
-/// The real, human-readable release version ("0.1.1-beta.1"), independent of
-/// tauri.conf.json's MSI-safe numeric-only `version` field. Set by release.yml
-/// as $BEEBEEB_RELEASE_VERSION before `cargo build` runs; falls back to the
-/// Cargo package version for local/dev builds where CI hasn't set it.
+/// The real release version displayed by the app and compared against channel
+/// manifests. Set by release.yml as $BEEBEEB_RELEASE_VERSION before `cargo
+/// build` runs; falls back to the Cargo package version for local/dev builds
+/// where CI hasn't set it.
 fn real_app_version() -> &'static str {
     option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -5714,13 +5736,14 @@ fn manual_update_available_result(
 
 fn manual_update_downgrade_result(
     channel: ReleaseChannel,
+    current_channel: ReleaseChannel,
     current_version: &str,
     version: String,
     body: Option<&str>,
 ) -> ManualUpdateCheckResult {
     ManualUpdateCheckResult::DowngradeAvailable {
         current_version: current_version.to_string(),
-        current_channel: release_channel_from_version(current_version).as_str().to_string(),
+        current_channel: current_channel.as_str().to_string(),
         channel: channel.as_str().to_string(),
         version: version.clone(),
         body: body.unwrap_or("").to_string(),
@@ -5730,13 +5753,20 @@ fn manual_update_downgrade_result(
 
 fn manual_update_result_for_remote(
     channel: ReleaseChannel,
+    current_channel: ReleaseChannel,
     current_version: &str,
     version: String,
     body: Option<&str>,
 ) -> (ManualUpdateCheckResult, Option<UpdateAvailablePayload>) {
     match compare_channel_release_to_current(current_version, &version) {
         Some(std::cmp::Ordering::Less) => (
-            manual_update_downgrade_result(channel, current_version, version, body),
+            manual_update_downgrade_result(
+                channel,
+                current_channel,
+                current_version,
+                version,
+                body,
+            ),
             None,
         ),
         Some(std::cmp::Ordering::Equal) => (
@@ -5786,6 +5816,7 @@ async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateChec
             let version = update.version.to_string();
             let (result, payload) = manual_update_result_for_remote(
                 channel,
+                installed_release_channel(),
                 real_app_version(),
                 version.clone(),
                 update.body.as_deref(),
@@ -5862,6 +5893,8 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
 
+            record_installed_release_channel(channel)
+                .map_err(|e| format!("record installed release channel: {e}"))?;
             app.restart();
         }
         None => {
@@ -5925,6 +5958,8 @@ async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Re
     .await
     .map_err(|e| e.to_string())?;
 
+    record_installed_release_channel(channel)
+        .map_err(|e| format!("record installed release channel: {e}"))?;
     app.restart()
 }
 
@@ -6297,7 +6332,6 @@ async fn check_for_update(app: &tauri::AppHandle) {
                 "update available — notifying frontend"
             );
             let version = update.version.to_string();
-            let release_channel = release_channel_from_version(&version);
             // Emit to the webview so the frontend can show a banner.
             // Frontend listens with: import { listen } from "@tauri-apps/api/event"
             //   await listen("update-available", handler)
@@ -6305,7 +6339,7 @@ async fn check_for_update(app: &tauri::AppHandle) {
                 "update-available",
                 serde_json::json!({
                     "version": version,
-                    "channel": release_channel.as_str(),
+                    "channel": channel.as_str(),
                     "body": update.body.as_deref().unwrap_or(""),
                     "release_notes_url": release_notes_url_for_version(&version),
                 }),
@@ -6594,11 +6628,11 @@ fn next_menu_zoom_scale(current: f64, action: MenuZoomAction) -> f64 {
 }
 
 fn about_metadata() -> AboutMetadata<'static> {
-    let channel = configured_release_channel();
+    let channel = installed_release_channel();
     AboutMetadata {
         name: Some("Beebeeb".to_string()),
         version: Some(real_app_version().to_string()),
-        comments: Some(format!("Release channel: {}", channel.as_str())),
+        comments: Some(format!("Current channel: {}", channel.as_str())),
         website: Some("https://beebeeb.io".to_string()),
         website_label: Some("beebeeb.io".to_string()),
         ..AboutMetadata::default()
@@ -7147,12 +7181,13 @@ mod tests {
         MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
         UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
         classify_finder_install_error, clear_cached_profile, desktop_manifest_path_for_channel, desktop_menu_specs,
-        finder_install_state_from_config, folder_leaf_name, is_disposable_cache_path, manual_update_available_result,
-        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
-        next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, real_app_version,
-        release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
-        should_show_conflict_notification, should_show_quota_warning_notification,
-        should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
+        finder_install_state_from_config, folder_leaf_name, installed_release_channel_from_config,
+        is_disposable_cache_path, manual_update_available_result, manual_update_result_for_remote,
+        manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids, next_menu_zoom_scale,
+        normalize_recovery_phrase_input, now_unix_seconds, real_app_version, release_channel_from_version,
+        release_notes_url_for_version, should_offer_channel_update, should_show_conflict_notification,
+        should_show_quota_warning_notification, should_show_sync_complete_notification, subtree_file_ids,
+        unused_child_path,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
@@ -7506,7 +7541,8 @@ mod tests {
     fn manual_update_result_reports_downgrade_without_banner_payload() {
         let (result, payload) = manual_update_result_for_remote(
             ReleaseChannel::Stable,
-            "0.2.0-beta.1",
+            ReleaseChannel::Beta,
+            "0.2.0",
             "0.1.9".to_string(),
             Some("Stable notes"),
         );
@@ -7515,11 +7551,64 @@ mod tests {
         assert_eq!(
             result,
             ManualUpdateCheckResult::DowngradeAvailable {
-                current_version: "0.2.0-beta.1".to_string(),
+                current_version: "0.2.0".to_string(),
                 current_channel: "beta".to_string(),
                 channel: "stable".to_string(),
                 version: "0.1.9".to_string(),
                 body: "Stable notes".to_string(),
+                release_notes_url: release_notes_url_for_version("0.1.9"),
+            }
+        );
+    }
+
+    #[test]
+    fn installed_release_channel_prefers_persisted_update_provenance_over_version_suffix() {
+        let cfg = DesktopConfig {
+            installed_release_channel: Some(ReleaseChannel::Beta),
+            release_channel: ReleaseChannel::Stable,
+            ..DesktopConfig::default()
+        };
+
+        assert_eq!(
+            installed_release_channel_from_config(Ok(cfg), "0.2.0"),
+            ReleaseChannel::Beta
+        );
+    }
+
+    #[test]
+    fn installed_release_channel_falls_back_to_legacy_version_suffix_when_metadata_is_absent() {
+        assert_eq!(
+            installed_release_channel_from_config(Ok(DesktopConfig::default()), "0.2.0-alpha.1"),
+            ReleaseChannel::Alpha
+        );
+        assert_eq!(
+            installed_release_channel_from_config(
+                Err("config unreadable".to_string()),
+                "0.2.0-beta.1",
+            ),
+            ReleaseChannel::Beta
+        );
+    }
+
+    #[test]
+    fn manual_update_result_keeps_configured_channel_and_installed_channel_separate() {
+        let (result, payload) = manual_update_result_for_remote(
+            ReleaseChannel::Alpha,
+            ReleaseChannel::Beta,
+            "0.2.0-beta.1",
+            "0.1.9".to_string(),
+            Some("Alpha notes"),
+        );
+
+        assert_eq!(payload, None);
+        assert_eq!(
+            result,
+            ManualUpdateCheckResult::DowngradeAvailable {
+                current_version: "0.2.0-beta.1".to_string(),
+                current_channel: "beta".to_string(),
+                channel: "alpha".to_string(),
+                version: "0.1.9".to_string(),
+                body: "Alpha notes".to_string(),
                 release_notes_url: release_notes_url_for_version("0.1.9"),
             }
         );

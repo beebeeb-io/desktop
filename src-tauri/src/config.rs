@@ -226,6 +226,15 @@ pub struct DesktopConfig {
     // behavior.
     #[serde(default)]
     pub release_channel: ReleaseChannel,
+
+    /// Channel provenance for the build currently installed on this machine.
+    ///
+    /// This is separate from `release_channel`: that field is the user's
+    /// selected channel to CHECK, while this field records the channel manifest
+    /// that actually SERVED the installed bits. It is not exposed in
+    /// `DesktopSettings`, so a settings save cannot rewrite update provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_release_channel: Option<ReleaseChannel>,
 }
 
 /// `#[serde(default = ...)]` needs a function returning the default.
@@ -307,6 +316,7 @@ impl Default for DesktopConfig {
             theme: DesktopTheme::System,
             local_cache_limit_bytes: DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
             release_channel: ReleaseChannel::Stable,
+            installed_release_channel: None,
         }
     }
 }
@@ -575,7 +585,9 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopConfig, DesktopSettings, DesktopTheme, default_sync_root_suggestion};
+    use super::{
+        DesktopConfig, DesktopSettings, DesktopTheme, ReleaseChannel, default_sync_root_suggestion,
+    };
 
     // ── Task 0800 — multi-account Phase 1: persisted account id ────────────
 
@@ -774,6 +786,32 @@ mod tests {
         let back: DesktopConfig = toml::from_str(&toml).expect("parse advanced settings");
         assert_eq!(back.theme, DesktopTheme::Dark);
         assert_eq!(back.local_cache_limit_bytes, 0);
+    }
+
+    #[test]
+    fn installed_release_channel_defaults_absent_and_round_trips_separately_from_configured_channel() {
+        let cfg: DesktopConfig =
+            toml::from_str("release_channel = \"alpha\"").expect("parse legacy channel config");
+        assert_eq!(cfg.release_channel, ReleaseChannel::Alpha);
+        assert_eq!(cfg.installed_release_channel, None);
+
+        let mut cfg = DesktopConfig {
+            release_channel: ReleaseChannel::Alpha,
+            installed_release_channel: Some(ReleaseChannel::Beta),
+            ..DesktopConfig::default()
+        };
+        cfg.apply_settings(DesktopSettings {
+            release_channel: Some(ReleaseChannel::Stable),
+            ..DesktopSettings::from(&cfg)
+        });
+
+        assert_eq!(cfg.release_channel, ReleaseChannel::Stable);
+        assert_eq!(cfg.installed_release_channel, Some(ReleaseChannel::Beta));
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialize installed release channel");
+        let back: DesktopConfig = toml::from_str(&toml).expect("parse installed release channel");
+        assert_eq!(back.release_channel, ReleaseChannel::Stable);
+        assert_eq!(back.installed_release_channel, Some(ReleaseChannel::Beta));
     }
 
     #[test]
