@@ -81,11 +81,14 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     }
   }, [])
 
+  const statusLoggedIn = status?.logged_in
+  const statusEngine = status?.engine
+
   useEffect(() => {
-    if (!status) return
-    if (!status.logged_in || status.engine !== 'running') {
+    if (statusLoggedIn == null || statusEngine == null) return
+    if (!statusLoggedIn || statusEngine !== 'running') {
       setStorage(null)
-      setStorageNotice(status.logged_in ? 'Unlock the vault to load storage.' : 'Sign in to load storage.')
+      setStorageNotice(statusLoggedIn ? 'Unlock the vault to load storage.' : 'Sign in to load storage.')
       return
     }
 
@@ -105,7 +108,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     return () => {
       cancelled = true
     }
-  }, [status?.logged_in, status?.engine])
+  }, [statusLoggedIn, statusEngine])
 
   const health = useMemo(() => {
     if (!status) return { label: 'Loading', className: '', detail: 'Waiting for daemon status.' }

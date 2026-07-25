@@ -41,7 +41,7 @@ describe('updateCheckViewModel', () => {
     })
   })
 
-  test('shows update-available handoff copy for the banner flow', () => {
+  test('shows update-available handoff copy for the toast flow', () => {
     const state: ManualUpdateCheckState = {
       kind: 'update_available',
       currentVersion: '0.1.1',
@@ -51,7 +51,7 @@ describe('updateCheckViewModel', () => {
 
     expect(buildUpdateCheckViewModel(state, '0.1.1', 'stable')).toEqual({
       title: 'Version 0.1.2 is available',
-      detail: 'Use the update banner to restart and apply the Beta update.',
+      detail: 'Use the update toast to restart and apply the Beta update.',
       chip: 'Update available',
       tone: 'amber',
     })

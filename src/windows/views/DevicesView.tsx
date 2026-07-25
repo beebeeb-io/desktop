@@ -404,7 +404,6 @@ export default function DevicesView() {
   useEffect(() => {
     const cancel = load()
     return cancel
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Group sessions under their device: device_id → id, else device_hostname → hostname.

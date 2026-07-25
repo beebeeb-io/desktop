@@ -765,7 +765,7 @@ function UpdatesPanel({
     <SettingsSectionShell>
       <PageHeader
         title="Updates"
-        subtitle="Beebeeb checks for updates at launch and every 4 hours. When one is available, the banner appears at the top of the app."
+        subtitle="Beebeeb checks for updates at launch and every 4 hours. When one is available, a toast appears in the app."
       />
 
       <Card style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr) auto auto', alignItems: 'center', gap: 14, padding: '16px 18px', background: T.paper2, marginBottom: 16 }}>
@@ -1102,7 +1102,7 @@ function UpdatesPanel({
         Beebeeb checks for updates automatically at startup and every 4 hours.
       </p>
       <p style={{ margin: 0, fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
-        Updates are verified with a minisign signature before installation. No update is applied without your confirmation via the restart banner.
+        Updates are verified with a minisign signature before installation. No update is applied without your confirmation via the restart toast.
       </p>
     </SettingsSectionShell>
   )

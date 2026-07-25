@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { useToast } from '../windows/ui'
 
 interface DesktopConfig {
   upload_kbps_limit: number
@@ -58,8 +59,8 @@ const TOGGLES: ToggleSpec[] = [
 ]
 
 export default function Notifications() {
+  const { showToast } = useToast()
   const [config, setConfig] = useState<DesktopConfig | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     invoke<DesktopConfig>('get_desktop_config')
@@ -67,11 +68,15 @@ export default function Notifications() {
       .catch((e: unknown) => {
         console.warn('get_desktop_config failed:', e)
         setConfig(DEFAULT_CONFIG)
-        setError(
-          'Notification preferences not yet wired up — toggles shown are defaults and won’t persist.',
-        )
+        showToast({
+          id: 'notification-config-defaults',
+          variant: 'warning',
+          title: 'Notification settings using defaults',
+          message: 'Notification preferences are not wired up yet; toggles shown are defaults and will not persist.',
+          durationMs: 9000,
+        })
       })
-  }, [])
+  }, [showToast])
 
   if (!config) return <p style={{ color: '#9ca3af' }}>Loading…</p>
 
@@ -80,6 +85,13 @@ export default function Notifications() {
     setConfig(next)
     invoke('set_desktop_config', { config: next }).catch((e: unknown) => {
       console.warn('set_desktop_config failed:', e)
+      showToast({
+        id: 'notification-config-save-error',
+        variant: 'error',
+        title: 'Notification setting was not saved',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: null,
+      })
     })
   }
 
@@ -89,47 +101,34 @@ export default function Notifications() {
         Notifications
       </h2>
 
-      {error && (
-        <div
-          style={{
-            background: '#fef3c7',
-            color: '#92400e',
-            border: '1px solid #fde68a',
-            borderRadius: 6,
-            padding: '8px 12px',
-            fontSize: 12,
-            marginBottom: 16,
-          }}
-        >
-          {error}
-        </div>
-      )}
-
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {TOGGLES.map((t) => (
-          <label
-            key={t.key}
-            style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: 10,
-              cursor: 'pointer',
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={config[t.key]}
-              onChange={() => toggle(t.key)}
-              style={{ marginTop: 3 }}
-            />
-            <span>
-              <div style={{ fontWeight: 500, fontSize: 14 }}>{t.label}</div>
-              <div style={{ color: '#6b7280', fontSize: 12 }}>
-                {t.description}
-              </div>
-            </span>
-          </label>
-        ))}
+        {TOGGLES.map((t) => {
+          const inputId = `notification-${t.key}`
+          return (
+            <div
+              key={t.key}
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 10,
+              }}
+            >
+              <input
+                id={inputId}
+                type="checkbox"
+                checked={config[t.key]}
+                onChange={() => toggle(t.key)}
+                style={{ marginTop: 3 }}
+              />
+              <label htmlFor={inputId} style={{ cursor: 'pointer' }}>
+                <span style={{ display: 'block', fontWeight: 500, fontSize: 14 }}>{t.label}</span>
+                <span style={{ display: 'block', color: '#6b7280', fontSize: 12 }}>
+                  {t.description}
+                </span>
+              </label>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
