@@ -1906,6 +1906,59 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn open_in_finder(item_id: String, path: Option<String>) -> Result<(), String> {
+    let _ = path;
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg
+        .sync_root
+        .clone()
+        .ok_or_else(|| "sync root not configured".to_string())?;
+    let db =
+        state_db_for_config(&cfg)?.ok_or_else(|| "The local sync database has not been created yet.".to_string())?;
+    let entry = db
+        .get_file(&item_id)
+        .map_err(|e| format!("read shared item: {e}"))?
+        .ok_or_else(|| "shared item is not available locally yet".to_string())?;
+
+    reject_unsafe_rel_path(&entry.path)?;
+    let local_path = sync_root.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&local_path)
+            .spawn()
+            .map_err(|e| format!("open Finder: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&local_path)
+            .spawn()
+            .map_err(|e| format!("open Explorer: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let open_path = if local_path.is_file() {
+            local_path.parent().unwrap_or(&sync_root)
+        } else {
+            local_path.as_path()
+        };
+        std::process::Command::new("xdg-open")
+            .arg(open_path)
+            .spawn()
+            .map_err(|e| format!("open file manager: {e}"))?;
+        Ok(())
+    }
+}
+
 // ── reveal_and_open_file — security helpers ───────────────────────────────────
 //
 // These helpers are NOT cfg-gated so they compile and are testable on any
@@ -1923,7 +1976,7 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
 ///
 /// Returns `Err(reason)` on any dangerous input.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
+pub(crate) fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
     // 1. Reject empty or whitespace-only input.
     if rel_path.trim().is_empty() {
         return Err("rel_path must not be empty".to_string());
@@ -1950,9 +2003,12 @@ fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
         }
     }
 
-    // 5. Inspect every path component (split on BOTH '/' and '\') for '..'
-    //    to catch traversal in any separator convention.
+    // 5. Inspect every path component (split on BOTH '/' and '\') for
+    //    traversal and ambiguous components in any separator convention.
     for component in rel_path.split(['/', '\\']) {
+        if component.is_empty() || component == "." {
+            return Err("rel_path must not contain empty or '.' components".to_string());
+        }
         if component == ".." {
             return Err("rel_path must not contain '..' components".to_string());
         }
@@ -1975,7 +2031,10 @@ fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
             Component::Prefix(_) => {
                 return Err("rel_path must not contain a drive/UNC prefix".to_string());
             }
-            Component::CurDir | Component::Normal(_) => {}
+            Component::CurDir => {
+                return Err("rel_path must not contain '.' (CurDir) components".to_string());
+            }
+            Component::Normal(_) => {}
         }
     }
 
@@ -2134,6 +2193,16 @@ mod reveal_and_open_file_tests {
     #[test]
     fn rejects_dotdot_mid_path() {
         assert!(reject_unsafe_rel_path("a/../../b").is_err());
+    }
+
+    #[test]
+    fn rejects_current_dir_component() {
+        assert!(reject_unsafe_rel_path("a/./b").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_component() {
+        assert!(reject_unsafe_rel_path("a//b").is_err());
     }
 
     #[test]
@@ -3834,6 +3903,16 @@ struct VaultItem {
     children: Vec<VaultItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct DesktopSharedRoot {
+    id: String,
+    name: String,
+    owner_email: Option<String>,
+    permission: String,
+    kind: String,
+    finder_path: Option<String>,
+}
+
 /// Lightweight, decode-free row used by the pure tree-builder. Decoupling
 /// from `state_db::FileEntry` keeps [`build_vault_tree`] trivially unit
 /// testable without constructing full DB rows.
@@ -3878,6 +3957,72 @@ fn folder_leaf_name(path: &str) -> Option<String> {
 fn folder_fallback_label(id: &str) -> String {
     let short = id.get(..8).unwrap_or(id);
     format!("Folder {short}…")
+}
+
+fn shared_permission_label(bits: i64) -> &'static str {
+    if bits & state_db::PERMISSION_OWNER != 0 {
+        "admin"
+    } else if bits & state_db::PERMISSION_WRITE != 0 {
+        "write"
+    } else {
+        "read"
+    }
+}
+
+fn local_path_under_sync_root(sync_root: &Path, rel_path: &str) -> Option<String> {
+    let rel = rel_path.trim_matches('/');
+    if rel.is_empty()
+        || rel
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    Some(
+        sync_root
+            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn shared_roots_from_db(db: &state_db::StateDb, sync_root: Option<&Path>) -> Result<Vec<DesktopSharedRoot>, String> {
+    let contracts = db
+        .list_contract_states_by_namespace(state_db::Namespace::SharedWithMe)
+        .map_err(|e| format!("list shared roots: {e}"))?;
+    let mut roots = Vec::new();
+
+    for contract in contracts.into_iter().filter(|contract| contract.parent_id.is_none()) {
+        let Some(entry) = db
+            .get_file(&contract.file_id)
+            .map_err(|e| format!("read shared root row: {e}"))?
+        else {
+            continue;
+        };
+        roots.push(DesktopSharedRoot {
+            id: entry.file_id.clone(),
+            name: folder_leaf_name(&entry.path).unwrap_or_else(|| folder_fallback_label(&entry.file_id)),
+            owner_email: contract.owner_email,
+            permission: shared_permission_label(contract.permission_bits).to_string(),
+            kind: match contract.item_kind {
+                state_db::ItemKind::Folder => "folder".to_string(),
+                state_db::ItemKind::File => "file".to_string(),
+            },
+            finder_path: sync_root.and_then(|root| local_path_under_sync_root(root, &entry.path)),
+        });
+    }
+
+    Ok(roots)
+}
+
+#[tauri::command]
+fn list_shared_roots() -> Result<Vec<DesktopSharedRoot>, String> {
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg.sync_root.clone();
+    let Some(db) = state_db_for_config(&cfg)? else {
+        return Ok(Vec::new());
+    };
+    shared_roots_from_db(&db, sync_root.as_deref())
 }
 
 /// Build the nested SelectiveSync folder tree from a flat set of local
@@ -6102,6 +6247,7 @@ pub fn run() {
             install_windows_shell_integration,
             reset_macos_integration,
             open_finder_location,
+            open_in_finder,
             // Task 9 — settings page IPC
             get_desktop_config,
             set_desktop_config,
@@ -6140,6 +6286,7 @@ pub fn run() {
             // Task 0804 — known-folder backup first-run onboarding prompt
             get_known_folder_onboarding_seen,
             mark_known_folder_onboarding_seen,
+            list_shared_roots,
             list_vault_folders,
             list_remote_tree,
             set_recursive_pin,
@@ -7189,7 +7336,7 @@ mod tests {
         is_disposable_cache_path, manual_update_available_result, manual_update_result_for_remote,
         manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids, next_menu_zoom_scale,
         normalize_recovery_phrase_input, now_unix_seconds, real_app_version, release_channel_from_version,
-        release_notes_url_for_version, should_offer_channel_update, should_show_conflict_notification,
+        release_notes_url_for_version, shared_roots_from_db, should_offer_channel_update, should_show_conflict_notification,
         should_show_quota_warning_notification, should_show_sync_complete_notification, subtree_file_ids,
         unused_child_path,
     };
@@ -7362,6 +7509,73 @@ mod tests {
         assert_eq!(items.len(), 12);
         assert_eq!(items[0].name, "file-11.txt");
         assert_eq!(items[11].name, "file-0.txt");
+    }
+
+    #[test]
+    fn list_shared_roots_reads_local_shared_with_me_root_rows() {
+        use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, PERMISSION_READ, PERMISSION_WRITE, StateDb};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+
+        db.upsert_file(&FileEntry {
+            file_id: "root-folder".into(),
+            path: "Shared with me/Quarterly planning".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 0,
+            modified_at: 1_700_000_000,
+            content_hash: None,
+            remote_updated_at: 1_700_000_000,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        })
+        .expect("seed shared root");
+        let mut root_contract = db
+            .get_file_contract_state("root-folder")
+            .expect("contract")
+            .expect("root contract");
+        root_contract.namespace = Namespace::SharedWithMe;
+        root_contract.shared_root_id = Some("root-folder".into());
+        root_contract.share_id = Some("invite-folder".into());
+        root_contract.permission_bits = PERMISSION_READ | PERMISSION_WRITE;
+        root_contract.item_kind = ItemKind::Folder;
+        root_contract.owner_email = Some("owner@example.com".into());
+        db.set_file_contract_state(&root_contract).expect("update contract");
+
+        db.upsert_file(&FileEntry {
+            file_id: "child-file".into(),
+            path: "Shared with me/Quarterly planning/notes.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 12,
+            modified_at: 1_700_000_001,
+            content_hash: None,
+            remote_updated_at: 1_700_000_001,
+            parent_id: Some("root-folder".into()),
+            item_kind: ItemKind::File,
+        })
+        .expect("seed child");
+        let mut child_contract = db
+            .get_file_contract_state("child-file")
+            .expect("contract")
+            .expect("child contract");
+        child_contract.namespace = Namespace::SharedWithMe;
+        child_contract.parent_id = Some("root-folder".into());
+        child_contract.shared_root_id = Some("root-folder".into());
+        child_contract.share_id = Some("invite-folder".into());
+        child_contract.permission_bits = PERMISSION_READ;
+        child_contract.item_kind = ItemKind::File;
+        child_contract.owner_email = Some("owner@example.com".into());
+        db.set_file_contract_state(&child_contract)
+            .expect("update child contract");
+
+        let roots = shared_roots_from_db(&db, None).expect("list shared roots");
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, "root-folder");
+        assert_eq!(roots[0].name, "Quarterly planning");
+        assert_eq!(roots[0].owner_email.as_deref(), Some("owner@example.com"));
+        assert_eq!(roots[0].permission, "write");
+        assert_eq!(roots[0].kind, "folder");
     }
 
     #[test]

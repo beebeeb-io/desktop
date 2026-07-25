@@ -381,6 +381,10 @@ impl ApiClient {
         self.url(&format!("/api/v1/shares/invites/folder-members/{}", encode(folder_id)))
     }
 
+    pub fn folder_keys_url(&self, invite_id: &str) -> String {
+        self.url(&format!("/api/v1/shares/invites/{}/folder-keys", encode(invite_id)))
+    }
+
     pub fn shares_incoming_url(&self) -> String {
         self.url("/api/v1/shares/invites/incoming")
     }
@@ -589,20 +593,36 @@ impl ApiClient {
         shared_folder_id: &str,
         parent_id: Option<&str>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let resp = self
-            .client
-            .get(self.list_files_url(ListFilesScope {
-                parent_id,
-                shared_folder_id: Some(shared_folder_id),
-                trashed: None,
-                cursor: None,
-            }))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
-        let body: serde_json::Value = resp.json().await?;
-        Ok(body["files"].as_array().cloned().unwrap_or_default())
+        const HARD_CAP: usize = 50_000;
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let resp = self
+                .client
+                .get(self.list_files_url(ListFilesScope {
+                    parent_id,
+                    shared_folder_id: Some(shared_folder_id),
+                    trashed: None,
+                    cursor: cursor.as_deref(),
+                }))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send()
+                .await?
+                .error_for_status()?;
+            let body: serde_json::Value = resp.json().await?;
+            let files = body["files"].as_array().cloned().unwrap_or_default();
+            out.extend(files);
+            if out.len() > HARD_CAP {
+                anyhow::bail!("shared folder listing exceeded hard cap of {HARD_CAP}");
+            }
+            cursor = body["next_cursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(out)
     }
 
     /// Enumerate every trashed row by following the `/files?trashed=true`
@@ -755,6 +775,17 @@ impl ApiClient {
         let resp = self
             .client
             .get(self.folder_members_url(folder_id))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    pub async fn get_folder_keys(&self, invite_id: &str) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(self.folder_keys_url(invite_id))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
@@ -1291,6 +1322,10 @@ mod tests {
         assert_eq!(
             client.folder_members_url("folder/one"),
             "https://api.beebeeb.io/api/v1/shares/invites/folder-members/folder%2Fone"
+        );
+        assert_eq!(
+            client.folder_keys_url("invite/one"),
+            "https://api.beebeeb.io/api/v1/shares/invites/invite%2Fone/folder-keys"
         );
         assert_eq!(
             client.shares_incoming_url(),

@@ -346,6 +346,7 @@ pub struct FileContractState {
     pub parent_id: Option<String>,
     pub shared_root_id: Option<String>,
     pub share_id: Option<String>,
+    pub owner_email: Option<String>,
     pub permission_bits: i64,
     pub item_kind: ItemKind,
     pub content_type: Option<String>,
@@ -518,6 +519,7 @@ impl StateDb {
                 parent_id TEXT,
                 shared_root_id TEXT,
                 share_id TEXT,
+                owner_email TEXT,
                 permission_bits INTEGER NOT NULL DEFAULT 0,
                 item_kind TEXT NOT NULL DEFAULT 'file',
                 content_type TEXT,
@@ -584,6 +586,7 @@ impl StateDb {
         ensure_column(&conn, "files", "parent_id", "TEXT")?;
         ensure_column(&conn, "files", "shared_root_id", "TEXT")?;
         ensure_column(&conn, "files", "share_id", "TEXT")?;
+        ensure_column(&conn, "files", "owner_email", "TEXT")?;
         ensure_column(&conn, "files", "permission_bits", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "item_kind", "TEXT NOT NULL DEFAULT 'file'")?;
         ensure_column(&conn, "files", "content_type", "TEXT")?;
@@ -1453,7 +1456,8 @@ impl StateDb {
                cache_bytes = ?14,
                pin_state = ?15,
                inherited_pin_state = ?16,
-               last_sync_at = ?17
+               last_sync_at = ?17,
+               owner_email = ?18
              WHERE file_id = ?1",
             params![
                 state.file_id,
@@ -1472,7 +1476,8 @@ impl StateDb {
                 state.cache_bytes,
                 state.pin_state.as_str(),
                 state.inherited_pin_state.as_str(),
-                state.last_sync_at
+                state.last_sync_at,
+                state.owner_email,
             ],
         )?;
         Ok(())
@@ -1484,7 +1489,7 @@ impl StateDb {
             "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
                     item_kind, content_type, current_version, current_object_version_id,
                     local_base_version, local_hash, cache_path, cache_bytes, pin_state,
-                    inherited_pin_state, last_sync_at
+                    inherited_pin_state, last_sync_at, owner_email
              FROM files WHERE file_id = ?1",
         )?;
         let mut rows = stmt.query(params![file_id])?;
@@ -1495,6 +1500,7 @@ impl StateDb {
                 parent_id: row.get(2)?,
                 shared_root_id: row.get(3)?,
                 share_id: row.get(4)?,
+                owner_email: row.get(17)?,
                 permission_bits: row.get(5)?,
                 item_kind: ItemKind::from_str(&row.get::<_, String>(6)?),
                 content_type: row.get(7)?,
@@ -1519,7 +1525,7 @@ impl StateDb {
             "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
                     item_kind, content_type, current_version, current_object_version_id,
                     local_base_version, local_hash, cache_path, cache_bytes, pin_state,
-                    inherited_pin_state, last_sync_at
+                    inherited_pin_state, last_sync_at, owner_email
              FROM files WHERE namespace = ?1 ORDER BY path ASC",
         )?;
         let rows = stmt.query_map(params![namespace.as_str()], |row| {
@@ -1529,6 +1535,7 @@ impl StateDb {
                 parent_id: row.get(2)?,
                 shared_root_id: row.get(3)?,
                 share_id: row.get(4)?,
+                owner_email: row.get(17)?,
                 permission_bits: row.get(5)?,
                 item_kind: ItemKind::from_str(&row.get::<_, String>(6)?),
                 content_type: row.get(7)?,
@@ -2762,6 +2769,7 @@ mod tests {
             parent_id: Some("parent1".into()),
             shared_root_id: Some("root1".into()),
             share_id: Some("share1".into()),
+            owner_email: None,
             permission_bits: PERMISSION_READ | PERMISSION_WRITE,
             item_kind: ItemKind::Folder,
             content_type: Some("public.folder".into()),
@@ -3441,6 +3449,7 @@ mod tests {
                 parent_id: None,
                 shared_root_id: None,
                 share_id: None,
+                owner_email: None,
                 permission_bits: 0,
                 item_kind: ItemKind::Folder,
                 content_type: None,
@@ -3759,6 +3768,7 @@ mod tests {
                 parent_id: Some(parent_id.to_string()),
                 shared_root_id: None,
                 share_id: None,
+                owner_email: None,
                 permission_bits: PERMISSION_READ,
                 item_kind: kind,
                 content_type: None,
