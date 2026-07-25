@@ -32,6 +32,7 @@
 
 import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { useToast } from './windows/ui'
 
 function DiffLine({
   line,
@@ -59,29 +60,40 @@ function DiffLine({
 }
 
 export default function ConflictWindow() {
+  const { showToast } = useToast()
   const params = new URLSearchParams(window.location.search)
   const fileId = params.get('fileId') ?? ''
   const fileName = params.get('fileName') ?? 'Unknown file'
   const isText = params.get('isText') === 'true'
 
   const [resolved, setResolved] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   async function resolve(choice: 'local' | 'remote' | 'both') {
     if (!fileId) {
-      setError('Missing fileId in URL — window opened without context.')
+      showToast({
+        id: 'conflict-resolution-error',
+        variant: 'error',
+        title: 'Conflict window missing context',
+        message: 'Missing fileId in URL; window opened without context.',
+        durationMs: null,
+      })
       return
     }
     setBusy(true)
-    setError(null)
     try {
       await invoke('resolve_conflict', { fileId, choice })
       setResolved(true)
       setTimeout(() => window.close(), 1500)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
-      setError(`Could not resolve conflict: ${msg}`)
+      showToast({
+        id: 'conflict-resolution-error',
+        variant: 'error',
+        title: 'Could not resolve conflict',
+        message: msg,
+        durationMs: null,
+      })
       setBusy(false)
     }
   }
@@ -120,22 +132,6 @@ export default function ConflictWindow() {
       <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 16 }}>
         This file was modified on two devices. Choose which version to keep.
       </p>
-
-      {error && (
-        <div
-          style={{
-            background: '#fee2e2',
-            color: '#991b1b',
-            border: '1px solid #fecaca',
-            borderRadius: 6,
-            padding: '8px 12px',
-            fontSize: 12,
-            marginBottom: 12,
-          }}
-        >
-          {error}
-        </div>
-      )}
 
       {isText ? (
         <div

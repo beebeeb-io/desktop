@@ -28,6 +28,7 @@ import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
 import WindowsApp from './WindowsApp'
 import { initializeDesktopThemeFromConfig } from './windows/theme'
+import { ToastProvider } from './windows/ui'
 import './design.css'
 
 const container = document.getElementById('root')
@@ -59,4 +60,8 @@ if (which === 'conflict') {
   component = <App />
 }
 
-createRoot(container).render(<StrictMode>{component}</StrictMode>)
+createRoot(container).render(
+  <StrictMode>
+    <ToastProvider>{component}</ToastProvider>
+  </StrictMode>,
+)

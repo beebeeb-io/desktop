@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "lint": "eslint .",
     "preview": "vite preview",
     "macos:fileprovider": "scripts/build-fileprovider-extension.sh",
     "macos:sign-local": "scripts/sign-local-macos-app.sh",
@@ -24,7 +25,11 @@
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react-hooks": "^7.0.1",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.57.1",
     "vite": "^6.0.0"
   }
 }

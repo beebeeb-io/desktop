@@ -428,6 +428,7 @@ export default function WindowsTray() {
         </div>
         <button
           title="Settings"
+          aria-label="Open settings"
           onClick={() => void openSettings()}
           style={{
             width: 28,

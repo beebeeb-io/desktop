@@ -868,7 +868,6 @@ export default function BandwidthView() {
       cancel?.()
       window.clearInterval(id)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const sessionCount = state.phase === 'ready' ? state.sessions.length : null

@@ -3,7 +3,7 @@
  * consumed by WindowsApp + src/windows/views/*.
  */
 
-import { useEffect, useRef, type RefObject } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 
 // ── Design tokens ───────────────────────────────────────────────────────────
 
@@ -240,6 +240,297 @@ export function Card({ children, style }: { children: React.ReactNode; style?: R
   )
 }
 
+// ── Toasts ──────────────────────────────────────────────────────────────────
+
+export type ToastVariant = 'info' | 'success' | 'warning' | 'error'
+
+export interface ToastTone {
+  background: string
+  border: string
+  color: string
+  iconBackground: string
+}
+
+export function toastToneForVariant(variant: ToastVariant): ToastTone {
+  switch (variant) {
+    case 'success':
+      return {
+        background: 'oklch(0.96 0.04 155)',
+        border: 'oklch(0.84 0.08 155)',
+        color: 'oklch(0.28 0.09 155)',
+        iconBackground: 'oklch(0.44 0.11 155)',
+      }
+    case 'warning':
+      return {
+        background: 'oklch(0.97 0.025 255)',
+        border: 'oklch(0.84 0.055 255)',
+        color: 'oklch(0.31 0.08 255)',
+        iconBackground: 'oklch(0.48 0.11 255)',
+      }
+    case 'error':
+      return {
+        background: 'oklch(0.98 0.02 25)',
+        border: 'oklch(0.88 0.05 25)',
+        color: 'oklch(0.42 0.15 25)',
+        iconBackground: 'oklch(0.52 0.17 25)',
+      }
+    case 'info':
+    default:
+      return {
+        background: T.paper,
+        border: T.line2,
+        color: T.ink2,
+        iconBackground: T.ink3,
+      }
+  }
+}
+
+export interface ToastAction {
+  label: string
+  onClick: () => void | Promise<void>
+  ariaLabel?: string
+  disabled?: boolean
+  ariaBusy?: boolean
+}
+
+export interface ToastInput {
+  id?: string
+  title?: React.ReactNode
+  message: React.ReactNode
+  variant?: ToastVariant
+  action?: ToastAction
+  durationMs?: number | null
+  dismissible?: boolean
+}
+
+export interface ToastRecord {
+  id: string
+  title?: React.ReactNode
+  message: React.ReactNode
+  variant: ToastVariant
+  action?: ToastAction
+  durationMs: number | null
+  dismissible: boolean
+  createdAt: number
+}
+
+interface ToastContextValue {
+  showToast: (toast: ToastInput) => string
+  dismissToast: (id: string) => void
+  clearToasts: () => void
+}
+
+const ToastContext = createContext<ToastContextValue | null>(null)
+let toastIdCounter = 0
+
+export function useToast(): ToastContextValue {
+  const context = useContext(ToastContext)
+  if (!context) {
+    throw new Error('useToast must be used inside ToastProvider')
+  }
+  return context
+}
+
+export function ToastProvider({ children }: { children: React.ReactNode }) {
+  const [toasts, setToasts] = useState<ToastRecord[]>([])
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id))
+  }, [])
+
+  const clearToasts = useCallback(() => {
+    setToasts([])
+  }, [])
+
+  const showToast = useCallback((input: ToastInput) => {
+    const id = input.id ?? `toast-${Date.now()}-${toastIdCounter += 1}`
+    const next: ToastRecord = {
+      id,
+      title: input.title,
+      message: input.message,
+      variant: input.variant ?? 'info',
+      action: input.action,
+      durationMs: input.durationMs === undefined ? 6000 : input.durationMs,
+      dismissible: input.dismissible ?? true,
+      createdAt: Date.now(),
+    }
+
+    setToasts((current) => {
+      const existing = current.findIndex((toast) => toast.id === id)
+      if (existing >= 0) {
+        const updated = [...current]
+        updated[existing] = next
+        return updated
+      }
+      return [next, ...current].slice(0, 5)
+    })
+
+    return id
+  }, [])
+
+  const contextValue = useMemo(() => ({ showToast, dismissToast, clearToasts }), [showToast, dismissToast, clearToasts])
+
+  return (
+    <ToastContext.Provider value={contextValue}>
+      {children}
+      <div
+        role="region"
+        aria-label="Notifications"
+        style={{
+          position: 'fixed',
+          top: 14,
+          right: 14,
+          zIndex: 1200,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          width: 'min(360px, calc(100vw - 28px))',
+          pointerEvents: 'none',
+          fontFamily: T.fontSans,
+        }}
+      >
+        {toasts.map((toast) => (
+          <Toast key={toast.id} toast={toast} onDismiss={dismissToast} />
+        ))}
+      </div>
+    </ToastContext.Provider>
+  )
+}
+
+export function Toast({ toast, onDismiss }: { toast: ToastRecord; onDismiss: (id: string) => void }) {
+  const tone = toastToneForVariant(toast.variant)
+  const isError = toast.variant === 'error'
+
+  useEffect(() => {
+    if (toast.durationMs == null || toast.durationMs <= 0) return
+    const timer = window.setTimeout(() => onDismiss(toast.id), toast.durationMs)
+    return () => window.clearTimeout(timer)
+  }, [toast.durationMs, toast.id, onDismiss])
+
+  return (
+    <div
+      role={isError ? 'alert' : 'status'}
+      aria-live={isError ? 'assertive' : 'polite'}
+      style={{
+        pointerEvents: 'auto',
+        display: 'grid',
+        gridTemplateColumns: '18px 1fr auto',
+        gap: 10,
+        alignItems: 'flex-start',
+        padding: '11px 12px',
+        background: tone.background,
+        border: `1px solid ${tone.border}`,
+        borderRadius: 8,
+        boxShadow: 'var(--shadow-2)',
+        color: tone.color,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: 999,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: tone.iconBackground,
+          color: T.paper,
+          fontSize: 12,
+          fontWeight: 700,
+          lineHeight: 1,
+          marginTop: 1,
+        }}
+      >
+        {toast.variant === 'success' ? <NavIcon name="check" size={11} color="currentColor" /> : toast.variant === 'info' ? 'i' : '!'}
+      </span>
+      <div style={{ minWidth: 0 }}>
+        {toast.title && <div style={{ color: T.ink, fontSize: 12.5, fontWeight: 700, lineHeight: 1.35, marginBottom: 2 }}>{toast.title}</div>}
+        <div style={{ fontSize: 12, lineHeight: 1.45, color: tone.color }}>{toast.message}</div>
+        {toast.action && (
+          <button
+            type="button"
+            onClick={() => void toast.action?.onClick()}
+            disabled={toast.action.disabled}
+            aria-label={toast.action.ariaLabel}
+            aria-busy={toast.action.ariaBusy}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              height: 28,
+              marginTop: 9,
+              padding: '0 10px',
+              borderRadius: 6,
+              border: `1px solid ${T.ink}`,
+              background: T.ink,
+              color: T.paper,
+              cursor: toast.action.disabled ? 'not-allowed' : 'pointer',
+              opacity: toast.action.disabled ? 0.65 : 1,
+              fontSize: 11.5,
+              fontFamily: T.fontSans,
+              fontWeight: 700,
+              letterSpacing: 0,
+            }}
+          >
+            {toast.action.label}
+          </button>
+        )}
+      </div>
+      {toast.dismissible && (
+        <button
+          type="button"
+          onClick={() => onDismiss(toast.id)}
+          aria-label="Dismiss notification"
+          style={{
+            width: 22,
+            height: 22,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 6,
+            border: 'none',
+            background: 'transparent',
+            color: T.ink3,
+            cursor: 'pointer',
+            fontSize: 16,
+            lineHeight: 1,
+            padding: 0,
+          }}
+        >
+          &times;
+        </button>
+      )}
+    </div>
+  )
+}
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'textarea:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+function focusableElementsWithin(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => {
+    if (element.tabIndex < 0) return false
+    if (element.getAttribute('aria-hidden') === 'true') return false
+    const style = window.getComputedStyle(element)
+    return style.visibility !== 'hidden' && style.display !== 'none'
+  })
+}
+
+export function modalFocusTargetIndex(currentIndex: number, count: number, direction: 'forward' | 'backward'): number {
+  if (count <= 0) return -1
+  if (currentIndex < 0 || currentIndex >= count) return direction === 'backward' ? count - 1 : 0
+  return direction === 'backward'
+    ? (currentIndex - 1 + count) % count
+    : (currentIndex + 1) % count
+}
+
 // A small reusable modal primitive — extracted from the ad-hoc dialogs already
 // used in WindowsApp.tsx (delete confirmation) and KnownFolderOnboarding.tsx
 // (the fuller `role="dialog"` pattern this follows): fixed translucent
@@ -265,11 +556,31 @@ export function Modal({
   initialFocusRef?: RefObject<HTMLElement | null>
 }) {
   const fallbackFocusRef = useRef<HTMLButtonElement | null>(null)
+  const dialogRef = useRef<HTMLDivElement | null>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     if (!open) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const dialog = dialogRef.current
+      if (!dialog) return
+      const focusable = focusableElementsWithin(dialog)
+      if (focusable.length === 0) {
+        event.preventDefault()
+        fallbackFocusRef.current?.focus()
+        return
+      }
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      const currentIndex = activeElement != null ? focusable.indexOf(activeElement) : -1
+      const targetIndex = modalFocusTargetIndex(currentIndex, focusable.length, event.shiftKey ? 'backward' : 'forward')
+      if (targetIndex < 0) return
+      event.preventDefault()
+      focusable[targetIndex]?.focus()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -277,16 +588,23 @@ export function Modal({
 
   useEffect(() => {
     if (!open) return
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const focusTimer = window.setTimeout(() => {
       const target = initialFocusRef?.current ?? fallbackFocusRef.current
       target?.focus()
     }, 0)
-    return () => window.clearTimeout(focusTimer)
+    return () => {
+      window.clearTimeout(focusTimer)
+      const previous = previousFocusRef.current
+      if (previous && document.contains(previous)) previous.focus()
+      previousFocusRef.current = null
+    }
   }, [open, initialFocusRef])
 
   if (!open) return null
 
   return (
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- Escape already provides the keyboard-equivalent close action for this non-interactive backdrop click-outside-to-dismiss pattern.
     <div
       onClick={onClose}
       style={{
@@ -301,7 +619,9 @@ export function Modal({
         fontFamily: T.fontSans,
       }}
     >
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- This dialog container only stops backdrop clicks; Escape already provides the keyboard-equivalent close action. */}
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={ariaLabel ?? (typeof title === 'string' ? title : undefined)}

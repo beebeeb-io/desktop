@@ -112,7 +112,7 @@ export function buildUpdateCheckViewModel(
     const label = releaseChannelLabel(state.channel)
     return {
       title: `Version ${state.version} is available`,
-      detail: `Use the update banner to restart and apply the ${label} update.`,
+      detail: `Use the update toast to restart and apply the ${label} update.`,
       chip: 'Update available',
       tone: 'amber',
     }

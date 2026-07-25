@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { useToast } from '../windows/ui'
 
 interface DesktopConfig {
   upload_kbps_limit: number
@@ -54,8 +55,8 @@ function formatLimit(kbps: number): string {
 }
 
 export default function Bandwidth() {
+  const { showToast } = useToast()
   const [config, setConfig] = useState<DesktopConfig | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const writeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -66,20 +67,31 @@ export default function Bandwidth() {
         // still renders, and surface the error to the user.
         console.warn('get_desktop_config failed:', e)
         setConfig(DEFAULT_CONFIG)
-        setError(
-          'Limits not yet wired up — values shown are defaults and won’t persist.',
-        )
+        showToast({
+          id: 'bandwidth-config-defaults',
+          variant: 'warning',
+          title: 'Bandwidth settings using defaults',
+          message: 'Limits are not wired up yet; values shown are defaults and will not persist.',
+          durationMs: 9000,
+        })
       })
     return () => {
       if (writeTimer.current) clearTimeout(writeTimer.current)
     }
-  }, [])
+  }, [showToast])
 
   const writeBack = (next: DesktopConfig, immediate = false) => {
     if (writeTimer.current) clearTimeout(writeTimer.current)
     const fire = () => {
       invoke('set_desktop_config', { config: next }).catch((e: unknown) => {
         console.warn('set_desktop_config failed:', e)
+        showToast({
+          id: 'bandwidth-config-save-error',
+          variant: 'error',
+          title: 'Bandwidth settings were not saved',
+          message: e instanceof Error ? e.message : String(e),
+          durationMs: null,
+        })
       })
     }
     if (immediate) fire()
@@ -97,22 +109,6 @@ export default function Bandwidth() {
   return (
     <div>
       <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>Bandwidth</h2>
-
-      {error && (
-        <div
-          style={{
-            background: '#fef3c7',
-            color: '#92400e',
-            border: '1px solid #fde68a',
-            borderRadius: 6,
-            padding: '8px 12px',
-            fontSize: 12,
-            marginBottom: 16,
-          }}
-        >
-          {error}
-        </div>
-      )}
 
       <label
         style={{
