@@ -7,51 +7,16 @@ import SelectiveSync from './pages/SelectiveSync'
 import Bandwidth from './pages/Bandwidth'
 import Notifications from './pages/Notifications'
 import Account from './pages/Account'
-import Shared from './pages/Shared'
 import VersionCenter from './pages/VersionCenter'
 import UpdateBanner from './UpdateBanner'
-
-type Page =
-  | 'status'
-  | 'finder'
-  | 'selective-sync'
-  | 'shared'
-  | 'versions'
-  | 'account'
-  | 'bandwidth'
-  | 'notifications'
+import { COMPACT_NAV_ITEMS, compactPageFromString, type CompactPage as Page } from './compactNavigation'
 
 const COMPACT_APP_NAV_EVENT = 'compact-app:navigate'
-const PAGE_IDS: ReadonlySet<string> = new Set([
-  'status',
-  'finder',
-  'selective-sync',
-  'shared',
-  'versions',
-  'account',
-  'bandwidth',
-  'notifications',
-])
-
-function pageFromString(value: string | null): Page | null {
-  return value != null && PAGE_IDS.has(value) ? (value as Page) : null
-}
 
 function initialPage(): Page {
   const params = new URLSearchParams(window.location.search)
-  return pageFromString(params.get('nav')) ?? 'status'
+  return compactPageFromString(params.get('nav')) ?? 'status'
 }
-
-const NAV: Array<{ id: Page; label: string; icon: string }> = [
-  { id: 'status', label: 'Status', icon: '●' },
-  { id: 'finder', label: 'Finder location', icon: '⌂' },
-  { id: 'selective-sync', label: 'Selective sync', icon: '↓' },
-  { id: 'shared', label: 'Shared roots', icon: '↔' },
-  { id: 'versions', label: 'Versions & conflicts', icon: '⎇' },
-  { id: 'account', label: 'Account & security', icon: '⌘' },
-  { id: 'bandwidth', label: 'Network', icon: '⇅' },
-  { id: 'notifications', label: 'Notifications', icon: '!' },
-]
 
 export default function App() {
   const [page, setPage] = useState<Page>(() => initialPage())
@@ -99,7 +64,7 @@ export default function App() {
       }),
       listen<string>(COMPACT_APP_NAV_EVENT, (event) => {
         if (cancelled) return
-        const next = pageFromString(event.payload)
+        const next = compactPageFromString(event.payload)
         if (next != null) setPage(next)
       }),
     ])
@@ -117,8 +82,6 @@ export default function App() {
         return <SyncFolder />
       case 'selective-sync':
         return <SelectiveSync />
-      case 'shared':
-        return <Shared />
       case 'versions':
         return <VersionCenter refreshSignal={versionCenterRefresh} />
       case 'account':
@@ -146,7 +109,7 @@ export default function App() {
           </div>
 
           <div className="nav-group">
-            {NAV.map((item) => (
+            {COMPACT_NAV_ITEMS.map((item) => (
               <button
                 key={item.id}
                 className={`nav-button ${page === item.id ? 'active' : ''}`}

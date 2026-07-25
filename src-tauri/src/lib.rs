@@ -6346,6 +6346,7 @@ const MENU_OPEN_WEB_APP_ID: &str = "menu_open_web_app";
 const MENU_SETTINGS_ID: &str = "menu_settings";
 const MENU_VIEW_FILES_ID: &str = "menu_view_files";
 const MENU_VIEW_ACTIVITY_ID: &str = "menu_view_activity";
+#[cfg(test)]
 const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
 const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
 const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
@@ -6361,8 +6362,8 @@ const DOCUMENTATION_URL: &str = "https://docs.beebeeb.io";
 const KEYBOARD_SHORTCUTS_URL: &str = "https://docs.beebeeb.io/desktop/keyboard-shortcuts";
 const SERVICE_STATUS_URL: &str = "https://status.beebeeb.io";
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-// The Windows app has no real Shared view yet (task 1186), so the native
-// Shared menu item falls through to Files instead of opening a fake placeholder.
+// The desktop app has no real Shared view yet (task 1186/1243), so any legacy
+// Shared navigation falls through to Files instead of opening a fake placeholder.
 const WINDOWS_MAIN_APP_VIEW_ROUTES: &[&str] = &["files", "activity", "trash"];
 const MENU_ZOOM_MIN: f64 = 0.5;
 const MENU_ZOOM_MAX: f64 = 2.0;
@@ -6372,6 +6373,7 @@ const MENU_ZOOM_STEP: f64 = 0.1;
 enum DesktopMenuView {
     Files,
     Activity,
+    #[cfg_attr(not(test), allow(dead_code))]
     Shared,
     Trash,
 }
@@ -6494,12 +6496,6 @@ const DESKTOP_MENU_SPECS: &[DesktopMenuSpec] = &[
         action: DesktopMenuAction::OpenView(DesktopMenuView::Activity),
     },
     DesktopMenuSpec {
-        id: MENU_VIEW_SHARED_ID,
-        label: "Shared",
-        accelerator: Some("CmdOrCtrl+Digit3"),
-        action: DesktopMenuAction::OpenView(DesktopMenuView::Shared),
-    },
-    DesktopMenuSpec {
         id: MENU_VIEW_TRASH_ID,
         label: "Trash",
         accelerator: Some("CmdOrCtrl+Digit4"),
@@ -6587,7 +6583,7 @@ fn compact_menu_page_for_view(view: DesktopMenuView) -> &'static str {
     match view {
         DesktopMenuView::Files => "finder",
         DesktopMenuView::Activity => "status",
-        DesktopMenuView::Shared => "shared",
+        DesktopMenuView::Shared => "finder",
         // The compact macOS/Linux shell has no Trash page yet; send it to the
         // file surface instead of leaving a dead native item.
         DesktopMenuView::Trash => "finder",
@@ -6628,7 +6624,6 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     let settings = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_SETTINGS_ID))?;
     let view_files = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_FILES_ID))?;
     let view_activity = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_ACTIVITY_ID))?;
-    let view_shared = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_SHARED_ID))?;
     let view_trash = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_TRASH_ID))?;
     let zoom_in = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_ZOOM_IN_ID))?;
     let zoom_out = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_ZOOM_OUT_ID))?;
@@ -6687,7 +6682,6 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
         &[
             &view_files,
             &view_activity,
-            &view_shared,
             &view_trash,
             &PredefinedMenuItem::separator(app)?,
             &zoom_in,
@@ -7156,12 +7150,12 @@ mod tests {
         MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
         MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
         UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
-        classify_finder_install_error, clear_cached_profile, desktop_manifest_path_for_channel, desktop_menu_specs,
-        finder_install_state_from_config, folder_leaf_name, is_disposable_cache_path, manual_update_available_result,
-        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
-        next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, real_app_version,
-        release_channel_from_version, release_notes_url_for_version, should_offer_channel_update,
-        should_show_conflict_notification, should_show_quota_warning_notification,
+        classify_finder_install_error, clear_cached_profile, compact_menu_page_for_view, desktop_manifest_path_for_channel,
+        desktop_menu_specs, finder_install_state_from_config, folder_leaf_name, is_disposable_cache_path,
+        manual_update_available_result, manual_update_result_for_remote, manual_update_up_to_date_result,
+        menu_view_nav_target, newly_excluded_ids, next_menu_zoom_scale, normalize_recovery_phrase_input,
+        now_unix_seconds, real_app_version, release_channel_from_version, release_notes_url_for_version,
+        should_offer_channel_update, should_show_conflict_notification, should_show_quota_warning_notification,
         should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
     };
     use crate::account_dto::AccountProfile;
@@ -7705,7 +7699,10 @@ mod tests {
         assert!(ids.contains(&MENU_OPEN_WEB_APP_ID));
         assert!(ids.contains(&MENU_VIEW_FILES_ID));
         assert!(ids.contains(&MENU_VIEW_ACTIVITY_ID));
-        assert!(ids.contains(&MENU_VIEW_SHARED_ID));
+        assert!(
+            !ids.contains(&MENU_VIEW_SHARED_ID),
+            "hide the dead-end Shared native menu item until real sharing ships"
+        );
         assert!(ids.contains(&MENU_VIEW_TRASH_ID));
         assert!(ids.contains(&MENU_ZOOM_IN_ID));
         assert!(ids.contains(&MENU_ZOOM_OUT_ID));
@@ -7752,6 +7749,11 @@ mod tests {
             menu_view_nav_target(DesktopMenuView::Shared, WINDOWS_MAIN_APP_VIEW_ROUTES),
             "files"
         );
+    }
+
+    #[test]
+    fn compact_shared_view_falls_back_to_finder_until_real_shared_route() {
+        assert_eq!(compact_menu_page_for_view(DesktopMenuView::Shared), "finder");
     }
 
     #[test]
