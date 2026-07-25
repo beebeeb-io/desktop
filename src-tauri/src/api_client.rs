@@ -193,6 +193,24 @@ pub struct UploadChunkResponse {
     pub skipped: Option<bool>,
 }
 
+/// One entry in `GET /api/v1/search-index/shards`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SearchShardRef {
+    pub bucket: u32,
+    pub page: u32,
+    pub version: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchShardManifest {
+    #[serde(default)]
+    shards: Vec<SearchShardRef>,
+}
+
+/// Server cap for one encrypted search shard blob. Core writes <=128 KiB pages;
+/// the API accepts a little extra framing headroom, matching web.
+pub const MAX_SEARCH_SHARD_BLOB_BYTES: usize = 160 * 1024;
+
 // ── Client device + sync-session telemetry (the WRITE/PRODUCE side) ────────────
 //
 // These power the desktop's half of the Bandwidth view: on login the runner
@@ -410,6 +428,14 @@ impl ApiClient {
         }
     }
 
+    pub fn search_shard_manifest_url(&self) -> String {
+        self.url("/api/v1/search-index/shards")
+    }
+
+    pub fn search_shard_url(&self, bucket: u32, page: u32) -> String {
+        self.url(&format!("/api/v1/search-index/shards/{bucket}/{page}"))
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -438,6 +464,74 @@ impl ApiClient {
         let resp = self.send_with_retry(|| self.client.get(&url)).await?;
         let body: serde_json::Value = resp.json().await?;
         Ok(body["files"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// `GET /api/v1/search-index/shards` — web-compatible shard manifest.
+    /// Returns `[]` when the server has no shards or omits the optional wrapper.
+    pub async fn fetch_search_shard_manifest(&self) -> anyhow::Result<Vec<SearchShardRef>> {
+        let url = self.search_shard_manifest_url();
+        let resp = self.send_with_retry(|| self.client.get(&url)).await?;
+        Ok(resp.json::<SearchShardManifest>().await?.shards)
+    }
+
+    /// `GET /api/v1/search-index/shards/{bucket}/{page}` — raw encrypted blob.
+    /// A 404 races a concurrent delete and is treated the same way web does:
+    /// skip the missing shard and let a later rebuild repair the cache.
+    pub async fn get_search_shard(&self, bucket: u32, page: u32) -> anyhow::Result<Option<Vec<u8>>> {
+        let url = self.search_shard_url(bucket, page);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = Self::check_status(resp).await?;
+        Ok(Some(resp.bytes().await?.to_vec()))
+    }
+
+    /// `PUT /api/v1/search-index/shards/{bucket}/{page}` — raw octet-stream
+    /// encrypted shard upload. The body is never JSON.
+    pub async fn put_search_shard(
+        &self,
+        shard: &beebeeb_core::search_index::EncryptedShard,
+    ) -> anyhow::Result<SearchShardRef> {
+        anyhow::ensure!(!shard.blob.is_empty(), "search shard blob must not be empty");
+        anyhow::ensure!(
+            shard.blob.len() <= MAX_SEARCH_SHARD_BLOB_BYTES,
+            "search shard {}/{} blob {}B exceeds cap",
+            shard.bucket,
+            shard.page,
+            shard.blob.len()
+        );
+        let resp = self
+            .client
+            .put(self.search_shard_url(shard.bucket, shard.page))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/octet-stream")
+            .body(shard.blob.clone())
+            .send()
+            .await?;
+        let resp = Self::check_status(resp).await?;
+        Ok(resp.json::<SearchShardRef>().await?)
+    }
+
+    /// `DELETE /api/v1/search-index/shards/{bucket}/{page}` — idempotent stale
+    /// shard removal. 204 and 404 both mean the coordinate is gone.
+    pub async fn delete_search_shard(&self, bucket: u32, page: u32) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .delete(self.search_shard_url(bucket, page))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Self::check_status(resp).await?;
+        Ok(())
     }
 
     /// `GET /api/v1/sync/snapshot` — the ENTIRE non-trashed tree + the latest

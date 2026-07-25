@@ -56,6 +56,7 @@ import {
   type RecentFile,
 } from './desktopApi'
 import UpdateBanner from './UpdateBanner'
+import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card } from './windows/ui'
 import KnownFolderOnboarding from './windows/KnownFolderOnboarding'
 import AccountView from './windows/views/AccountView'
@@ -1606,6 +1607,7 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
 
 export default function WindowsApp() {
   const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
+  const [searchOpen, setSearchOpen] = useState(false)
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [usage, setUsage] = useState<BillingUsage | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -1782,6 +1784,11 @@ export default function WindowsApp() {
           inline — so any view can use them without mounting UpdateBanner). */}
       <style>{'@keyframes bb-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } } @keyframes bb-spin { to { transform: rotate(360deg); } }'}</style>
       <UpdateBanner />
+      <DesktopQuickSearch
+        open={searchOpen}
+        onOpen={() => setSearchOpen(true)}
+        onClose={() => setSearchOpen(false)}
+      />
 
       {/* Known-folder backup onboarding (task 0804). Only meaningful once signed
           in (it enables backup into the signed-in vault). 'auto' self-gates on
@@ -1806,6 +1813,10 @@ export default function WindowsApp() {
               <span style={{ fontWeight: 800, fontSize: 12, color: T.ink, lineHeight: 1 }}>b</span>
             </div>
             <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-0.01em', color: T.ink }}>beebeeb.io</span>
+          </div>
+
+          <div style={{ padding: '0 2px 10px' }}>
+            <DesktopQuickSearchTrigger onOpen={() => setSearchOpen(true)} />
           </div>
 
           {/* Nav sections */}

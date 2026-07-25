@@ -546,6 +546,24 @@ export interface FileOverview {
   pinned_bytes: number
 }
 
+export type DesktopSearchIndexState = 'ready' | 'syncing'
+
+export interface DesktopSearchResult {
+  file_id: string
+  name: string
+  rel_path: string
+  status: string
+  size_bytes: number
+  modified_at: number
+}
+
+export interface DesktopSearchResponse {
+  query: string
+  index_state: DesktopSearchIndexState
+  indexed_file_count: number
+  results: DesktopSearchResult[]
+}
+
 export interface DesktopTrashItem {
   id: string
   name: string
@@ -724,6 +742,15 @@ export function desktopFileOverview(
   recentLimit?: number,
 ): Promise<CommandResult<FileOverview>> {
   return command<FileOverview>('desktop_file_overview', { recentLimit })
+}
+
+/** Query the local desktop file-name search index. Results are local mirror
+ *  entries and are opened via the existing OS file-manager command. */
+export function desktopSearchFiles(
+  query: string,
+  limit?: number,
+): Promise<CommandResult<DesktopSearchResponse>> {
+  return command<DesktopSearchResponse>('desktop_search_files', { query, limit })
 }
 
 export function desktopConfirmAction(password: string): Promise<CommandResult<ConfirmActionResult>> {
