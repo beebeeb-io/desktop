@@ -1,25 +1,21 @@
-# Beebeeb Desktop 0.8.0 — choose where your files live
+# Beebeeb Desktop 0.8.1 — consistent error messages everywhere
 
-You can now choose which region stores your new uploads directly from desktop, and see the full list of available regions instead of just a passive mention of your current one.
-
-Desktop already showed your storage region in a few places (Settings, Activity, Insights, onboarding) as a simple inline label. What was missing was any way to see the full picture or change it — that gap is closed with a dedicated Data Residency settings section.
+A small consistency fix: every error message in the app now appears the same way, instead of three different ad hoc styles depending on which screen you were on.
 
 ### What's New
 
-- **Data residency settings.** A new "Data residency" section under Settings lists every available storage region with its location (city and country — never the underlying provider, per our brand rule), marks the current default, and lets you pick a different one when more than one is available. Selecting a region updates immediately with a confirmation toast; if the save fails, the selection rolls back and you get a clear error instead of a silently stuck UI.
-- Only one region (Falkenstein, Germany) is live in production today, so the section shows that clearly rather than offering a non-functional choice. The full selection flow is built, tested, and ready for the moment a second region goes live.
+- Nothing new — this release is entirely about making existing errors look and behave consistently.
 
 ### Bug Fixes / Hardening
 
-- None this release — this is a pure feature addition. The existing passive region labels used elsewhere in the app (Settings, Activity, Insights, onboarding, Selective Sync) are untouched.
+- **Consistent error presentation.** Task 0.6.0 introduced a shared toast notification system but only migrated 4 of the files that still hand-rolled their own error UI. This release finishes that migration for sign-in, first-run setup, the known-folder backup onboarding flow, the Explorer/Windows integration and launch-at-login settings, and several actions in the main file view (opening the sync folder, toggling a backed-up folder, restoring a file from Trash). Errors that need to stay next to the thing you're fixing — like the recovery-phrase unlock screen, a folder still loading, or the Trash list itself failing to load — were deliberately left as they were; only genuine one-off action failures moved to a toast.
+- **Fixed a real bug along the way:** restoring a file from Trash that failed used to silently replace the entire Trash list with a "Could not load Trash" error card, even though the list had loaded fine — only the restore itself had failed. The restore failure is now its own toast, so the list stays visible.
 
 ### Verification
 
-- `cargo test --locked` — 320 passed, 0 failed (317 baseline + 3 new tests covering the set-region request/response shape and the server-error/rollback path).
-- `bunx tsc --noEmit` — clean. `bun run lint` — exits 0. `bun test` — 22 passed, 0 failed.
-- The new client request was checked directly against the real server route handler (`PUT /api/v1/me/region` in the server repo) rather than assumed — request shape, error codes, and response fields all confirmed to match exactly.
-- The optimistic-update-and-rollback logic and the "never show the storage provider name" brand rule were both confirmed by reading the actual UI source, not just a screenshot.
-- Not verified: this feature has not been exercised on real hardware, and there is no live second region to test an actual region switch against in production today.
+- `bunx tsc --noEmit` — clean. `bun run lint` — exits 0 (the accessibility/hooks gate from 0.6.0). `bun test` — 22 passed, 0 failed.
+- Every changed file was reviewed directly, not just the summary: confirmed each case kept inline is genuinely load-bearing (gates other UI, or is a load-failure state, or is a form the user retries in place), and confirmed no leftover unused code from the removed error states.
+- Not verified: this is a presentation-only change with no functional behavior change, so no real-hardware smoke test was run specifically for it — it ships alongside the existing outstanding real-hardware verification gate for this release cycle.
 
 ### Install / Update
 
