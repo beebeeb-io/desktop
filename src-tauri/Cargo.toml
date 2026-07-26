@@ -151,7 +151,12 @@ beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = "0.14"
+# 0.16 is the minimum version patched for RUSTSEC-2021-0154 (fuser passed a
+# NULL op-list to libfuse's fuse_session_new -> uninitialized reads/leaks in
+# libfuse). Deliberately held at the 0.16 line: 0.17 rewrote the API
+# (mount2 -> mount, Vec<MountOption> -> Config, &mut self -> &self). 0.16's
+# only change vs 0.14 is getattr gaining an fh: Option<u64> parameter.
+fuser = "0.16"
 libc = "0.2"
 
 # Windows Cloud Files API — Phase 2 Task 6 of the desktop sync client
