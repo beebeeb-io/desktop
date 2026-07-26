@@ -65,7 +65,7 @@ impl Filesystem for BeebeebFS {
         reply.entry(&TTL, &file_attr(ino, &entry), 0);
     }
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         if ino == ROOT_INO {
             reply.attr(&TTL, &dir_attr(ROOT_INO));
             return;
