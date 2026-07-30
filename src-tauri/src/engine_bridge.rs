@@ -2078,7 +2078,7 @@ impl EngineBridge {
                 // `write_hydrated_plaintext` fails closed if the final component
                 // is (or race-becomes) a symlink, closing the race atomically at
                 // open() time rather than re-checking-then-hoping.
-                let write_result = write_hydrated_plaintext(dest_path, &buf)
+                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf)
                     .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
@@ -3261,31 +3261,104 @@ fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
 /// to follow a symlink at open() time, so the swap fails the write instead of
 /// redirecting decrypted plaintext outside the allowed root — no re-check race.
 ///
-/// Unix also creates the file `0o600` (owner-only) so freshly decrypted vault
-/// plaintext is never world-readable, even under a world-traversable `/tmp`
-/// (that mode only applies on creation; an existing regular file keeps its own
-/// perms, which is fine — the concern is newly materialized plaintext).
+/// Unix also forces the file to `0o600` (owner-only) via `fchmod` so freshly
+/// decrypted vault plaintext is never world-readable, even under a
+/// world-traversable `/tmp`. `fchmod` (not the `O_CREAT` mode arg) is used
+/// deliberately: POSIX applies the open-time mode ONLY to a newly created inode,
+/// so a pre-existing (e.g. attacker-planted `0o644`) file at a legitimately
+/// in-root path would otherwise keep its permissions and leak the plaintext to
+/// other local users — a deterministic bypass with no race needed.
 ///
-/// Non-unix keeps `std::fs::write` (`O_NOFOLLOW`/mode are Unix-only, and the
-/// Windows Cloud Files path never writes plaintext to disk via this fn — it uses
-/// `hydrate_file_to_memory`).
+/// Defense against a parent-directory swap (task 1247, second review): the leaf
+/// `O_NOFOLLOW` alone only refuses a symlink at the FINAL component; an attacker
+/// could pass containment with a real subdir, then swap that subdir for a
+/// symlink during the download/decrypt window. So the parent directory is opened
+/// with `O_DIRECTORY|O_NOFOLLOW` (fails closed if the parent's own basename is a
+/// symlink) and the leaf is created/written via `openat` RELATIVE to that dir
+/// fd — anchoring the whole write to the directory inode that was
+/// containment-checked, so a later parent swap cannot redirect it. Containment
+/// is re-verified against the freshly-resolved path right before the open, since
+/// the top-of-`hydrate_file` guard ran before `do_hydrate`.
+///
+/// Non-unix keeps `std::fs::write` (`O_NOFOLLOW`/`openat`/`fchmod` are Unix-only,
+/// and the Windows Cloud Files path never writes plaintext to disk via this fn —
+/// it uses `hydrate_file_to_memory`).
+///
+/// Known residual (documented follow-up, not closed here): a same-filesystem
+/// HARD link to a file outside all allowed roots bypasses containment
+/// (canonicalize cannot see hard links), and `O_TRUNC` would overwrite the
+/// linked inode. Noted in the task file.
 #[cfg(unix)]
-fn write_hydrated_plaintext(dest_path: &Path, buf: &[u8]) -> std::io::Result<()> {
+fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(0o600)
-        .open(dest_path)?;
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+
+    let parent = match dest_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let leaf = dest_path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "hydrate destination has no file name"))?;
+
+    // Re-verify containment right before the anchored open. canonicalize()
+    // resolves symlinks, so a parent/ancestor swapped to point outside an
+    // allowed root during the do_hydrate window is caught here.
+    if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "hydrate destination no longer within an allowed root",
+        ));
+    }
+
+    // Anchor to the parent directory inode: O_DIRECTORY|O_NOFOLLOW fails closed
+    // (ELOOP) if the parent's basename is currently a symlink, and the resulting
+    // fd tracks that exact inode so it cannot be swapped out from under us.
+    let dir_c = path_to_cstring(parent.as_os_str())?;
+    let dir_raw = unsafe { libc::open(dir_c.as_ptr(), libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if dir_raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let dir_fd = unsafe { OwnedFd::from_raw_fd(dir_raw) };
+
+    // Create/open the leaf RELATIVE to the anchored dir fd, still refusing to
+    // follow a symlink at the leaf itself.
+    let leaf_c = path_to_cstring(leaf)?;
+    let file_raw = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            leaf_c.as_ptr(),
+            libc::O_NOFOLLOW | libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+            0o600 as libc::c_int,
+        )
+    };
+    if file_raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file_fd = unsafe { OwnedFd::from_raw_fd(file_raw) };
+
+    // Force 0o600 on the fd unconditionally (covers the pre-existing-file case
+    // the O_CREAT mode misses), BEFORE any plaintext is written.
+    if unsafe { libc::fchmod(file_fd.as_raw_fd(), 0o600 as libc::mode_t) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut file = std::fs::File::from(file_fd);
     file.write_all(buf)
 }
 
 #[cfg(not(unix))]
-fn write_hydrated_plaintext(dest_path: &Path, buf: &[u8]) -> std::io::Result<()> {
+fn write_hydrated_plaintext(dest_path: &Path, _allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
     std::fs::write(dest_path, buf)
+}
+
+/// Convert an `OsStr` path component to a NUL-terminated `CString` for the raw
+/// `libc::open`/`openat` calls in `write_hydrated_plaintext`.
+#[cfg(unix)]
+fn path_to_cstring(s: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(s.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains an interior NUL byte"))
 }
 
 #[cfg(target_os = "linux")]
@@ -8343,7 +8416,7 @@ mod tests {
         // Success path: a real, new destination is written 0o600 with the exact
         // bytes.
         let real_dest = root.path().join("real-out.bin");
-        write_hydrated_plaintext(&real_dest, b"plaintext-payload").unwrap();
+        write_hydrated_plaintext(&real_dest, &[root.path()], b"plaintext-payload").unwrap();
         assert_eq!(std::fs::read(&real_dest).unwrap(), b"plaintext-payload");
         let mode = std::fs::metadata(&real_dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "freshly written plaintext must be owner-only, got {mode:o}");
@@ -8356,16 +8429,98 @@ mod tests {
         std::os::unix::fs::symlink(&planted_target, &symlink_dest).unwrap();
         assert!(!planted_target.exists(), "precondition: symlink target must not exist yet");
 
-        let err = write_hydrated_plaintext(&symlink_dest, b"decrypted-secret").unwrap_err();
+        let err = write_hydrated_plaintext(&symlink_dest, &[root.path()], b"decrypted-secret").unwrap_err();
         assert!(
             !planted_target.exists(),
             "O_NOFOLLOW must not follow the symlink — the outside target must NOT be created"
         );
-        // O_NOFOLLOW hitting a symlink final component fails with ELOOP.
+        // O_NOFOLLOW hitting a symlink final (leaf) component fails with ELOOP.
         assert_eq!(
             err.raw_os_error(),
             Some(libc::ELOOP),
             "expected O_NOFOLLOW symlink refusal (ELOOP), got {err:?}"
+        );
+    }
+
+    /// Task 1247 second-review Gap 1 (parent-directory symlink swap): the leaf
+    /// O_NOFOLLOW is not enough — an attacker can replace a legitimately-contained
+    /// PARENT directory with a symlink during the download window. The write must
+    /// anchor to the parent via O_DIRECTORY|O_NOFOLLOW + openat so a symlinked
+    /// parent is refused. Here the parent symlink points to a real dir INSIDE the
+    /// allowed root, so the containment re-check PASSES — meaning ONLY the
+    /// parent-anchoring O_NOFOLLOW can stop it (isolates that defense).
+    ///
+    /// Load-bearing: with the old leaf-only open, the write would follow the
+    /// symlinked parent and create the file at the real inside-root dir.
+    #[test]
+    fn write_hydrated_plaintext_refuses_symlinked_parent_dir() {
+        let root = tempfile::tempdir().unwrap();
+
+        // A real directory inside the allowed root, and a symlink to it (also
+        // inside the root) used as the destination's parent.
+        let real_subdir = root.path().join("real_dir");
+        std::fs::create_dir(&real_subdir).unwrap();
+        let symlink_parent = root.path().join("swapped_parent");
+        std::os::unix::fs::symlink(&real_subdir, &symlink_parent).unwrap();
+
+        let dest = symlink_parent.join("out.bin");
+        let would_leak_to = real_subdir.join("out.bin");
+
+        // Sanity: containment passes (canonicalize resolves the symlink to an
+        // in-root real dir), so the parent-anchoring defense is what must refuse.
+        assert!(
+            hydrate_dest_is_allowed(&dest, &[root.path()]),
+            "precondition: the symlinked-parent dest must pass containment"
+        );
+
+        let err = write_hydrated_plaintext(&dest, &[root.path()], b"decrypted-secret").unwrap_err();
+        assert!(
+            !would_leak_to.exists(),
+            "must NOT write through a symlinked parent directory"
+        );
+        // O_DIRECTORY|O_NOFOLLOW on a symlinked parent fails closed. Linux reports
+        // ENOTDIR (the un-followed symlink is not a directory); a bare leaf
+        // O_NOFOLLOW would report ELOOP — accept either as "symlinked-parent refused".
+        assert!(
+            matches!(err.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)),
+            "O_DIRECTORY|O_NOFOLLOW must refuse a symlinked parent (ELOOP/ENOTDIR), got {err:?}"
+        );
+    }
+
+    /// Task 1247 second-review Gap 2 (mode ignored for pre-existing files): the
+    /// O_CREAT `mode` only applies to a NEWLY created inode, so a pre-existing
+    /// world-readable file at an in-root path would keep its perms and leak the
+    /// plaintext. The unconditional `fchmod` must force 0o600 regardless.
+    ///
+    /// Load-bearing: without the fchmod (relying on the open-time mode) the
+    /// pre-existing 0o644 file keeps 0o644 after the write.
+    #[test]
+    fn write_hydrated_plaintext_forces_0600_on_preexisting_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        // Attacker pre-creates a mundane, world-readable real file at an in-root
+        // path (no symlink trick — passes containment as a genuine regular file).
+        let dest = root.path().join("preexisting.bin");
+        std::fs::write(&dest, b"attacker-placeholder").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "precondition: the pre-existing file must start world-readable"
+        );
+
+        write_hydrated_plaintext(&dest, &[root.path()], b"decrypted-secret").unwrap();
+
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"decrypted-secret",
+            "the decrypted content must be written"
+        );
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "fchmod must force owner-only perms even on a pre-existing file, got {mode:o}"
         );
     }
 
