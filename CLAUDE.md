@@ -107,6 +107,10 @@ To develop against the real web client instead of the placeholder:
 
 ## Current macOS integration state
 
+**Read `docs/MACOS_BRINGUP_BRIEF.md` first** — a full, ordered bring-up plan (credentials needed,
+what's already proven working on real hardware, what NOT to do) written 2026-07-30 for whichever
+session next has a Mac available. Don't rediscover this from scratch.
+
 macOS is the first desktop product target. Keep cross-platform logic in Rust
 where possible: auth/session handling, crypto, sync, queueing, conflict/version
 logic, cache policy, and API protocol code belong in `src-tauri` or shared Rust
