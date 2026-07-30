@@ -124,11 +124,34 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
 pub async fn serve_ipc(
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+    cancel: oneshot::Receiver<()>,
+) {
+    serve_ipc_at(ipc_socket_path(), db, bridge, cancel).await
+}
+
+/// Real IPC server, bound to an explicit `path`. `serve_ipc` calls this with the
+/// production `ipc_socket_path()`; tests bind it to a throwaway temp socket so
+/// they can exercise the real accept/dispatch path without touching
+/// `$XDG_RUNTIME_DIR/beebeeb-daemon.sock` (task 1247).
+pub async fn serve_ipc_at(
+    path: std::path::PathBuf,
+    db: std::sync::Arc<crate::state_db::StateDb>,
+    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     mut cancel: oneshot::Receiver<()>,
 ) {
-    let path = ipc_socket_path();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).expect("bind IPC socket");
+    // Harden the socket file to owner-only (0o600) so no other user can even
+    // connect() — defense-in-depth with the per-connection peer-UID check
+    // (task 1247). Best-effort: a chmod failure is logged, not fatal. This
+    // mirrors `config.rs::DesktopConfig::save`'s 0o600 chmod precedent, but is
+    // non-fatal here since this is a fire-and-forget async server loop.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(error = %e, "failed to chmod IPC socket to 0o600");
+        }
+    }
     tracing::info!("IPC socket listening at {:?}", path);
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
 
@@ -155,11 +178,78 @@ pub async fn serve_ipc(
     tracing::info!("IPC socket stopped at {:?}", path);
 }
 
+/// Read the connecting peer process's UID from a connected Unix stream.
+///
+/// Linux uses `SO_PEERCRED` (the kernel fills a `libc::ucred`). macOS and other
+/// unix platforms would need `getpeereid()` / `LOCAL_PEERCRED` instead — that is
+/// deliberately NOT implemented here: there is no macOS environment available to
+/// verify the FFI struct/constant layout is correct, and macOS builds are
+/// disabled in CI today (per `repos/desktop/CLAUDE.md`). Rather than ship
+/// unverified, security-critical `unsafe` code, the non-Linux branch fails
+/// closed (returns `Err`, so the caller rejects the connection). It MUST be
+/// implemented and verified on real macOS hardware before macOS ships this
+/// daemon — a blocking item in the macOS bring-up brief (task 1247).
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(stream);
+    // SAFETY: `cred` is a plain-old-data struct the kernel fills; we pass its
+    // size in `len` (updated in-place) and only read `cred` after a 0 return.
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(_stream: &UnixStream) -> std::io::Result<u32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "peer credential check not implemented for this platform",
+    ))
+}
+
+/// Pure authorization predicate, split out so the comparison logic is unit-
+/// testable without a real cross-UID connection (which would need root/setuid
+/// privileges no sandboxed test runner has). The daemon only serves a peer
+/// running as its own OS user.
+fn is_authorized_peer(daemon_uid: u32, peer_uid: u32) -> bool {
+    daemon_uid == peer_uid
+}
+
 async fn handle_connection(
     mut stream: UnixStream,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
 ) {
+    // Authenticate the peer BEFORE reading or dispatching anything. The daemon
+    // holds vault keys in memory and `hydrate_file` is a decrypt oracle, so a
+    // connection from any other OS user is refused outright — no request is
+    // parsed, no response is written, the connection is just dropped
+    // (task 1247). The `peer_uid` check fails closed on non-Linux unix.
+    let daemon_uid = unsafe { libc::getuid() };
+    match peer_uid(&stream) {
+        Ok(uid) if is_authorized_peer(daemon_uid, uid) => {}
+        Ok(uid) => {
+            tracing::warn!(peer_uid = uid, daemon_uid, "IPC connection rejected: peer UID does not match daemon");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "IPC connection rejected: could not verify peer credentials");
+            return;
+        }
+    }
+
     let mut buf = vec![0u8; 65536];
     loop {
         let n = match stream.read(&mut buf).await {
@@ -185,7 +275,23 @@ async fn handle_connection(
                 items: list_file_provider_items(&db, &container_id),
             },
             IpcRequest::HydrateFile { file_id, dest_path } => {
-                match bridge.hydrate_file(&file_id, std::path::Path::new(&dest_path)).await {
+                // `dest_path` arrives straight off the wire (untrusted). Bound
+                // it to the caller's legitimate destinations before handing it
+                // to `hydrate_file`, which decrypts vault plaintext to disk
+                // (task 1247). The only real IPC caller (the File Provider
+                // extension / FUSE mount) writes either under the sync root or
+                // into the per-file temp cache, so both are allowed roots; if
+                // no sync root is configured yet, only the temp dir is.
+                // Resolve sync_root the same way the SetRecursivePin handler
+                // below already does.
+                let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+                let temp_root = std::env::temp_dir();
+                let dest = std::path::Path::new(&dest_path);
+                let result = match &sync_root {
+                    Some(root) => bridge.hydrate_file(&file_id, dest, &[root.as_path(), temp_root.as_path()]).await,
+                    None => bridge.hydrate_file(&file_id, dest, &[temp_root.as_path()]).await,
+                };
+                match result {
                     Ok(_) => IpcResponse::Ok,
                     Err(e) => IpcResponse::Error { message: e.to_string() },
                 }
@@ -610,6 +716,18 @@ mod tests {
             editable.capabilities & (CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE),
             CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
         );
+    }
+
+    #[test]
+    fn test_is_authorized_peer_matches_only_same_uid() {
+        // The real cross-UID rejection cannot be exercised end-to-end in a
+        // sandboxed test runner (it needs root/setuid to connect as a different
+        // real UID), so this pins the exact comparison the live peer-cred check
+        // uses (task 1247).
+        assert!(is_authorized_peer(1000, 1000));
+        assert!(!is_authorized_peer(1000, 1001));
+        assert!(!is_authorized_peer(0, 1000));
+        assert!(is_authorized_peer(0, 0));
     }
 
     fn seed_shared_root(db: &StateDb, file_id: &str, path: &str, permissions: i64) {

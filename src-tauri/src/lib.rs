@@ -2049,8 +2049,11 @@ pub(crate) fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
 /// Returns true iff `full` is strictly inside (or equal to) `root` after
 /// both paths are canonicalized with the same function — keeping the `\\?\`
 /// verbatim prefix consistent on Windows so `starts_with` works correctly.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn is_contained(root: &std::path::Path, full: &std::path::Path) -> bool {
+///
+/// `pub(crate)` and no longer `allow(dead_code)`: it is now used cross-platform
+/// by `engine_bridge::hydrate_dest_is_allowed` (task 1247 — validating the
+/// IPC-supplied hydrate destination), not just by the Windows reveal path.
+pub(crate) fn is_contained(root: &std::path::Path, full: &std::path::Path) -> bool {
     let Ok(root_canon) = std::fs::canonicalize(root) else {
         return false;
     };

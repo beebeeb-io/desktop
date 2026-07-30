@@ -107,9 +107,16 @@ impl Filesystem for BeebeebFS {
             // Clone the path into the hydrate future so `cache_path` stays owned
             // here for the `std::fs::read` below (the future moves what it borrows).
             let hydrate_path = cache_path.clone();
-            let result = self
-                .rt
-                .block_on(async move { bridge.hydrate_file(&file_id, &hydrate_path).await });
+            let result = self.rt.block_on(async move {
+                // The FUSE read path hydrates into a fixed per-file temp cache
+                // entry (`<temp_dir>/bb_<file_id>`), never under the sync root —
+                // so the temp dir is this call's only allowed hydrate root
+                // (task 1247).
+                let temp_root = std::env::temp_dir();
+                bridge
+                    .hydrate_file(&file_id, &hydrate_path, &[temp_root.as_path()])
+                    .await
+            });
             if result.is_err() {
                 reply.error(libc::EIO);
                 return;
