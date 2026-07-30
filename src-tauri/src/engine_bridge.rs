@@ -2068,8 +2068,18 @@ impl EngineBridge {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
                 }
-                let write_result =
-                    std::fs::write(dest_path, &*buf).map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                // Write via an O_NOFOLLOW handle (task 1247): the containment
+                // guard at the top of this fn is a check-then-use, and there is
+                // a real time window here (`do_hydrate` did a network download +
+                // decrypt). A same-UID attacker could plant a symlink at
+                // `dest_path` during that window pointing at, say,
+                // ~/.ssh/authorized_keys; a plain `fs::write` would follow it
+                // and overwrite the real target with decrypted plaintext.
+                // `write_hydrated_plaintext` fails closed if the final component
+                // is (or race-becomes) a symlink, closing the race atomically at
+                // open() time rather than re-checking-then-hoping.
+                let write_result = write_hydrated_plaintext(dest_path, &buf)
+                    .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
@@ -3238,6 +3248,44 @@ fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
         }
     }
     false
+}
+
+/// Task 1247: write hydrated plaintext to `dest_path`, failing closed if the
+/// final path component is (or race-becomes) a symlink.
+///
+/// This is the atomic half of the destination defense: `hydrate_dest_is_allowed`
+/// validates the path *before* the network download/decrypt, but the write only
+/// happens *after* — a real TOCTOU window in which a same-UID attacker could
+/// swap `dest_path` for a symlink to an unauthorized target (e.g.
+/// `~/.ssh/authorized_keys`). Opening with `O_NOFOLLOW` makes the kernel refuse
+/// to follow a symlink at open() time, so the swap fails the write instead of
+/// redirecting decrypted plaintext outside the allowed root — no re-check race.
+///
+/// Unix also creates the file `0o600` (owner-only) so freshly decrypted vault
+/// plaintext is never world-readable, even under a world-traversable `/tmp`
+/// (that mode only applies on creation; an existing regular file keeps its own
+/// perms, which is fine — the concern is newly materialized plaintext).
+///
+/// Non-unix keeps `std::fs::write` (`O_NOFOLLOW`/mode are Unix-only, and the
+/// Windows Cloud Files path never writes plaintext to disk via this fn — it uses
+/// `hydrate_file_to_memory`).
+#[cfg(unix)]
+fn write_hydrated_plaintext(dest_path: &Path, buf: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(dest_path)?;
+    file.write_all(buf)
+}
+
+#[cfg(not(unix))]
+fn write_hydrated_plaintext(dest_path: &Path, buf: &[u8]) -> std::io::Result<()> {
+    std::fs::write(dest_path, buf)
 }
 
 #[cfg(target_os = "linux")]
@@ -8280,5 +8328,104 @@ mod tests {
             let _ = cancel_tx.send(());
             let _ = server.await;
         });
+    }
+
+    /// Task 1247 P0 follow-up (TOCTOU symlink race): the write primitive itself
+    /// must refuse a symlink destination (O_NOFOLLOW) and create real files
+    /// owner-only (0o600). This unit test pins both directly on the primitive.
+    #[test]
+    fn write_hydrated_plaintext_refuses_symlink_and_sets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // Success path: a real, new destination is written 0o600 with the exact
+        // bytes.
+        let real_dest = root.path().join("real-out.bin");
+        write_hydrated_plaintext(&real_dest, b"plaintext-payload").unwrap();
+        assert_eq!(std::fs::read(&real_dest).unwrap(), b"plaintext-payload");
+        let mode = std::fs::metadata(&real_dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "freshly written plaintext must be owner-only, got {mode:o}");
+
+        // Attack path: destination is a symlink pointing OUTSIDE the root at a
+        // not-yet-existing target. O_NOFOLLOW must make the open fail closed so
+        // the symlink is never followed and its target is never created/written.
+        let planted_target = outside.path().join("authorized_keys");
+        let symlink_dest = root.path().join("bb_planted_link");
+        std::os::unix::fs::symlink(&planted_target, &symlink_dest).unwrap();
+        assert!(!planted_target.exists(), "precondition: symlink target must not exist yet");
+
+        let err = write_hydrated_plaintext(&symlink_dest, b"decrypted-secret").unwrap_err();
+        assert!(
+            !planted_target.exists(),
+            "O_NOFOLLOW must not follow the symlink — the outside target must NOT be created"
+        );
+        // O_NOFOLLOW hitting a symlink final component fails with ELOOP.
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ELOOP),
+            "expected O_NOFOLLOW symlink refusal (ELOOP), got {err:?}"
+        );
+    }
+
+    /// Task 1247 P0 follow-up: the SAME race proven end-to-end through the real
+    /// `hydrate_file`. A broken symlink at the destination passes the top-of-fn
+    /// containment guard (its `exists()` is false → not-yet-exists branch: parent
+    /// contained + single-component name), then a full download+decrypt runs, and
+    /// only the O_NOFOLLOW write stops the decrypted plaintext from being written
+    /// through the symlink to a target outside the allowed root. Load-bearing:
+    /// with a plain `fs::write` the outside target WOULD be created.
+    #[test]
+    fn hydrate_file_fails_closed_on_symlink_destination_toctou() {
+        let dir = tempfile::tempdir().unwrap(); // the allowed root
+        let outside = tempfile::tempdir().unwrap(); // outside every allowed root
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+
+        let plaintext = b"decrypted-vault-plaintext-must-not-escape".to_vec();
+        let server = IpcHydrationMock::start(file_key, vec![plaintext.clone()]);
+
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "/legit.bin",
+            None,
+            FileStatus::CloudOnly,
+            plaintext.len() as i64,
+        );
+
+        // Attacker plants a symlink at the guard-passing destination pointing to a
+        // not-yet-existing file OUTSIDE the allowed root (simulating the swap
+        // landing during the do_hydrate window — a broken symlink so the guard's
+        // exists() check is false and it passes containment).
+        let planted_target = outside.path().join("authorized_keys");
+        let dest = dir.path().join("bb_target_link");
+        std::os::unix::fs::symlink(&planted_target, &dest).unwrap();
+        assert!(!planted_target.exists(), "precondition: symlink target must not exist yet");
+        // Sanity: the destination genuinely passes the containment guard, so this
+        // test really is exercising the write-site O_NOFOLLOW defense, not the guard.
+        assert!(
+            hydrate_dest_is_allowed(&dest, &[dir.path()]),
+            "the symlink destination must pass the containment guard (so only O_NOFOLLOW can stop it)"
+        );
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir.path()]).await });
+
+        assert!(
+            result.is_err(),
+            "hydrate_file must fail closed on a symlink destination, got {result:?}"
+        );
+        assert!(
+            !planted_target.exists(),
+            "O_NOFOLLOW must prevent following the planted symlink — decrypted plaintext must NOT reach the outside target"
+        );
+
+        server.stop_and_count();
     }
 }
