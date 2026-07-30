@@ -8583,6 +8583,34 @@ mod tests {
         );
     }
 
+    /// Task 1247 4th review (close the untested `..`-rejection logic): a
+    /// `dest_path` whose relative portion contains a non-Normal component (`..`)
+    /// must be refused before any openat descent. Not fixing a known bug — just
+    /// covering a branch that had zero direct tests across four rounds.
+    ///
+    /// Load-bearing: `root/legit` exists, so if the non-normal-component
+    /// rejection were removed, the descent would resolve `legit/..` back to
+    /// `root` and create `root/evil`. The check must stop it first.
+    #[test]
+    fn write_hydrated_plaintext_rejects_dotdot_components() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("legit")).unwrap();
+
+        // root/legit/../evil — the parent (root/legit/..) carries a ParentDir
+        // component after strip_prefix, which must be rejected.
+        let dest = root.path().join("legit").join("..").join("evil");
+        let result = write_hydrated_plaintext(&dest, &[root.path()], b"decrypted-secret");
+
+        assert!(
+            result.is_err(),
+            "a dest_path with a `..` component must be rejected, got {result:?}"
+        );
+        assert!(
+            !root.path().join("evil").exists(),
+            "nothing must be written when a `..` component is rejected"
+        );
+    }
+
     /// Task 1247 third review (rename-swap, NOT a symlink): the write must anchor
     /// to the directory INODE that was validated during the openat descent, not
     /// re-resolve the path a second time. This is proven DETERMINISTICALLY (no
