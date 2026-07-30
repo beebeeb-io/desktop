@@ -438,7 +438,7 @@ impl EngineBridge {
                 } else {
                     return Err(anyhow::anyhow!("hydrate operation target missing from state"));
                 };
-                self.hydrate_file(file_id, &dest).await
+                self.hydrate_file(file_id, &dest, &[sync_root]).await
             }
             OperationKind::CreateFolder => {
                 let metadata = operation_metadata(op)?;
@@ -2038,7 +2038,21 @@ impl EngineBridge {
     /// **Windows Cloud Files callers must use [`Self::hydrate_file_to_memory`]
     /// instead** — that variant never writes plaintext to disk, satisfying the
     /// zero-knowledge requirement for on-demand CF hydration.
-    pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
+    pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path, allowed_roots: &[&Path]) -> anyhow::Result<()> {
+        // Task 1247 self-defense: validate `dest_path` against the caller's
+        // trusted root(s) BEFORE any directory creation or plaintext write.
+        // `dest_path` reaches the one untrusted caller (the IPC socket handler)
+        // straight off the wire, and the `file_id`-keyed guard below
+        // (`ensure_shared_hydrate_path_safe`) validates an entirely SEPARATE
+        // value (`entry.path`), so it can never vouch for `dest_path`. Without
+        // this check any local process could turn the daemon into a
+        // decrypt-oracle + arbitrary-write primitive (e.g. writing decrypted
+        // vault plaintext over ~/.ssh/authorized_keys).
+        if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
+            return Err(anyhow::anyhow!(
+                "hydrate destination is not within an allowed root"
+            ));
+        }
         self.ensure_shared_hydrate_path_safe(file_id)?;
         // RAII-style: any early return below the status flip should
         // leave the file in `Error`, not `Downloading`. We do that by
@@ -2574,7 +2588,7 @@ impl EngineBridge {
         // hydrate_file flips Conflict → Downloading → Local on success
         // (or Error on failure). We don't care about the intermediate
         // state for this path.
-        self.hydrate_file(file_id, &dest).await?;
+        self.hydrate_file(file_id, &dest, &[sync_root]).await?;
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -2611,7 +2625,7 @@ impl EngineBridge {
         // If the local file no longer exists on disk (user deleted it
         // outside the daemon), Keep Both collapses to Keep Remote.
         if !original.exists() {
-            self.hydrate_file(&entry.file_id, &original).await?;
+            self.hydrate_file(&entry.file_id, &original, &[sync_root]).await?;
             self.db.set_status(&entry.file_id, FileStatus::Local)?;
             return Ok(entry.path.clone());
         }
@@ -2635,7 +2649,7 @@ impl EngineBridge {
         // Hydrate remote into the now-vacant original path. On failure
         // we mark Error rather than Conflict — the conflict copy is
         // safe on disk, the remote download just needs a retry.
-        if let Err(e) = self.hydrate_file(&entry.file_id, &original).await {
+        if let Err(e) = self.hydrate_file(&entry.file_id, &original, &[sync_root]).await {
             self.db.set_status(&entry.file_id, FileStatus::Error)?;
             return Err(e);
         }
@@ -3184,6 +3198,46 @@ fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+}
+
+/// Task 1247: is `dest_path` a safe hydration target — i.e. inside (or about to
+/// be created inside) at least one of the caller's trusted `allowed_roots`?
+///
+/// Pure and free-standing so the containment decision is directly unit-testable
+/// without a live `EngineBridge`. Mirrors the two-layer containment pattern
+/// already used by `lib.rs::reveal_and_open_file` (see its documented 3-layer
+/// comment block):
+///   - If `dest_path` already exists, canonicalize both and require containment.
+///   - If it does not exist yet (the normal hydrate case — we are about to
+///     create it), require the PARENT directory to be contained AND the file
+///     name to be a single normal component with no embedded separator, so a
+///     traversal like `<root>/../evil` cannot slip past the parent check.
+///
+/// Returns true if ANY root passes; false if none do. An empty `allowed_roots`
+/// slice returns false (fail-closed), never vacuously true.
+fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
+    for &root in allowed_roots {
+        let ok = if dest_path.exists() {
+            crate::is_contained(root, dest_path)
+        } else {
+            let parent_ok = dest_path
+                .parent()
+                .map(|p| crate::is_contained(root, p))
+                .unwrap_or(false);
+            let name_ok = dest_path
+                .file_name()
+                .map(|n| {
+                    let s = n.to_string_lossy();
+                    !s.contains('/') && !s.contains('\\')
+                })
+                .unwrap_or(false);
+            parent_ok && name_ok
+        };
+        if ok {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -7889,5 +7943,342 @@ mod tests {
             bridge.db().get_file(kept).unwrap().is_some(),
             "empty snapshot must NOT prune the existing own-tree (fail-closed)"
         );
+    }
+
+    // ── Task 1247: hydrate destination allow-list + real IPC entry point ──────
+
+    /// Item 1: the pure containment predicate `hydrate_file` uses to reject an
+    /// out-of-root destination before writing plaintext.
+    #[test]
+    fn hydrate_dest_is_allowed_covers_the_containment_matrix() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let root_path = root.path();
+        let other_path = other.path();
+
+        // An absolute path outside all allowed roots (its parent exists but is
+        // NOT under `root`) — the ~/.ssh/authorized_keys style attack — is
+        // rejected. `other` exists, so this hits the parent-containment branch.
+        let outside = other_path.join("evil.txt");
+        assert!(
+            !hydrate_dest_is_allowed(&outside, &[root_path]),
+            "an existing-parent path outside every root must be rejected"
+        );
+
+        // A path with `..` that resolves outside the root is rejected: the
+        // parent (`root/..`) is not contained even though the file name is a
+        // single component.
+        let traversal = root_path.join("../evil.txt");
+        assert!(
+            !hydrate_dest_is_allowed(&traversal, &[root_path]),
+            "a `..` traversal escaping the root must be rejected"
+        );
+
+        // The normal hydrate case: a not-yet-existing file directly under the
+        // allowed root is accepted (parent contained + single-component name).
+        let legit = root_path.join("newfile.bin");
+        assert!(
+            !legit.exists(),
+            "precondition: destination must not exist yet for the common case"
+        );
+        assert!(
+            hydrate_dest_is_allowed(&legit, &[root_path]),
+            "a not-yet-existing file under the allowed root must be accepted"
+        );
+
+        // Accepted when the destination is under a SECOND allowed root even
+        // though it is outside the first (ANY root passing is enough).
+        let legit_second = other_path.join("under-second.bin");
+        assert!(
+            hydrate_dest_is_allowed(&legit_second, &[root_path, other_path]),
+            "a destination under any allowed root must be accepted"
+        );
+
+        // An empty allow-list fails closed — never vacuously true.
+        assert!(
+            !hydrate_dest_is_allowed(&legit, &[]),
+            "an empty allowed_roots slice must reject everything"
+        );
+
+        // A destination whose parent directory does not exist is rejected too
+        // (canonicalization of a missing parent fails) — this is exactly the
+        // construction the malicious IPC test below relies on.
+        let missing_parent = root_path.join("does-not-exist-dir").join("x.txt");
+        assert!(
+            !hydrate_dest_is_allowed(&missing_parent, &[root_path]),
+            "a path under a non-existent subdirectory must be rejected"
+        );
+    }
+
+    /// Self-terminating HTTP mock for the IPC end-to-end hydration tests. Unlike
+    /// `HydrationMockServer` (blocking accept, fixed request count), this one is
+    /// non-blocking with a stop flag + deadline, so the malicious test — where
+    /// the destination guard fires BEFORE any HTTP call and the server therefore
+    /// sees zero requests — can never hang. It also reports how many requests it
+    /// actually served, which is what proves `do_hydrate` never ran on rejection.
+    struct IpcHydrationMock {
+        base_url: String,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl IpcHydrationMock {
+        fn start(file_key: beebeeb_core::kdf::FileKey, chunks: Vec<Vec<u8>>) -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize};
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let size_bytes: usize = chunks.iter().map(|c| c.len()).sum();
+            let chunk_count = chunks.len();
+            let chunk_size_bytes = chunks.first().map(|c| c.len()).unwrap_or(0);
+            let requests = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (rq, st) = (requests.clone(), stop.clone());
+            let handle = thread::spawn(move || {
+                let started = std::time::Instant::now();
+                loop {
+                    if st.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(15) {
+                        break;
+                    }
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let request = read_http_request(&mut stream);
+                            rq.fetch_add(1, Ordering::Relaxed);
+                            let response = hydration_mock_response(
+                                &request,
+                                &file_key,
+                                &chunks,
+                                size_bytes,
+                                chunk_count,
+                                chunk_size_bytes,
+                            );
+                            match response {
+                                MockResponse::Text(body) => stream.write_all(body.as_bytes()).unwrap(),
+                                MockResponse::Binary(body) => {
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        body.len()
+                                    );
+                                    stream.write_all(header.as_bytes()).unwrap();
+                                    stream.write_all(&body).unwrap();
+                                }
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("ipc hydration mock accept failed: {e}"),
+                    }
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                stop,
+                handle,
+            }
+        }
+
+        fn stop_and_count(self) -> usize {
+            self.stop.store(true, Ordering::Relaxed);
+            self.handle.join().unwrap();
+            self.requests.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Drive one real `HydrateFile` request over a real Unix socket against a
+    /// real `serve_ipc_at` server, returning the daemon's response. This is the
+    /// actual IPC entry point an attacker would use — not an internal function.
+    fn ipc_hydrate_roundtrip(
+        db: Arc<StateDb>,
+        bridge: Arc<EngineBridge>,
+        file_id: &str,
+        dest_path: &Path,
+    ) -> crate::ipc_socket::IpcResponse {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sock_dir = tempfile::tempdir().unwrap();
+        let sock_path = sock_dir.path().join("ipc.sock");
+        let file_id = file_id.to_string();
+        let dest_string = dest_path.to_string_lossy().to_string();
+        let sp = sock_path.clone();
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async move {
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(crate::ipc_socket::serve_ipc_at(sp.clone(), db, bridge, cancel_rx));
+
+            // Wait for the listener to bind, then connect a real client.
+            let mut client = {
+                let mut attempt = 0;
+                loop {
+                    match tokio::net::UnixStream::connect(&sp).await {
+                        Ok(s) => break s,
+                        Err(_) if attempt < 300 => {
+                            attempt += 1;
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(e) => panic!("could not connect to test IPC socket: {e}"),
+                    }
+                }
+            };
+
+            // Exact wire shape the server deserializes off the socket.
+            let req = serde_json::to_vec(&crate::ipc_socket::IpcRequest::HydrateFile {
+                file_id: file_id.clone(),
+                dest_path: dest_string.clone(),
+            })
+            .unwrap();
+            client.write_all(&req).await.unwrap();
+
+            let mut buf = vec![0u8; 65536];
+            let n = client.read(&mut buf).await.unwrap();
+            let resp: crate::ipc_socket::IpcResponse =
+                serde_json::from_slice(&buf[..n]).expect("daemon must return a valid IpcResponse");
+
+            drop(client);
+            let _ = cancel_tx.send(());
+            let _ = server.await;
+            resp
+        })
+    }
+
+    /// Item 3 (load-bearing): a malicious `HydrateFile` whose `dest_path` is
+    /// outside every allowed root, sent over the REAL IPC socket, is rejected —
+    /// the daemon returns `Error`, the target file is NOT created, and the
+    /// hydration backend is never even contacted (0 requests), proving the
+    /// destination guard short-circuits before any decrypt/download happens.
+    #[test]
+    fn ipc_rejects_hydrate_write_outside_allowed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+
+        // A working backend, so the ONLY thing that can stop the out-of-root
+        // write is the guard. If the guard were removed, do_hydrate would
+        // succeed and the file would land on disk — failing this test.
+        let server = IpcHydrationMock::start(file_key, vec![b"attacker-would-read-this".to_vec()]);
+
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/secret.bin", None, FileStatus::CloudOnly, 24);
+
+        // Destination under a non-existent subdirectory of a real temp dir: it
+        // is outside the sync root AND its parent cannot be canonicalized, so it
+        // is outside every allowed root the IPC handler passes (sync_root? +
+        // temp_dir) regardless of this machine's config.
+        let malicious_dest = dir.path().join("attacker-controlled-dir").join("authorized_keys");
+
+        let resp = ipc_hydrate_roundtrip(db, bridge, TEST_FILE_ID, &malicious_dest);
+
+        match resp {
+            crate::ipc_socket::IpcResponse::Error { message } => {
+                assert!(
+                    message.contains("allowed root"),
+                    "rejection must come from the destination guard, got: {message}"
+                );
+            }
+            other => panic!("expected the malicious write to be rejected, got {other:?}"),
+        }
+
+        assert!(
+            !malicious_dest.exists(),
+            "the malicious destination file must NOT have been created"
+        );
+        assert!(
+            !malicious_dest.parent().unwrap().exists(),
+            "the guard must run before create_dir_all — the parent dir must not exist either"
+        );
+
+        let served = server.stop_and_count();
+        assert_eq!(
+            served, 0,
+            "the hydration backend must never be contacted when the destination is rejected"
+        );
+    }
+
+    /// Item 4: the fix does NOT break the legitimate case. The same real IPC
+    /// server, given a `dest_path` genuinely under an allowed root (the temp
+    /// dir, always an allowed root in the handler), decrypts the real content
+    /// and writes it to disk, returning `Ok`.
+    #[test]
+    fn ipc_allows_hydrate_write_under_allowed_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap(); // under std::env::temp_dir()
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+
+        let plaintext = b"beebeeb-1247-real-decrypted-plaintext".to_vec();
+        let server = IpcHydrationMock::start(file_key, vec![plaintext.clone()]);
+
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "/legit.bin",
+            None,
+            FileStatus::CloudOnly,
+            plaintext.len() as i64,
+        );
+
+        // dest_dir is created by tempfile under std::env::temp_dir(), which the
+        // IPC handler always includes as an allowed root, so this is accepted.
+        let legit_dest = dest_dir.path().join("legit-out.bin");
+
+        let resp = ipc_hydrate_roundtrip(db, bridge, TEST_FILE_ID, &legit_dest);
+
+        assert!(
+            matches!(resp, crate::ipc_socket::IpcResponse::Ok),
+            "a legitimate in-root hydrate must succeed, got {resp:?}"
+        );
+        assert_eq!(
+            std::fs::read(&legit_dest).expect("the decrypted file must exist on disk"),
+            plaintext,
+            "the real decrypted plaintext must land at the requested path"
+        );
+
+        let served = server.stop_and_count();
+        assert!(
+            served >= 2,
+            "the legitimate path must contact the backend for metadata + chunk (got {served})"
+        );
+    }
+
+    /// Item 5: `serve_ipc_at` hardens the bound socket file to owner-only 0o600.
+    #[test]
+    fn ipc_socket_file_is_chmod_0600_after_bind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_dir = tempfile::tempdir().unwrap();
+        let sock_path = sock_dir.path().join("perm.sock");
+
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+
+        let sp = sock_path.clone();
+        tokio::runtime::Runtime::new().unwrap().block_on(async move {
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(crate::ipc_socket::serve_ipc_at(sp.clone(), db, bridge, cancel_rx));
+
+            // Wait for the socket file to appear (i.e. bind + chmod done).
+            let mut attempt = 0;
+            while !sp.exists() && attempt < 300 {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(sp.exists(), "the IPC socket file must be created by serve_ipc_at");
+
+            let mode = std::fs::metadata(&sp).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the socket file must be chmod 0o600, got {mode:o}");
+
+            let _ = cancel_tx.send(());
+            let _ = server.await;
+        });
     }
 }
