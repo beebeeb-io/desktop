@@ -180,15 +180,17 @@ pub async fn serve_ipc_at(
 
 /// Read the connecting peer process's UID from a connected Unix stream.
 ///
-/// Linux uses `SO_PEERCRED` (the kernel fills a `libc::ucred`). macOS and other
-/// unix platforms would need `getpeereid()` / `LOCAL_PEERCRED` instead — that is
-/// deliberately NOT implemented here: there is no macOS environment available to
-/// verify the FFI struct/constant layout is correct, and macOS builds are
-/// disabled in CI today (per `repos/desktop/CLAUDE.md`). Rather than ship
-/// unverified, security-critical `unsafe` code, the non-Linux branch fails
-/// closed (returns `Err`, so the caller rejects the connection). It MUST be
-/// implemented and verified on real macOS hardware before macOS ships this
-/// daemon — a blocking item in the macOS bring-up brief (task 1247).
+/// Linux uses `SO_PEERCRED` (the kernel fills a `libc::ucred`). macOS/iOS use
+/// `getpeereid()` — the sanctioned BSD API for exactly this (simpler than the
+/// `LOCAL_PEERCRED` getsockopt: no struct layout to get wrong, libc fills two
+/// plain `uid_t`/`gid_t` out-params). Implemented and VERIFIED on real macOS
+/// hardware 2026-08-29 (Darwin 25.6, Apple Silicon): with this in place the two
+/// real-socket engine_bridge IPC tests (`ipc_allows_hydrate_write_under_allowed_root`,
+/// `ipc_rejects_hydrate_write_outside_allowed_roots`) go from failing-closed
+/// (connection dropped, client sees EOF/BrokenPipe) to passing — closing the
+/// blocking item in the macOS bring-up brief (task 1247). Platforms with
+/// neither implementation still fail closed (returns `Err`, so the caller
+/// rejects the connection).
 #[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     let fd = std::os::unix::io::AsRawFd::as_raw_fd(stream);
@@ -211,7 +213,22 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     Ok(cred.uid)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(stream);
+    let mut euid: libc::uid_t = 0;
+    let mut egid: libc::gid_t = 0;
+    // SAFETY: getpeereid only writes the two out-params on success (rc == 0);
+    // both are plain integers we own on the stack. We read them only after
+    // checking rc.
+    let rc = unsafe { libc::getpeereid(fd, &mut euid, &mut egid) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(euid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
 fn peer_uid(_stream: &UnixStream) -> std::io::Result<u32> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -236,7 +253,8 @@ async fn handle_connection(
     // holds vault keys in memory and `hydrate_file` is a decrypt oracle, so a
     // connection from any other OS user is refused outright — no request is
     // parsed, no response is written, the connection is just dropped
-    // (task 1247). The `peer_uid` check fails closed on non-Linux unix.
+    // (task 1247). `peer_uid` is implemented for Linux (SO_PEERCRED) and
+    // macOS/iOS (getpeereid); any other platform fails closed.
     let daemon_uid = unsafe { libc::getuid() };
     match peer_uid(&stream) {
         Ok(uid) if is_authorized_peer(daemon_uid, uid) => {}
