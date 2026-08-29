@@ -82,6 +82,17 @@ is rejected. Do not skip this and just remove the fail-closed guard — that wou
 the exact class of vulnerability task 1247 fixed on Linux, on a platform where it was never closed
 to begin with.
 
+> **✅ RESOLVED 2026-08-29 (real macOS hardware, Darwin 25.6 / Apple Silicon).** `peer_uid()` now
+> implements `getpeereid()` for `target_os = "macos"/"ios"` (branch `feat/1247-macos-peer-uid`).
+> Verified exactly as this brief demanded: the two real-socket IPC tests
+> (`ipc_allows_hydrate_write_under_allowed_root` — a genuine same-UID connection over a real Unix
+> socket — and `ipc_rejects_hydrate_write_outside_allowed_roots`) went from failing-closed
+> (EOF/BrokenPipe on every connection) to passing, and the full `cargo test --locked` suite is
+> green on macOS: **329 passed / 0 failed** — its first-ever fully green run on this platform.
+> Cross-UID rejection is covered by the `is_authorized_peer` unit predicate (a live cross-UID
+> connection needs root, same limitation the Linux test recorded). The fail-closed guard remains
+> for every platform without an implementation.
+
 ### 5. Known remaining product gaps (lower priority, not release-blocking on their own)
 
 - **Secure Enclave / `SecAccessControl` key wrapping** (task `0331`): the master key is currently
