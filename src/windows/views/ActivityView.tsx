@@ -200,8 +200,6 @@ function TimelineSection() {
         setData(r.value)
         setErr(null)
       } else {
-        // SPLIT PENDING — NO OWNER YET (flagged to the lead 2026-08-31): toast this action failure, leave the load failure inline.
-        // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
         setErr({ reason: r.reason, unsupported: r.unsupported })
         setData(null)
       }
@@ -356,8 +354,6 @@ function NotificationsSection() {
       const r = await accountNotifications()
       if (cancelled) return
       if (r.ok) { setData(r.value); setErr(null) }
-      // SPLIT PENDING — NO OWNER YET (flagged to the lead 2026-08-31): toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
       else { setErr({ reason: r.reason, unsupported: r.unsupported }); setData(null) }
       setLoading(false)
     })()

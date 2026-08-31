@@ -98,6 +98,26 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
       `,
     },
     {
+      name: 'LOAD reached only via an onRetry callback is still a load, not a split',
+      // Task 1330. ActivityView and SettingsView wire `load` as <ErrorBlock onRetry={load}/>
+      // and never call it from a useEffect, so isLoadPath called it an action and the rule
+      // reported a load+action split. Toasting that half would have removed the very
+      // ErrorBlock whose Retry button calls it.
+      code: `
+        function Panel() {
+          const [err, setErr] = useState(null)
+          const load = () => {
+            void (async () => {
+              const r = await accountActivityFeed(1, 50)
+              if (!r.ok) setErr({ reason: r.reason, unsupported: r.unsupported })
+            })()
+          }
+          if (err) return <ErrorBlock reason={err.reason} onRetry={load} />
+          return <div>ok</div>
+        }
+      `,
+    },
+    {
       name: 'state that never holds a command failure is not an error state',
       code: `
         function Panel() {

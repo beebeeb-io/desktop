@@ -388,8 +388,6 @@ function NotificationPreferencesPanel() {
         setValues(r.value.preferences)
         setErr(null)
       } else {
-        // SPLIT PENDING — NO OWNER YET (flagged to the lead 2026-08-31): toast this action failure, leave the load failure inline.
-        // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
         setErr({ reason: r.reason, unsupported: r.unsupported })
         setValues(null)
       }

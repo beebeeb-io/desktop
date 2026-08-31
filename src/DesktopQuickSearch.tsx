@@ -7,6 +7,7 @@ import {
   type DesktopSearchResponse,
   type DesktopSearchResult,
 } from './desktopApi'
+import { useToast } from './windows/ui'
 
 const SEARCH_LIMIT = 12
 const SEARCH_DEBOUNCE_MS = 120
@@ -54,6 +55,7 @@ export default function DesktopQuickSearch({
   onOpen: () => void
   onClose: () => void
 }) {
+  const { showToast } = useToast()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState<DesktopSearchResponse | null>(null)
@@ -139,12 +141,14 @@ export default function DesktopQuickSearch({
     if (opened.ok) {
       onClose()
     } else {
-      // SPLIT PENDING — NO OWNER YET (flagged to the lead 2026-08-31): toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-      setNotice(opened.unsupported ? commandUnavailableLabel('open_in_finder') : opened.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open in Finder',
+        message: opened.unsupported ? commandUnavailableLabel('open_in_finder') : opened.reason,
+      })
     }
     setOpeningId(null)
-  }, [onClose])
+  }, [onClose, showToast])
 
   const onInputKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown' && results.length > 0) {
