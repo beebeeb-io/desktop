@@ -309,6 +309,21 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
   const [finderPath, setFinderPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // KEPT INLINE BY DESIGN — task 1255, lead ruling 2026-08-31 ("option (a)").
+  //
+  // DO NOT convert this to a Toast and delete the state. `message` is not decoration:
+  // it GATES the "Continue without install" button in the button row below. Delete this
+  // state and that button disappears from the product — a user whose Finder install
+  // fails is left with no way past this onboarding step.
+  //
+  // All three setMessage sites (the pick_sync_root, install_finder_location and
+  // continue_without_finder_location failures) feed that same gate, so they stay
+  // together; splitting only some of them leaves the gate driven by a subset of its
+  // causes, which is worse than either alternative.
+  //
+  // Same load-bearing shape as WindowsFirstRun's UnlockStep and its "Continue without
+  // unlock" escape hatch. See the 1255 task file for the full ruling and the
+  // `escapeHatchVisible: true` evidence.
   const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
@@ -389,6 +404,9 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
         <button className="button primary" onClick={install} disabled={busy}>
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
+        {/* This escape hatch EXISTS ONLY while `message` is set — it is the gate described
+            on the `message` state above. Removing the inline error removes this button.
+            Read that comment before refactoring either one. */}
         {message && !isMacos && (
           <button className="button" onClick={continueWithoutInstall} disabled={busy}>
             Continue without install
