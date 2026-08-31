@@ -38,7 +38,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
-import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 import { useRegionLabel } from '../useRegion'
 
 const RED = 'oklch(0.5 0.18 25)'
@@ -401,14 +401,12 @@ function Footer({
   onlineOnly,
   dirty,
   applying,
-  applyError,
   onApply,
 }: {
   onDisk: number
   onlineOnly: number
   dirty: boolean
   applying: boolean
-  applyError: string | null
   onApply: () => void
 }) {
   return (
@@ -438,20 +436,6 @@ function Footer({
         disk (they stay safe in your vault).
       </div>
 
-      {applyError && (
-        <div
-          style={{
-            marginTop: 10,
-            fontSize: 11.5,
-            fontFamily: T.fontMono,
-            color: RED,
-            lineHeight: 1.5,
-            wordBreak: 'break-word' as const,
-          }}
-        >
-          {applyError}
-        </div>
-      )}
     </div>
   )
 }
@@ -675,15 +659,12 @@ function RefreshButton({
 
 export default function SelectiveSyncView() {
   const regionLabel = useRegionLabel()
+  const { showToast } = useToast()
   const [state, setState] = useState<LoadState>({ phase: 'loading' })
   // Working excluded set + which folders are expanded. Re-seeded on every load.
   const [working, setWorking] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [applying, setApplying] = useState(false)
-  // UNTRIAGED (task 1319 notes). Prop-drilled like SettingsView's `notice` was, so likely a straggler,
-  // but unwinding it is a separate change.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-  const [applyError, setApplyError] = useState<string | null>(null)
   // Latched true while a silent background refresh is in flight, so the header
   // chip can show "Refreshing…" without disturbing the tree.
   const [refreshing, setRefreshing] = useState(false)
@@ -698,7 +679,6 @@ export default function SelectiveSyncView() {
   // silent poll (which must never flash a skeleton or clobber a live edit).
   const load = () => {
     setState({ phase: 'loading' })
-    setApplyError(null)
     let cancelled = false
     void (async () => {
       const result = await listVaultFolders()
@@ -788,7 +768,6 @@ export default function SelectiveSyncView() {
   // Toggle a folder's sync state: excluded → synced (remove), synced → excluded
   // (add). Ancestor-excluded folders are not toggleable (handled by the row).
   const toggleSync = (node: VaultItem) => {
-    setApplyError(null)
     setWorking((prev) => {
       const next = new Set(prev)
       if (next.has(node.id)) next.delete(node.id)
@@ -800,16 +779,17 @@ export default function SelectiveSyncView() {
   const apply = () => {
     if (state.phase !== 'ready') return
     setApplying(true)
-    setApplyError(null)
     void (async () => {
       const result = await setSelectiveSync([...working])
       if (!result.ok) {
         setApplying(false)
-        setApplyError(
-          result.unsupported
+        showToast({
+          variant: 'error',
+          title: 'Couldn’t apply selective sync',
+          message: result.unsupported
             ? "Selective sync can't be changed in this build yet."
             : result.reason,
-        )
+        })
         return
       }
       // Success — reload the tree (excluding frees disk, so aggregates change).
@@ -877,7 +857,6 @@ export default function SelectiveSyncView() {
             onlineOnly={totals.onlineOnly}
             dirty={dirty}
             applying={applying}
-            applyError={applyError}
             onApply={apply}
           />
         </>

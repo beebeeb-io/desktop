@@ -35,7 +35,7 @@ import {
   type SecurityFactor,
   type AccountSession,
 } from '../../desktopApi'
-import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 
 // ── Local palette extensions (warning/danger reuse WindowsApp's error tone) ──
 
@@ -575,15 +575,11 @@ export default function SecurityView() {
   const [revokingId, setRevokingId] = useState<string | null>(null)
   const [confirmAllOthers, setConfirmAllOthers] = useState(false)
   const [revokingAll, setRevokingAll] = useState(false)
-  // UNTRIAGED (task 1319 notes). Coupled to actionNote via `actionNote && !actionError`, so migrating
-  // it changes that interaction — needs its own decision.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-  const [actionError, setActionError] = useState<string | null>(null)
   const [actionNote, setActionNote] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   const load = async () => {
     setState({ phase: 'loading' })
-    setActionError(null)
     setActionNote(null)
     setConfirmId(null)
     setConfirmAllOthers(false)
@@ -612,15 +608,16 @@ export default function SecurityView() {
 
   const doRevoke = async (id: string) => {
     setRevokingId(id)
-    setActionError(null)
     setActionNote(null)
     const r = await accountRevokeSession(id)
     setRevokingId(null)
     setConfirmId(null)
     if (!r.ok) {
-      setActionError(
-        r.unsupported ? 'Revoking sessions isn’t available in this build.' : r.reason,
-      )
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t sign out that session',
+        message: r.unsupported ? 'Revoking sessions isn’t available in this build.' : r.reason,
+      })
       return
     }
     setActionNote('Session signed out.')
@@ -629,15 +626,16 @@ export default function SecurityView() {
 
   const doRevokeAllOthers = async () => {
     setRevokingAll(true)
-    setActionError(null)
     setActionNote(null)
     const r = await accountRevokeOtherSessions()
     setRevokingAll(false)
     setConfirmAllOthers(false)
     if (!r.ok) {
-      setActionError(
-        r.unsupported ? 'Signing out other sessions isn’t available in this build.' : r.reason,
-      )
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t sign out other sessions',
+        message: r.unsupported ? 'Signing out other sessions isn’t available in this build.' : r.reason,
+      })
       return
     }
     const n = r.value?.revoked ?? 0
@@ -693,23 +691,7 @@ export default function SecurityView() {
         )}
 
         {/* Action feedback (revoke results / errors) */}
-        {actionError && (
-          <div
-            style={{
-              padding: '10px 14px',
-              borderRadius: 8,
-              border: `1px solid ${WARN_LINE}`,
-              background: WARN_BG,
-              fontSize: 11.5,
-              fontFamily: T.fontSans,
-              color: WARN,
-              wordBreak: 'break-word' as const,
-            }}
-          >
-            {actionError}
-          </div>
-        )}
-        {actionNote && !actionError && (
+        {actionNote && (
           <div
             style={{
               padding: '10px 14px',
@@ -752,7 +734,6 @@ export default function SecurityView() {
                   pendingConfirm={confirmId === s.id}
                   busy={revokingId === s.id}
                   onAskRevoke={() => {
-                    setActionError(null)
                     setActionNote(null)
                     setConfirmAllOthers(false)
                     setConfirmId(s.id)
@@ -816,7 +797,6 @@ export default function SecurityView() {
                   ) : (
                     <PrimaryBtn
                       onClick={() => {
-                        setActionError(null)
                         setActionNote(null)
                         setConfirmId(null)
                         setConfirmAllOthers(true)

@@ -305,8 +305,12 @@ type DisconnectPhase = 'idle' | 'confirming' | 'busy' | 'error'
 
 function DisconnectSection() {
   const [phase, setPhase] = useState<DisconnectPhase>('idle')
-  // UNTRIAGED (task 1319 notes). Rendered inside a confirmation flow, so it may well be form-blocking,
-  // but that was not verified in this task.
+  // TRIAGED (task 1323): NOT correction-blocking — there is no input anywhere in this component, so
+  // the third clause correctly does not apply. It is the state-machine family instead: errorMsg is set
+  // together with setPhase('error') and renders ONLY inside {phase === 'error' && …}, beside a Retry
+  // button, so it persists until the user acts rather than being fire-and-forget. A fourth clause
+  // covering that shape was proposed and DECLINED (see 1323) — a stated reason is auditable where a
+  // structural exemption is invisible, so this stays a documented exception.
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [errorMsg, setErrorMsg] = useState<string>('')
 

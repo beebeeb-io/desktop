@@ -14,7 +14,9 @@ export default function Account() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  // UNTRIAGED — src/pages/ is task 1318's scope and was deliberately not widened into here.
+  // OWNED BY TASK 1318 — src/pages/ (the compact shell) was never scoped onto the Toast system at all,
+  // and 1323 deliberately did not widen into it. Not untriaged: it has an owner. Migrate it with the
+  // rest of src/pages/ so the shell changes once, not twice.
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [notice, setNotice] = useState<string | null>(null)
 
