@@ -8,6 +8,7 @@ import {
   type StorageSummary,
   type SyncStatus,
 } from '../desktopApi'
+import { useToast } from '../windows/ui'
 
 type PageLink = 'versions' | 'selective-sync' | 'finder' | 'account'
 
@@ -48,10 +49,13 @@ function finderSetupState(installState: FinderInstallState | null) {
 }
 
 export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) => void }) {
+  const { showToast } = useToast()
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [finderInstallState, setFinderInstallState] = useState<FinderInstallState | null>(null)
   const [finderNotice, setFinderNotice] = useState<string | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
+  // Survives the split: still carries the LOAD failure for the storage summary, which must
+  // persist because the panel stays on screen without its numbers. The action failure toasts.
   const [storageNotice, setStorageNotice] = useState<string | null>(null)
 
   useEffect(() => {
@@ -137,9 +141,11 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     if (!status?.logged_in) {
       const opened = await command<void>('open_onboarding_window')
       if (!opened.ok) {
-        // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-        // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-        setStorageNotice(opened.unsupported ? commandUnavailableLabel('open_onboarding_window') : opened.reason)
+        showToast({
+          variant: 'error',
+          title: 'Couldn’t open setup',
+          message: opened.unsupported ? commandUnavailableLabel('open_onboarding_window') : opened.reason,
+        })
       }
       return
     }

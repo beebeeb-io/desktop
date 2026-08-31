@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useState } from 'react'
 import { command, commandUnavailableLabel, type VaultItem } from '../desktopApi'
+import { useToast } from '../windows/ui'
 
 export default function SelectiveSync() {
   const [items, setItems] = useState<VaultItem[]>([])
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<string | null>(null)
+  // `notice` deliberately survives the split: it still carries the LOAD failure, where
+  // `list_remote_tree` falls back to `list_vault_folders` and leaves a DEGRADED list on
+  // screen that needs a persistent explanation. The toggle failure below is a transient
+  // action failure and goes to a Toast. Same split as 1255's PinningStep.
+  //
+  // The `setNotice(null)` resets that used to open each action handler are gone ON PURPOSE.
+  // They predate the split, when the same state carried both failures and clearing it before
+  // an action was correct. Now that only the LOAD failure lives here, clearing it on an
+  // unrelated click would dismiss a still-true explanation of a still-degraded surface —
+  // which is precisely the persistence this split exists to preserve.
   const [notice, setNotice] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   useEffect(() => {
     let cancelled = false
@@ -35,7 +47,6 @@ export default function SelectiveSync() {
 
   const toggleFolder = async (folder: VaultItem) => {
     setSavingId(folder.id)
-    setNotice(null)
     const nextPinned = !folder.pinned
     const result = await command<void>('set_recursive_pin', {
       itemId: folder.id,
@@ -43,9 +54,11 @@ export default function SelectiveSync() {
     })
     setSavingId(null)
     if (!result.ok) {
-      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-      setNotice(result.unsupported ? commandUnavailableLabel('set_recursive_pin') : result.reason)
+      showToast({
+        variant: 'error',
+        title: nextPinned ? 'Couldn’t make folder offline' : 'Couldn’t make folder online-only',
+        message: result.unsupported ? commandUnavailableLabel('set_recursive_pin') : result.reason,
+      })
       return
     }
     setItems((current) => updateItem(current, folder.id, { pinned: nextPinned }))
