@@ -364,6 +364,8 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
         }
       `,
       errors: [{ messageId: 'splitCandidate' }],
+    },
+    {
       name: 'CLAUSE 4 NEGATIVE: one render OUTSIDE the gate and it is still reported',
       // Condition 2 from the lead's adoption. A component that merely CONTAINS a state
       // machine must not exempt every error in its body — the same over-broad shape
