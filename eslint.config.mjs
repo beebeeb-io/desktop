@@ -1,6 +1,7 @@
 import jsxA11y from 'eslint-plugin-jsx-a11y'
 import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
+import noAdHocErrorSurface from './eslint-rules/no-ad-hoc-error-surface.mjs'
 
 const jsxA11yRecommended = jsxA11y.flatConfigs.recommended
 
@@ -17,6 +18,7 @@ export default [
     plugins: {
       ...jsxA11yRecommended.plugins,
       'react-hooks': reactHooks,
+      beebeeb: { rules: { 'no-ad-hoc-error-surface': noAdHocErrorSurface } },
     },
     languageOptions: {
       ...jsxA11yRecommended.languageOptions,
@@ -31,6 +33,7 @@ export default [
       ...jsxA11yRecommended.rules,
       'react-hooks/exhaustive-deps': 'error',
       'react-hooks/rules-of-hooks': 'error',
+      'beebeeb/no-ad-hoc-error-surface': 'error',
     },
   },
 ]
