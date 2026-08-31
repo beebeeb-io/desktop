@@ -9,8 +9,19 @@ import {
 } from '../desktopApi'
 import { useToast } from '../windows/ui'
 
+// Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
+// following the DisconnectSection precedent in windows/views/AccountView.tsx:
+//   idle       → shows the "Reset Finder integration…" button
+//   confirming → shows the consequences copy + Reset / Cancel pair
+//   busy       → shows the in-flight copy while the IPC call runs
+// The action stays GATED behind an explicit confirmation. It deliberately does not become
+// a toast: a toast is an announcement, not consent, and this unregisters the Finder
+// location and turns off Start at login.
+type ResetPhase = 'idle' | 'confirming' | 'busy'
+
 export default function SyncFolder() {
   const { showToast } = useToast()
+  const [resetPhase, setResetPhase] = useState<ResetPhase>('idle')
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
   const [installState, setInstallState] = useState<FinderInstallState | null>(null)
   const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
@@ -80,14 +91,11 @@ export default function SyncFolder() {
   }
 
   const resetFinderIntegration = async () => {
-    const confirmed = window.confirm(
-      'Reset Finder integration?\n\nBeebeeb will unregister the Finder location, turn off Start at login, remove the stale local socket, and preserve queued uploads and local sync state.'
-    )
-    if (!confirmed) return
-
+    setResetPhase('busy')
     setBusy(true)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setBusy(false)
+    setResetPhase('idle')
     if (!result.ok) {
       showToast({
         variant: 'error',
@@ -201,10 +209,34 @@ export default function SyncFolder() {
               and keeps queued uploads.
             </div>
           </div>
-          <button className="button" disabled={busy} onClick={() => void resetFinderIntegration()}>
-            Reset Finder integration…
-          </button>
+          {resetPhase === 'idle' && (
+            <button className="button" disabled={busy} onClick={() => setResetPhase('confirming')}>
+              Reset Finder integration…
+            </button>
+          )}
+          {resetPhase === 'busy' && (
+            <button className="button" disabled>
+              Resetting…
+            </button>
+          )}
         </div>
+        {resetPhase === 'confirming' && (
+          <div className="notice" style={{ marginTop: 12 }}>
+            <div style={{ marginBottom: 10 }}>
+              <strong>Reset Finder integration?</strong> Beebeeb will unregister the Finder location,
+              turn off Start at login, and remove the stale local socket. Queued uploads and local
+              sync state are preserved.
+            </div>
+            <div className="button-row">
+              <button className="button danger" onClick={() => void resetFinderIntegration()}>
+                Reset Finder integration
+              </button>
+              <button className="button" onClick={() => setResetPhase('idle')}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   )
