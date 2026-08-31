@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, type SharedRoot } from '../desktopApi'
+import { useToast } from '../windows/ui'
 
 function permissionLabel(permission: SharedRoot['permission']): string {
   if (permission === 'admin') return 'Admin'
@@ -12,8 +13,11 @@ function kindLabel(kind: SharedRoot['kind']): string {
 }
 
 export default function Shared() {
+  const { showToast } = useToast()
   const [roots, setRoots] = useState<SharedRoot[]>([])
   const [loading, setLoading] = useState(true)
+  // Survives the split: still carries the LOAD failure, which must persist because the
+  // surface it explains stays on screen degraded. The action failure now toasts.
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
@@ -36,9 +40,11 @@ export default function Shared() {
       path: root.finder_path,
     })
     if (!result.ok) {
-      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-      setNotice(result.unsupported ? commandUnavailableLabel('open_in_finder') : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open in Finder',
+        message: result.unsupported ? commandUnavailableLabel('open_in_finder') : result.reason,
+      })
     }
   }
 

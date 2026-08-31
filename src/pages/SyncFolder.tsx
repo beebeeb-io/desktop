@@ -7,12 +7,22 @@ import {
   type MacosIntegrationResetResult,
   type SyncStatus,
 } from '../desktopApi'
+import { useToast } from '../windows/ui'
 
 export default function SyncFolder() {
+  const { showToast } = useToast()
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
   const [installState, setInstallState] = useState<FinderInstallState | null>(null)
   const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
   const [busy, setBusy] = useState(false)
+  // Survives the split: still carries the LOAD failure for the Finder install state, which
+  // must persist because the panel stays on screen without it. All four action failures toast.
+  //
+  // The `setNotice(null)` resets that used to open each action handler are gone ON PURPOSE.
+  // They predate the split, when the same state carried both failures and clearing it before
+  // an action was correct. Now that only the LOAD failure lives here, clearing it on an
+  // unrelated click would dismiss a still-true explanation of a still-degraded surface —
+  // which is precisely the persistence this split exists to preserve.
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
@@ -30,39 +40,42 @@ export default function SyncFolder() {
 
   const chooseFolderClick = async () => {
     setBusy(true)
-    setNotice(null)
     const result = await command<string | null>('pick_sync_root')
     setBusy(false)
     if (result.ok) {
       if (result.value) setSyncRoot(result.value)
       return
     }
-    // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-    // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-    setNotice(result.unsupported ? commandUnavailableLabel('pick_sync_root') : result.reason)
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t open the folder picker',
+      message: result.unsupported ? commandUnavailableLabel('pick_sync_root') : result.reason,
+    })
   }
 
   const installFinder = async () => {
     setBusy(true)
-    setNotice(null)
     const result = await command<FinderInstallState>('install_finder_location', { path: syncRoot })
     setBusy(false)
     if (result.ok) {
       setInstallState(result.value)
       return
     }
-    // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-    // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-    setNotice(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t install the Finder location',
+      message: result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason,
+    })
   }
 
   const openFinder = async () => {
-    setNotice(null)
     const result = await command<void>('open_finder_location', { path: platform === 'macos' ? null : syncRoot })
     if (!result.ok) {
-      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-      setNotice(result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open the sync folder',
+        message: result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason,
+      })
     }
   }
 
@@ -73,13 +86,14 @@ export default function SyncFolder() {
     if (!confirmed) return
 
     setBusy(true)
-    setNotice(null)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setBusy(false)
     if (!result.ok) {
-      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-      setNotice(result.unsupported ? commandUnavailableLabel('reset_macos_integration') : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t reset Finder integration',
+        message: result.unsupported ? commandUnavailableLabel('reset_macos_integration') : result.reason,
+      })
       return
     }
 

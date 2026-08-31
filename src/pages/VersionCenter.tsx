@@ -53,6 +53,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   const [conflicts, setConflicts] = useState(0)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  // Survives the split: still carries the LOAD failure for the version list. The action
+  // failure now toasts, finishing the migration 1251 started in this file.
   const [notice, setNotice] = useState<string | null>(null)
   const [versionNotice, setVersionNotice] = useState<string | null>(null)
   const [restoring, setRestoring] = useState<string | null>(null)
@@ -118,9 +120,11 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       isText: false,
     })
     if (!result.ok) {
-      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
-      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-      setNotice(result.unsupported ? commandUnavailableLabel('open_conflict_window') : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open conflicts',
+        message: result.unsupported ? commandUnavailableLabel('open_conflict_window') : result.reason,
+      })
     }
   }
 
