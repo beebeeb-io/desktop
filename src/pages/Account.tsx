@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useToast } from '../windows/ui'
 import {
   command,
   commandUnavailableLabel,
@@ -10,15 +11,11 @@ import {
 const WEB_APP_URL = 'https://app.beebeeb.io'
 
 export default function Account() {
+  const { showToast } = useToast()
   const [email, setEmail] = useState<string | null>(null)
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  // OWNED BY TASK 1318 — src/pages/ (the compact shell) was never scoped onto the Toast system at all,
-  // and 1323 deliberately did not widen into it. Not untriaged: it has an owner. Migrate it with the
-  // rest of src/pages/ so the shell changes once, not twice.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
-  const [notice, setNotice] = useState<string | null>(null)
 
   // Poll sync_status so the component reflects auto-unlock state that
   // occurs on startup — the vault may unlock a few seconds after mount.
@@ -53,11 +50,14 @@ export default function Account() {
 
   const runAction = async (name: string, args?: Record<string, unknown>) => {
     setBusy(name)
-    setNotice(null)
     const result = await command<void>(name, args)
     setBusy(null)
     if (!result.ok) {
-      setNotice(result.unsupported ? commandUnavailableLabel(name) : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'That didn’t work',
+        message: result.unsupported ? commandUnavailableLabel(name) : result.reason,
+      })
       return false
     }
     return true
@@ -79,11 +79,14 @@ export default function Account() {
 
   const signOut = async () => {
     setBusy('clear_session')
-    setNotice(null)
     const result = await command<void>('clear_session')
     setBusy(null)
     if (!result.ok) {
-      setNotice(result.unsupported ? commandUnavailableLabel('clear_session') : result.reason)
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t sign out',
+        message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason,
+      })
       return
     }
     setEmail(null)
@@ -95,12 +98,20 @@ export default function Account() {
     const result = await command<boolean>('toggle_autostart')
     setBusy(null)
     if (result.ok) setAutostart(result.value)
-    else setNotice(result.unsupported ? commandUnavailableLabel('toggle_autostart') : result.reason)
+    else showToast({
+      variant: 'error',
+      title: 'Couldn’t change launch setting',
+      message: result.unsupported ? commandUnavailableLabel('toggle_autostart') : result.reason,
+    })
   }
 
   const diagnostics = async () => {
     if (await runAction('export_diagnostics')) {
-      setNotice('Diagnostics export started.')
+      showToast({
+        variant: 'success',
+        title: 'Diagnostics export started',
+        message: 'The bundle is being written to your sync folder.',
+      })
     }
   }
 
@@ -123,7 +134,6 @@ export default function Account() {
         </span>
       </div>
 
-      {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
 
       <div className="grid two">
         <div className="panel">
