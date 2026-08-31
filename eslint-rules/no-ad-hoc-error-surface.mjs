@@ -143,6 +143,31 @@ const FUNCTION_TYPES = new Set([
  * from an empty state). So follow one level of indirection: if the enclosing function is
  * bound to a name, and that name is called inside a useEffect, this is a load path.
  */
+/**
+ * A function wired as a RETRY affordance is a load path too.
+ *
+ * The repo's shape is `<ErrorBlock reason={…} onRetry={load} />`, where `load` re-runs the
+ * same fetch the mount effect ran. Task 1330 found three states — ActivityView's two `err`
+ * states and SettingsView's NotificationPreferences `err` — where `load` sets the error but
+ * is reached ONLY through `onRetry`, never from inside a useEffect. They were reported as
+ * `load+action` split candidates, i.e. the rule claimed half of each was a transient action
+ * that should toast. Retrying a failed load is still a load, and toasting it would have
+ * removed the very ErrorBlock whose Retry button called it.
+ *
+ * Keyed on the `onRetry` prop specifically, not on any handler prop: `onClick` would
+ * swallow genuine action failures, which is the trade this rule exists to get right.
+ */
+function isRetryCallback(fnVar) {
+  return fnVar.references.some((ref) => {
+    const container = ref.identifier.parent
+    return (
+      container?.type === 'JSXExpressionContainer' &&
+      container.parent?.type === 'JSXAttribute' &&
+      container.parent.name?.name === 'onRetry'
+    )
+  })
+}
+
 function isLoadPath(node, sourceCode) {
   if (isInsideUseEffect(node)) return true
 
@@ -160,6 +185,7 @@ function isLoadPath(node, sourceCode) {
     const [fnVar] = sourceCode.getDeclaredVariables(declarator)
     if (!fnVar) continue
     if (fnVar.references.some((ref) => isInsideUseEffect(ref.identifier))) return true
+    if (isRetryCallback(fnVar)) return true
   }
 
   return false
