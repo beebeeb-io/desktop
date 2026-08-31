@@ -38,6 +38,15 @@
  * no shared Notice module — WindowsFirstRun has a local one and ErrorBlock is duplicated
  * in ActivityView and SettingsView), so it needs its own task, not a noisy rule here.
  *
+ * KNOWN BLIND SPOT — do not claim this rule "cannot undercount", only that it cannot
+ * forget to look. It recognises an error state by two shapes: a setter receiving
+ * `.reason`/`commandUnavailableLabel(...)`, or a `useState<CommandResult<...>>`. An error
+ * sourced from anywhere else is invisible to it. A real example lives in this repo:
+ * WindowsFirstRun's `browserError` is fed from a Tauri event payload (`p.message`), so the
+ * census does not see it. Widening to `.message` was considered and rejected — it matches
+ * every `Error.message` in the codebase and would bury the signal. If a third origin shape
+ * appears, add it here rather than going back to counting by hand.
+ *
  * DELIBERATE EXCEPTIONS: use an eslint-disable-next-line comment WITH a reason. The
  * rule is designed so that documenting an exception in code is the way to satisfy it,
  * which is also what task 1255's AC6 requires.
@@ -252,15 +261,29 @@ export default {
         if (!stateVar || !setterVar) return
 
         // ---- Is this an error state at all? (data-flow, not naming) ----
-        let isErrorState = false
+        // Second recognised shape: the whole CommandResult is parked in state
+        // (`useState<CommandResult<void> | null>`) and `.reason` is read at the render
+        // site instead of the setter. Onboarding's UnlockStep does this, and reading
+        // only setter arguments missed it entirely — found by diffing this rule's census
+        // against a hand count, which is the sort of gap a hand count cannot self-detect.
+        const typeArgs = node.init.typeArguments ?? node.init.typeParameters
+        let isErrorState = Boolean(typeArgs && /\bCommandResult\b/.test(sourceCode.getText(typeArgs)))
         let setFromLoad = false
         let setFromAction = false
 
+        // When the state is error-typed (a parked CommandResult), every write counts —
+        // its setter argument is the whole result object, so `.reason` never appears at
+        // the call site and requiring it there left the state detected but unclassified,
+        // i.e. silently never reported. Caught by the rule's own test, not by reading it.
+        const errorByType = isErrorState
         for (const ref of setterVar.references) {
           const call = ref.identifier.parent
           if (call?.type !== 'CallExpression' || call.callee !== ref.identifier) continue
           const arg = call.arguments[0]
-          if (!arg || !isErrorOrigin(arg)) continue
+          if (!arg) continue
+          const argIsNullish = arg.type === 'Literal' && arg.value === null
+          if (!errorByType && !isErrorOrigin(arg)) continue
+          if (errorByType && argIsNullish) continue // `setResult(null)` is a reset, not a failure
           isErrorState = true
           if (isLoadPath(call, sourceCode)) setFromLoad = true
           else setFromAction = true
@@ -279,6 +302,27 @@ export default {
           if (usage.gatesControl) gatesControl = true
           if (usage.renderedInline) renderedInline = true
           if (usage.passedAsProp) passedAsProp = true
+        }
+
+        // A census mode exists so the per-file enumeration is reproducible by anyone.
+        // Four hand counts of these files disagreed; `BB_ERROR_SURFACE_CENSUS=1 bunx eslint src`
+        // prints every error state the rule can see, defect or not, so the next reviewer
+        // re-derives the number instead of trusting a figure typed into a task file.
+        // NOTE: this writes to stderr rather than context.report ON PURPOSE. A census
+        // routed through context.report is silenced by the very eslint-disable comments
+        // that mark documented exceptions, so it would under-report exactly the states
+        // someone had already decided about — reintroducing the undercount in the tool
+        // built to end it. stderr cannot be disabled away.
+        if (process.env.BB_ERROR_SURFACE_CENSUS === '1') {
+          process.stderr.write(JSON.stringify({
+            census: true,
+            file: context.filename ?? context.getFilename(),
+            line: node.loc.start.line,
+            name: stateVar.name,
+            trigger: setFromLoad ? (setFromAction ? 'load+action' : 'load') : 'action',
+            gatesControl,
+            presentation: passedAsProp ? 'prop' : renderedInline ? 'inline' : 'toast-only',
+          }) + '\n')
         }
 
         // ---- Arm A: a transient action failure that should have been a toast ----

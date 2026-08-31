@@ -109,9 +109,38 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
         }
       `,
     },
+    {
+      name: 'CommandResult parked in state that GATES a control stays inline (UnlockStep)',
+      code: `
+        function Panel() {
+          const [result, setResult] = useState<CommandResult<void> | null>(null)
+          const unlock = async () => { setResult(await command('unlock')) }
+          return <div>
+            {result && !result.ok && <div className="notice">{result.reason}</div>}
+            {result && !result.ok && result.unsupported && <button onClick={onDone}>Continue</button>}
+          </div>
+        }
+      `,
+    },
   ],
 
   invalid: [
+    {
+      name: 'CommandResult parked in state, action-only, gating nothing, is a straggler',
+      // Found by diffing the rule's census against a hand count: reading only setter
+      // arguments missed this shape entirely, because `.reason` is read at the render site.
+      code: `
+        function Panel() {
+          const [result, setResult] = useState<CommandResult<void> | null>(null)
+          const save = async () => { setResult(await command('save')) }
+          return <div>
+            <button onClick={save}>Save</button>
+            {result && !result.ok && <div className="notice">{result.reason}</div>}
+          </div>
+        }
+      `,
+      errors: [{ messageId: 'transientActionInline' }],
+    },
     {
       name: 'transient action failure rendered inline is a straggler',
       code: straggler,
