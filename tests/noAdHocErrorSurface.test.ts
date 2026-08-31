@@ -68,6 +68,20 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
       `,
     },
     {
+      name: 'SPLIT NEGATIVE: a PURE load state is still fully exempt, not a split candidate',
+      code: `
+        function Panel() {
+          const [notice, setNotice] = useState(null)
+          const load = async () => {
+            const r = await command('list')
+            if (!r.ok) setNotice(r.reason)
+          }
+          useEffect(() => { void load() }, [])
+          return <div>{notice && <div className="notice">{notice}</div>}</div>
+        }
+      `,
+    },
+    {
       name: 'LOAD failure via a named load() called from useEffect stays inline',
       // Regression test: reading only lexical nesting missed this idiom and classified
       // TrashView's list-load failure as a transient action.
@@ -249,6 +263,31 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
         }
       `,
       errors: [{ messageId: 'transientActionInline' }],
+    },
+    {
+      name: 'SPLIT CANDIDATE: a state carrying BOTH a load and an action failure is reported',
+      // The PinningStep / SelectiveSync shape. The rule used to exempt this wholesale
+      // because ONE setter sat on a load path — a silent under-report, which is the
+      // failure mode this whole guard exists to end.
+      code: `
+        function Panel() {
+          const [notice, setNotice] = useState(null)
+          useEffect(() => {
+            command('list_remote_tree').then((tree) => {
+              if (!tree.ok) setNotice(tree.reason)
+            })
+          }, [])
+          const toggle = async (item) => {
+            const r = await command('set_recursive_pin', { id: item.id })
+            if (!r.ok) setNotice(r.reason)
+          }
+          return <div>
+            {notice && <div className="notice">{notice}</div>}
+            <button onClick={toggle}>Toggle</button>
+          </div>
+        }
+      `,
+      errors: [{ messageId: 'splitCandidate' }],
     },
     {
       name: 'transient action failure rendered inline is a straggler',

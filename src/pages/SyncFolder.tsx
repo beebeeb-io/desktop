@@ -37,6 +37,8 @@ export default function SyncFolder() {
       if (result.value) setSyncRoot(result.value)
       return
     }
+    // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+    // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
     setNotice(result.unsupported ? commandUnavailableLabel('pick_sync_root') : result.reason)
   }
 
@@ -49,6 +51,8 @@ export default function SyncFolder() {
       setInstallState(result.value)
       return
     }
+    // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+    // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
     setNotice(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
   }
 
@@ -56,6 +60,8 @@ export default function SyncFolder() {
     setNotice(null)
     const result = await command<void>('open_finder_location', { path: platform === 'macos' ? null : syncRoot })
     if (!result.ok) {
+      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
       setNotice(result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason)
     }
   }
@@ -71,6 +77,8 @@ export default function SyncFolder() {
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setBusy(false)
     if (!result.ok) {
+      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
       setNotice(result.unsupported ? commandUnavailableLabel('reset_macos_integration') : result.reason)
       return
     }

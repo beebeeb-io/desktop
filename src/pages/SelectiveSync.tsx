@@ -43,6 +43,8 @@ export default function SelectiveSync() {
     })
     setSavingId(null)
     if (!result.ok) {
+      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
       setNotice(result.unsupported ? commandUnavailableLabel('set_recursive_pin') : result.reason)
       return
     }

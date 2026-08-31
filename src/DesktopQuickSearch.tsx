@@ -139,6 +139,8 @@ export default function DesktopQuickSearch({
     if (opened.ok) {
       onClose()
     } else {
+      // SPLIT PENDING — NO OWNER YET (flagged to the lead 2026-08-31): toast this action failure, leave the load failure inline.
+      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
       setNotice(opened.unsupported ? commandUnavailableLabel('open_in_finder') : opened.reason)
     }
     setOpeningId(null)
