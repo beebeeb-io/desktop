@@ -680,6 +680,9 @@ export default function SelectiveSyncView() {
   const [working, setWorking] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [applying, setApplying] = useState(false)
+  // UNTRIAGED (task 1319 notes). Prop-drilled like SettingsView's `notice` was, so likely a straggler,
+  // but unwinding it is a separate change.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [applyError, setApplyError] = useState<string | null>(null)
   // Latched true while a silent background refresh is in flight, so the header
   // chip can show "Refreshing…" without disturbing the tree.

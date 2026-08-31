@@ -321,10 +321,15 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [pwBusy, setPwBusy] = useState(false)
+  // Form-blocking: the user re-reads and corrects the password in place, so the error must stay next
+  // to the input. A toast would scroll away mid-retry.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [pwError, setPwError] = useState<string | null>(null)
 
   const [totpCode, setTotpCode] = useState('')
   const [totpBusy, setTotpBusy] = useState(false)
+  // Form-blocking: same as pwError — the 2FA code is corrected in place while the error is visible.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [totpError, setTotpError] = useState<string | null>(null)
   const totpInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -911,7 +916,7 @@ function SyncModeStep({ onDone }: { onDone: () => void }) {
 function ExplorerStep({ onDone }: { onDone: () => void }) {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   useEffect(() => {
     command<string>('default_sync_root').then((r) => { if (r.ok) setSyncRoot(r.value) })
@@ -922,17 +927,26 @@ function ExplorerStep({ onDone }: { onDone: () => void }) {
     const picked = await command<string | null>('pick_sync_root')
     setBusy(false)
     if (picked.ok && picked.value) { setSyncRoot(picked.value); return }
-    if (!picked.ok) setMessage(picked.unsupported ? commandUnavailableLabel('pick_sync_root') : picked.reason)
-  }, [])
+    if (!picked.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open the folder picker',
+        message: picked.unsupported ? commandUnavailableLabel('pick_sync_root') : picked.reason,
+      })
+    }
+  }, [showToast])
 
   const install = useCallback(async () => {
     setBusy(true)
-    setMessage(null)
     const result = await command<ShellIntegrationState>('install_windows_shell_integration', { path: syncRoot })
     setBusy(false)
     if (result.ok) { onDone(); return }
-    setMessage(result.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : result.reason)
-  }, [onDone, syncRoot])
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t install File Explorer integration',
+      message: result.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : result.reason,
+    })
+  }, [onDone, syncRoot, showToast])
 
   const skip = useCallback(() => {
     // No dedicated skip command on Windows — proceed directly
@@ -950,7 +964,6 @@ function ExplorerStep({ onDone }: { onDone: () => void }) {
       <p style={{ margin: '0 0 18px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
         Beebeeb will appear as a location in File Explorer. This is separate from the sync folder you'll use every day.
       </p>
-      {message && <Notice>{message}</Notice>}
       <div style={{
         padding: '14px 16px',
         background: T.paper2,

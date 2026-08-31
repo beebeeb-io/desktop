@@ -575,6 +575,9 @@ export default function SecurityView() {
   const [revokingId, setRevokingId] = useState<string | null>(null)
   const [confirmAllOthers, setConfirmAllOthers] = useState(false)
   const [revokingAll, setRevokingAll] = useState(false)
+  // UNTRIAGED (task 1319 notes). Coupled to actionNote via `actionNote && !actionError`, so migrating
+  // it changes that interaction — needs its own decision.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [actionError, setActionError] = useState<string | null>(null)
   const [actionNote, setActionNote] = useState<string | null>(null)
 

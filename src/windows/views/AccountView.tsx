@@ -305,6 +305,9 @@ type DisconnectPhase = 'idle' | 'confirming' | 'busy' | 'error'
 
 function DisconnectSection() {
   const [phase, setPhase] = useState<DisconnectPhase>('idle')
+  // UNTRIAGED (task 1319 notes). Rendered inside a confirmation flow, so it may well be form-blocking,
+  // but that was not verified in this task.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [errorMsg, setErrorMsg] = useState<string>('')
 
   const handleConfirm = async () => {

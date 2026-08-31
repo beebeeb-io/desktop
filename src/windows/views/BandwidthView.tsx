@@ -643,6 +643,11 @@ function bpsToMbps(bps: number): string {
 }
 
 function SpeedtestPanel() {
+  // Phase-based view state machine (SpeedtestState.phase === 'error'), not an ad hoc error string —
+  // the error is one render phase of the speedtest panel. Deliberately NOT filtered out in the rule:
+  // excluding every object-shaped state would risk hiding a real straggler, and undercounting is the
+  // failure mode this rule exists to prevent.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [st, setSt] = useState<SpeedtestState>({ phase: 'idle' })
   const runningRef = useRef(false)
 

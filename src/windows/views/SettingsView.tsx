@@ -240,15 +240,16 @@ function SyncPanel({
   storage,
   config,
   onConfigChange,
-  notice,
 }: {
   status: SyncStatus | null
   storage: StorageSummary | null
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
-  notice: string | null
 }) {
   const [freeUpBusy, setFreeUpBusy] = useState(false)
+  // Not an error surface: freeUpNote reports the RESULT of 'Free up space' on both success and
+  // failure, in ink3, not as an error. It happens to carry result.reason on the failure branch.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [freeUpNote, setFreeUpNote] = useState<string | null>(null)
   const [lastSyncLabel, setLastSyncLabel] = useState('...')
 
@@ -349,12 +350,6 @@ function SyncPanel({
           )
         })}
       </Card>
-
-      {notice && (
-        <div style={{ marginTop: 14, padding: '10px 14px', borderRadius: 8, border: '1px solid oklch(0.88 0.05 84)', background: T.amberBg, fontSize: 12, color: T.amberDeep, lineHeight: 1.5 }}>
-          {notice}
-        </div>
-      )}
 
       <Card style={{ marginTop: 24, padding: 18, display: 'flex', alignItems: 'center', gap: 14, background: T.paper2 }}>
         <div style={{ width: 32, height: 32, borderRadius: 8, background: T.paper, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -502,11 +497,9 @@ function NotificationPreferencesSkeleton() {
 function DesktopNotificationPreferencesPanel({
   config,
   onConfigChange,
-  notice,
 }: {
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
-  notice: string | null
 }) {
   const toggleDesktopNotification = (key: DesktopNotificationPrefKey, value: boolean) => {
     switch (key) {
@@ -546,7 +539,6 @@ function DesktopNotificationPreferencesPanel({
         )
       })}
 
-      {notice && <div style={{ padding: '11px 20px', borderTop: `1px solid ${T.line}`, background: T.paper2, fontSize: 11.5, color: RED, lineHeight: 1.5 }}>{notice}</div>}
     </Card>
   )
 }
@@ -554,11 +546,9 @@ function DesktopNotificationPreferencesPanel({
 function NotificationsSettingsPanel({
   config,
   onConfigChange,
-  notice,
 }: {
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
-  notice: string | null
 }) {
   return (
     <SettingsSectionShell>
@@ -567,7 +557,7 @@ function NotificationsSettingsPanel({
         subtitle="Choose which desktop and account events Beebeeb is allowed to tell you about."
       />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-        <DesktopNotificationPreferencesPanel config={config} onConfigChange={onConfigChange} notice={notice} />
+        <DesktopNotificationPreferencesPanel config={config} onConfigChange={onConfigChange} />
         <NotificationPreferencesPanel />
       </div>
     </SettingsSectionShell>
@@ -915,15 +905,16 @@ function ExplorerIntegrationPanel() {
 function UpdatesPanel({
   config,
   onConfigChange,
-  notice,
 }: {
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
-  notice: string | null
 }) {
   const [version, setVersion] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
+  // Paired with the downgradeInstallState machine: the string is only rendered while that machine is
+  // in its 'error' phase, which persists until the user acts. Not fire-and-forget.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
   const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
@@ -1331,12 +1322,6 @@ function UpdatesPanel({
         })}
       </Card>
 
-      {notice && (
-        <div style={{ margin: '0 0 16px', padding: '10px 14px', borderRadius: 8, border: '1px solid oklch(0.88 0.05 84)', background: T.amberBg, fontSize: 12, color: T.amberDeep, lineHeight: 1.5 }}>
-          {notice}
-        </div>
-      )}
-
       <p style={{ margin: '0 0 16px', fontSize: 11.5, color: T.ink3, lineHeight: 1.6 }}>
         Beebeeb checks for updates automatically at startup and every 4 hours.
       </p>
@@ -1499,12 +1484,10 @@ function AdvancedPanel({
   storage,
   config,
   onConfigChange,
-  notice,
 }: {
   storage: StorageSummary | null
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
-  notice: string | null
 }) {
   const themePreference = normalizeThemePreference(config.theme)
   const cacheLimitBytes = normalizeCacheLimitBytes(config.local_cache_limit_bytes)
@@ -1698,12 +1681,6 @@ function AdvancedPanel({
         )}
       </Card>
 
-      {notice && (
-        <div style={{ margin: '0 0 16px', padding: '10px 14px', borderRadius: 8, border: '1px solid oklch(0.88 0.05 84)', background: T.amberBg, fontSize: 12, color: T.amberDeep, lineHeight: 1.5 }}>
-          {notice}
-        </div>
-      )}
-
       <AppActivityPanel />
     </SettingsSectionShell>
   )
@@ -1775,7 +1752,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [config, setConfig] = useState<DesktopConfig>(DEFAULT_CONFIG)
   const configRef = useRef<DesktopConfig>(DEFAULT_CONFIG)
-  const [notice, setNotice] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   useEffect(() => {
     if (!loggedIn && !ALWAYS_ACCESSIBLE_SETTINGS.has(activeNav)) {
@@ -1805,14 +1782,16 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
   }, [])
 
   const handleConfigChange = async (patch: Partial<DesktopConfig>) => {
-    setNotice(null)
     if (patch.theme) setDesktopThemePreference(patch.theme)
     const next: DesktopConfig = { ...configRef.current, ...patch }
     configRef.current = next
     setConfig(next)
     const result = await command<void>('set_desktop_config', { config: next })
     if (!result.ok) {
-      setNotice(result.reason)
+      // Transient ACTION failure (a settings control the user just changed) -> Toast.
+      // This used to be a `notice` string prop-drilled into four panels, which rendered
+      // it in two different visual treatments (amber in three, raw color: RED in one).
+      showToast({ variant: 'error', title: 'Couldn’t save setting', message: result.reason })
     }
   }
 
@@ -1829,7 +1808,6 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
             storage={storage}
             config={config}
             onConfigChange={(patch) => void handleConfigChange(patch)}
-            notice={notice}
           />
         )
       case 'notifications':
@@ -1837,7 +1815,6 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
           <NotificationsSettingsPanel
             config={config}
             onConfigChange={(patch) => void handleConfigChange(patch)}
-            notice={notice}
           />
         )
       case 'data-residency':
@@ -1847,14 +1824,13 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       case 'explorer-integration':
         return <ExplorerIntegrationPanel />
       case 'updates':
-        return <UpdatesPanel config={config} onConfigChange={(patch) => void handleConfigChange(patch)} notice={notice} />
+        return <UpdatesPanel config={config} onConfigChange={(patch) => void handleConfigChange(patch)} />
       case 'advanced':
         return (
           <AdvancedPanel
             storage={storage}
             config={config}
             onConfigChange={(patch) => void handleConfigChange(patch)}
-            notice={notice}
           />
         )
       default:
