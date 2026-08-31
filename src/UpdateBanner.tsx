@@ -22,9 +22,6 @@ export default function UpdateBanner() {
   const { showToast } = useToast()
   const [update, setUpdate] = useState<UpdatePayload | null>(null)
   const [installState, setInstallState] = useState<InstallState>('idle')
-  // Paired with the installState machine (installState === 'error'); the banner persists until
-  // dismissed or retried, so it is a durable state, not a transient notification.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [installError, setInstallError] = useState<string | null>(null)
 
   useEffect(() => {
