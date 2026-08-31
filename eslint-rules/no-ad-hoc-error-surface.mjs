@@ -213,6 +213,54 @@ function rendersCorrectableInput(node) {
   return found
 }
 
+/**
+ * A SUBSTITUTE RENDER: the error is returned as the whole view body, replacing whatever
+ * that view would otherwise show, rather than annotating a view that is still there.
+ *
+ * This is NOT a fourth clause — it is the missing structural signature of the EXISTING
+ * load clause. `isLoadPath` recognises a load by its call site (inside useEffect, or a
+ * function useEffect calls), which misses a load triggered by user interaction.
+ * DesktopVersionHistory's `loadVersions` is exactly that: it nulls the list, sets a
+ * loading flag, fetches versions, and on failure returns the error AS the panel body:
+ *
+ *     if (versionNotice != null) return <div className="quick-search-notice">{versionNotice}</div>
+ *     if (earlierVersions.length === 0) return <div>No earlier versions</div>
+ *
+ * Route that to a toast and the panel falls through to "No earlier versions" — a load
+ * failure becomes indistinguishable from an empty result. That is precisely the bug task
+ * 1255 found in TrashView and refused to reintroduce.
+ *
+ * Kept deliberately TIGHT to avoid becoming a blanket exemption: the returned expression
+ * must be a JSX element whose ONLY interpolation is this error. An error buried inside a
+ * large returned tree is an annotation, not a substitute, and is still reported — a
+ * component with early returns must not thereby exempt every error in its main body.
+ */
+function isSubstituteRender(identifier, chain) {
+  const fnIndex = chain.findIndex((a) => FUNCTION_TYPES.has(a.type))
+  const returnIndex = chain.findIndex((a) => a.type === 'ReturnStatement')
+  if (returnIndex === -1) return false
+  if (fnIndex !== -1 && fnIndex < returnIndex) return false // return belongs to an inner fn
+
+  const returned = chain[returnIndex].argument
+  if (returned?.type !== 'JSXElement') return false
+
+  const containers = []
+  walk(returned, (n) => { if (n.type === 'JSXExpressionContainer') containers.push(n) })
+  if (containers.length !== 1) return false
+  let onlyHoldsThisError = false
+  walk(containers[0], (n) => { if (n === identifier) onlyHoldsThisError = true })
+  if (!onlyHoldsThisError) return false
+
+  // A lone return substitutes for nothing; require a sibling branch it displaces.
+  const fn = chain.slice(returnIndex).find((a) => FUNCTION_TYPES.has(a.type))
+  if (!fn) return false
+  let jsxReturns = 0
+  walk(fn.body, (n) => {
+    if (n.type === 'ReturnStatement' && n.argument?.type === 'JSXElement') jsxReturns += 1
+  })
+  return jsxReturns >= 2
+}
+
 /** Does this subtree render an interactive control? */
 function rendersInteractiveControl(node) {
   let found = false
@@ -237,6 +285,7 @@ function classifyJsxUsage(identifier) {
   const result = {
     gatesControl: false,
     correctionBlocking: false,
+    substituteRender: false,
     renderedInline: false,
     passedAsProp: false,
     approvedRender: false,
@@ -254,6 +303,7 @@ function classifyJsxUsage(identifier) {
   // Does this error render alongside an input the user is correcting?
   const enclosing = chain.find((a) => a.type === 'JSXElement')
   if (enclosing && rendersCorrectableInput(enclosing)) result.correctionBlocking = true
+  if (isSubstituteRender(identifier, chain)) result.substituteRender = true
 
   // `{err && <X/>}` — what does the guard reveal?
   // Take the OUTERMOST `&&` below the container, not the innermost: in
@@ -351,6 +401,7 @@ export default {
         // ---- How is it presented? ----
         let gatesControl = false
         let correctionBlocking = false
+        let substituteRender = false
         let renderedInline = false
         let passedAsProp = false
 
@@ -359,6 +410,7 @@ export default {
           if (!usage) continue
           if (usage.gatesControl) gatesControl = true
           if (usage.correctionBlocking) correctionBlocking = true
+          if (usage.substituteRender) substituteRender = true
           if (usage.renderedInline) renderedInline = true
           if (usage.passedAsProp) passedAsProp = true
         }
@@ -381,6 +433,7 @@ export default {
             trigger: setFromLoad ? (setFromAction ? 'load+action' : 'load') : 'action',
             gatesControl,
             correctionBlocking,
+            substituteRender,
             presentation: passedAsProp ? 'prop' : renderedInline ? 'inline' : 'toast-only',
           }) + '\n')
         }
@@ -394,6 +447,7 @@ export default {
           !setFromLoad &&
           !gatesControl &&
           !correctionBlocking &&
+          !substituteRender &&
           (renderedInline || passedAsProp)
         ) {
           context.report({
