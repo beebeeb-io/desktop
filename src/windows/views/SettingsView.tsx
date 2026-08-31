@@ -912,9 +912,6 @@ function UpdatesPanel({
   const [version, setVersion] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
-  // Paired with the downgradeInstallState machine: the string is only rendered while that machine is
-  // in its 'error' phase, which persists until the user acts. Not fire-and-forget.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
   const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)

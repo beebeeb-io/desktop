@@ -299,6 +299,79 @@ function isSubstituteRender(identifier, chain) {
   return jsxReturns >= 2
 }
 
+/** String literals that mark a state machine's failure phase. */
+const ERROR_PHASE_VALUES = new Set(['error', 'failed', 'failure'])
+
+/**
+ * THE FOURTH CLAUSE (task 1325, adopted by the lead 2026-08-31 after four instances and a
+ * testable invariant — the condition on which it was originally declined).
+ *
+ *   An error whose EVERY render sits inside a branch gated on a SIBLING state variable
+ *   compared against an error phase persists by construction, and stays inline.
+ *
+ * `downgradeInstallError` renders only inside `downgradeInstallState === 'error' ? … : …`;
+ * `errorMsg` only inside `{phase === 'error' && …}`. Neither is fire-and-forget: the
+ * machine holds that phase until the user acts, usually beside a Retry control, so a
+ * 6s toast would vanish while the failure it describes is still on screen.
+ *
+ * EVERY render must be gated — one render outside and the error is still reported. A
+ * component that merely CONTAINS a state machine must not thereby exempt every error in
+ * its body. That is the same over-broad shape rejected for the third clause when
+ * "contains an input anywhere" was refused, and a negative test pins it.
+ *
+ * SIBLING is load-bearing too. `BandwidthView`'s `st` gates on ITSELF (`st.phase ===
+ * 'error'`) and renders three non-error phases besides, so it is deliberately NOT
+ * exempted: it is a view state machine that happens to carry a reason, not an error
+ * string held alongside one. See the task notes — it was named as a fourth instance and
+ * on inspection is a different shape.
+ */
+function comparesToErrorPhase(node, ownName) {
+  let found = false
+  walk(node, (n) => {
+    if (found || n.type !== 'BinaryExpression') return
+    if (n.operator !== '===' && n.operator !== '==') return
+    const sides = [n.left, n.right]
+    const literal = sides.find(
+      (x) => x?.type === 'Literal' && ERROR_PHASE_VALUES.has(String(x.value)),
+    )
+    if (!literal) return
+    const other = sides.find((x) => x !== literal)
+    // The compared value must belong to a DIFFERENT state than the error itself.
+    let root = other
+    while (root?.type === 'MemberExpression') root = root.object
+    if (root?.type === 'Identifier' && root.name !== ownName) found = true
+  })
+  return found
+}
+
+/**
+ * The gate may be written through a local boolean, e.g. UpdateBanner's
+ *   const installFailed = installState === 'error' && installError != null
+ *   … {installFailed && <span>Install failed: {installError}</span>}
+ * Following one level of const indirection preserves the invariant exactly, and mirrors
+ * how `isLoadPath` already follows `const load = …; useEffect(() => load())`.
+ */
+function testGatesOnErrorPhase(test, ownName, sourceCode) {
+  if (!test) return false
+  if (comparesToErrorPhase(test, ownName)) return true
+
+  let resolved = false
+  walk(test, (n) => {
+    if (resolved || n.type !== 'Identifier') return
+    const scope = sourceCode.getScope ? sourceCode.getScope(n) : null
+    if (!scope) return
+    let variable = null
+    for (let s = scope; s && !variable; s = s.upper) {
+      variable = s.variables.find((v) => v.name === n.name) ?? null
+    }
+    const def = variable?.defs?.[0]
+    if (def?.node?.type === 'VariableDeclarator' && def.node.init) {
+      if (comparesToErrorPhase(def.node.init, ownName)) resolved = true
+    }
+  })
+  return resolved
+}
+
 /** Does this subtree render an interactive control? */
 function rendersInteractiveControl(node) {
   let found = false
@@ -314,7 +387,7 @@ function rendersInteractiveControl(node) {
  * Given an identifier reference, classify how it is used in JSX.
  * Returns { gatesControl, renderedInline, passedAsProp, approvedRender }
  */
-function classifyJsxUsage(identifier) {
+function classifyJsxUsage(identifier, ownName, sourceCode) {
   const chain = ancestors(identifier)
   const containerIndex = chain.findIndex((a) => a.type === 'JSXExpressionContainer')
   if (containerIndex === -1) return null
@@ -324,6 +397,7 @@ function classifyJsxUsage(identifier) {
     gatesControl: false,
     correctionBlocking: false,
     substituteRender: false,
+    stateMachineGated: false,
     renderedInline: false,
     passedAsProp: false,
     approvedRender: false,
@@ -342,6 +416,35 @@ function classifyJsxUsage(identifier) {
   const enclosing = chain.find((a) => a.type === 'JSXElement')
   if (enclosing && rendersCorrectableInput(enclosing)) result.correctionBlocking = true
   if (isSubstituteRender(identifier, chain)) result.substituteRender = true
+
+  // Fourth clause: is this render gated on a sibling state machine's error phase?
+  //
+  // The gate is usually NOT the nearest expression container. In
+  //   {phase === 'error' && (<div>…<div>{errorMsg}</div>…</div>)}
+  // the container around `{errorMsg}` is the inner one; the gate is an ancestor of the
+  // whole element. Searching only below the nearest container found the gate for the
+  // ternary shape and missed it for the far more common `&&` shape — it exempted
+  // downgradeInstallError and not errorMsg. So walk the WHOLE ancestor chain and accept
+  // any gate whose guarded branch contains this identifier.
+  const containsIdentifier = (node) => {
+    let hit = false
+    walk(node, (n) => { if (n === identifier) hit = true })
+    return hit
+  }
+  for (const ancestor of chain) {
+    if (result.stateMachineGated) break
+    if (ancestor.type === 'LogicalExpression' && ancestor.operator === '&&') {
+      if (containsIdentifier(ancestor.right) && testGatesOnErrorPhase(ancestor.left, ownName, sourceCode)) {
+        result.stateMachineGated = true
+      }
+    } else if (ancestor.type === 'ConditionalExpression') {
+      const guarded = containsIdentifier(ancestor.consequent) || containsIdentifier(ancestor.alternate)
+      const inTest = containsIdentifier(ancestor.test)
+      if ((guarded || inTest) && testGatesOnErrorPhase(ancestor.test, ownName, sourceCode)) {
+        result.stateMachineGated = true
+      }
+    }
+  }
 
   // `{err && <X/>}` — what does the guard reveal?
   // Take the OUTERMOST `&&` below the container, not the innermost: in
@@ -446,15 +549,21 @@ export default {
         let gatesControl = false
         let correctionBlocking = false
         let substituteRender = false
+        let renderCount = 0
+        let gatedRenderCount = 0
         let renderedInline = false
         let passedAsProp = false
 
         for (const ref of stateVar.references) {
-          const usage = classifyJsxUsage(ref.identifier)
+          const usage = classifyJsxUsage(ref.identifier, stateVar.name, sourceCode)
           if (!usage) continue
           if (usage.gatesControl) gatesControl = true
           if (usage.correctionBlocking) correctionBlocking = true
           if (usage.substituteRender) substituteRender = true
+          if (usage.renderedInline) {
+            renderCount += 1
+            if (usage.stateMachineGated) gatedRenderCount += 1
+          }
           if (usage.renderedInline) renderedInline = true
           if (usage.passedAsProp) passedAsProp = true
         }
@@ -478,6 +587,7 @@ export default {
             gatesControl,
             correctionBlocking,
             substituteRender,
+            stateMachineGated: renderCount > 0 && gatedRenderCount === renderCount,
             presentation: passedAsProp ? 'prop' : renderedInline ? 'inline' : 'toast-only',
           }) + '\n')
         }
@@ -506,6 +616,7 @@ export default {
           !gatesControl &&
           !correctionBlocking &&
           !substituteRender &&
+          !(renderCount > 0 && gatedRenderCount === renderCount) &&
           (renderedInline || passedAsProp)
         ) {
           context.report({

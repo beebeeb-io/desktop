@@ -193,6 +193,62 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
       `,
     },
     {
+      name: 'CLAUSE 4: error rendered only inside a sibling machine error phase stays inline',
+      code: `
+        function Panel() {
+          const [phase, setPhase] = useState('idle')
+          const [errorMsg, setErrorMsg] = useState('')
+          const confirm = async () => {
+            const r = await clearSession()
+            if (!r.ok) { setErrorMsg(r.reason); setPhase('error') }
+          }
+          return <div>
+            <button onClick={confirm}>Disconnect</button>
+            {phase === 'error' && (
+              <div><div>{errorMsg}</div><button onClick={confirm}>Retry</button></div>
+            )}
+          </div>
+        }
+      `,
+    },
+    {
+      name: 'CLAUSE 4: the ternary shape (downgradeInstallError) stays inline',
+      code: `
+        function Panel() {
+          const [downgradeInstallState, setS] = useState('idle')
+          const [downgradeInstallError, setE] = useState(null)
+          const go = async () => {
+            const r = await command('downgrade')
+            if (!r.ok) { setE(r.reason); setS('error') }
+          }
+          return <div>
+            <button onClick={go}>Downgrade</button>
+            <div>{downgradeInstallState === 'error' && downgradeInstallError
+              ? \`Downgrade failed: \${downgradeInstallError}\`
+              : 'Read the release notes first.'}</div>
+          </div>
+        }
+      `,
+    },
+    {
+      name: 'CLAUSE 4: gate written through a local boolean (UpdateBanner) stays inline',
+      code: `
+        function Panel() {
+          const [installState, setState] = useState('idle')
+          const [installError, setErr] = useState(null)
+          const install = async () => {
+            const r = await command('install')
+            if (!r.ok) { setErr(r.reason); setState('error') }
+          }
+          const installFailed = installState === 'error' && installError != null
+          return <div>
+            <button onClick={install}>Install</button>
+            {installFailed && <span>Install failed: {installError}</span>}
+          </div>
+        }
+      `,
+    },
+    {
       name: 'action failure already routed to a toast is not rendered inline',
       code: `
         function Panel() {
@@ -308,6 +364,48 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
         }
       `,
       errors: [{ messageId: 'splitCandidate' }],
+      name: 'CLAUSE 4 NEGATIVE: one render OUTSIDE the gate and it is still reported',
+      // Condition 2 from the lead's adoption. A component that merely CONTAINS a state
+      // machine must not exempt every error in its body — the same over-broad shape
+      // rejected for clause 3 when "contains an input anywhere" was refused.
+      code: `
+        function Panel() {
+          const [phase, setPhase] = useState('idle')
+          const [errorMsg, setErrorMsg] = useState('')
+          const go = async () => {
+            const r = await command('go')
+            if (!r.ok) { setErrorMsg(r.reason); setPhase('error') }
+          }
+          return <div>
+            <button onClick={go}>Go</button>
+            <footer>{errorMsg}</footer>
+            {phase === 'error' && <div>{errorMsg}</div>}
+          </div>
+        }
+      `,
+      errors: [{ messageId: 'transientActionInline' }],
+    },
+    {
+      name: 'CLAUSE 4 NEGATIVE: a self-gated machine with other phases is NOT exempt',
+      // BandwidthView's `st`. It gates on ITSELF, not a sibling, and renders three
+      // non-error phases besides. Named as a fourth instance; on inspection it is a view
+      // state machine that happens to carry a reason, which is a different shape.
+      code: `
+        function Panel() {
+          const [st, setSt] = useState({ phase: 'idle' })
+          const run = async () => {
+            const r = await command('speedtest')
+            if (!r.ok) setSt({ phase: 'error', reason: r.reason })
+          }
+          return <div>
+            <button onClick={run}>Run</button>
+            {st.phase === 'idle' && <div>Idle</div>}
+            {st.phase === 'running' && <div>Running…</div>}
+            {st.phase === 'error' && <div>{st.reason}</div>}
+          </div>
+        }
+      `,
+      errors: [{ messageId: 'transientActionInline' }],
     },
     {
       name: 'transient action failure rendered inline is a straggler',

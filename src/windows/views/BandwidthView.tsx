@@ -643,10 +643,12 @@ function bpsToMbps(bps: number): string {
 }
 
 function SpeedtestPanel() {
-  // Phase-based view state machine (SpeedtestState.phase === 'error'), not an ad hoc error string —
-  // the error is one render phase of the speedtest panel. Deliberately NOT filtered out in the rule:
-  // excluding every object-shaped state would risk hiding a real straggler, and undercounting is the
-  // failure mode this rule exists to prevent.
+  // Clause 4 (state-machine-gated) was ADOPTED in task 1325 and deliberately does NOT cover this. `st`
+  // gates on ITSELF (st.phase === 'error'), not on a sibling state, and it renders three non-error
+  // phases besides — so it is a view state machine that happens to carry a reason, not an error string
+  // held alongside a machine. It was named as the fourth instance when the clause was proposed; on
+  // inspection it is a different shape, and exempting it would have required dropping both the sibling
+  // and every-render halves of the invariant. Stays a documented exception.
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [st, setSt] = useState<SpeedtestState>({ phase: 'idle' })
   const runningRef = useRef(false)
