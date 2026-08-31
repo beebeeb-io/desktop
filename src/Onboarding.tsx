@@ -402,7 +402,12 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
 function PinningStep({ onDone }: { onDone: () => void }) {
   const [items, setItems] = useState<VaultItem[]>([])
   const [loading, setLoading] = useState(true)
+  // `notice` is deliberately kept for the LOAD failure only: when `list_remote_tree`
+  // fails we fall back to `list_vault_folders`, so the list on screen is degraded and
+  // needs a persistent explanation. The toggle failure below is a transient ACTION
+  // failure and goes to a Toast instead.
   const [notice, setNotice] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   useEffect(() => {
     let cancelled = false
@@ -435,7 +440,11 @@ function PinningStep({ onDone }: { onDone: () => void }) {
       pinned: nextPinned,
     })
     if (!result.ok) {
-      setNotice(result.unsupported ? commandUnavailableLabel('set_recursive_pin') : result.reason)
+      showToast({
+        variant: 'error',
+        title: nextPinned ? 'Couldn’t make folder offline' : 'Couldn’t make folder online-only',
+        message: result.unsupported ? commandUnavailableLabel('set_recursive_pin') : result.reason,
+      })
       return
     }
     setItems((current) =>
