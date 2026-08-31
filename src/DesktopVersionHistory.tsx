@@ -70,10 +70,6 @@ export default function DesktopVersionHistory({
   const [selectedFile, setSelectedFile] = useState<DesktopSearchResult | null>(null)
   const [versionList, setVersionList] = useState<FileVersionListResponse | null>(null)
   const [versionLoading, setVersionLoading] = useState(false)
-  // UNTRIAGED (task 1319 notes). Looks like a transient action failure rendered inline, but
-  // classifying it needs the same gate/load/form-blocking judgement 1255 applied per surface. Not
-  // decided here.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [versionNotice, setVersionNotice] = useState<string | null>(null)
   const [selectedVersionIndex, setSelectedVersionIndex] = useState(0)
   const [restoringId, setRestoringId] = useState<string | null>(null)

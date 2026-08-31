@@ -137,6 +137,28 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
       `,
     },
     {
+      name: 'SUBSTITUTE RENDER: an error returned AS the view body stays inline',
+      // DesktopVersionHistory's versionNotice. loadVersions is a load triggered by a click
+      // rather than by mount, so isLoadPath cannot see it; the error is returned as the
+      // whole panel body. Toasting it falls through to "No earlier versions", making a load
+      // failure indistinguishable from an empty result — the TrashView bug from 1255.
+      code: `
+        function Panel() {
+          const [versionNotice, setVersionNotice] = useState(null)
+          const loadVersions = useCallback(async (file) => {
+            const r = await desktopListFileVersions(file.id)
+            if (!r.ok) setVersionNotice(r.reason)
+          }, [])
+          const body = () => {
+            if (loading) return <div className="empty">Loading…</div>
+            if (versionNotice != null) return <div className="notice">{versionNotice}</div>
+            return <div className="empty">No earlier versions</div>
+          }
+          return <div onClick={loadVersions}>{body()}</div>
+        }
+      `,
+    },
+    {
       name: 'action failure already routed to a toast is not rendered inline',
       code: `
         function Panel() {
@@ -199,6 +221,31 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
               {saveError && <div>{saveError}</div>}
             </Card>
           </div>
+        }
+      `,
+      errors: [{ messageId: 'transientActionInline' }],
+    },
+    {
+      name: 'early returns elsewhere do NOT exempt an error annotating the main body',
+      // Guards the substitute-render clause against becoming a blanket exemption: this
+      // component has two JSX returns, but the error is buried in a large returned tree,
+      // which makes it an annotation rather than a replacement for the view.
+      code: `
+        function Panel() {
+          const [applyError, setApplyError] = useState(null)
+          const apply = async () => {
+            const r = await command('apply')
+            if (!r.ok) setApplyError(r.reason)
+          }
+          if (loading) return <div className="skeleton">Loading…</div>
+          return (
+            <div>
+              <h1>Selective sync</h1>
+              <p>Choose folders.</p>
+              <button onClick={apply}>Apply</button>
+              {applyError && <div>{applyError}</div>}
+            </div>
+          )
         }
       `,
       errors: [{ messageId: 'transientActionInline' }],
