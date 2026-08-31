@@ -161,6 +161,58 @@ function jsxElementName(node) {
   return null
 }
 
+/**
+ * Text-entry controls the user can CORRECT and resubmit. A toggle or a button is not
+ * one: there is nothing to retype, so a failed toggle has no correction to block.
+ */
+const CORRECTABLE_INPUT_TYPES = new Set([
+  'text', 'password', 'email', 'search', 'number', 'tel', 'url', 'date', 'time',
+])
+
+function isCorrectableInput(node) {
+  const name = jsxElementName(node)
+  if (name === 'textarea') return true
+  if (name !== 'input') return false
+  const typeAttr = node.openingElement.attributes.find(
+    (a) => a.type === 'JSXAttribute' && a.name?.name === 'type',
+  )
+  if (!typeAttr) return true // an <input> with no type is a text field
+  const value = typeAttr.value
+  if (value?.type !== 'Literal') return true // dynamic type — assume correctable
+  return CORRECTABLE_INPUT_TYPES.has(String(value.value))
+}
+
+/**
+ * THE THIRD CLAUSE (task 1319, lead ruling 2026-08-31).
+ *
+ * The principle had two exemptions — load failures and errors that gate a control — and
+ * this rule therefore reported WindowsFirstRun's `pwError`/`totpError` as stragglers,
+ * because a sign-in error hides no element. Checked against the source, the humans were
+ * right and the PRINCIPLE was incomplete, not the code: `submitPassword` is a
+ * `<form onSubmit>` handler, `pwError` renders immediately above that form, and the email
+ * and password inputs stay on screen for the user to correct. A 6s toast would vanish
+ * while someone is still retyping their password. That is a real third category:
+ *
+ *   an error the user must SEE WHILE CORRECTING the input that caused it stays inline.
+ *
+ * Detected structurally: the error renders in a subtree that also holds a correctable
+ * text input. Both known shapes satisfy it — `pwError` renders as a sibling of the
+ * <form> holding the inputs, and TrashView's `deleteError` renders as a direct sibling
+ * of the delete modal's <input type="password">.
+ *
+ * Deliberately NOT "the component contains an input anywhere": that would give any
+ * component with a search box a free pass for every unrelated action failure, which is
+ * an undercount, and undercounting is the failure mode this rule exists to prevent.
+ */
+function rendersCorrectableInput(node) {
+  let found = false
+  walk(node, (n) => {
+    if (found || n.type !== 'JSXElement') return
+    if (isCorrectableInput(n)) found = true
+  })
+  return found
+}
+
 /** Does this subtree render an interactive control? */
 function rendersInteractiveControl(node) {
   let found = false
@@ -184,6 +236,7 @@ function classifyJsxUsage(identifier) {
   const container = chain[containerIndex]
   const result = {
     gatesControl: false,
+    correctionBlocking: false,
     renderedInline: false,
     passedAsProp: false,
     approvedRender: false,
@@ -197,6 +250,10 @@ function classifyJsxUsage(identifier) {
   }
 
   result.renderedInline = true
+
+  // Does this error render alongside an input the user is correcting?
+  const enclosing = chain.find((a) => a.type === 'JSXElement')
+  if (enclosing && rendersCorrectableInput(enclosing)) result.correctionBlocking = true
 
   // `{err && <X/>}` — what does the guard reveal?
   // Take the OUTERMOST `&&` below the container, not the innermost: in
@@ -293,6 +350,7 @@ export default {
 
         // ---- How is it presented? ----
         let gatesControl = false
+        let correctionBlocking = false
         let renderedInline = false
         let passedAsProp = false
 
@@ -300,6 +358,7 @@ export default {
           const usage = classifyJsxUsage(ref.identifier)
           if (!usage) continue
           if (usage.gatesControl) gatesControl = true
+          if (usage.correctionBlocking) correctionBlocking = true
           if (usage.renderedInline) renderedInline = true
           if (usage.passedAsProp) passedAsProp = true
         }
@@ -321,6 +380,7 @@ export default {
             name: stateVar.name,
             trigger: setFromLoad ? (setFromAction ? 'load+action' : 'load') : 'action',
             gatesControl,
+            correctionBlocking,
             presentation: passedAsProp ? 'prop' : renderedInline ? 'inline' : 'toast-only',
           }) + '\n')
         }
@@ -329,7 +389,13 @@ export default {
         // A load failure is allowed to stay inline (the surface is degraded and needs a
         // persistent explanation). An error that gates a control must stay inline (a
         // toast would delete the control). Everything else is a straggler.
-        if (setFromAction && !setFromLoad && !gatesControl && (renderedInline || passedAsProp)) {
+        if (
+          setFromAction &&
+          !setFromLoad &&
+          !gatesControl &&
+          !correctionBlocking &&
+          (renderedInline || passedAsProp)
+        ) {
           context.report({
             node: node.id.elements[0],
             messageId: 'transientActionInline',

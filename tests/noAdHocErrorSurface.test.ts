@@ -97,6 +97,46 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
       `,
     },
     {
+      name: 'CORRECTION-BLOCKING: sign-in error beside the form the user retypes stays inline',
+      // The pwError/totpError shape. The rule originally called these stragglers; checking
+      // the source showed the PRINCIPLE was missing a clause, not that the code was wrong.
+      code: `
+        function Panel() {
+          const [pwError, setPwError] = useState(null)
+          const submit = async (e) => {
+            e.preventDefault()
+            const r = await desktopLogin(email, password)
+            if (!r.ok) setPwError(r.reason)
+          }
+          return <div>
+            {pwError && <Notice kind="error">{pwError}</Notice>}
+            <form onSubmit={submit}>
+              <input type="email" value={email} onChange={onEmail} />
+              <input type="password" value={password} onChange={onPassword} />
+            </form>
+          </div>
+        }
+      `,
+    },
+    {
+      name: 'CORRECTION-BLOCKING: modal password error beside its input stays inline',
+      // TrashView's deleteError — no <form>, the error div is a direct sibling of the input.
+      code: `
+        function Panel() {
+          const [deleteError, setDeleteError] = useState(null)
+          const del = async () => {
+            const r = await command('delete', { password })
+            if (!r.ok) setDeleteError(r.reason)
+          }
+          return <Card>
+            <input type="password" value={password} onChange={onPassword} />
+            {deleteError && <div>{deleteError}</div>}
+            <GhostButton onClick={del}>Delete</GhostButton>
+          </Card>
+        }
+      `,
+    },
+    {
       name: 'action failure already routed to a toast is not rendered inline',
       code: `
         function Panel() {
@@ -136,6 +176,28 @@ ruleTester.run('no-ad-hoc-error-surface', rule, {
           return <div>
             <button onClick={save}>Save</button>
             {result && !result.ok && <div className="notice">{result.reason}</div>}
+          </div>
+        }
+      `,
+      errors: [{ messageId: 'transientActionInline' }],
+    },
+    {
+      name: 'a toggle failure is NOT correction-blocking just because the page has inputs',
+      // Guards against the third clause becoming a blanket exemption: the error renders
+      // among toggles, in a different subtree from the unrelated search box.
+      code: `
+        function Panel() {
+          const [saveError, setSaveError] = useState(null)
+          const toggle = async () => {
+            const r = await command('save_pref')
+            if (!r.ok) setSaveError(r.reason)
+          }
+          return <div>
+            <div><input type="search" value={q} onChange={onQ} /></div>
+            <Card>
+              <Toggle onChange={toggle} label="Notify me" />
+              {saveError && <div>{saveError}</div>}
+            </Card>
           </div>
         }
       `,

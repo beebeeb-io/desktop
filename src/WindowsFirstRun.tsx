@@ -321,15 +321,10 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [pwBusy, setPwBusy] = useState(false)
-  // Form-blocking: the user re-reads and corrects the password in place, so the error must stay next
-  // to the input. A toast would scroll away mid-retry.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [pwError, setPwError] = useState<string | null>(null)
 
   const [totpCode, setTotpCode] = useState('')
   const [totpBusy, setTotpBusy] = useState(false)
-  // Form-blocking: same as pwError — the 2FA code is corrected in place while the error is visible.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [totpError, setTotpError] = useState<string | null>(null)
   const totpInputRef = useRef<HTMLInputElement | null>(null)
 

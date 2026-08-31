@@ -1352,11 +1352,6 @@ function TrashView() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<DesktopTrashItem | null>(null)
   const [password, setPassword] = useState('')
-  // Delete-confirmation error stays inline in the modal next to the password
-  // field the user is retrying — a transient toast is the wrong surface here.
-  // Form-blocking: password re-entry inside the delete-confirmation modal. The error belongs next to
-  // the field being corrected, and the modal outlives a toast.
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const load = async () => {
