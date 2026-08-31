@@ -380,13 +380,12 @@ function NotificationPreferencesPanel() {
   const [err, setErr] = useState<{ reason: string; unsupported: boolean } | null>(null)
   const [loading, setLoading] = useState(true)
   const [busyKey, setBusyKey] = useState<AccountNotificationPrefKey | null>(null)
-  const [saveError, setSaveError] = useState<string | null>(null)
+  const { showToast } = useToast()
 
   const load = () => {
     let cancelled = false
     setLoading(true)
     setErr(null)
-    setSaveError(null)
     void (async () => {
       const r = await accountNotificationPreferences()
       if (cancelled) return
@@ -422,14 +421,20 @@ function NotificationPreferencesPanel() {
     const next = !values[key]
     setValues({ ...values, [key]: next })
     setBusyKey(key)
-    setSaveError(null)
     void (async () => {
       const r = await accountUpdateNotificationPreferences({ [key]: next })
       if (r.ok) {
         setValues(r.value.preferences)
       } else {
+        // Transient ACTION failure (a one-shot toggle press) -> Toast, matching
+        // LaunchPanel's autostart toggle one panel over. The panel's OTHER error
+        // (`err`, the load failure) deliberately stays inline via ErrorBlock+Retry.
         setValues(prev)
-        setSaveError(r.unsupported ? 'Changing this preference is not available in this build.' : `Could not save: ${r.reason}`)
+        showToast({
+          variant: 'error',
+          title: 'Couldn’t save notification preference',
+          message: r.unsupported ? 'Changing this preference is not available in this build.' : r.reason,
+        })
       }
       setBusyKey(null)
     })()
@@ -470,8 +475,6 @@ function NotificationPreferencesPanel() {
           </div>
         )
       })}
-
-      {saveError && <div style={{ padding: '11px 20px', borderTop: `1px solid ${T.line}`, background: T.paper2, fontSize: 11.5, color: RED, lineHeight: 1.5 }}>{saveError}</div>}
     </Card>
   )
 }
