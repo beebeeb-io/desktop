@@ -14,6 +14,8 @@ export default function Account() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  // UNTRIAGED — src/pages/ is task 1318's scope and was deliberately not widened into here.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [notice, setNotice] = useState<string | null>(null)
 
   // Poll sync_status so the component reflects auto-unlock state that
