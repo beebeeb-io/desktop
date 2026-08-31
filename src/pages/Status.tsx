@@ -137,6 +137,8 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     if (!status?.logged_in) {
       const opened = await command<void>('open_onboarding_window')
       if (!opened.ok) {
+        // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+        // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
         setStorageNotice(opened.unsupported ? commandUnavailableLabel('open_onboarding_window') : opened.reason)
       }
       return

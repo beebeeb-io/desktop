@@ -118,6 +118,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       isText: false,
     })
     if (!result.ok) {
+      // SPLIT PENDING — owned by task 1318: toast this action failure, leave the load failure inline.
+      // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
       setNotice(result.unsupported ? commandUnavailableLabel('open_conflict_window') : result.reason)
     }
   }

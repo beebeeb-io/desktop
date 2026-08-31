@@ -38,6 +38,18 @@
  * no shared Notice module — WindowsFirstRun has a local one and ErrorBlock is duplicated
  * in ActivityView and SettingsView), so it needs its own task, not a noisy rule here.
  *
+ * OVER-REPORTING IS LOUD; UNDER-REPORTING IS SILENT. Read this before relaxing anything.
+ * This rule has been wrong three times. Twice it over-reported — it called a documented
+ * exception a straggler — and both were caught within minutes, because a false finding
+ * argues with you. The third time it UNDER-reported: `load+action` states, where the same
+ * state carries a load failure AND an action failure, were silently exempted wholesale
+ * because one setter sat on a load path. Nine of thirty-seven states, invisible, in the
+ * guard built to end silent undercounting. Nobody noticed until a task went looking at
+ * `src/pages/` for other reasons.
+ * So when choosing between a rule that cries wolf and a rule that stays quiet, prefer the
+ * wolf. A false positive costs a disable comment with a reason; a false negative costs a
+ * defect nobody is looking for.
+ *
  * KNOWN BLIND SPOT — do not claim this rule "cannot undercount", only that it cannot
  * forget to look. It recognises an error state by two shapes: a setter receiving
  * `.reason`/`commandUnavailableLabel(...)`, or a `useState<CommandResult<...>>`. An error
@@ -344,6 +356,8 @@ export default {
     },
     schema: [],
     messages: {
+      splitCandidate:
+        "'{{name}}' (declared line {{declLine}}) carries BOTH a load failure and an action failure. They need different answers: route THIS action failure to showToast, and leave the load failure rendering inline (the surface is degraded and needs a persistent explanation). This is the split task 1255 applied by hand to PinningStep, ManageBackupCard and TrashView.",
       transientActionInline:
         "'{{name}}' holds a command failure that is only ever set from an event handler (never a useEffect load) and gates no control, but it is rendered inline. A transient ACTION failure belongs in a Toast — call showToast instead. If this is deliberate, add an eslint-disable-next-line comment saying which control it gates or why it must persist.",
     },
@@ -382,6 +396,7 @@ export default {
         // its setter argument is the whole result object, so `.reason` never appears at
         // the call site and requiring it there left the state detected but unclassified,
         // i.e. silently never reported. Caught by the rule's own test, not by reading it.
+        const actionCalls = []
         const errorByType = isErrorState
         for (const ref of setterVar.references) {
           const call = ref.identifier.parent
@@ -393,7 +408,10 @@ export default {
           if (errorByType && argIsNullish) continue // `setResult(null)` is a reset, not a failure
           isErrorState = true
           if (isLoadPath(call, sourceCode)) setFromLoad = true
-          else setFromAction = true
+          else {
+            setFromAction = true
+            actionCalls.push(call)
+          }
         }
 
         if (!isErrorState) return
@@ -436,6 +454,20 @@ export default {
             substituteRender,
             presentation: passedAsProp ? 'prop' : renderedInline ? 'inline' : 'toast-only',
           }) + '\n')
+        }
+
+        // ---- Split candidates: one state, two failures, two different right answers ----
+        // Reported at the ACTION setter rather than the declaration, because that is the
+        // line that has to change; the load setter is correct as it stands and reporting
+        // it would invite someone to "fix" the half that is already right.
+        if (setFromLoad && setFromAction && (renderedInline || passedAsProp)) {
+          for (const call of actionCalls) {
+            context.report({
+              node: call,
+              messageId: 'splitCandidate',
+              data: { name: stateVar.name, declLine: String(node.loc.start.line) },
+            })
+          }
         }
 
         // ---- Arm A: a transient action failure that should have been a toast ----
