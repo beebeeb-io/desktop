@@ -6286,30 +6286,105 @@ static MACOS_TRAY_FLYOUT_ANCHOR: LazyLock<Mutex<Option<tauri::PhysicalPosition<i
 #[cfg(target_os = "macos")]
 static MACOS_FLYOUT_GAINED_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Finds the monitor whose PHYSICAL bounds contain the given physical-pixel
+/// point, without needing a scale factor up front. Deliberately does not use
+/// `AppHandle::monitor_from_point`: on macOS that delegates to `tao`'s
+/// CoreGraphics-backed lookup, which tests the point against
+/// `CGDisplayBounds` — a LOGICAL (point) rect — while `tray-icon`'s
+/// `get_tray_rect` (and `Monitor::position()`/`size()`) report PHYSICAL
+/// pixels. On a Retina display a physical x/y routinely falls outside every
+/// monitor's logical-point bounds even though the icon is plainly on
+/// screen, so `monitor_from_point` silently returned `None` here, and the
+/// scale factor fell back to 1.0 — shifting the flyout 340 physical px
+/// (170pt) too far right on a 2x display (1384 follow-up, found on real
+/// 16" MacBook Pro hardware). Comparing against each monitor's own
+/// already-physical bounds instead sidesteps that mismatch entirely.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_monitor_containing_physical_point(app: &tauri::AppHandle, x: f64, y: f64) -> Option<tauri::Monitor> {
+    let monitors = app.available_monitors().ok()?;
+    let bounds: Vec<(f64, f64, f64, f64)> = monitors
+        .iter()
+        .map(|m| {
+            let position = m.position();
+            let size = m.size();
+            (position.x as f64, position.y as f64, size.width as f64, size.height as f64)
+        })
+        .collect();
+    let index = physical_point_monitor_index(&bounds, x, y)?;
+    monitors.into_iter().nth(index)
+}
+
+/// Pure containment test extracted from `macos_monitor_containing_physical_point`
+/// so it's unit-testable without a live `AppHandle`/`Monitor`. Each monitor is
+/// `(position_x, position_y, width, height)`, all physical pixels — the same
+/// units `tauri::Monitor::position()`/`size()` return.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn physical_point_monitor_index(monitors: &[(f64, f64, f64, f64)], x: f64, y: f64) -> Option<usize> {
+    monitors
+        .iter()
+        .position(|&(min_x, min_y, width, height)| x >= min_x && x < min_x + width && y >= min_y && y < min_y + height)
+}
+
 /// Resolve where the macOS tray flyout should open, from the tray click
 /// event's icon `rect`. Looks up the monitor under the icon for its real
 /// scale factor and physical bounds (so a tray on a non-primary or
 /// negative-origin monitor still anchors and clamps correctly); falls back
-/// to an unclamped 1.0-scale placement if no monitor can be resolved.
+/// to the flyout window's own scale factor, then the primary monitor's, and
+/// only then to an unclamped 1.0-scale placement — logging whichever
+/// fallback fired, since silently guessing 1.0 is exactly what caused the
+/// 1384 follow-up mispositioning bug.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri::PhysicalPosition<i32> {
     // `rect` comes back from the tray-icon crate already in physical pixels
     // on macOS (see `tray-icon`'s `get_tray_rect`), but the field type is
-    // the platform-neutral `dpi::Position`/`dpi::Size` enum. A provisional
-    // 1.0-scale extraction is a no-op cast for the already-physical case —
-    // used only to resolve which monitor the icon sits on — then we
-    // re-resolve with that monitor's real scale factor so a future
-    // Logical-reporting `tray-icon` upgrade would still be correct instead
-    // of silently mispositioning (the exact class of bug 307b826 fixed for
-    // Windows).
+    // the platform-neutral `dpi::Position`/`dpi::Size` enum. A 1.0-scale
+    // extraction is a no-op cast for the already-physical case (see
+    // `dpi::PixelUnit::to_physical`, which just casts when the value is
+    // already `Physical`), so this is safe to use as-is regardless of the
+    // real scale factor.
     let provisional = rect.position.to_physical::<f64>(1.0);
-    let monitor = app.monitor_from_point(provisional.x, provisional.y).ok().flatten();
+    let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
 
-    let scale_factor = monitor
-        .as_ref()
-        .map(|m| m.scale_factor())
-        .filter(|s| s.is_finite() && *s > 0.0)
-        .unwrap_or(1.0);
+    let scale_factor = match monitor.as_ref().map(|m| m.scale_factor()).filter(|s| s.is_finite() && *s > 0.0) {
+        Some(scale_factor) => scale_factor,
+        None => {
+            // Should be rare now that the lookup above compares physical
+            // bounds directly, but never silently guess 1.0 — prefer the
+            // flyout window's own current scale factor, then the primary
+            // monitor's, and log whichever fallback actually fired.
+            let window_scale = app
+                .get_webview_window("settings")
+                .and_then(|win| win.scale_factor().ok())
+                .filter(|s| s.is_finite() && *s > 0.0);
+            let primary_scale = app
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| m.scale_factor())
+                .filter(|s| s.is_finite() && *s > 0.0);
+
+            match window_scale.or(primary_scale) {
+                Some(scale_factor) => {
+                    tracing::warn!(
+                        icon_x = provisional.x,
+                        icon_y = provisional.y,
+                        scale_factor,
+                        used_window_scale = window_scale.is_some(),
+                        "macos tray flyout: no monitor found under the icon; falling back to window/primary-monitor scale factor"
+                    );
+                    scale_factor
+                }
+                None => {
+                    tracing::warn!(
+                        icon_x = provisional.x,
+                        icon_y = provisional.y,
+                        "macos tray flyout: no monitor found under the icon and no window/primary-monitor scale factor available; falling back to 1.0 (flyout may mis-position)"
+                    );
+                    1.0
+                }
+            }
+        }
+    };
 
     let icon_position = rect.position.to_physical::<f64>(scale_factor);
     let icon_size = rect.size.to_physical::<f64>(scale_factor);
@@ -6323,7 +6398,7 @@ fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri
         None => (f64::NEG_INFINITY, f64::INFINITY),
     };
 
-    macos_tray_flyout_position(
+    let result = macos_tray_flyout_position(
         icon_position.x,
         icon_position.y,
         icon_size.width,
@@ -6332,7 +6407,21 @@ fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri
         scale_factor,
         screen_min_x,
         screen_max_x,
-    )
+    );
+
+    tracing::info!(
+        icon_x = icon_position.x,
+        icon_y = icon_position.y,
+        icon_width = icon_size.width,
+        icon_height = icon_size.height,
+        scale_factor,
+        monitor_found = monitor.is_some(),
+        result_x = result.x,
+        result_y = result.y,
+        "macos tray flyout: computed anchor position"
+    );
+
+    result
 }
 
 /// Pure anchor math: centers the flyout horizontally under the status item
@@ -8047,6 +8136,61 @@ mod tests {
 
         assert_eq!(position.x, 172); // icon center 512 - 340, unclamped
         assert_eq!(position.y, 28);
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_matches_measured_regression_case() {
+        // The exact case measured on real 16" MacBook Pro hardware (1384
+        // follow-up): a status item at physical x=2348 (1174pt * 2), width
+        // 72 physical (36pt * 2), on a "More Space" 2056pt-wide display at
+        // backingScaleFactor 2.0. With the correct scale factor the flyout
+        // should land at physical x=1704 (852pt) — centered under the icon.
+        let position = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 2.0, 0.0, 4_112.0);
+
+        assert_eq!(position.x, 1_704); // icon center 2384 - (680*2)/2
+        assert_eq!(position.y, 34); // 0 + 22 + 6*2 gap
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_documents_pre_fix_scale_fallback_bug() {
+        // Same icon geometry as the measured-regression case above, but
+        // computed with the scale factor incorrectly falling back to 1.0
+        // (what `valid_macos_tray_scale_factor`/`monitor_from_point` used to
+        // silently do when no monitor was resolved). This reproduces the
+        // exact 340-physical-px (170pt) rightward mispositioning bug that
+        // the monitor-lookup fix in `macos_monitor_containing_physical_point`
+        // resolves — the flyout window's width is a LOGICAL constant, so
+        // using scale 1.0 instead of 2.0 halves how much of it gets
+        // subtracted when centering, pushing the flyout right.
+        let correct = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 2.0, 0.0, 4_112.0);
+        let with_1x_fallback = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 1.0, 0.0, 4_112.0);
+
+        assert_eq!(correct.x, 1_704);
+        assert_eq!(with_1x_fallback.x, 2_044);
+        assert_eq!(with_1x_fallback.x - correct.x, 340);
+    }
+
+    #[test]
+    fn physical_point_monitor_index_finds_containing_monitor() {
+        // Two side-by-side monitors at different scales/positions, mirroring
+        // a MacBook's built-in display plus an external one to its right.
+        let monitors = [
+            (0.0, 0.0, 2_056.0 * 2.0, 1_329.0 * 2.0), // built-in, 2x, origin (0,0)
+            (2_056.0 * 2.0, 0.0, 2_560.0, 1_440.0),   // external, 1x, to the right
+        ];
+
+        // A point on the built-in display's far right edge (this is exactly
+        // the case that broke `monitor_from_point`: physical x=2348 falls
+        // well inside the built-in monitor's PHYSICAL bounds here, but
+        // outside its LOGICAL 2056pt-wide CGDisplayBounds).
+        assert_eq!(super::physical_point_monitor_index(&monitors, 2_348.0, 0.0), Some(0));
+
+        // A point on the external display.
+        assert_eq!(super::physical_point_monitor_index(&monitors, 5_000.0, 0.0), Some(1));
+
+        // A point off every monitor.
+        assert_eq!(super::physical_point_monitor_index(&monitors, -100.0, 0.0), None);
+        assert_eq!(super::physical_point_monitor_index(&[], 0.0, 0.0), None);
     }
 
     #[test]
