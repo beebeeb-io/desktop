@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   accountRegion,
   accountNotificationPreferences,
@@ -26,8 +26,10 @@ import {
   availableSettingsSections,
   defaultSettingsPage,
   settingLabel,
+  shellIntegrationLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
+import { usePlatform, usePlatformName, type PlatformName } from '../../platform'
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
@@ -118,6 +120,25 @@ const THEME_OPTIONS: Array<{ value: DesktopTheme; label: string; hint: string }>
   { value: 'dark', label: 'Dark', hint: 'Use the dark desktop palette.' },
   { value: 'system', label: 'System', hint: 'Follow Windows or macOS.' },
 ]
+
+/** "this Mac" / "this PC" / "this device" — the noun this shell uses for the local machine. */
+function thisDeviceNoun(platform: PlatformName): string {
+  if (platform === 'macos') return 'this Mac'
+  if (platform === 'linux') return 'this device'
+  return 'this PC'
+}
+
+function signInToOsLine(platform: PlatformName): string {
+  if (platform === 'macos') return 'Beebeeb launches automatically and resumes syncing when you sign in to macOS.'
+  if (platform === 'linux') return 'Beebeeb launches automatically and resumes syncing when you sign in.'
+  return 'Beebeeb launches automatically and resumes syncing when you sign in to Windows.'
+}
+
+function systemThemeHint(platform: PlatformName): string {
+  if (platform === 'macos') return 'Follow macOS.'
+  if (platform === 'linux') return 'Follow your desktop.'
+  return 'Follow Windows.'
+}
 
 function formatCpuPercent(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value < 0) return '—'
@@ -779,6 +800,7 @@ function DataResidencyPanel() {
 }
 
 function LaunchPanel() {
+  const platform = usePlatformName()
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
@@ -814,11 +836,11 @@ function LaunchPanel() {
 
   return (
     <SettingsSectionShell>
-      <PageHeader title="Launch" subtitle="Control how Beebeeb starts on this PC." />
+      <PageHeader title="Launch" subtitle={`Control how Beebeeb starts on ${thisDeviceNoun(platform)}.`} />
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Start at login</div>
-          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>Beebeeb launches automatically and resumes syncing when you sign in to Windows.</div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{signInToOsLine(platform)}</div>
         </div>
         <Toggle on={enabled === true} busy={busy || enabled === null} onChange={() => void toggle()} label="Start at login" />
       </Card>
@@ -826,46 +848,90 @@ function LaunchPanel() {
   )
 }
 
+/**
+ * The Rust command pair backing this panel, per platform. macOS registers the
+ * sync root as a File Provider domain (`finder_*`); Windows registers it as a
+ * Cloud Files sync root (`windows_*`). Both return `FinderInstallState`
+ * (aliased here as `ShellIntegrationState`), so the panel's result mapping is
+ * shared — only the command names differ. Linux has no backing command yet:
+ * `null` tells the panel to say so honestly instead of invoking a
+ * platform-specific command that can only ever error.
+ */
+function shellIntegrationCommandsFor(platform: PlatformName): { state: string; install: string } | null {
+  if (platform === 'macos') return { state: 'finder_location_state', install: 'install_finder_location' }
+  if (platform === 'windows') return { state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }
+  return null
+}
+
 function ExplorerIntegrationPanel() {
+  // Gate everything below on `resolved`: `platform` starts `null` and only
+  // becomes a real value once `desktop_platform` answers. Deriving `commands`
+  // from `resolved ? platform : null` means `commands` itself is the single
+  // gate a shell-integration command can go through — it is `null` (so
+  // `enable()`/the state-check effect below both bail) until the real host
+  // platform is known. This is what stops the macOS main window (routed with
+  // `?platform=windows`) from invoking `windows_shell_integration_state` and
+  // surfacing "Windows shell integration is only available on Windows"
+  // before flipping to the real Finder panel a moment later (PR #34 review).
+  const { name: platformName, resolved } = usePlatform()
+  const platform = resolved ? platformName : null
+  const label = shellIntegrationLabel(platform)
+  // "Explorer integration" / "Finder integration" read fine mid-sentence (proper nouns);
+  // the generic Linux fallback reads better lowercase there.
+  const midSentenceLabel = platform === 'linux' ? 'file manager integration' : label
+  const fileSurfaceName =
+    platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : platform === 'windows' ? 'File Explorer' : 'your files'
+  const commands = useMemo(() => (platform ? shellIntegrationCommandsFor(platform) : null), [platform])
+  const actionVerb = platform === 'macos' ? 'Install' : 'Enable'
+  const actionVerbBusy = platform === 'macos' ? 'Installing...' : 'Enabling...'
   const [state, setState] = useState<ShellIntegrationState | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
   const regionCity = useRegionCity()
 
   const refresh = async () => {
-    const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+    if (!commands) return
+    const r = await command<ShellIntegrationState>(commands.state)
     if (r.ok) {
       setState(r.value)
     } else {
       showToast({
         variant: 'error',
-        title: 'Couldn’t check Explorer integration',
-        message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
+        title: `Couldn’t check ${midSentenceLabel}`,
+        message: r.unsupported ? commandUnavailableLabel(commands.state) : r.reason,
       })
     }
-    setLoading(false)
   }
 
+  // Does not run until `resolved === true` (via `commands`, which is `null`
+  // for an unresolved platform) — no command invocation, no toast, while the
+  // real host platform is still unknown.
   useEffect(() => {
+    if (!commands) return
     let cancelled = false
+    setChecking(true)
     void (async () => {
-      const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+      const r = await command<ShellIntegrationState>(commands.state)
       if (cancelled) return
       if (r.ok) setState(r.value)
       else showToast({
         variant: 'error',
-        title: 'Couldn’t check Explorer integration',
-        message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
+        title: `Couldn’t check ${midSentenceLabel}`,
+        message: r.unsupported ? commandUnavailableLabel(commands.state) : r.reason,
       })
-      setLoading(false)
+      setChecking(false)
     })()
     return () => { cancelled = true }
-  }, [showToast])
+  }, [showToast, midSentenceLabel, commands])
 
   const enable = async () => {
+    if (!commands) return
     setBusy(true)
-    const r = await command<ShellIntegrationState>('install_windows_shell_integration')
+    // macOS ignores `path` and always installs at the default sync root
+    // (src-tauri/src/lib.rs `install_finder_location`), same as Onboarding.tsx.
+    const args = platform === 'macos' ? { path: null } : undefined
+    const r = await command<ShellIntegrationState>(commands.install, args)
     setBusy(false)
     if (r.ok) {
       setState(r.value)
@@ -874,29 +940,43 @@ function ExplorerIntegrationPanel() {
     }
     showToast({
       variant: 'error',
-      title: 'Couldn’t enable Explorer integration',
-      message: r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason,
+      title: `Couldn’t ${actionVerb.toLowerCase()} ${midSentenceLabel}`,
+      message: r.unsupported ? commandUnavailableLabel(commands.install) : r.reason,
     })
   }
 
   const active = state?.installed === true
+  const deviceNoun = platform ? thisDeviceNoun(platform) : 'this device'
+  const statusText = !resolved
+    ? 'Checking...'
+    : !commands
+      ? `${label} isn’t available on ${deviceNoun} yet.`
+      : checking
+        ? 'Checking...'
+        : active
+          ? platform === 'macos'
+            ? `Finder location installed on ${deviceNoun}.`
+            : `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
+          : platform === 'macos'
+            ? `Finder location not installed on ${deviceNoun}.`
+            : `Not set up yet on ${deviceNoun}.`
 
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Explorer integration"
-        subtitle={`Beebeeb appears in File Explorer as a sync folder. Files are encrypted on this PC before they leave for ${regionCity}.`}
+        title={label}
+        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for ${regionCity}.`}
       />
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>File Explorer location</div>
-          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-            {loading ? 'Checking...' : active ? 'Active. Beebeeb is registered as a sync folder on this PC.' : 'Not set up yet on this PC.'}
-          </div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{fileSurfaceName} location</div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{statusText}</div>
         </div>
-        {!loading && !active && <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? 'Enabling...' : 'Enable'}</PrimaryBtn>}
-        {!loading && active && <Chip tone="green">Active</Chip>}
+        {commands && !checking && !active && (
+          <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? actionVerbBusy : actionVerb}</PrimaryBtn>
+        )}
+        {commands && !checking && active && <Chip tone="green">Active</Chip>}
       </Card>
     </SettingsSectionShell>
   )
@@ -909,6 +989,7 @@ function UpdatesPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const platform = usePlatformName()
   const [version, setVersion] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
@@ -1247,7 +1328,7 @@ function UpdatesPanel({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Release channel</div>
             <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-              Choose which desktop releases this PC receives.
+              Choose which desktop releases {thisDeviceNoun(platform)} receives.
             </div>
           </div>
           <div
@@ -1486,6 +1567,10 @@ function AdvancedPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const platform = usePlatformName()
+  const themeOptions = THEME_OPTIONS.map((option) =>
+    option.value === 'system' ? { ...option, hint: systemThemeHint(platform) } : option,
+  )
   const themePreference = normalizeThemePreference(config.theme)
   const cacheLimitBytes = normalizeCacheLimitBytes(config.local_cache_limit_bytes)
   const cacheView = buildCacheLimitView({
@@ -1535,7 +1620,7 @@ function AdvancedPanel({
               flexShrink: 0,
             }}
           >
-            {THEME_OPTIONS.map((option) => {
+            {themeOptions.map((option) => {
               const selected = option.value === themePreference
               return (
                 <button
@@ -1565,7 +1650,7 @@ function AdvancedPanel({
             })}
           </div>
         </div>
-        {THEME_OPTIONS.map((option, index) => {
+        {themeOptions.map((option, index) => {
           const selected = option.value === themePreference
           return (
             <div
@@ -1576,7 +1661,7 @@ function AdvancedPanel({
                 gap: 12,
                 padding: '11px 18px',
                 alignItems: 'center',
-                borderBottom: index === THEME_OPTIONS.length - 1 ? 'none' : `1px solid ${T.line}`,
+                borderBottom: index === themeOptions.length - 1 ? 'none' : `1px solid ${T.line}`,
               }}
             >
               <div style={{ minWidth: 0 }}>
@@ -1692,7 +1777,11 @@ function SettingsNav({
   loggedIn: boolean
   onChange: (id: SettingsNavId) => void
 }) {
-  const sections = availableSettingsSections(loggedIn)
+  // `null` while the real host platform hasn't resolved yet — passed through
+  // as-is so `availableSettingsSections` renders the neutral "Shell
+  // integration" label instead of a guessed one that then flips (PR #34 review).
+  const { name: platform, resolved } = usePlatform()
+  const sections = availableSettingsSections(loggedIn, resolved ? platform : null)
 
   return (
     <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px', overflow: 'auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1744,6 +1833,7 @@ function SettingsNav({
 }
 
 export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps) {
+  const { name: platform, resolved: platformResolved } = usePlatform()
   const loggedIn = status?.logged_in ?? false
   const [activeNav, setActiveNav] = useState<SettingsNavId>(() => defaultSettingsPage(loggedIn))
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -1833,7 +1923,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       default:
         return (
           <SettingsSectionShell>
-            <PageHeader title={settingLabel(activeNav)} />
+            <PageHeader title={settingLabel(activeNav, platformResolved ? platform : null)} />
           </SettingsSectionShell>
         )
     }

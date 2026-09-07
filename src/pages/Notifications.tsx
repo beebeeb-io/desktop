@@ -118,7 +118,7 @@ export default function Notifications() {
                 type="checkbox"
                 checked={config[t.key]}
                 onChange={() => toggle(t.key)}
-                style={{ marginTop: 3 }}
+                style={{ marginTop: 3, accentColor: 'var(--amber)' }}
               />
               <label htmlFor={inputId} style={{ cursor: 'pointer' }}>
                 <span style={{ display: 'block', fontWeight: 500, fontSize: 14 }}>{t.label}</span>
