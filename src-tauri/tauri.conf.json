@@ -58,8 +58,10 @@
     },
     "trayIcon": {
       "id": "tray",
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
+      "iconPath": "icons/tray-template@2x.png",
+      "iconAsTemplate": true,
+      "showMenuOnLeftClick": false,
+      "tooltip": "Beebeeb"
     }
   },
   "plugins": {

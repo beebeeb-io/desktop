@@ -8,7 +8,7 @@ use sysinfo::{CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{
     Emitter, Manager, State,
     menu::{AboutMetadata, CheckMenuItemBuilder, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIconEvent},
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -6250,6 +6250,133 @@ fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click_x: f64, cl
         .unwrap_or(1.0)
 }
 
+// ── macOS tray flyout anchoring (task 1384) ────────────────────────────────
+//
+// The compact "settings" window (App.tsx) doubles as the macOS/Linux tray
+// flyout. Pre-1384 it always opened decorated and `.center()`-ed — a
+// 680×540pt window landing mid-screen instead of under the status item.
+// macOS gets its own anchor math here, mirroring the DPI-correct approach
+// 307b826 established for Windows above, but anchored from the tray click
+// event's `rect` (the icon's own bounds) rather than the raw click point,
+// since a click can land anywhere inside the icon. Linux keeps the
+// original centered/decorated behaviour untouched (see the `#[cfg(not(any(
+// target_os = "windows", target_os = "macos")))]` branch in
+// `setup_tray`'s click handler, and the `#[cfg(not(target_os = "macos"))]`
+// branch in `show_compact_app_window_with_nav` below).
+
+const MACOS_SETTINGS_WINDOW_WIDTH: f64 = 680.0;
+const MACOS_SETTINGS_WINDOW_HEIGHT: f64 = 540.0;
+const MACOS_TRAY_FLYOUT_GAP: i32 = 6;
+
+/// A one-shot handoff from the tray click handler to
+/// `show_compact_app_window_with_nav`: the physical position the flyout
+/// should open at, computed from the clicked status item's rect. `take()`n
+/// (consumed) the moment it's read, so an unrelated open of the same
+/// window (the "Open Beebeeb" menu item, a notification, a deep link) that
+/// didn't go through the tray click falls back to centering instead of
+/// reusing a stale tray position.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+static MACOS_TRAY_FLYOUT_ANCHOR: LazyLock<Mutex<Option<tauri::PhysicalPosition<i32>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Debounces the focus-loss-hide handler against the spurious `Focused(false)`
+/// some window managers deliver right as a borderless always-on-top window
+/// is created/shown, before it has actually become key — only hide once a
+/// real `Focused(true)` was observed since the last show.
+#[cfg(target_os = "macos")]
+static MACOS_FLYOUT_GAINED_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Resolve where the macOS tray flyout should open, from the tray click
+/// event's icon `rect`. Looks up the monitor under the icon for its real
+/// scale factor and physical bounds (so a tray on a non-primary or
+/// negative-origin monitor still anchors and clamps correctly); falls back
+/// to an unclamped 1.0-scale placement if no monitor can be resolved.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri::PhysicalPosition<i32> {
+    // `rect` comes back from the tray-icon crate already in physical pixels
+    // on macOS (see `tray-icon`'s `get_tray_rect`), but the field type is
+    // the platform-neutral `dpi::Position`/`dpi::Size` enum. A provisional
+    // 1.0-scale extraction is a no-op cast for the already-physical case —
+    // used only to resolve which monitor the icon sits on — then we
+    // re-resolve with that monitor's real scale factor so a future
+    // Logical-reporting `tray-icon` upgrade would still be correct instead
+    // of silently mispositioning (the exact class of bug 307b826 fixed for
+    // Windows).
+    let provisional = rect.position.to_physical::<f64>(1.0);
+    let monitor = app.monitor_from_point(provisional.x, provisional.y).ok().flatten();
+
+    let scale_factor = monitor
+        .as_ref()
+        .map(|m| m.scale_factor())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0);
+
+    let icon_position = rect.position.to_physical::<f64>(scale_factor);
+    let icon_size = rect.size.to_physical::<f64>(scale_factor);
+
+    let (screen_min_x, screen_max_x) = match &monitor {
+        Some(m) => {
+            let position = m.position();
+            let size = m.size();
+            (position.x as f64, position.x as f64 + size.width as f64)
+        }
+        None => (f64::NEG_INFINITY, f64::INFINITY),
+    };
+
+    macos_tray_flyout_position(
+        icon_position.x,
+        icon_position.y,
+        icon_size.width,
+        icon_size.height,
+        MACOS_SETTINGS_WINDOW_WIDTH,
+        scale_factor,
+        screen_min_x,
+        screen_max_x,
+    )
+}
+
+/// Pure anchor math: centers the flyout horizontally under the status item
+/// and places its top edge `MACOS_TRAY_FLYOUT_GAP` points below the icon's
+/// bottom edge, clamped so it never runs off either edge of the containing
+/// monitor. All of `icon_x`/`icon_y`/`icon_width`/`icon_height` and the
+/// returned position are physical pixels; `flyout_width_logical` is the
+/// flyout window's configured logical width, converted internally using
+/// `scale_factor`. Pass `f64::NEG_INFINITY`/`f64::INFINITY` for
+/// `screen_min_x`/`screen_max_x` to skip clamping (no monitor resolved).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_tray_flyout_position(
+    icon_x: f64,
+    icon_y: f64,
+    icon_width: f64,
+    icon_height: f64,
+    flyout_width_logical: f64,
+    scale_factor: f64,
+    screen_min_x: f64,
+    screen_max_x: f64,
+) -> tauri::PhysicalPosition<i32> {
+    let scale_factor = valid_macos_tray_scale_factor(scale_factor);
+    let physical_flyout_width = flyout_width_logical * scale_factor;
+    let physical_gap = MACOS_TRAY_FLYOUT_GAP as f64 * scale_factor;
+
+    let icon_center_x = icon_x + icon_width / 2.0;
+    let ideal_x = icon_center_x - physical_flyout_width / 2.0;
+    let max_x = (screen_max_x - physical_flyout_width).max(screen_min_x);
+
+    tauri::PhysicalPosition {
+        x: ideal_x.clamp(screen_min_x, max_x).round() as i32,
+        y: (icon_y + icon_height + physical_gap).round() as i32,
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
 fn window_state_denylist_labels() -> &'static [&'static str] {
     &["tray", "windows-onboarding"]
 }
@@ -7168,109 +7295,140 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let tray_menu = build_tray_menu(app, autostart_enabled)?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("no app icon found — check icons/icon.png exists");
+    // The tray ICON itself is built declaratively from `app.trayIcon` in
+    // tauri.conf.json (iconPath, iconAsTemplate, tooltip,
+    // showMenuOnLeftClick) — Tauri's `App::build()` constructs it from that
+    // config BEFORE this `.setup()` closure runs. Building a second,
+    // fully-independent `TrayIconBuilder::with_id("tray")` here — as this
+    // function used to — registers a SECOND native status item with the
+    // same string id (two blank/duplicate icons in the menu bar, task
+    // 1384). Attach the menu + click behaviour to the config-built tray
+    // instead of constructing a new one.
+    let tray = app
+        .tray_by_id("tray")
+        .expect("app.trayIcon in tauri.conf.json did not register a tray with id \"tray\"");
 
-    let _tray = TrayIconBuilder::with_id("tray")
-        .icon(icon)
-        .icon_as_template(true) // macOS: monochrome, respects dark/light mode
-        .menu(&tray_menu)
-        .show_menu_on_left_click(false)
-        .tooltip("Beebeeb")
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "open_settings" => show_main_app_window_impl(app),
-            "tray_hide" => {
-                #[cfg(target_os = "windows")]
-                {
-                    if let Some(win) = app.get_webview_window("main-app") {
-                        let _ = win.hide();
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    if let Some(win) = app.get_webview_window("settings") {
-                        let _ = win.hide();
-                    }
-                }
-            }
-            "tray_autostart" => {
-                // Toggle autostart and rebuild the tray menu so the check
-                // mark reflects the new state. TrayIcon::set_menu replaces
-                // the whole menu; there is no per-item getter in Tauri 2.
-                let manager = app.autolaunch();
-                let currently = manager.is_enabled().unwrap_or(false);
-                if currently {
-                    let _ = manager.disable();
-                } else {
-                    let _ = manager.enable();
-                }
-                let new_state = !currently;
-                if let Some(tray) = app.tray_by_id("tray") {
-                    if let Ok(menu) = build_tray_menu(app, new_state) {
-                        let _ = tray.set_menu(Some(menu));
-                    }
-                }
-                tracing::info!(enabled = new_state, "autostart toggled via tray");
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            // Left-click toggles window visibility.
-            // On Windows: show/hide the frameless tray flyout ("tray" window),
-            // positioned near the bottom-right corner so it appears above the
-            // system tray area. The main app opens from the context menu or
-            // the tray flyout itself.
-            // On macOS/Linux: toggle the compact app window as before.
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                position,
-                ..
-            } = event
+    tray.set_menu(Some(tray_menu))?;
+
+    tray.on_menu_event(|app, event| match event.id().as_ref() {
+        "open_settings" => show_main_app_window_impl(app),
+        "tray_hide" => {
+            #[cfg(target_os = "windows")]
             {
-                let app = tray.app_handle();
+                if let Some(win) = app.get_webview_window("main-app") {
+                    let _ = win.hide();
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(win) = app.get_webview_window("settings") {
+                    let _ = win.hide();
+                }
+            }
+        }
+        "tray_autostart" => {
+            // Toggle autostart and rebuild the tray menu so the check
+            // mark reflects the new state. TrayIcon::set_menu replaces
+            // the whole menu; there is no per-item getter in Tauri 2.
+            let manager = app.autolaunch();
+            let currently = manager.is_enabled().unwrap_or(false);
+            if currently {
+                let _ = manager.disable();
+            } else {
+                let _ = manager.enable();
+            }
+            let new_state = !currently;
+            if let Some(tray) = app.tray_by_id("tray") {
+                if let Ok(menu) = build_tray_menu(app, new_state) {
+                    let _ = tray.set_menu(Some(menu));
+                }
+            }
+            tracing::info!(enabled = new_state, "autostart toggled via tray");
+        }
+        _ => {}
+    });
 
-                #[cfg(target_os = "windows")]
-                {
-                    if let Some(win) = app.get_webview_window("tray") {
-                        if win.is_visible().unwrap_or(false) {
-                            let _ = win.hide();
-                        } else {
-                            // Position the flyout above the tray icon.
-                            // The tray event's position is physical desktop
-                            // coordinates. The tray window size in tauri.conf.json
-                            // is logical, so resolve the scale from the monitor
-                            // containing the click; this handles a tray on a
-                            // non-primary monitor or a hidden window whose current
-                            // monitor is stale. If monitor lookup fails, fall back
-                            // to the window scale, then 1.0.
-                            let scale_factor = windows_tray_flyout_scale_factor(&win, position.x, position.y);
-                            let flyout_position = windows_tray_flyout_position(position.x, position.y, scale_factor);
-                            let _ = win.set_position(tauri::Position::Physical(flyout_position));
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
+    tray.on_tray_icon_event(|tray, event| {
+        // Left-click toggles window visibility.
+        // On Windows: show/hide the frameless tray flyout ("tray" window),
+        // positioned near the bottom-right corner so it appears above the
+        // system tray area. The main app opens from the context menu or
+        // the tray flyout itself.
+        // On macOS: show/hide the same compact window, but anchored
+        // directly under the status item (from the click event's `rect`,
+        // not the raw click point — anchoring off the icon's own bounds
+        // is correct regardless of where inside it the user clicked) and
+        // without window chrome, so it reads as a system popover (1384).
+        // On Linux: toggle the compact app window exactly as before.
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            position,
+            rect,
+            ..
+        } = event
+        {
+            let app = tray.app_handle();
+
+            #[cfg(target_os = "windows")]
+            {
+                let _ = &rect; // unused — Windows anchors from the click point
+                if let Some(win) = app.get_webview_window("tray") {
+                    if win.is_visible().unwrap_or(false) {
+                        let _ = win.hide();
+                    } else {
+                        // Position the flyout above the tray icon.
+                        // The tray event's position is physical desktop
+                        // coordinates. The tray window size in tauri.conf.json
+                        // is logical, so resolve the scale from the monitor
+                        // containing the click; this handles a tray on a
+                        // non-primary monitor or a hidden window whose current
+                        // monitor is stale. If monitor lookup fails, fall back
+                        // to the window scale, then 1.0.
+                        let scale_factor = windows_tray_flyout_scale_factor(&win, position.x, position.y);
+                        let flyout_position = windows_tray_flyout_position(position.x, position.y, scale_factor);
+                        let _ = win.set_position(tauri::Position::Physical(flyout_position));
+                        let _ = win.show();
+                        let _ = win.set_focus();
                     }
                 }
+            }
 
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = position; // unused on non-Windows
+            #[cfg(target_os = "macos")]
+            {
+                let _ = position; // unused — macOS anchors from the icon's own rect
+                let already_visible = app
+                    .get_webview_window("settings")
+                    .map(|win| win.is_visible().unwrap_or(false))
+                    .unwrap_or(false);
+
+                if already_visible {
                     if let Some(win) = app.get_webview_window("settings") {
-                        if win.is_visible().unwrap_or(false) {
-                            let _ = win.hide();
-                        } else {
-                            show_compact_app_window_impl(app);
-                        }
+                        let _ = win.hide();
+                    }
+                } else {
+                    let anchor = macos_tray_flyout_anchor(app, &rect);
+                    *MACOS_TRAY_FLYOUT_ANCHOR.lock().unwrap() = Some(anchor);
+                    show_compact_app_window_impl(app);
+                }
+            }
+
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                let _ = position;
+                let _ = &rect;
+                if let Some(win) = app.get_webview_window("settings") {
+                    if win.is_visible().unwrap_or(false) {
+                        let _ = win.hide();
                     } else {
                         show_compact_app_window_impl(app);
                     }
+                } else {
+                    show_compact_app_window_impl(app);
                 }
             }
-        })
-        .build(app)?;
+        }
+    });
 
     Ok(())
 }
@@ -7286,13 +7444,47 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 
 /// Internal helper for non-Windows builds, optionally selecting one of the
 /// compact app's existing pages (`status`, `finder`, `shared`, ...).
+///
+/// On macOS this window doubles as the tray flyout (task 1384): borderless,
+/// always-on-top, hides on focus loss, and opens anchored under the status
+/// item when `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (set by the
+/// tray click handler in `setup_tray`) — falling back to centered when it
+/// doesn't (e.g. opened via the "Open Beebeeb" menu item, a notification,
+/// or a deep link, none of which have a status-item rect to anchor from).
+/// The `?platform=macos` URL tag lets the frontend force the sidebar+
+/// content two-column grid regardless of this window's 680px width — see
+/// `design.css`'s `html.macos-flyout` rule; without it, the existing
+/// `max-width: 820px` responsive breakpoint (meant for the browser/
+/// main-app case) collapsed to a single stacked column and reproduced
+/// 1173's overflow. Linux keeps the original centered/decorated/no-anchor
+/// behaviour untouched.
 #[cfg(not(target_os = "windows"))]
 fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
-    let (label, width, height, resizable) = ("settings", 680.0, 540.0, false);
-    let url = nav
+    let (label, width, height, resizable) = (
+        "settings",
+        MACOS_SETTINGS_WINDOW_WIDTH,
+        MACOS_SETTINGS_WINDOW_HEIGHT,
+        false,
+    );
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut url = nav
         .map(|nav| format!("index.html?nav={nav}"))
         .unwrap_or_else(|| "index.html".to_string());
+    #[cfg(target_os = "macos")]
+    url.push_str(if nav.is_some() {
+        "&platform=macos"
+    } else {
+        "?platform=macos"
+    });
+
+    #[cfg(target_os = "macos")]
+    let pending_anchor = MACOS_TRAY_FLYOUT_ANCHOR.lock().unwrap().take();
+
     if let Some(win) = app.get_webview_window(label) {
+        #[cfg(target_os = "macos")]
+        if let Some(position) = pending_anchor {
+            let _ = win.set_position(tauri::Position::Physical(position));
+        }
         let _ = win.show();
         let _ = win.set_focus();
         if let Some(nav) = nav {
@@ -7301,14 +7493,45 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
         return;
     }
 
-    match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut builder = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
         .title("Beebeeb")
         .inner_size(width, height)
         .resizable(resizable)
-        .center()
-        .build()
+        .center();
+
+    #[cfg(target_os = "macos")]
     {
+        // Chrome-less, floats above other windows, built invisible so the
+        // `set_position` below (when we have an anchor) never flashes at
+        // the centered fallback position first.
+        builder = builder.decorations(false).always_on_top(true).visible(false);
+    }
+
+    match builder.build() {
         Ok(win) => {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(position) = pending_anchor {
+                    let _ = win.set_position(tauri::Position::Physical(position));
+                }
+
+                // Hide on focus loss, like a system popover — debounced
+                // against the spurious immediate blur some window managers
+                // deliver right as a borderless always-on-top window is
+                // shown (see `MACOS_FLYOUT_GAINED_FOCUS`).
+                let hide_target = win.clone();
+                win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(focused) = event {
+                        if *focused {
+                            MACOS_FLYOUT_GAINED_FOCUS.store(true, Ordering::Relaxed);
+                        } else if MACOS_FLYOUT_GAINED_FOCUS.swap(false, Ordering::Relaxed) {
+                            let _ = hide_target.hide();
+                        }
+                    }
+                });
+            }
+
             let _ = win.show();
             let _ = win.set_focus();
             if let Some(nav) = nav {
@@ -7768,6 +7991,71 @@ mod tests {
 
         assert_eq!(position.x, 0);
         assert_eq!(position.y, 225);
+    }
+
+    #[test]
+    fn macos_tray_flyout_geometry_matches_configured_window() {
+        assert_eq!(super::MACOS_SETTINGS_WINDOW_WIDTH, 680.0);
+        assert_eq!(super::MACOS_SETTINGS_WINDOW_HEIGHT, 540.0);
+        assert_eq!(super::MACOS_TRAY_FLYOUT_GAP, 6);
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_centers_under_icon() {
+        // A 24×22 physical status item near the left of a 2560-wide menu
+        // bar at 1x — the anchored flyout fits without clamping.
+        let position = super::macos_tray_flyout_position(1_000.0, 0.0, 24.0, 22.0, 680.0, 1.0, 0.0, 2_560.0);
+
+        assert_eq!(position.x, 672); // icon center 1012 - 680/2
+        assert_eq!(position.y, 28); // 0 + 22 + 6 gap
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_scales_with_dpi() {
+        // Same icon at 2x scale (physical coordinates already doubled, as
+        // the tray-icon crate reports them on macOS).
+        let position = super::macos_tray_flyout_position(2_000.0, 0.0, 48.0, 44.0, 680.0, 2.0, 0.0, 5_120.0);
+
+        assert_eq!(position.x, 1_344); // icon center 2024 - (680*2)/2
+        assert_eq!(position.y, 56); // 0 + 44 + 6*2 gap
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_clamps_to_right_screen_edge() {
+        let position = super::macos_tray_flyout_position(2_500.0, 0.0, 24.0, 22.0, 680.0, 1.0, 0.0, 2_560.0);
+
+        // Centering under the icon would push the flyout's right edge past
+        // the monitor; clamp so it stays fully on-screen.
+        assert_eq!(position.x, 1_880); // 2560 - 680
+        assert_eq!(position.y, 28);
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_clamps_to_left_screen_edge() {
+        // A status item near the left edge of a monitor whose physical
+        // origin is negative (a monitor to the left of the primary one).
+        let position = super::macos_tray_flyout_position(-1_400.0, 0.0, 24.0, 22.0, 680.0, 1.0, -1_440.0, 0.0);
+
+        assert_eq!(position.x, -1_440);
+        assert_eq!(position.y, 28);
+    }
+
+    #[test]
+    fn macos_tray_flyout_position_unbounded_when_no_monitor_found() {
+        let position =
+            super::macos_tray_flyout_position(500.0, 0.0, 24.0, 22.0, 680.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
+
+        assert_eq!(position.x, 172); // icon center 512 - 340, unclamped
+        assert_eq!(position.y, 28);
+    }
+
+    #[test]
+    fn valid_macos_tray_scale_factor_falls_back_to_one() {
+        assert_eq!(super::valid_macos_tray_scale_factor(2.0), 2.0);
+        assert_eq!(super::valid_macos_tray_scale_factor(0.0), 1.0);
+        assert_eq!(super::valid_macos_tray_scale_factor(-1.0), 1.0);
+        assert_eq!(super::valid_macos_tray_scale_factor(f64::NAN), 1.0);
+        assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
     }
 
     #[test]

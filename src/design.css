@@ -161,6 +161,40 @@ html.tray-window #root {
   height: 100%;
 }
 
+/*
+ * macOS tray flyout (task 1384) — the compact "settings" window (App.tsx)
+ * also serves as the macOS tray flyout; main.tsx tags <html> with
+ * .macos-flyout when it's mounted with ?platform=macos. Same frameless-but-
+ * opaque reasoning as .tray-window above (decorations:false on the Rust
+ * side, not transparent).
+ *
+ * `.app-shell`'s two-column sidebar+content grid collapses to a single
+ * stacked column under the `max-width: 820px` responsive breakpoint further
+ * below — correct for the browser/main-app responsive case, but this
+ * window is a fixed 680px, well under that breakpoint. Left as-is, the
+ * collapse stacks the sidebar (nav + footer) above the page, and at this
+ * window's 540px height that reproduced 1173's overflow: the page and
+ * action footer were only reachable by scrolling past the whole nav. Force
+ * the two-column grid back on for this window regardless of width — the
+ * selector's specificity (two classes) wins over the media query's bare
+ * `.app-shell` (one class) without needing `!important`.
+ */
+html.macos-flyout,
+html.macos-flyout body,
+html.macos-flyout #root {
+  background: var(--paper) !important;
+  margin: 0;
+  padding: 0;
+}
+
+html.macos-flyout #root {
+  height: 100%;
+}
+
+html.macos-flyout .app-shell {
+  grid-template-columns: 228px minmax(0, 1fr);
+}
+
 button,
 input {
   font: inherit;
