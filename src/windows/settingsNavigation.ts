@@ -9,11 +9,20 @@ export type SettingsNavId =
   | 'updates'
   | 'advanced'
 
-/** Label for the OS shell-integration nav item/page — "Finder" on macOS, "Explorer" on Windows. */
-export function shellIntegrationLabel(platform: PlatformName): string {
+/**
+ * Label for the OS shell-integration nav item/page — "Finder" on macOS,
+ * "Explorer" on Windows. `platform === null` means the real host platform
+ * hasn't resolved yet (see `usePlatform()` in `platform.ts`); callers in that
+ * state must pass `null` rather than a guessed fallback, so the sidebar shows
+ * a neutral "Shell integration" instead of flipping from "Explorer
+ * integration" to "Finder integration" once the real OS resolves (PR #34
+ * review).
+ */
+export function shellIntegrationLabel(platform: PlatformName | null): string {
   if (platform === 'macos') return 'Finder integration'
   if (platform === 'linux') return 'File manager integration'
-  return 'Explorer integration'
+  if (platform === 'windows') return 'Explorer integration'
+  return 'Shell integration'
 }
 
 export interface SettingsNavItem {
@@ -58,12 +67,12 @@ export function defaultSettingsPage(loggedIn: boolean): SettingsNavId {
   return loggedIn ? 'sync' : 'launch'
 }
 
-export function settingLabel(id: SettingsNavId, platform: PlatformName = 'windows'): string {
+export function settingLabel(id: SettingsNavId, platform: PlatformName | null = 'windows'): string {
   if (id === 'explorer-integration') return shellIntegrationLabel(platform)
   return SETTINGS_SECTIONS.flatMap((section) => section.items).find((item) => item.id === id)?.label ?? id
 }
 
-function withPlatformLabels(sections: SettingsNavSection[], platform: PlatformName): SettingsNavSection[] {
+function withPlatformLabels(sections: SettingsNavSection[], platform: PlatformName | null): SettingsNavSection[] {
   return sections.map((section) => ({
     ...section,
     items: section.items.map((item) =>
@@ -72,7 +81,7 @@ function withPlatformLabels(sections: SettingsNavSection[], platform: PlatformNa
   }))
 }
 
-export function availableSettingsSections(loggedIn: boolean, platform: PlatformName = 'windows'): SettingsNavSection[] {
+export function availableSettingsSections(loggedIn: boolean, platform: PlatformName | null = 'windows'): SettingsNavSection[] {
   if (loggedIn) return withPlatformLabels(SETTINGS_SECTIONS, platform)
 
   return withPlatformLabels(

@@ -29,7 +29,7 @@ import {
   shellIntegrationLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
-import { usePlatformName, type PlatformName } from '../../platform'
+import { usePlatform, usePlatformName, type PlatformName } from '../../platform'
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
@@ -864,17 +864,28 @@ function shellIntegrationCommandsFor(platform: PlatformName): { state: string; i
 }
 
 function ExplorerIntegrationPanel() {
-  const platform = usePlatformName()
+  // Gate everything below on `resolved`: `platform` starts `null` and only
+  // becomes a real value once `desktop_platform` answers. Deriving `commands`
+  // from `resolved ? platform : null` means `commands` itself is the single
+  // gate a shell-integration command can go through — it is `null` (so
+  // `enable()`/the state-check effect below both bail) until the real host
+  // platform is known. This is what stops the macOS main window (routed with
+  // `?platform=windows`) from invoking `windows_shell_integration_state` and
+  // surfacing "Windows shell integration is only available on Windows"
+  // before flipping to the real Finder panel a moment later (PR #34 review).
+  const { name: platformName, resolved } = usePlatform()
+  const platform = resolved ? platformName : null
   const label = shellIntegrationLabel(platform)
   // "Explorer integration" / "Finder integration" read fine mid-sentence (proper nouns);
   // the generic Linux fallback reads better lowercase there.
   const midSentenceLabel = platform === 'linux' ? 'file manager integration' : label
-  const fileSurfaceName = platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : 'File Explorer'
-  const commands = useMemo(() => shellIntegrationCommandsFor(platform), [platform])
+  const fileSurfaceName =
+    platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : platform === 'windows' ? 'File Explorer' : 'your files'
+  const commands = useMemo(() => (platform ? shellIntegrationCommandsFor(platform) : null), [platform])
   const actionVerb = platform === 'macos' ? 'Install' : 'Enable'
   const actionVerbBusy = platform === 'macos' ? 'Installing...' : 'Enabling...'
   const [state, setState] = useState<ShellIntegrationState | null>(null)
-  const [loading, setLoading] = useState(commands != null)
+  const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
   const regionCity = useRegionCity()
@@ -891,15 +902,15 @@ function ExplorerIntegrationPanel() {
         message: r.unsupported ? commandUnavailableLabel(commands.state) : r.reason,
       })
     }
-    setLoading(false)
   }
 
+  // Does not run until `resolved === true` (via `commands`, which is `null`
+  // for an unresolved platform) — no command invocation, no toast, while the
+  // real host platform is still unknown.
   useEffect(() => {
+    if (!commands) return
     let cancelled = false
-    if (!commands) {
-      setLoading(false)
-      return
-    }
+    setChecking(true)
     void (async () => {
       const r = await command<ShellIntegrationState>(commands.state)
       if (cancelled) return
@@ -909,7 +920,7 @@ function ExplorerIntegrationPanel() {
         title: `Couldn’t check ${midSentenceLabel}`,
         message: r.unsupported ? commandUnavailableLabel(commands.state) : r.reason,
       })
-      setLoading(false)
+      setChecking(false)
     })()
     return () => { cancelled = true }
   }, [showToast, midSentenceLabel, commands])
@@ -935,18 +946,20 @@ function ExplorerIntegrationPanel() {
   }
 
   const active = state?.installed === true
-  const deviceNoun = thisDeviceNoun(platform)
-  const statusText = !commands
-    ? `${label} isn’t available on ${deviceNoun} yet.`
-    : loading
-      ? 'Checking...'
-      : active
-        ? platform === 'macos'
-          ? `Finder location installed on ${deviceNoun}.`
-          : `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
-        : platform === 'macos'
-          ? `Finder location not installed on ${deviceNoun}.`
-          : `Not set up yet on ${deviceNoun}.`
+  const deviceNoun = platform ? thisDeviceNoun(platform) : 'this device'
+  const statusText = !resolved
+    ? 'Checking...'
+    : !commands
+      ? `${label} isn’t available on ${deviceNoun} yet.`
+      : checking
+        ? 'Checking...'
+        : active
+          ? platform === 'macos'
+            ? `Finder location installed on ${deviceNoun}.`
+            : `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
+          : platform === 'macos'
+            ? `Finder location not installed on ${deviceNoun}.`
+            : `Not set up yet on ${deviceNoun}.`
 
   return (
     <SettingsSectionShell>
@@ -960,10 +973,10 @@ function ExplorerIntegrationPanel() {
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{fileSurfaceName} location</div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{statusText}</div>
         </div>
-        {commands && !loading && !active && (
+        {commands && !checking && !active && (
           <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? actionVerbBusy : actionVerb}</PrimaryBtn>
         )}
-        {commands && !loading && active && <Chip tone="green">Active</Chip>}
+        {commands && !checking && active && <Chip tone="green">Active</Chip>}
       </Card>
     </SettingsSectionShell>
   )
@@ -1764,8 +1777,11 @@ function SettingsNav({
   loggedIn: boolean
   onChange: (id: SettingsNavId) => void
 }) {
-  const platform = usePlatformName()
-  const sections = availableSettingsSections(loggedIn, platform)
+  // `null` while the real host platform hasn't resolved yet — passed through
+  // as-is so `availableSettingsSections` renders the neutral "Shell
+  // integration" label instead of a guessed one that then flips (PR #34 review).
+  const { name: platform, resolved } = usePlatform()
+  const sections = availableSettingsSections(loggedIn, resolved ? platform : null)
 
   return (
     <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px', overflow: 'auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1817,7 +1833,7 @@ function SettingsNav({
 }
 
 export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps) {
-  const platform = usePlatformName()
+  const { name: platform, resolved: platformResolved } = usePlatform()
   const loggedIn = status?.logged_in ?? false
   const [activeNav, setActiveNav] = useState<SettingsNavId>(() => defaultSettingsPage(loggedIn))
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -1907,7 +1923,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       default:
         return (
           <SettingsSectionShell>
-            <PageHeader title={settingLabel(activeNav, platform)} />
+            <PageHeader title={settingLabel(activeNav, platformResolved ? platform : null)} />
           </SettingsSectionShell>
         )
     }

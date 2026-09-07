@@ -28,25 +28,74 @@ function platformFromQueryParam(fallback: PlatformName): PlatformName {
 }
 
 /**
- * React hook resolving the real host platform via the `desktop_platform`
- * Tauri command. Starts at `fallback` (defaulting to the query-param hint,
- * itself defaulting to 'windows' — this shell's historical assumption)
- * until the command resolves, then reflects the true OS.
+ * Module-level cache of the real host platform, filled in once by whichever
+ * `usePlatform()` mount resolves first. `desktop_platform` never changes
+ * within a window's lifetime, so every later mount (revisiting a settings
+ * panel, mounting a sibling panel) reads this synchronously instead of
+ * re-invoking the command and re-showing the unresolved fallback — that
+ * repeated unresolved-then-resolved cycle is what produced the
+ * Explorer -> Finder label flicker and the spurious "Windows shell
+ * integration is only available on Windows" toast on macOS (PR #34 review).
+ * `inFlight` dedupes concurrent callers during the single real IPC round trip.
  */
-export function usePlatformName(fallback?: PlatformName): PlatformName {
-  const [platform, setPlatform] = useState<PlatformName>(() => platformFromQueryParam(fallback ?? 'windows'))
+let cachedPlatform: PlatformName | null = null
+let inFlight: Promise<void> | null = null
+
+function resolvePlatformOnce(): Promise<void> {
+  if (cachedPlatform !== null) return Promise.resolve()
+  if (!inFlight) {
+    inFlight = command<DesktopPlatform>('desktop_platform').then((result) => {
+      if (result.ok && isPlatformName(result.value)) {
+        cachedPlatform = result.value
+      }
+    })
+  }
+  return inFlight
+}
+
+export interface PlatformResolution {
+  /** The real host platform, or `null` until `desktop_platform` resolves. */
+  name: PlatformName | null
+  /** True once `name` reflects the real host platform. */
+  resolved: boolean
+}
+
+/**
+ * React hook resolving the real host platform via the `desktop_platform`
+ * Tauri command, with the resolution state exposed so callers can avoid
+ * acting on the pre-resolution value (e.g. invoking an OS-specific command,
+ * or rendering an OS-specific label) before it is safe to do so.
+ */
+export function usePlatform(): PlatformResolution {
+  const [name, setName] = useState<PlatformName | null>(() => cachedPlatform)
 
   useEffect(() => {
+    if (cachedPlatform !== null) {
+      setName(cachedPlatform)
+      return
+    }
     let cancelled = false
-    command<DesktopPlatform>('desktop_platform').then((result) => {
-      if (!cancelled && result.ok && isPlatformName(result.value)) {
-        setPlatform(result.value)
-      }
+    void resolvePlatformOnce().then(() => {
+      if (!cancelled && cachedPlatform !== null) setName(cachedPlatform)
     })
     return () => {
       cancelled = true
     }
   }, [])
 
-  return platform
+  return { name, resolved: name !== null }
+}
+
+/**
+ * Convenience wrapper over `usePlatform()` for existing callers that just
+ * want a best-effort platform name. Starts at `fallback` (defaulting to the
+ * query-param hint, itself defaulting to 'windows' — this shell's historical
+ * assumption) until the real platform resolves, then reflects the true OS.
+ * Prefer `usePlatform()` directly for anything that must not act (call a
+ * platform-specific command, render a platform-specific label) on the
+ * unresolved fallback value.
+ */
+export function usePlatformName(fallback?: PlatformName): PlatformName {
+  const { name } = usePlatform()
+  return name ?? platformFromQueryParam(fallback ?? 'windows')
 }
