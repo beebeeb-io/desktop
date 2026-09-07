@@ -123,6 +123,7 @@ export default function Bandwidth() {
           type="checkbox"
           checked={config.pause_sync}
           onChange={(e) => update({ pause_sync: e.target.checked }, true)}
+          style={{ accentColor: 'var(--amber)' }}
         />
         <span style={{ fontWeight: 500 }}>Pause sync</span>
         <span style={{ color: '#9ca3af', fontSize: 12 }}>

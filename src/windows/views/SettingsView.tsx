@@ -26,8 +26,10 @@ import {
   availableSettingsSections,
   defaultSettingsPage,
   settingLabel,
+  shellIntegrationLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
+import { usePlatformName, type PlatformName } from '../../platform'
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
@@ -118,6 +120,25 @@ const THEME_OPTIONS: Array<{ value: DesktopTheme; label: string; hint: string }>
   { value: 'dark', label: 'Dark', hint: 'Use the dark desktop palette.' },
   { value: 'system', label: 'System', hint: 'Follow Windows or macOS.' },
 ]
+
+/** "this Mac" / "this PC" / "this device" — the noun this shell uses for the local machine. */
+function thisDeviceNoun(platform: PlatformName): string {
+  if (platform === 'macos') return 'this Mac'
+  if (platform === 'linux') return 'this device'
+  return 'this PC'
+}
+
+function signInToOsLine(platform: PlatformName): string {
+  if (platform === 'macos') return 'Beebeeb launches automatically and resumes syncing when you sign in to macOS.'
+  if (platform === 'linux') return 'Beebeeb launches automatically and resumes syncing when you sign in.'
+  return 'Beebeeb launches automatically and resumes syncing when you sign in to Windows.'
+}
+
+function systemThemeHint(platform: PlatformName): string {
+  if (platform === 'macos') return 'Follow macOS.'
+  if (platform === 'linux') return 'Follow your desktop.'
+  return 'Follow Windows.'
+}
 
 function formatCpuPercent(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value < 0) return '—'
@@ -779,6 +800,7 @@ function DataResidencyPanel() {
 }
 
 function LaunchPanel() {
+  const platform = usePlatformName()
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
@@ -814,11 +836,11 @@ function LaunchPanel() {
 
   return (
     <SettingsSectionShell>
-      <PageHeader title="Launch" subtitle="Control how Beebeeb starts on this PC." />
+      <PageHeader title="Launch" subtitle={`Control how Beebeeb starts on ${thisDeviceNoun(platform)}.`} />
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Start at login</div>
-          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>Beebeeb launches automatically and resumes syncing when you sign in to Windows.</div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{signInToOsLine(platform)}</div>
         </div>
         <Toggle on={enabled === true} busy={busy || enabled === null} onChange={() => void toggle()} label="Start at login" />
       </Card>
@@ -827,6 +849,12 @@ function LaunchPanel() {
 }
 
 function ExplorerIntegrationPanel() {
+  const platform = usePlatformName()
+  const label = shellIntegrationLabel(platform)
+  // "Explorer integration" / "Finder integration" read fine mid-sentence (proper nouns);
+  // the generic Linux fallback reads better lowercase there.
+  const midSentenceLabel = platform === 'linux' ? 'file manager integration' : label
+  const fileSurfaceName = platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : 'File Explorer'
   const [state, setState] = useState<ShellIntegrationState | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -840,7 +868,7 @@ function ExplorerIntegrationPanel() {
     } else {
       showToast({
         variant: 'error',
-        title: 'Couldn’t check Explorer integration',
+        title: `Couldn’t check ${midSentenceLabel}`,
         message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
       })
     }
@@ -855,13 +883,13 @@ function ExplorerIntegrationPanel() {
       if (r.ok) setState(r.value)
       else showToast({
         variant: 'error',
-        title: 'Couldn’t check Explorer integration',
+        title: `Couldn’t check ${midSentenceLabel}`,
         message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
       })
       setLoading(false)
     })()
     return () => { cancelled = true }
-  }, [showToast])
+  }, [showToast, midSentenceLabel])
 
   const enable = async () => {
     setBusy(true)
@@ -874,25 +902,26 @@ function ExplorerIntegrationPanel() {
     }
     showToast({
       variant: 'error',
-      title: 'Couldn’t enable Explorer integration',
+      title: `Couldn’t enable ${midSentenceLabel}`,
       message: r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason,
     })
   }
 
   const active = state?.installed === true
+  const deviceNoun = thisDeviceNoun(platform)
 
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Explorer integration"
-        subtitle={`Beebeeb appears in File Explorer as a sync folder. Files are encrypted on this PC before they leave for ${regionCity}.`}
+        title={label}
+        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for ${regionCity}.`}
       />
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>File Explorer location</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{fileSurfaceName} location</div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-            {loading ? 'Checking...' : active ? 'Active. Beebeeb is registered as a sync folder on this PC.' : 'Not set up yet on this PC.'}
+            {loading ? 'Checking...' : active ? `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.` : `Not set up yet on ${deviceNoun}.`}
           </div>
         </div>
         {!loading && !active && <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? 'Enabling...' : 'Enable'}</PrimaryBtn>}
@@ -909,6 +938,7 @@ function UpdatesPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const platform = usePlatformName()
   const [version, setVersion] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
@@ -1247,7 +1277,7 @@ function UpdatesPanel({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Release channel</div>
             <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-              Choose which desktop releases this PC receives.
+              Choose which desktop releases {thisDeviceNoun(platform)} receives.
             </div>
           </div>
           <div
@@ -1486,6 +1516,10 @@ function AdvancedPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const platform = usePlatformName()
+  const themeOptions = THEME_OPTIONS.map((option) =>
+    option.value === 'system' ? { ...option, hint: systemThemeHint(platform) } : option,
+  )
   const themePreference = normalizeThemePreference(config.theme)
   const cacheLimitBytes = normalizeCacheLimitBytes(config.local_cache_limit_bytes)
   const cacheView = buildCacheLimitView({
@@ -1535,7 +1569,7 @@ function AdvancedPanel({
               flexShrink: 0,
             }}
           >
-            {THEME_OPTIONS.map((option) => {
+            {themeOptions.map((option) => {
               const selected = option.value === themePreference
               return (
                 <button
@@ -1565,7 +1599,7 @@ function AdvancedPanel({
             })}
           </div>
         </div>
-        {THEME_OPTIONS.map((option, index) => {
+        {themeOptions.map((option, index) => {
           const selected = option.value === themePreference
           return (
             <div
@@ -1576,7 +1610,7 @@ function AdvancedPanel({
                 gap: 12,
                 padding: '11px 18px',
                 alignItems: 'center',
-                borderBottom: index === THEME_OPTIONS.length - 1 ? 'none' : `1px solid ${T.line}`,
+                borderBottom: index === themeOptions.length - 1 ? 'none' : `1px solid ${T.line}`,
               }}
             >
               <div style={{ minWidth: 0 }}>
@@ -1692,7 +1726,8 @@ function SettingsNav({
   loggedIn: boolean
   onChange: (id: SettingsNavId) => void
 }) {
-  const sections = availableSettingsSections(loggedIn)
+  const platform = usePlatformName()
+  const sections = availableSettingsSections(loggedIn, platform)
 
   return (
     <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px', overflow: 'auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1744,6 +1779,7 @@ function SettingsNav({
 }
 
 export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps) {
+  const platform = usePlatformName()
   const loggedIn = status?.logged_in ?? false
   const [activeNav, setActiveNav] = useState<SettingsNavId>(() => defaultSettingsPage(loggedIn))
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -1833,7 +1869,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       default:
         return (
           <SettingsSectionShell>
-            <PageHeader title={settingLabel(activeNav)} />
+            <PageHeader title={settingLabel(activeNav, platform)} />
           </SettingsSectionShell>
         )
     }
