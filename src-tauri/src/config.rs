@@ -96,9 +96,13 @@ pub struct DesktopConfig {
     /// only on the noteworthy events.
     #[serde(default)]
     pub notify_sync_complete: bool,
-    /// Surface quota-warning notifications (80% / 95% / full). On by
-    /// default because hitting a hard quota mid-upload silently
-    /// leaves a partial sync, which is also a worst-case failure.
+    /// Surface a native OS notification when local cache usage crosses
+    /// 90% of `local_cache_limit_bytes` (Settings → Advanced). This is a
+    /// desktop-local cache-cap warning, distinct from the account's
+    /// cloud-storage-quota notification. On by default because silently
+    /// running out of local cache room stops caching new content, which
+    /// is also a worst-case failure. Never fires when the cap is
+    /// Unlimited (`local_cache_limit_bytes == 0`).
     #[serde(default = "default_true")]
     pub notify_quota_warnings: bool,
 
