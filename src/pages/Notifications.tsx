@@ -53,8 +53,8 @@ const TOGGLES: ToggleSpec[] = [
   },
   {
     key: 'notify_quota_warnings',
-    label: 'Storage quota warnings',
-    description: 'When you cross 90 % and 100 % of your plan’s storage.',
+    label: 'Local cache warnings',
+    description: 'When this device is close to its local cache limit (Settings → Advanced).',
   },
 ]
 
