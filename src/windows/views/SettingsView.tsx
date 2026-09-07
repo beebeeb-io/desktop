@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   accountRegion,
   accountNotificationPreferences,
@@ -848,6 +848,21 @@ function LaunchPanel() {
   )
 }
 
+/**
+ * The Rust command pair backing this panel, per platform. macOS registers the
+ * sync root as a File Provider domain (`finder_*`); Windows registers it as a
+ * Cloud Files sync root (`windows_*`). Both return `FinderInstallState`
+ * (aliased here as `ShellIntegrationState`), so the panel's result mapping is
+ * shared — only the command names differ. Linux has no backing command yet:
+ * `null` tells the panel to say so honestly instead of invoking a
+ * platform-specific command that can only ever error.
+ */
+function shellIntegrationCommandsFor(platform: PlatformName): { state: string; install: string } | null {
+  if (platform === 'macos') return { state: 'finder_location_state', install: 'install_finder_location' }
+  if (platform === 'windows') return { state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }
+  return null
+}
+
 function ExplorerIntegrationPanel() {
   const platform = usePlatformName()
   const label = shellIntegrationLabel(platform)
@@ -855,21 +870,25 @@ function ExplorerIntegrationPanel() {
   // the generic Linux fallback reads better lowercase there.
   const midSentenceLabel = platform === 'linux' ? 'file manager integration' : label
   const fileSurfaceName = platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : 'File Explorer'
+  const commands = useMemo(() => shellIntegrationCommandsFor(platform), [platform])
+  const actionVerb = platform === 'macos' ? 'Install' : 'Enable'
+  const actionVerbBusy = platform === 'macos' ? 'Installing...' : 'Enabling...'
   const [state, setState] = useState<ShellIntegrationState | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(commands != null)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
   const regionCity = useRegionCity()
 
   const refresh = async () => {
-    const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+    if (!commands) return
+    const r = await command<ShellIntegrationState>(commands.state)
     if (r.ok) {
       setState(r.value)
     } else {
       showToast({
         variant: 'error',
         title: `Couldn’t check ${midSentenceLabel}`,
-        message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
+        message: r.unsupported ? commandUnavailableLabel(commands.state) : r.reason,
       })
     }
     setLoading(false)
@@ -877,23 +896,31 @@ function ExplorerIntegrationPanel() {
 
   useEffect(() => {
     let cancelled = false
+    if (!commands) {
+      setLoading(false)
+      return
+    }
     void (async () => {
-      const r = await command<ShellIntegrationState>('windows_shell_integration_state')
+      const r = await command<ShellIntegrationState>(commands.state)
       if (cancelled) return
       if (r.ok) setState(r.value)
       else showToast({
         variant: 'error',
         title: `Couldn’t check ${midSentenceLabel}`,
-        message: r.unsupported ? commandUnavailableLabel('windows_shell_integration_state') : r.reason,
+        message: r.unsupported ? commandUnavailableLabel(commands.state) : r.reason,
       })
       setLoading(false)
     })()
     return () => { cancelled = true }
-  }, [showToast, midSentenceLabel])
+  }, [showToast, midSentenceLabel, commands])
 
   const enable = async () => {
+    if (!commands) return
     setBusy(true)
-    const r = await command<ShellIntegrationState>('install_windows_shell_integration')
+    // macOS ignores `path` and always installs at the default sync root
+    // (src-tauri/src/lib.rs `install_finder_location`), same as Onboarding.tsx.
+    const args = platform === 'macos' ? { path: null } : undefined
+    const r = await command<ShellIntegrationState>(commands.install, args)
     setBusy(false)
     if (r.ok) {
       setState(r.value)
@@ -902,13 +929,24 @@ function ExplorerIntegrationPanel() {
     }
     showToast({
       variant: 'error',
-      title: `Couldn’t enable ${midSentenceLabel}`,
-      message: r.unsupported ? commandUnavailableLabel('install_windows_shell_integration') : r.reason,
+      title: `Couldn’t ${actionVerb.toLowerCase()} ${midSentenceLabel}`,
+      message: r.unsupported ? commandUnavailableLabel(commands.install) : r.reason,
     })
   }
 
   const active = state?.installed === true
   const deviceNoun = thisDeviceNoun(platform)
+  const statusText = !commands
+    ? `${label} isn’t available on ${deviceNoun} yet.`
+    : loading
+      ? 'Checking...'
+      : active
+        ? platform === 'macos'
+          ? `Finder location installed on ${deviceNoun}.`
+          : `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
+        : platform === 'macos'
+          ? `Finder location not installed on ${deviceNoun}.`
+          : `Not set up yet on ${deviceNoun}.`
 
   return (
     <SettingsSectionShell>
@@ -920,12 +958,12 @@ function ExplorerIntegrationPanel() {
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{fileSurfaceName} location</div>
-          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-            {loading ? 'Checking...' : active ? `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.` : `Not set up yet on ${deviceNoun}.`}
-          </div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{statusText}</div>
         </div>
-        {!loading && !active && <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? 'Enabling...' : 'Enable'}</PrimaryBtn>}
-        {!loading && active && <Chip tone="green">Active</Chip>}
+        {commands && !loading && !active && (
+          <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? actionVerbBusy : actionVerb}</PrimaryBtn>
+        )}
+        {commands && !loading && active && <Chip tone="green">Active</Chip>}
       </Card>
     </SettingsSectionShell>
   )
