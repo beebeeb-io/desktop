@@ -6286,6 +6286,46 @@ static MACOS_TRAY_FLYOUT_ANCHOR: LazyLock<Mutex<Option<tauri::PhysicalPosition<i
 #[cfg(target_os = "macos")]
 static MACOS_FLYOUT_GAINED_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the shared macOS settings window is currently behaving as a
+/// tray-anchored popover or as a regular window. Set every time
+/// `show_compact_app_window_with_nav` shows the window (same one-shot-handoff
+/// family as `MACOS_TRAY_FLYOUT_ANCHOR`/`MACOS_FLYOUT_GAINED_FOCUS`), and read
+/// live by the focus-loss handler registered once at window-build time — the
+/// window is reused for every subsequent open, so the handler cannot rely on
+/// a mode captured in its closure at build time; it must consult this flag
+/// each time focus changes (1384 review follow-up: only the tray-click path
+/// should hide on focus loss and open chrome-less; "Open Beebeeb", the
+/// Preferences/Settings menu items, and `show_main_app_window` must produce
+/// the previous regular, decorated, centered, persistent window).
+#[cfg(target_os = "macos")]
+static MACOS_FLYOUT_IS_POPOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Which chrome/behavior the shared macOS settings window should adopt for
+/// this open. Pure decision, extracted from `show_compact_app_window_with_nav`
+/// so it's unit-testable without a live `AppHandle`/`WebviewWindow`: an
+/// anchor is present only when the open came from the tray click handler
+/// (`MACOS_TRAY_FLYOUT_ANCHOR`, consumed via `take()`); every other caller
+/// ("Open Beebeeb", Preferences/Settings menu items, a notification, a deep
+/// link) passes `None` and gets the regular window treatment.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosWindowMode {
+    /// Chrome-less, always-on-top, positioned under the status item, hides
+    /// on focus loss — reads as a system popover.
+    Popover,
+    /// Decorated, centered, normal window-manager behavior, stays open when
+    /// focus moves elsewhere.
+    Regular,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_window_mode_for_anchor(anchor: Option<tauri::PhysicalPosition<i32>>) -> MacosWindowMode {
+    match anchor {
+        Some(_) => MacosWindowMode::Popover,
+        None => MacosWindowMode::Regular,
+    }
+}
+
 /// Finds the monitor whose PHYSICAL bounds contain the given physical-pixel
 /// point, without needing a scale factor up front. Deliberately does not use
 /// `AppHandle::monitor_from_point`: on macOS that delegates to `tao`'s
@@ -7534,12 +7574,27 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 /// Internal helper for non-Windows builds, optionally selecting one of the
 /// compact app's existing pages (`status`, `finder`, `shared`, ...).
 ///
-/// On macOS this window doubles as the tray flyout (task 1384): borderless,
-/// always-on-top, hides on focus loss, and opens anchored under the status
-/// item when `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (set by the
-/// tray click handler in `setup_tray`) — falling back to centered when it
-/// doesn't (e.g. opened via the "Open Beebeeb" menu item, a notification,
-/// or a deep link, none of which have a status-item rect to anchor from).
+/// On macOS this window doubles as BOTH the tray flyout and the regular
+/// Settings/Preferences window (task 1384; review follow-up after 8d7b5a1
+/// applied the flyout's chrome-less/always-on-top/hide-on-focus-loss
+/// treatment to every macOS open, breaking "Open Beebeeb", the Preferences/
+/// Settings menu items, and `show_main_app_window`). Which behavior it gets
+/// is decided per-open by `macos_window_mode_for_anchor`, purely from
+/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (set only by
+/// the tray click handler in `setup_tray`, consumed here via `take()`):
+/// - `Popover` (anchor present): chrome-less, always-on-top, positioned
+///   under the status item, hides on focus loss — reads as a system
+///   popover.
+/// - `Regular` (no anchor — "Open Beebeeb", Preferences/Settings menu
+///   items, a notification, a deep link): decorated, centered, normal
+///   window-manager behavior, stays open when focus moves elsewhere.
+///
+/// The window is built once and reused for every later open, so each open
+/// explicitly re-applies decorations/always-on-top/position for the mode in
+/// effect (`MACOS_FLYOUT_IS_POPOVER` records which one, for the
+/// once-registered focus-loss handler to read live) rather than assuming
+/// whatever the window happened to be built with.
+///
 /// The `?platform=macos` URL tag lets the frontend force the sidebar+
 /// content two-column grid regardless of this window's 680px width — see
 /// `design.css`'s `html.macos-flyout` rule; without it, the existing
@@ -7568,11 +7623,38 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 
     #[cfg(target_os = "macos")]
     let pending_anchor = MACOS_TRAY_FLYOUT_ANCHOR.lock().unwrap().take();
+    #[cfg(target_os = "macos")]
+    let mode = macos_window_mode_for_anchor(pending_anchor);
+    // `swap` both updates the flag for the focus-loss handler and hands back
+    // the mode the window was actually left in after its last open, so a
+    // Regular open can tell "just switched out of Popover" (needs a
+    // recenter — the leftover tray-anchor position assumed no title bar and
+    // is often right under the menu bar) from "still Regular" (the user may
+    // have dragged this decorated window; leave it exactly where it is, as
+    // the pre-1384 behavior did for every reopen).
+    #[cfg(target_os = "macos")]
+    let was_popover = MACOS_FLYOUT_IS_POPOVER.swap(mode == MacosWindowMode::Popover, Ordering::Relaxed);
 
     if let Some(win) = app.get_webview_window(label) {
+        // The window already exists (this is at least its second open) —
+        // make the mode switch explicit rather than leaving it however the
+        // previous open left it.
         #[cfg(target_os = "macos")]
-        if let Some(position) = pending_anchor {
-            let _ = win.set_position(tauri::Position::Physical(position));
+        match mode {
+            MacosWindowMode::Popover => {
+                let _ = win.set_decorations(false);
+                let _ = win.set_always_on_top(true);
+                if let Some(position) = pending_anchor {
+                    let _ = win.set_position(tauri::Position::Physical(position));
+                }
+            }
+            MacosWindowMode::Regular => {
+                let _ = win.set_always_on_top(false);
+                let _ = win.set_decorations(true);
+                if was_popover {
+                    let _ = win.center();
+                }
+            }
         }
         let _ = win.show();
         let _ = win.set_focus();
@@ -7591,30 +7673,45 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 
     #[cfg(target_os = "macos")]
     {
-        // Chrome-less, floats above other windows, built invisible so the
-        // `set_position` below (when we have an anchor) never flashes at
-        // the centered fallback position first.
-        builder = builder.decorations(false).always_on_top(true).visible(false);
+        // Built invisible either way, so the placement applied after
+        // `.build()` below — the anchor position for a popover, or just the
+        // `.center()` above for a regular window — never flashes at the
+        // wrong spot first.
+        builder = match mode {
+            MacosWindowMode::Popover => builder.decorations(false).always_on_top(true).visible(false),
+            MacosWindowMode::Regular => builder.decorations(true).always_on_top(false).visible(false),
+        };
     }
 
     match builder.build() {
         Ok(win) => {
             #[cfg(target_os = "macos")]
             {
-                if let Some(position) = pending_anchor {
-                    let _ = win.set_position(tauri::Position::Physical(position));
+                if mode == MacosWindowMode::Popover {
+                    if let Some(position) = pending_anchor {
+                        let _ = win.set_position(tauri::Position::Physical(position));
+                    }
                 }
 
-                // Hide on focus loss, like a system popover — debounced
-                // against the spurious immediate blur some window managers
-                // deliver right as a borderless always-on-top window is
-                // shown (see `MACOS_FLYOUT_GAINED_FOCUS`).
+                // Hide on focus loss, like a system popover — but only
+                // while the window is currently in popover mode
+                // (`MACOS_FLYOUT_IS_POPOVER`); a regular open (Preferences,
+                // "Open Beebeeb", the Settings menu item) must stay open
+                // when focus moves elsewhere. Registered once, here, at
+                // first build — the window is reused for every later open,
+                // so this reads the mode flag live on each focus change
+                // rather than one captured at registration time. Also
+                // debounced against the spurious immediate blur some window
+                // managers deliver right as a borderless always-on-top
+                // window is shown (see `MACOS_FLYOUT_GAINED_FOCUS`).
                 let hide_target = win.clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::Focused(focused) = event {
                         if *focused {
                             MACOS_FLYOUT_GAINED_FOCUS.store(true, Ordering::Relaxed);
-                        } else if MACOS_FLYOUT_GAINED_FOCUS.swap(false, Ordering::Relaxed) {
+                        } else if MACOS_FLYOUT_GAINED_FOCUS.swap(false, Ordering::Relaxed)
+                            && MACOS_FLYOUT_IS_POPOVER.load(Ordering::Relaxed)
+                        {
                             let _ = hide_target.hide();
                         }
                     }
@@ -8200,6 +8297,29 @@ mod tests {
         assert_eq!(super::valid_macos_tray_scale_factor(-1.0), 1.0);
         assert_eq!(super::valid_macos_tray_scale_factor(f64::NAN), 1.0);
         assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
+    }
+
+    #[test]
+    fn macos_window_mode_is_popover_when_anchor_present() {
+        // Tray click path: `macos_tray_flyout_anchor` produced a position,
+        // handed off through `MACOS_TRAY_FLYOUT_ANCHOR` — the window must
+        // open as a chrome-less popover anchored under the status item.
+        let anchor = Some(tauri::PhysicalPosition::new(1_704, 34));
+        assert_eq!(
+            super::macos_window_mode_for_anchor(anchor),
+            super::MacosWindowMode::Popover
+        );
+    }
+
+    #[test]
+    fn macos_window_mode_is_regular_when_anchor_absent() {
+        // Every non-tray caller ("Open Beebeeb", Preferences/Settings menu
+        // items, a notification, a deep link) never sets an anchor — the
+        // window must open as a regular decorated, centered window.
+        assert_eq!(
+            super::macos_window_mode_for_anchor(None),
+            super::MacosWindowMode::Regular
+        );
     }
 
     #[test]
