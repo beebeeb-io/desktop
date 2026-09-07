@@ -2,7 +2,12 @@
  * Vite entry — picks which window component to mount based on the
  * `window` query param set by the Tauri side when it opens the webview.
  *
- *   • default (no ?window)         → compact app shell (App.tsx)
+ *   • default (no ?window)         → compact app shell (App.tsx). On macOS
+ *                                    the Rust side tags the URL
+ *                                    ?platform=macos (this window also
+ *                                    serves as the tray flyout there) —
+ *                                    see `html.macos-flyout` in design.css,
+ *                                    task 1384.
  *   • ?window=conflict             → conflict resolution (ConflictWindow.tsx)
  *   • ?window=onboarding           → first-launch flow (Onboarding.tsx, macOS)
  *   • ?window=onboarding&platform=windows
@@ -57,6 +62,16 @@ if (which === 'conflict') {
 } else if (which === 'main-app' && platform === 'windows') {
   component = <WindowsApp />
 } else {
+  if (platform === 'macos') {
+    // This window also serves as the macOS tray flyout (task 1384). Below
+    // design.css's 820px responsive breakpoint, `.app-shell` collapses its
+    // sidebar+content grid to a single stacked column — correct for the
+    // browser/main-app responsive case, wrong for this fixed 680px native
+    // window, where it reproduced 1173's overflow (nav + footer pushed the
+    // page below the fold). `html.macos-flyout` forces the two-column grid
+    // back on regardless of width, for this window only.
+    document.documentElement.classList.add('macos-flyout')
+  }
   component = <App />
 }
 

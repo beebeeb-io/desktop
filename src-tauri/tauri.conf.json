@@ -59,7 +59,9 @@
     "trayIcon": {
       "id": "tray",
       "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
+      "iconAsTemplate": false,
+      "showMenuOnLeftClick": false,
+      "tooltip": "Beebeeb"
     }
   },
   "plugins": {
