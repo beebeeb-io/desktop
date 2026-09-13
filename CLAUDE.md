@@ -189,6 +189,20 @@ new updates — they'll need a manual reinstall to onboard the new pubkey.
 - Icons: amber rounded square with lowercase `b` (`icons/icon.png`). Replace with the production icon set via `bunx tauri icon path/to/source.png` once ready.
 - App name: "Beebeeb". Identifier: `io.beebeeb.app`.
 
+## How we work (evidence, design, done, parallel agents)
+
+The full rules live in the workspace `CLAUDE.md` → "How we work" (also summarised in the workspace `AGENTS.md`). Read them; they apply here. The repo-specific instantiation:
+
+- **The count-shaped truth line:** `cargo test` in `src-tauri/` → per-binary
+  `test result: ok. N passed; 0 failed`; `bun run tauri build … -- --locked` asserts the exit code
+  and the bundle files on disk (`ls` them, paste the listing).
+- **"Cannot be done here" is the normal state of this repo:** macOS signing/notary, Windows
+  installers, and Finder/File Provider need hardware and credentials this session may not have.
+  Route each to `.claude/tasks/decisions/` with the specific question; never fake a local folder
+  root or a UI timeout to make a gate pass (rule already above).
+- **A release is verified by `RELEASE_NOTES.md` naming the version AND the workflow run being
+  green AND the manifest resolving** — three counts, not one adjective.
+
 ## Graphify
 
 This repo has a knowledge graph at graphify-out/.
