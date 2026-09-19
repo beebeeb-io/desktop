@@ -139,6 +139,24 @@ to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
 3. Call from JS: `import { invoke } from "@tauri-apps/api/core"; await invoke("my_cmd", { arg })`.
 4. If it touches an OS API (fs, dialog, notification…), add the matching permission to `capabilities/default.json`.
 
+## API client (`src-tauri/src/api_client.rs`)
+
+Every request the daemon's `ApiClient` sends — and every ad-hoc `reqwest::Client`
+the Tauri commands in `lib.rs` build for one-off auth calls (`desktop_login`,
+`desktop_login_2fa`, `desktop_confirm_action`, `desktop_storage_summary`) —
+carries `X-Beebeeb-Client: desktop` and `X-Beebeeb-Client-Version: <version>`,
+set as `default_headers` via `api_client::provenance_headers()` (task 1436, the
+desktop half of 1392; mirrors the CLI's `build_client` from cli PR #14). The
+server records both on every `object_versions` row (server PR #23 / task 1369)
+for writer-provenance queries.
+
+The version sent is `BEEBEEB_RELEASE_VERSION` (set by release.yml; same string
+`real_app_version()` shows in Settings and compares against update manifests),
+falling back to `CARGO_PKG_VERSION` for local/dev builds — **not** the raw Cargo
+package version alone, since Cargo.toml's `version` is pinned at `0.1.0` and
+never bumped for releases (unlike the CLI, which has no separate
+release-version indirection and sends `CARGO_PKG_VERSION` directly).
+
 ## Sync engine
 
 `src-tauri` is expected to own the background Rust sync runtime and call shared
