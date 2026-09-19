@@ -632,6 +632,7 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .default_headers(api_client::provenance_headers())
         .build()
         .map_err(|e| format!("reqwest build: {e}"))?;
 
@@ -787,6 +788,7 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .default_headers(api_client::provenance_headers())
         .build()
         .map_err(|e| format!("reqwest build: {e}"))?;
 
@@ -2494,7 +2496,11 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
             .ok_or_else(|| "vault is locked".to_string())?
     };
 
-    let usage: BillingUsageResponse = reqwest::Client::new()
+    let storage_client = reqwest::Client::builder()
+        .default_headers(api_client::provenance_headers())
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+    let usage: BillingUsageResponse = storage_client
         .get(format!("{}/api/v1/billing/usage", runner::api_base_url()))
         .bearer_auth(&token)
         .send()
@@ -4778,6 +4784,7 @@ async fn desktop_confirm_action(
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .default_headers(api_client::provenance_headers())
         .build()
         .map_err(|e| format!("reqwest build: {e}"))?;
 

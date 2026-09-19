@@ -44,9 +44,11 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rand::rngs::OsRng;
 use tauri::{Emitter, State};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 
 use crate::AppState;
+use crate::api_client::provenance_headers;
 use crate::runner;
 
 /// Sign-in breadcrumb. These trace the exact step the handoff reached so a
@@ -100,6 +102,25 @@ fn ws_url() -> String {
     let base = runner::api_base_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
     format!("{ws}/api/v1/auth/cli")
+}
+
+/// Build the WebSocket upgrade request for `ws_url()`, carrying the same
+/// writer-provenance headers (`X-Beebeeb-Client` / `X-Beebeeb-Client-Version`,
+/// task 1436) every other desktop request sends as `reqwest` `default_headers`.
+/// Passing a bare `&str`/`String` straight to `connect_async_tls_with_config`
+/// (as this did before) builds an upgrade request with no way to attach custom
+/// headers, so this WS handshake never carried them (Codex review on PR #39) —
+/// `IntoClientRequest` is the seam that lets a caller add headers before the
+/// connect. A free function (not inlined into `run_handoff`) so the test below
+/// exercises the IDENTICAL code path `run_handoff` calls, not a re-implementation.
+fn build_ws_request(url: &str) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| format!("build WS request: {e}"))?;
+    for (name, value) in provenance_headers().iter() {
+        request.headers_mut().insert(name.clone(), value.clone());
+    }
+    Ok(request)
 }
 
 /// Build a rustls `Connector` that validates the server cert against the
@@ -219,7 +240,8 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
     bc!("[bb-signin] run_handoff: before building connector");
     let connector = webpki_rustls_connector()?;
     bc!("[bb-signin] run_handoff: connector returned ok");
-    let connect_fut = connect_async_tls_with_config(&url, None, false, Some(connector));
+    let request = build_ws_request(&url)?;
+    let connect_fut = connect_async_tls_with_config(request, None, false, Some(connector));
     bc!("[bb-signin] run_handoff: before timeout/connect await");
     let (mut ws, _) = match tokio::time::timeout(CONNECT_TIMEOUT, connect_fut).await {
         Ok(Ok(pair)) => {
@@ -454,6 +476,33 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+
+    /// Task 1436 (Codex review on PR #39): `build_ws_request` — the function
+    /// `run_handoff` actually calls to build the `/api/v1/auth/cli` WebSocket
+    /// upgrade request — must carry the same writer-provenance headers every
+    /// other desktop request sends. Calls the REAL function, not a
+    /// re-implementation, so a regression here (e.g. someone reverting to
+    /// passing a bare `&url` to `connect_async_tls_with_config`) is caught.
+    #[test]
+    fn ws_upgrade_request_carries_provenance_headers() {
+        let request = build_ws_request("wss://api.beebeeb.io/api/v1/auth/cli")
+            .expect("build_ws_request should succeed for a valid wss:// URL");
+
+        assert_eq!(
+            request.headers().get("x-beebeeb-client").map(|v| v.to_str().unwrap()),
+            Some("desktop"),
+            "X-Beebeeb-Client missing or wrong on the /api/v1/auth/cli WS upgrade request"
+        );
+        let expected_version = option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            request
+                .headers()
+                .get("x-beebeeb-client-version")
+                .map(|v| v.to_str().unwrap()),
+            Some(expected_version),
+            "X-Beebeeb-Client-Version missing or stale on the /api/v1/auth/cli WS upgrade request"
+        );
+    }
 
     type WsItem = Result<Message, tokio_tungstenite::tungstenite::Error>;
 
