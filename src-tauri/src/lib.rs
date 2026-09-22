@@ -6869,8 +6869,19 @@ const MENU_HELP_REPORT_ID: &str = "menu_help_report";
 const MENU_HELP_STATUS_ID: &str = "menu_help_status";
 
 const WEB_APP_URL: &str = "https://app.beebeeb.io";
-const DOCUMENTATION_URL: &str = "https://docs.beebeeb.io";
-const KEYBOARD_SHORTCUTS_URL: &str = "https://docs.beebeeb.io/desktop/keyboard-shortcuts";
+// Pre-mortem 10 task 8: the old documentation subdomain has never had a DNS
+// record. The plan's own literal replacement for KEYBOARD_SHORTCUTS_URL
+// (beebeeb.io/faq) is ALSO a dead link -- verified via `curl -I` on the live
+// marketing site (2026-09-22): /docs -> 200, /support -> 200, /faq -> 404.
+// No dedicated keyboard-shortcuts or FAQ route exists (grepped
+// repos/site/src for "faq" -- the only FAQ content lives embedded in
+// support.astro's `allFaqs`), so KEYBOARD_SHORTCUTS_URL points at /support
+// (the closest real "get help" surface) instead. DOCUMENTATION_URL points at
+// /docs, a real, populated docs index (repos/site/src/pages/docs.astro),
+// which is also a better topical match than the plan's own /support
+// suggestion for a "Documentation" menu item.
+const DOCUMENTATION_URL: &str = "https://beebeeb.io/docs";
+const KEYBOARD_SHORTCUTS_URL: &str = "https://beebeeb.io/support";
 const SERVICE_STATUS_URL: &str = "https://status.beebeeb.io";
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 // The desktop app has no real Shared view yet (task 1186/1243), so any legacy
