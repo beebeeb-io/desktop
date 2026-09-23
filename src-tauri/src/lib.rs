@@ -997,39 +997,15 @@ async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, sessio
 
 // ── IPC commands: session ─────────────────────────────────────────────────────
 
-/// Stash an authenticated session in app state. Called by the WebView
-/// immediately after a successful OPAQUE (or legacy) login on the
-/// frontend side. Idempotent — overwrites any previous session.
-///
-/// If a sync_root is also configured, spawns the engine runner.
-/// Otherwise the engine waits for `pick_sync_root` to land first.
-///
-/// Returns `Err` if `master_key` is not exactly 32 bytes; the WebView
-/// should treat that as a programming bug and surface it loudly.
-#[tauri::command]
-async fn set_session(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    token: String,
-    master_key: Vec<u8>,
-    email: Option<String>,
-) -> Result<(), String> {
-    if master_key.len() != 32 {
-        return Err(format!("master_key must be 32 bytes, got {}", master_key.len()));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&master_key);
-    apply_session(app, &state, token, arr, email).await
-}
-
 /// Persist a freshly-authenticated session and start the engine.
 ///
-/// This is the shared core of `set_session` (called by the web client) and
-/// `start_browser_login` (the Windows browser-handoff flow): both arrive at a
-/// session token + 32-byte master key + email and need the exact same
-/// side-effects — write to the platform credential store, stash in memory, and
-/// spawn the sync engine if a sync_root is already configured. Keeping it in one
-/// place means the browser handoff can never drift from the IPC path.
+/// This is the shared core used by `start_browser_login` (the live browser-
+/// handoff flow): it arrives at a session token + 32-byte master key + email
+/// and needs write-to-credential-store + stash-in-memory + spawn-the-engine
+/// side-effects. (Task 1479: this used to also be the core of a `set_session`
+/// IPC command invoked by the WebView after an in-webview login — removed
+/// because no desktop window ever loads the web client, so nothing could
+/// call it. `apply_session` itself is untouched; it's still live.)
 pub(crate) async fn apply_session(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -3008,8 +2984,9 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
         tracing::info!(path = %path.display(), "sync root set");
 
         // If a session is already loaded, start syncing immediately.
-        // (Common path: WebView calls set_session before pick_sync_root,
-        //  so the engine couldn't start there; it starts here instead.)
+        // (Common path: the browser-login handoff calls apply_session before
+        //  pick_sync_root, so the engine couldn't start there; it starts
+        //  here instead.)
         // session / engine / sync_paused are per-account (decision 0800).
         let acct = state.active_account()?;
         let session = acct
@@ -6524,8 +6501,9 @@ pub fn run() {
         .try_init();
 
     tauri::Builder::default()
-        // Shared state — session pushed in by the WebView via set_session
-        // IPC after login. The future sync engine task reads from this.
+        // Shared state — session installed via apply_session (the
+        // browser-login handoff) after login. The sync engine task reads
+        // from this.
         .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(
@@ -6551,7 +6529,6 @@ pub fn run() {
             install_channel_downgrade,
             toggle_autostart,
             autostart_enabled,
-            set_session,
             clear_session,
             unlock_vault,
             desktop_unlock_with_recovery_phrase,
