@@ -6,9 +6,8 @@
 //! cloud propagation, plus the per-file URL helper.
 //!
 //! Master key + session token are owned by the client so call sites
-//! don't have to thread them through every method. The token comes
-//! from the WebView via the `set_session` IPC, the master key from
-//! the same IPC.
+//! don't have to thread them through every method. Both arrive via
+//! `apply_session` (the browser-login handoff).
 //!
 //! Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
 //! Phase 1 Task 2.

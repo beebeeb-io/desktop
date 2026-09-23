@@ -177,8 +177,8 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub finder_install_reason_category: Option<String>,
     // NOTE: persisted session deferred to a later step. For now the
-    // session is in-memory only (set_session IPC). Adding it here
-    // requires the OS-keychain wrapping called out in spec 030 §1.
+    // session is in-memory only (installed via apply_session). Adding it
+    // here requires the OS-keychain wrapping called out in spec 030 §1.
 
     // ── WS1 — Windows first-run sync mode ─────────────────────────────
     //

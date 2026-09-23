@@ -10,8 +10,8 @@
 //! ## Lifecycle
 //!
 //! - `EngineRunner::spawn` is called from either:
-//!   - the `set_session` IPC handler immediately after the WebView
-//!     pushes a fresh session, or
+//!   - `apply_session` (via `start_engine_if_possible`) immediately after
+//!     the browser-login handoff installs a fresh session, or
 //!   - `pick_sync_root` if a session is already in memory when the
 //!     first-launch picker resolves.
 //!
