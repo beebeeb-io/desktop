@@ -18,7 +18,7 @@
 ## Status — Windows + Linux released, macOS not yet
 
 > **[desktop-v0.8.3](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
-> release** — signed `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
+> release** — `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
 > each with a minisign `.sig` for the auto-updater (fingerprint `C6FADFD59D732197`). **Neither
 > installer carries an OS-trusted code-signing certificate yet** — Windows shows an "unknown
 > publisher" SmartScreen warning until that's wired up. **macOS has no build at all**: the
