@@ -5,8 +5,9 @@
 <p align="center">Native desktop sync for macOS, Windows, and Linux — files encrypted before they leave your machine.</p>
 <p align="center"><strong>We can't recover your data. Not even if we wanted to.</strong> That's the point.</p>
 <p align="center">
+  <a href="https://github.com/beebeeb-io/desktop/releases/latest"><img src="https://img.shields.io/github/v/release/beebeeb-io/desktop?label=release" alt="Release" /></a> &nbsp;
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-555.svg" alt="License: AGPL-3.0" /></a> &nbsp;
-  <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-555.svg" alt="macOS · Windows · Linux" /> &nbsp;
+  <img src="https://img.shields.io/badge/Windows%20%C2%B7%20Linux%20%C2%B7%20macOS%20soon-555.svg" alt="Windows · Linux · macOS soon" /> &nbsp;
   <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-555.svg" alt="Security policy" /></a>
 </p>
 <p align="center"><a href="https://beebeeb.io">Website</a> &nbsp;·&nbsp; <a href="https://beebeeb.io/security">How it works</a> &nbsp;·&nbsp; <a href="SECURITY.md">Report a vulnerability</a></p>
@@ -14,14 +15,18 @@
 
 ---
 
-## Status — no official release yet
+## Status — Windows + Linux released, macOS not yet
 
-> **In active development.** There are no published builds or GitHub releases,
-> and the release pipeline is not yet green. macOS is the first product target;
-> the Rust sync engine and Tauri shell are active. Finder / File Provider
-> integration is blocked on Apple provisioning profiles with the correct
-> app-group entitlements. Install instructions and a real CI/release badge will
-> land here once the first release ships.
+> **[desktop-v0.8.3](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
+> release** — signed `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
+> each with a minisign `.sig` for the auto-updater (fingerprint `C6FADFD59D732197`). **Neither
+> installer carries an OS-trusted code-signing certificate yet** — Windows shows an "unknown
+> publisher" SmartScreen warning until that's wired up. **macOS has no build at all**: the
+> macOS entry in the release workflow's build matrix is commented out (the File Provider
+> extension doesn't yet support universal arm64+x86_64 builds, and no Developer ID/notary
+> credentials are configured in CI). The site's [/download](https://beebeeb.io/download) page
+> links directly to whatever is current once desktop apps are announced there; until then,
+> grab a release straight from GitHub.
 
 The [beebeeb](https://beebeeb.io) desktop client gives you a native sync folder on macOS, Windows, and Linux. Drop files into your beebeeb folder and they are encrypted on your machine and synced to the cloud — the server only ever sees ciphertext. The UI and the sync engine are shared with the rest of beebeeb: a [web](https://github.com/beebeeb-io/web) frontend in a native WebView, plus the Rust sync engine and cryptography from [core](https://github.com/beebeeb-io/core).
 
@@ -56,9 +61,9 @@ graph TD
 
 | Platform | Shell | Integration | Status |
 |---|---|---|---|
-| **macOS** | Tauri + Swift File Provider | Menu bar, Finder File Provider location | In progress |
-| **Windows** | Tauri (WinUI WebView) | System tray, Explorer overlay icons | In progress |
-| **Linux** | Tauri (WebKitGTK) | Tray indicator, FUSE mount for online-only files | In progress |
+| **macOS** | Tauri + Swift File Provider | Menu bar, Finder File Provider location | No build — Finder/File Provider blocked on provisioning; not code-signed/notarized |
+| **Windows** | Tauri (WinUI WebView) | System tray, Explorer overlay icons | [Released](https://github.com/beebeeb-io/desktop/releases/latest), not code-signed (SmartScreen warns) |
+| **Linux** | Tauri (WebKitGTK) | Tray indicator, FUSE mount for online-only files | [Released](https://github.com/beebeeb-io/desktop/releases/latest) (AppImage/.deb/.rpm) |
 
 ## Build & run
 
