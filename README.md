@@ -21,7 +21,8 @@
 > release** — `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
 > each with a minisign `.sig` for the auto-updater (fingerprint `C6FADFD59D732197`). **Neither
 > installer carries an OS-trusted code-signing certificate yet** — Windows shows an "unknown
-> publisher" SmartScreen warning until that's wired up. **macOS has no build at all**: the
+> publisher" SmartScreen warning until that's wired up. **macOS has no published release yet** (development-signed builds already run on real Mac
+> hardware with the Finder File Provider mount — see `docs/MACOS_BRINGUP_BRIEF.md`): the
 > macOS entry in the release workflow's build matrix is commented out (the File Provider
 > extension doesn't yet support universal arm64+x86_64 builds, and no Developer ID/notary
 > credentials are configured in CI). The site's [/download](https://beebeeb.io/download) page
@@ -61,7 +62,7 @@ graph TD
 
 | Platform | Shell | Integration | Status |
 |---|---|---|---|
-| **macOS** | Tauri + Swift File Provider | Menu bar, Finder File Provider location | No build — Finder/File Provider blocked on provisioning; not code-signed/notarized |
+| **macOS** | Tauri + Swift File Provider | Menu bar, Finder File Provider location | Not released — dev-signed builds run on real hardware; release build + Developer ID/notarization not wired into CI |
 | **Windows** | Tauri (WinUI WebView) | System tray, Explorer overlay icons | [Released](https://github.com/beebeeb-io/desktop/releases/latest), not code-signed (SmartScreen warns) |
 | **Linux** | Tauri (WebKitGTK) | Tray indicator, FUSE mount for online-only files | [Released](https://github.com/beebeeb-io/desktop/releases/latest) (AppImage/.deb/.rpm) |
 
