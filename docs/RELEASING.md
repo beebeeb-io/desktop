@@ -91,6 +91,11 @@ Mechanical checklist for release N+1:
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is the new passphrase.
 4. Run the normal release workflow for release N+1.
 5. Smoke-test updating an install already on release N to release N+1.
+6. Update the public verification key on beebeeb.io/download: in the site repo, `src/lib/downloads.ts`
+   (`DESKTOP_MINISIGN_KEY_ID` / `DESKTOP_MINISIGN_PUBLIC_KEY`) still names the pre-rotation key
+   `545D7BA77EDEA7E1` that signs release N's assets. After N+1 is published, switch it to the new key
+   `C6FADFD59D732197` and prove it with a real `minisign -Vm <asset> -P <key>` against an N+1 asset
+   before deploying the site. Also update the key ID in this repo's README.
 
 Run the local verifier before either release. It requires the Tauri CLI from `bun install`; in a
 worktree without `node_modules`, set `TAURI_CLI` to the installed `@tauri-apps/cli/tauri.js`.
