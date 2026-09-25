@@ -8797,3 +8797,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+// CI red-proof (throwaway, never merge): Windows-only type error.
+#[cfg(target_os = "windows")]
+const _CI_RED_PROOF: u32 = "not a number";
