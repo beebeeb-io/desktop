@@ -5650,6 +5650,42 @@ async fn resolve_conflict(
     Ok(())
 }
 
+/// Real content preview for the conflict-resolution window (task 1546 finding
+/// 2), replacing ConflictWindow.tsx's previous hardcoded placeholder diff
+/// body. Read-only — does not resolve anything or touch state.db; see
+/// [`engine_bridge::EngineBridge::conflict_content_preview`] for why.
+///
+/// Same session/sync-root/bridge-construction pattern as `resolve_conflict`
+/// just above.
+#[tauri::command]
+async fn conflict_content_preview(
+    state: State<'_, AppState>,
+    file_id: String,
+    is_text: bool,
+) -> Result<engine_bridge::ConflictContentPreview, String> {
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
+
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+
+    bridge
+        .conflict_content_preview(&file_id, &sync_root, is_text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── IPC commands: app metadata ────────────────────────────────────────────────
 
 // ── Durations ─────────────────────────────────────────────────────────────────
@@ -6619,6 +6655,8 @@ pub fn run() {
             // Task 12 — conflict window IPC
             open_conflict_window,
             resolve_conflict,
+            // Task 1546 finding 2 — real (non-placeholder) conflict content preview
+            conflict_content_preview,
             // Task 11 — native conflict notification
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)

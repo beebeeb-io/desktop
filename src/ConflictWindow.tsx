@@ -17,22 +17,24 @@
  * URL contract (set by `open_conflict_window` IPC in lib.rs):
  *   ?window=conflict&fileId=<uuid>&fileName=<utf8>&isText=true|false
  *
- * The `resolve_conflict` IPC command is added by the rust-engineer in
- * a sister task (plan §1749). Until then `invoke` will reject — we
- * surface the error instead of silently failing.
- *
- * The diff body is currently a placeholder ("Content from this
- * device…" / "Content from other device…") because actual diffing
- * needs the daemon to expose both blob bytes — that's tracked in
- * the plan as a follow-up. The shell, the URL contract, and the
- * three-button decision flow are correct as-is.
+ * Task 1546 finding 2: the diff body used to be a hardcoded placeholder
+ * (fixed "…from this device" / "…from other device" filler text) for every
+ * conflict, text or binary, regardless of actual file content — this window
+ * now fetches both sides' REAL content via `conflict_content_preview`
+ * (src-tauri/src/engine_bridge.rs, read-only — it does not touch state.db)
+ * and renders a real line-level diff (`diffLines`) for text files, or real
+ * sizes for binary ones. When a side can't be shown (too large to diff, not
+ * UTF-8, a read/download failure), the window says exactly that instead of
+ * fabricating content — the three-button decision flow is unchanged.
  *
  * See docs/superpowers/plans/2026-05-07-desktop-sync-client.md (Task 12).
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToast } from './windows/ui'
+import { conflictContentPreview, formatBytes, type ConflictContentPreview } from './desktopApi'
+import { diffLines, type DiffOp } from './diffLines'
 
 function DiffLine({
   line,
@@ -60,6 +62,35 @@ function DiffLine({
   )
 }
 
+/** One side's pane body: the real diff ops relevant to THIS side (its own
+ * "same"/"same" content plus whichever op type marks what's unique to it),
+ * an honest unavailable reason, or a loading/raw fallback. Never the old
+ * fixed placeholder line. */
+function DiffPane({
+  ops,
+  rawText,
+  onlyOpType,
+}: {
+  ops: DiffOp[] | null
+  rawText: string | null
+  onlyOpType: 'remove' | 'add'
+}) {
+  if (ops) {
+    return (
+      <>
+        {ops
+          .filter((op) => op.type === 'same' || op.type === onlyOpType)
+          .map((op, index) => (
+            <DiffLine key={index} line={op.line} type={op.type} />
+          ))}
+      </>
+    )
+  }
+  // Diff highlighting was skipped (too many lines to compare inline, see
+  // diffLines' DIFF_MAX_CELLS) — still real content, just unhighlighted.
+  return <DiffLine line={rawText ?? ''} type="same" />
+}
+
 export default function ConflictWindow() {
   const { showToast } = useToast()
   const params = new URLSearchParams(window.location.search)
@@ -69,6 +100,33 @@ export default function ConflictWindow() {
 
   const [resolved, setResolved] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [preview, setPreview] = useState<ConflictContentPreview | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(true)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!fileId) {
+      setPreviewLoading(false)
+      return
+    }
+    let cancelled = false
+    setPreviewLoading(true)
+    void conflictContentPreview(fileId, isText).then((result) => {
+      if (cancelled) return
+      setPreviewLoading(false)
+      if (result.ok) {
+        setPreview(result.value)
+      } else {
+        setPreviewError(result.reason)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+    // fileId/isText come from the URL and never change for the lifetime of
+    // this window.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function resolve(choice: 'local' | 'remote' | 'both') {
     if (!fileId) {
@@ -98,6 +156,11 @@ export default function ConflictWindow() {
       setBusy(false)
     }
   }
+
+  const diffOps =
+    preview?.local.text != null && preview?.remote.text != null
+      ? diffLines(preview.local.text, preview.remote.text)
+      : null
 
   if (resolved) {
     return (
@@ -137,6 +200,20 @@ export default function ConflictWindow() {
         This file was modified on two devices. Choose which version to keep.
       </p>
 
+      {previewLoading && (
+        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 12 }}>Loading both versions…</div>
+      )}
+      {previewError && (
+        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 12 }}>
+          Couldn’t load either version’s content: {previewError}. You can still choose a version below.
+        </div>
+      )}
+      {!previewLoading && preview && isText && diffOps === null && preview.local.text != null && preview.remote.text != null && (
+        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 12 }}>
+          Both files are too large to compare line-by-line inline — showing full content below without highlighting.
+        </div>
+      )}
+
       {isText ? (
         <div
           style={{
@@ -159,7 +236,13 @@ export default function ConflictWindow() {
                 flex: 1,
               }}
             >
-              <DiffLine line="Content from this device…" type="add" />
+              {preview?.local.text != null ? (
+                <DiffPane ops={diffOps} rawText={preview.local.text} onlyOpType="remove" />
+              ) : (
+                <div style={{ padding: 8, fontSize: 12, color: 'var(--ink-3)' }}>
+                  {preview?.local.unavailable_reason ?? (previewLoading ? '' : 'Content unavailable.')}
+                </div>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -174,7 +257,13 @@ export default function ConflictWindow() {
                 flex: 1,
               }}
             >
-              <DiffLine line="Content from other device…" type="remove" />
+              {preview?.remote.text != null ? (
+                <DiffPane ops={diffOps} rawText={preview.remote.text} onlyOpType="add" />
+              ) : (
+                <div style={{ padding: 8, fontSize: 12, color: 'var(--ink-3)' }}>
+                  {preview?.remote.unavailable_reason ?? (previewLoading ? '' : 'Content unavailable.')}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -187,7 +276,12 @@ export default function ConflictWindow() {
             gap: 12,
           }}
         >
-          {['This device', 'Other device'].map((label) => (
+          {(
+            [
+              ['This device', preview?.local],
+              ['Other device', preview?.remote],
+            ] as const
+          ).map(([label, side]) => (
             <div
               key={label}
               style={{
@@ -206,7 +300,15 @@ export default function ConflictWindow() {
                 {label}
               </div>
               <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>
-                <div>Binary file</div>
+                {previewLoading ? (
+                  <div>Loading…</div>
+                ) : side?.unavailable_reason ? (
+                  <div>{side.unavailable_reason}</div>
+                ) : (
+                  <div>
+                    Binary file{typeof side?.size_bytes === 'number' ? ` · ${formatBytes(side.size_bytes)}` : ''}
+                  </div>
+                )}
                 <div>Click "Keep" to use this version</div>
               </div>
             </div>

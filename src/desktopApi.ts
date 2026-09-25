@@ -132,6 +132,10 @@ export interface VersionConflictEntry {
     | 'restore'
     | 'metadata'
     | 'delete'
+    // Task 1546 finding 3: a 401/unauthorized/invalid-token operation failure.
+    // Previously fell through to the generic 'failed_upload' bucket with the
+    // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
+    | 'auth_failure'
   status: string
   updated_at?: number
   detail: string
@@ -140,6 +144,36 @@ export interface VersionConflictEntry {
   version_id?: string | null
   base_version?: number | null
   last_error?: string | null
+}
+
+/** billing/upgrade destination shared by the Plan panel and any review-row
+ * "Upgrade" action — same URL Windows' StorageWidget already opens. */
+export const BILLING_URL = 'https://app.beebeeb.io/billing'
+
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+
+export interface ReviewEntryAction {
+  kind: ReviewEntryActionKind
+  label: string
+}
+
+/**
+ * The single actionable button (if any) a Versions & conflicts row should
+ * show, decided from its `kind`/`action` fields. VersionCenter.tsx renders
+ * through this instead of the old inline `entry.action === 'open_conflict'`
+ * check, which is why `quota_failure` (task 1546 finding 1) and
+ * `auth_failure` (finding 3) rows previously got no button at all — every
+ * other `review_upload` kind (failed_upload, permission_failure, stale_base,
+ * metadata, delete) still gets none: there is no generic "retry"/"dismiss"
+ * IPC command yet, and a fake button would be worse than none.
+ */
+export function reviewEntryAction(
+  entry: Pick<VersionConflictEntry, 'kind' | 'action'>,
+): ReviewEntryAction | null {
+  if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
+  if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
+  if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  return null
 }
 
 export interface FileVersionEntry {
@@ -317,6 +351,31 @@ export function restorableFileVersions(versions: FileVersionEntry[]): FileVersio
 
 export function restoreVersionId(version: FileVersionEntry): string {
   return version.id
+}
+
+// ── Conflict content preview (task 1546 finding 2) ──────────────────────────
+// Mirrors src-tauri/src/engine_bridge.rs's `ConflictContentSide` /
+// `ConflictContentPreview`. Real content (or an honest reason it's
+// unavailable) for both sides of a conflict — replaces ConflictWindow.tsx's
+// previous hardcoded placeholder diff body.
+
+export interface ConflictContentSide {
+  size_bytes?: number | null
+  text?: string | null
+  unavailable_reason?: string | null
+}
+
+export interface ConflictContentPreview {
+  is_text: boolean
+  local: ConflictContentSide
+  remote: ConflictContentSide
+}
+
+export function conflictContentPreview(
+  fileId: string,
+  isText: boolean,
+): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('conflict_content_preview', { fileId, isText })
 }
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {

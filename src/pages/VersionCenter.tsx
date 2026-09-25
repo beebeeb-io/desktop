@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  BILLING_URL,
   command,
   commandUnavailableLabel,
   desktopListFileVersions,
   desktopRestoreFileVersion,
   formatBytes,
+  openUrl,
   restoreVersionId,
+  reviewEntryAction,
   type FileVersionEntry,
   type SyncStatus,
   type VersionConflictEntry,
@@ -128,6 +131,17 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     }
   }
 
+  const signInAgain = async () => {
+    const result = await command<void>('open_onboarding_window')
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open sign-in',
+        message: result.unsupported ? commandUnavailableLabel('open_onboarding_window') : result.reason,
+      })
+    }
+  }
+
   const restoreVersion = async (version: FileVersionEntry) => {
     if (!selectedEntry) return
     const versionId = restoreVersionId(version)
@@ -217,11 +231,29 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                     <span className="row-detail">{entry.detail}</span>
                   </span>
                 </button>
-                {entry.action === 'open_conflict' && (
-                  <button className="button" onClick={() => void openConflict(entry)}>
-                    Review
-                  </button>
-                )}
+                {(() => {
+                  const reviewAction = reviewEntryAction(entry)
+                  if (!reviewAction) return null
+                  if (reviewAction.kind === 'open_conflict') {
+                    return (
+                      <button className="button" onClick={() => void openConflict(entry)}>
+                        {reviewAction.label}
+                      </button>
+                    )
+                  }
+                  if (reviewAction.kind === 'upgrade') {
+                    return (
+                      <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
+                        {reviewAction.label}
+                      </button>
+                    )
+                  }
+                  return (
+                    <button className="button amber" onClick={() => void signInAgain()}>
+                      {reviewAction.label}
+                    </button>
+                  )
+                })()}
               </div>
             ))}
           </div>
