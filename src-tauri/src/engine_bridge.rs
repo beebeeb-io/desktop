@@ -5592,6 +5592,25 @@ mod tests {
                 loop {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // The listener above is non-blocking so this accept
+                            // loop can poll it (see the WouldBlock arm below),
+                            // but the *accepted* stream must be put back into
+                            // blocking mode before handing it to
+                            // `read_http_request`, which does a raw, un-retried
+                            // `.read().unwrap()`. Without this, under enough
+                            // scheduler contention the request bytes can still
+                            // be in flight when `read` is called, and a
+                            // non-blocking read returns `WouldBlock` instead of
+                            // waiting — panicking the mock server's accept
+                            // thread. `IpcHydrationMock::start` (below) already
+                            // does this; this server predates that fix and was
+                            // missing it, causing an intermittent
+                            // `Os { code: 35, kind: WouldBlock }` panic under
+                            // shared-machine load (confirmed via task 1546's
+                            // and task 1538's independent gate runs: 3 distinct
+                            // tests using this helper each panicked here under
+                            // load and passed 3/3 when rerun in isolation).
+                            stream.set_nonblocking(false).unwrap();
                             idle_after_min_since = None;
                             let request = read_http_request(&mut stream);
                             let response = upload_mock_response(&request, fail_chunk);
