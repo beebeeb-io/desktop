@@ -9,6 +9,7 @@ import Notifications from './pages/Notifications'
 import Account from './pages/Account'
 import VersionCenter from './pages/VersionCenter'
 import UpdateBanner from './UpdateBanner'
+import AuthExpiredBanner from './AuthExpiredBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
 import DesktopVersionHistory, { DesktopVersionHistoryTrigger } from './DesktopVersionHistory'
 import {
@@ -114,6 +115,7 @@ export default function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <UpdateBanner />
+      <AuthExpiredBanner authExpired={status?.auth_expired ?? false} />
       <DesktopQuickSearch
         open={searchOpen}
         onOpen={() => setSearchOpen(true)}

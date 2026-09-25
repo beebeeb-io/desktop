@@ -20,6 +20,13 @@ export interface DiffOp {
   line: string
 }
 
+export interface DiffResult {
+  ops: DiffOp[]
+  /** `true` when `ops` was cut short at [`DIFF_MAX_OPS`] — the caller must
+   * say so in the UI rather than silently show a partial diff. */
+  truncated: boolean
+}
+
 /** (lines in A + 1) * (lines in B + 1) DP cells, above which `diffLines`
  * returns `null` instead of building the table. ~1.5M cells is comfortably
  * fast and a few MB of memory for a one-off UI action, while still covering
@@ -27,12 +34,24 @@ export interface DiffOp {
  * line length. */
 export const DIFF_MAX_CELLS = 1_500_000
 
+/** Hard cap on the total number of ops `diffLines` returns (task 1546 Codex
+ * round 2, finding 4). `DIFF_MAX_CELLS` alone doesn't bound highly
+ * ASYMMETRIC inputs: a 256 KiB file that's mostly newlines compared against
+ * a one-line file stays well under the DP-cell budget yet still produces
+ * roughly n+m ops — each rendered as its own React element in
+ * `ConflictWindow.tsx` — which can freeze the conflict webview. 4,000 ops is
+ * roughly 2,000 rendered lines per side for a fully-divergent diff, still
+ * comfortably readable and fast to mount. */
+export const DIFF_MAX_OPS = 4_000
+
 /**
  * Returns a line-level diff of `a` -> `b` (add/remove/same ops that, read in
  * order, reconstruct both `a` — same+remove lines — and `b` — same+add
  * lines), or `null` if the two line counts' product exceeds `DIFF_MAX_CELLS`.
+ * When the op count itself exceeds `DIFF_MAX_OPS`, the ops list is cut short
+ * and `truncated: true` is set — still real, ordered content, just partial.
  */
-export function diffLines(a: string, b: string): DiffOp[] | null {
+export function diffLines(a: string, b: string): DiffResult | null {
   const linesA = a.split('\n')
   const linesB = b.split('\n')
   const n = linesA.length
@@ -51,7 +70,7 @@ export function diffLines(a: string, b: string): DiffOp[] | null {
   const ops: DiffOp[] = []
   let i = 0
   let j = 0
-  while (i < n && j < m) {
+  while (i < n && j < m && ops.length < DIFF_MAX_OPS) {
     if (linesA[i] === linesB[j]) {
       ops.push({ type: 'same', line: linesA[i] })
       i++
@@ -64,13 +83,14 @@ export function diffLines(a: string, b: string): DiffOp[] | null {
       j++
     }
   }
-  while (i < n) {
+  while (i < n && ops.length < DIFF_MAX_OPS) {
     ops.push({ type: 'remove', line: linesA[i] })
     i++
   }
-  while (j < m) {
+  while (j < m && ops.length < DIFF_MAX_OPS) {
     ops.push({ type: 'add', line: linesB[j] })
     j++
   }
-  return ops
+  const truncated = i < n || j < m
+  return { ops, truncated }
 }

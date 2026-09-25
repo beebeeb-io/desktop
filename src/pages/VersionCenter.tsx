@@ -5,6 +5,7 @@ import {
   commandUnavailableLabel,
   desktopListFileVersions,
   desktopRestoreFileVersion,
+  forceReauth,
   formatBytes,
   openUrl,
   restoreVersionId,
@@ -132,7 +133,11 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   }
 
   const signInAgain = async () => {
-    const result = await command<void>('open_onboarding_window')
+    // Task 1546 Codex round 2, finding 2: must clear the expired session
+    // BEFORE opening onboarding, or onboarding fast-forwards an "unlocked,
+    // configured" user straight past the sign-in form — `forceReauth` does
+    // both steps in the right order.
+    const result = await forceReauth()
     if (!result.ok) {
       showToast({
         variant: 'error',

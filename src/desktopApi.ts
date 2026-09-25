@@ -13,6 +13,12 @@ export interface SyncStatus {
   syncing: number
   cloud_only: number
   conflicts: number
+  // Task 1546 finding 5: set once the engine sees 3+ consecutive 401s from
+  // its heartbeat/sync-tick calls, reset by any success. Independent of
+  // `logged_in` — the stale token can still be installed (`logged_in: true`)
+  // while every call it makes fails. Drives the persistent "You're signed
+  // out on this device" banner.
+  auth_expired?: boolean
 }
 
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
@@ -371,11 +377,12 @@ export interface ConflictContentPreview {
   remote: ConflictContentSide
 }
 
-export function conflictContentPreview(
-  fileId: string,
-  isText: boolean,
-): Promise<CommandResult<ConflictContentPreview>> {
-  return command<ConflictContentPreview>('conflict_content_preview', { fileId, isText })
+// `is_text` is no longer a caller-supplied argument (task 1546 Codex round 2,
+// finding 3): the daemon determines textness itself, from the file's own
+// path, and returns it on `ConflictContentPreview.is_text` — a caller-passed
+// flag could never be trusted (VersionCenter's open always guessed `false`).
+export function conflictContentPreview(fileId: string): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('conflict_content_preview', { fileId })
 }
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
@@ -1020,6 +1027,36 @@ export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
  */
 export function clearSession(): Promise<CommandResult<void>> {
   return command<void>('clear_session')
+}
+
+export interface ForceReauthApi {
+  clearSession: typeof clearSession
+  openOnboardingWindow: () => Promise<CommandResult<void>>
+}
+
+const defaultForceReauthApi: ForceReauthApi = {
+  clearSession,
+  openOnboardingWindow: () => command<void>('open_onboarding_window'),
+}
+
+/**
+ * Force a fresh sign-in (task 1546 Codex round 2, finding 2). Clears the
+ * (expired/invalid) session on the Rust side FIRST — via `clearSession`, so
+ * `sync_status` reports `logged_in: false` and `auth_expired: false` — THEN
+ * opens the onboarding window. Routing straight to `open_onboarding_window`
+ * while the stale session/token was still installed let onboarding
+ * fast-forward an "unlocked, configured" user straight past the sign-in
+ * form. Shared by VersionCenter's "Sign in again" review action and the
+ * persistent auth-expired banner, so both use the exact same forced flow.
+ *
+ * Takes an injectable `api` (default: the real Tauri commands) so the
+ * ordering + short-circuit-on-failure decision is unit-testable without a
+ * Tauri runtime — mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
+ */
+export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<void>> {
+  const cleared = await api.clearSession()
+  if (!cleared.ok) return cleared
+  return api.openOnboardingWindow()
 }
 
 // ── Selective sync (wave-2) ──────────────────────────────────────────────────

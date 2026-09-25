@@ -34,7 +34,7 @@ import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToast } from './windows/ui'
 import { conflictContentPreview, formatBytes, type ConflictContentPreview } from './desktopApi'
-import { diffLines, type DiffOp } from './diffLines'
+import { diffLines, DIFF_MAX_OPS, type DiffOp } from './diffLines'
 
 function DiffLine({
   line,
@@ -96,13 +96,21 @@ export default function ConflictWindow() {
   const params = new URLSearchParams(window.location.search)
   const fileId = params.get('fileId') ?? ''
   const fileName = params.get('fileName') ?? 'Unknown file'
-  const isText = params.get('isText') === 'true'
+  // Best-effort layout hint for the FIRST paint only, while the real preview
+  // is still loading. Task 1546 Codex round 2, finding 3: the daemon now
+  // decides textness itself (from the file's own path) and returns the
+  // authoritative value on `preview.is_text` — this URL flag is never
+  // trusted for anything past the initial skeleton, because the
+  // VersionCenter-initiated open always sets it to `false`.
+  const initialIsText = params.get('isText') === 'true'
 
   const [resolved, setResolved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [preview, setPreview] = useState<ConflictContentPreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
+
+  const isText = preview?.is_text ?? initialIsText
 
   useEffect(() => {
     if (!fileId) {
@@ -111,7 +119,7 @@ export default function ConflictWindow() {
     }
     let cancelled = false
     setPreviewLoading(true)
-    void conflictContentPreview(fileId, isText).then((result) => {
+    void conflictContentPreview(fileId).then((result) => {
       if (cancelled) return
       setPreviewLoading(false)
       if (result.ok) {
@@ -123,8 +131,8 @@ export default function ConflictWindow() {
     return () => {
       cancelled = true
     }
-    // fileId/isText come from the URL and never change for the lifetime of
-    // this window.
+    // fileId comes from the URL and never changes for the lifetime of this
+    // window.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -157,10 +165,11 @@ export default function ConflictWindow() {
     }
   }
 
-  const diffOps =
+  const diffResult =
     preview?.local.text != null && preview?.remote.text != null
       ? diffLines(preview.local.text, preview.remote.text)
       : null
+  const diffOps = diffResult?.ops ?? null
 
   if (resolved) {
     return (
@@ -211,6 +220,11 @@ export default function ConflictWindow() {
       {!previewLoading && preview && isText && diffOps === null && preview.local.text != null && preview.remote.text != null && (
         <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 12 }}>
           Both files are too large to compare line-by-line inline — showing full content below without highlighting.
+        </div>
+      )}
+      {!previewLoading && diffResult?.truncated && (
+        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 12 }}>
+          Diff truncated — showing the first {DIFF_MAX_OPS.toLocaleString()} changes.
         </div>
       )}
 
