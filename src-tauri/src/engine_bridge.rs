@@ -34,7 +34,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::{Zeroize, Zeroizing};
@@ -210,6 +210,18 @@ pub struct EngineBridge {
     /// Wire-byte counters shared with the heartbeat producer. Both are
     /// drained (swapped to 0) once per beat; incremented by the chunk loops.
     pub wire: Arc<WireCounters>,
+    /// Cooperative stop signal (task 1538 Codex P1, PR #49 lib.rs:1087
+    /// thread). `false` for the lifetime of a normal bridge. Flipped `true`
+    /// by [`crate::runner::EngineRunner::abort`] BEFORE it even sends the
+    /// tick-loop's cancel oneshot, so [`Self::process_due_operations`]
+    /// (checked before every queued operation) and
+    /// [`Self::queue_finder_create`]/[`Self::queue_finder_modify`]/
+    /// [`Self::queue_finder_delete`] (checked before enqueuing) can refuse
+    /// to start/queue further work immediately — instead of relying solely
+    /// on `abort`'s tick-boundary cancel, which could otherwise let an
+    /// entire in-progress due-operations batch, or a fresh watcher/File-
+    /// Provider write landing mid-teardown, through unchecked.
+    stopping: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,12 +368,37 @@ struct SharedRootMapping {
 }
 
 impl EngineBridge {
+    /// Build a bridge with its own private, never-flipped stop flag. Correct
+    /// for the one-shot bridges Tauri IPC commands build over the app-local
+    /// state DB (restore version, set pin, resolve conflict, …) — those are
+    /// each a fresh, independent unit of work, not the long-running engine
+    /// loop `EngineRunner` owns, so there is nothing external that should
+    /// ever ask THIS instance to stop mid-call.
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
+        Self::new_with_stop_flag(db, api, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Like [`Self::new`], but shares an externally-owned stop flag —
+    /// [`crate::runner::run`] passes the SAME `Arc<AtomicBool>` its
+    /// `EngineRunner` flips on `abort()`, so this bridge (and every clone of
+    /// it handed to the IPC socket server / Windows upload watcher) observes
+    /// the stop request the instant it's set, not just at the next tick
+    /// boundary (task 1538 Codex P1).
+    pub fn new_with_stop_flag(db: Arc<StateDb>, api: Arc<ApiClient>, stopping: Arc<AtomicBool>) -> Self {
         Self {
             db,
             api,
             wire: WireCounters::new(),
+            stopping,
         }
+    }
+
+    /// `true` once a caller has asked this engine to stop (task 1538).
+    /// `SeqCst` — this flag is the FIRST thing `EngineRunner::abort` sets,
+    /// before it even sends the tick loop's cancel oneshot, specifically so
+    /// this read is guaranteed to observe it promptly from any thread.
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     /// Borrow the underlying state DB so callers (e.g. [`sync_tick`])
@@ -390,6 +427,16 @@ impl EngineBridge {
         let operations = self.db.list_due_operations(now)?;
 
         for op in operations {
+            // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
+            // the queue the instant a caller asks this engine to stop,
+            // rather than finishing every due operation first. `abort()`'s
+            // graceful window is bounded (3s) before it force-terminates the
+            // whole task — a caller waiting on that to purge the queue on
+            // sign-out needs this loop to actually stop promptly on its own,
+            // not "eventually, once the batch happens to finish".
+            if self.is_stopping() {
+                break;
+            }
             let result = self.execute_operation(&op, sync_root, now).await;
             match result {
                 Ok(()) => {
@@ -1067,6 +1114,16 @@ impl EngineBridge {
     }
 
     pub fn queue_finder_create(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
+        // enqueue once this engine has been asked to stop. Both the Windows
+        // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
+        // macOS/Linux File Provider extension (via `ipc_socket::handle_connection`'s
+        // `QueueFinderCreate` dispatch) call this directly, so this single
+        // check covers "the watcher" on every platform without needing a
+        // separate flag check duplicated in each caller.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
         if is_ignored_finder_name(&target.filename) {
             return Ok(FinderWriteOutcome::Ignored {
                 message: format!("ignored temporary Finder item {}", target.filename),
@@ -1185,6 +1242,10 @@ impl EngineBridge {
     }
 
     pub fn queue_finder_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
         if is_ignored_finder_name(&target.filename) {
             return Ok(FinderWriteOutcome::Ignored {
                 message: format!("ignored temporary Finder item {}", target.filename),
@@ -1265,6 +1326,10 @@ impl EngineBridge {
         file_id: &str,
         base_version_identifier: Option<String>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
         let item_contract = self.ensure_item_allows_shared_write(file_id, "delete")?;
         let mut payload = serde_json::json!({
             "operation": "trash",
@@ -6648,6 +6713,125 @@ mod tests {
         assert_eq!(outcome.completed_op_ids, vec!["op-pin".to_string()]);
         assert_eq!(outcome.invalidated_item_ids, vec!["folder-1".to_string()]);
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+    }
+
+    /// Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): once the bridge's
+    /// stop flag is set, `process_due_operations` must not execute ANY due
+    /// operation — not "finish the current batch, then stop next tick".
+    /// Uses `PinTree` (the cheapest op kind: `execute_operation` returns
+    /// `Ok(())` with no network call) so a failure here can only be the
+    /// missing stop-check, never a flaky mock server.
+    #[tokio::test]
+    async fn test_process_due_operations_stops_immediately_once_engine_is_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.db");
+        let db = Arc::new(StateDb::open(&db_path).unwrap());
+        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping.clone());
+
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-pin-1".into(),
+            kind: OperationKind::PinTree,
+            file_id: Some("folder-1".into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-pin-2".into(),
+            kind: OperationKind::PinTree,
+            file_id: Some("folder-2".into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+
+        // Ask the engine to stop BEFORE draining the queue — simulates
+        // `EngineRunner::abort` flipping the flag while a tick is already
+        // about to process a batch of due operations.
+        stopping.store(true, Ordering::SeqCst);
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        assert!(
+            outcome.completed_op_ids.is_empty(),
+            "no operation may run once the engine has been asked to stop"
+        );
+        assert_eq!(
+            db.list_due_operations(999).unwrap().len(),
+            2,
+            "both queued ops must still be in the queue, untouched, for the caller's purge to clear"
+        );
+    }
+
+    /// Task 1538 Codex P1 — the watcher (Windows upload watcher AND the
+    /// macOS/Linux File Provider IPC handler both call these directly) must
+    /// not be able to slip a fresh write into the queue once the engine has
+    /// been asked to stop, or sign-out's purge could run BEFORE the write
+    /// lands and then miss it entirely.
+    #[test]
+    fn test_queue_finder_writes_refuse_to_enqueue_once_engine_is_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.db");
+        let db = Arc::new(StateDb::open(&db_path).unwrap());
+        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let stopping = Arc::new(AtomicBool::new(true));
+        let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping);
+
+        let create_result = bridge.queue_finder_create(FinderWriteTarget {
+            file_id: None,
+            parent_id: None,
+            filename: "new-file.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        });
+        assert!(create_result.is_err(), "queue_finder_create must refuse while stopping");
+
+        let modify_result = bridge.queue_finder_modify(FinderWriteTarget {
+            file_id: Some("file-1".into()),
+            parent_id: None,
+            filename: "renamed.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        });
+        assert!(modify_result.is_err(), "queue_finder_modify must refuse while stopping");
+
+        let delete_result = bridge.queue_finder_delete("file-1", None);
+        assert!(delete_result.is_err(), "queue_finder_delete must refuse while stopping");
+
+        assert!(
+            db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "not a single one of the refused writes may have reached the operation_queue"
+        );
     }
 
     #[tokio::test]

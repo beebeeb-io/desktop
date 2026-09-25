@@ -538,7 +538,14 @@ async fn start_engine_if_possible(
         let pause_flag = acct.sync_paused.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
+            // Task 1538 Codex P1: this is a re-login/sync-root-change
+            // respawn, not sign-out — there's no purge to gate here, but an
+            // unconfirmed stop is still worth knowing about (a not-really-
+            // gone previous task could still be touching the same state.db
+            // the freshly spawned runner is about to open).
+            if !prev.abort().await {
+                tracing::warn!("previous engine did not confirm termination before respawning a new one");
+            }
         }
         *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag));
     }
@@ -1044,12 +1051,35 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     let acct = state.active_account()?;
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
+    //
+    // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): `abort()` now returns
+    // whether the engine's task is CONFIRMED terminated, not just "we asked
+    // and waited a bit". The purge below is a cross-account data-
+    // exfiltration control (findings 1+2) — it is only safe to run once the
+    // OLD engine (and everything nested in its single task: the IPC socket
+    // server, the Windows upload watcher) is genuinely gone and can no
+    // longer drain or enqueue operations behind its back. If we can't
+    // confirm that, refuse to complete sign-out rather than purge anyway
+    // and hand the next account's engine a false sense of a clean slate.
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
+        let stopped = prev.abort().await;
+        drop(engine_slot);
+        if !stopped {
+            tracing::error!(
+                "sign-out refused: could not confirm the sync engine stopped; \
+                 refusing to purge local state or clear credentials while it may still be running"
+            );
+            return Err(
+                "Could not stop the sync engine. Please try signing out again; if this keeps \
+                 happening, restart Beebeeb before signing in with a different account."
+                    .to_string(),
+            );
+        }
         tracing::info!("engine aborted on logout");
+    } else {
+        drop(engine_slot);
     }
-    drop(engine_slot);
 
     // Windows: remove the Explorer SHELL registration (nav-pane entry, Status
     // column, overlays) on sign-out so a logged-out machine doesn't show a dead
@@ -1080,22 +1110,43 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     // `purge_all_local_state` regardless of whether every on-disk file
     // removal below succeeds, so nothing can act on a leftover file again
     // even if this loop can't delete it.
-    if let Some(db) = DesktopConfig::load()
-        .ok()
-        .and_then(|cfg| state_db_for_config(&cfg).ok().flatten())
-    {
-        match purge_local_state_files(&db) {
+    //
+    // Task 1538 Codex P1 (lib.rs:1085 thread): `db` is resolved from the
+    // app-local state dir DIRECTLY — `state_db_from_app_local_state_dir`,
+    // not the old `DesktopConfig::load().ok().and_then(state_db_for_config)`
+    // chain — because `state.db` lives there independently of
+    // `desktop.toml`/`sync_root`. A missing, corrupt, or unreadable config
+    // (or one whose `sync_root` was rejected on load) must never silently
+    // skip this security purge. `sync_root` itself is still read from
+    // `DesktopConfig` best-effort, separately — it is used ONLY to resolve
+    // Windows placeholder paths below, never to gate whether the purge runs
+    // at all.
+    let cfg_sync_root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    match state_db_from_app_local_state_dir() {
+        Ok(Some(db)) => match purge_local_state_files(&db, cfg_sync_root.as_deref()) {
             Ok(summary) => {
                 tracing::info!(
                     queued_ops_purged = summary.queued_ops_purged,
                     files_removed = summary.files_removed,
                     files_skipped = summary.files_skipped,
+                    windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
                     "purged operation queue and decrypted cache on sign-out"
                 );
             }
             Err(error) => {
                 tracing::warn!(error = %error, "failed to purge operation queue / decrypted cache on sign-out");
             }
+        },
+        Ok(None) => {
+            // No state.db yet — a fresh install that never synced anything.
+            // Nothing to purge; not an error.
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "sign-out purge: could not resolve the local state database; \
+                 operation queue / decrypted cache may not have been cleared"
+            );
         }
     }
 
@@ -1189,8 +1240,18 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     let acct = state.active_account()?;
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
-        tracing::info!("engine aborted on vault lock");
+        // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
+        // session/master key right after this — an unconfirmed stop means
+        // the old engine could still be alive and using it. No purge is
+        // gated on this (lock keeps the account's Keychain session, so
+        // there's nothing cross-account to protect here), but it's still
+        // worth a loud warning rather than a silent "we waited 3s and moved
+        // on".
+        if !prev.abort().await {
+            tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
+        } else {
+            tracing::info!("engine aborted on vault lock");
+        }
     }
     drop(engine_slot);
 
@@ -1351,6 +1412,51 @@ fn state_db_for_config(cfg: &DesktopConfig) -> Result<Option<state_db::StateDb>,
         .map_err(|e| format!("open state.db: {e}"))
 }
 
+/// Resolve the local `state.db` from the app-local data dir alone — task
+/// 1538 Codex P1 (PR #49, lib.rs:1085 thread).
+///
+/// `state.db` lives in `state_paths::beebeeb_state_dir()`, which resolves
+/// purely from Tauri's `app_local_data_dir()`; it has NEVER depended on
+/// `DesktopConfig`/`desktop.toml` (see that function's own doc comment).
+/// `state_db_for_config` above nonetheless GATES on a successfully-loaded
+/// `DesktopConfig` with a non-`None`, accepted `sync_root` — so a missing,
+/// corrupt, unreadable `desktop.toml`, or one whose `sync_root` was rejected
+/// on load, makes the caller's `.ok()` chain silently skip the ENTIRE
+/// sign-out purge. That purge is a cross-account data-exfiltration control
+/// (task 1538 findings 1+2); it must not be able to depend on config health
+/// it needs no part of.
+///
+/// This resolves + opens `state.db` directly against the app-local state
+/// dir, with no `DesktopConfig` involved at all. `Ok(None)` only when the
+/// file genuinely doesn't exist yet (a fresh install that has never synced
+/// anything — nothing to purge); any OTHER failure (state dir not
+/// initialized, DB open/migration error) is returned as `Err` so the caller
+/// logs it loudly instead of treating it the same as "nothing to do".
+///
+/// Thin wrapper around [`state_db_from_state_dir`] — the ONLY thing this
+/// adds is resolving Tauri's global app-local-data path; that split exists
+/// so the actual decision logic is unit-testable without a live Tauri
+/// `AppHandle` having called `state_paths::init_from_app` first.
+fn state_db_from_app_local_state_dir() -> Result<Option<state_db::StateDb>, String> {
+    state_db_from_state_dir(&state_paths::beebeeb_state_dir()?)
+}
+
+/// Pure core of [`state_db_from_app_local_state_dir`]: open `state.db`
+/// directly under `state_dir`, given explicitly — no Tauri global, no
+/// `DesktopConfig`. Task 1538 Codex P1 (PR #49, lib.rs:1085 thread): this
+/// signature is the proof the sign-out purge's DB resolution cannot depend
+/// on `desktop.toml` health, because there is no `DesktopConfig` parameter
+/// for it to depend on.
+fn state_db_from_state_dir(state_dir: &std::path::Path) -> Result<Option<state_db::StateDb>, String> {
+    let db_path = state_dir.join(state_paths::STATE_DB_FILENAME);
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    state_db::StateDb::open(&db_path)
+        .map(Some)
+        .map_err(|e| format!("open state.db: {e}"))
+}
+
 fn disposable_cache_roots() -> Vec<PathBuf> {
     let mut roots = vec![std::env::temp_dir()];
     if let Some(cache_dir) = dirs::cache_dir() {
@@ -1387,6 +1493,10 @@ struct LocalStatePurgeSummary {
     queued_ops_purged: usize,
     files_removed: usize,
     files_skipped: usize,
+    /// Windows Cloud Files placeholders dehydrated (or, failing that,
+    /// removed outright) — task 1538 Codex P1, PR #49 state_db.rs:1785
+    /// thread. Always `0` on macOS/Linux.
+    windows_placeholders_dehydrated: usize,
 }
 
 /// Task 1538 findings 1+2: delete every queued operation's staged plaintext
@@ -1396,15 +1506,21 @@ struct LocalStatePurgeSummary {
 ///
 /// Pure w.r.t. Tauri/OS credential state (takes an already-opened `db`) so
 /// it is directly unit-testable without a live `AppState`/Keychain — see
-/// `clear_session_impl`, the only real caller, which resolves `db` from
-/// `DesktopConfig` and never touches this function's internals.
+/// `clear_session_impl`, the only real caller, which resolves `db`
+/// independently of `DesktopConfig` (task 1538 Codex P1) and never touches
+/// this function's internals. `sync_root`, by contrast, is ONLY needed to
+/// resolve Windows Cloud Files placeholder paths below — best-effort and
+/// `None`-able; every other step here is sync-root-independent.
 ///
 /// Each candidate path is gated by `is_disposable_cache_path` — the same
 /// safety check `reset_macos_integration` already uses — before removal, so
 /// a bug that fed this function an unexpected path can never turn a sign-out
 /// into an arbitrary-file-delete. A gated-out or already-missing path is
 /// logged, not fatal: sign-out must always appear to succeed.
-fn purge_local_state_files(db: &state_db::StateDb) -> Result<LocalStatePurgeSummary, String> {
+fn purge_local_state_files(
+    db: &state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+) -> Result<LocalStatePurgeSummary, String> {
     let purge = db
         .purge_all_local_state()
         .map_err(|e| format!("purge operation queue and cache metadata: {e}"))?;
@@ -1428,11 +1544,145 @@ fn purge_local_state_files(db: &state_db::StateDb) -> Result<LocalStatePurgeSumm
         }
     }
 
+    // Task 1538 Codex P1 (state_db.rs:1785 thread): a Windows Cloud Files
+    // placeholder's plaintext lives in the sync root, not at `cache_path` —
+    // the loop above can never find it. `local_placeholder_paths` is the
+    // cross-platform candidate list `purge_all_local_state` captured before
+    // flipping those rows' status. `resolve_purge_placeholder_paths` (the
+    // "which files, which safe paths" decision) runs on every platform so
+    // it stays exercised and unit-testable without a Windows host; only the
+    // actual `CfDehydratePlaceholder` FFI call is Windows-only. macOS/Linux
+    // both store hydrated bytes as a separate cache copy already covered by
+    // `cache_paths` above, and macOS's File Provider domain removal
+    // (`clear_session_impl`, right after this function returns) handles the
+    // analogous cleanup there — so this list is a deliberate no-op on those
+    // platforms, not an oversight.
+    let windows_placeholders_dehydrated: usize = if purge.local_placeholder_paths.is_empty() {
+        0
+    } else {
+        match sync_root {
+            Some(root) => {
+                let resolved = resolve_purge_placeholder_paths(&purge.local_placeholder_paths, root);
+                #[cfg(target_os = "windows")]
+                {
+                    purge_windows_placeholders(&resolved)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = resolved;
+                    0
+                }
+            }
+            None => {
+                #[cfg(target_os = "windows")]
+                tracing::warn!(
+                    candidate_count = purge.local_placeholder_paths.len(),
+                    "sign-out purge: no sync root known; Windows placeholders could not be dehydrated/removed"
+                );
+                0
+            }
+        }
+    };
+
     Ok(LocalStatePurgeSummary {
         queued_ops_purged: purge.queued_ops_purged,
         files_removed,
         files_skipped,
+        windows_placeholders_dehydrated,
     })
+}
+
+/// Resolve every `(file_id, server_relative_path)` candidate from
+/// [`state_db::LocalStatePurge::local_placeholder_paths`] to an absolute,
+/// safety-checked on-disk path under `sync_root` — the same canonicalize +
+/// allowed-roots invariant [`free_up_space_windows`] already enforces for
+/// the analogous eviction sweep, reused here (task 1538 Codex P1, PR #49
+/// state_db.rs:1785 thread).
+///
+/// Pure and platform-independent on purpose: the actual
+/// `CfDehydratePlaceholder` FFI call that ACTS on this list is Windows-only
+/// ([`purge_windows_placeholders`] below); this is only the "which files,
+/// which paths" decision, so it is unit-testable on any host. A candidate is
+/// silently dropped (not an error — sign-out must still succeed) when it
+/// doesn't resolve to a real file under an allowed root: an
+/// already-cleaned-up or corrupt row has nothing for the caller to act on.
+fn resolve_purge_placeholder_paths(candidates: &[(String, String)], sync_root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    candidates
+        .iter()
+        .filter_map(|(file_id, rel_path)| {
+            let rel = rel_path.trim_matches('/');
+            if rel.is_empty() {
+                return None;
+            }
+            let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let canonical = local_path.canonicalize().ok()?;
+            if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+                return None;
+            }
+            Some((file_id.clone(), canonical))
+        })
+        .collect()
+}
+
+/// Dehydrate (or, failing that, remove outright) every Windows Cloud Files
+/// placeholder [`resolve_purge_placeholder_paths`] resolved — task 1538
+/// Codex P1, PR #49 state_db.rs:1785 thread. Mirrors
+/// [`free_up_space_windows`]'s `dehydrate_placeholder` call, with two
+/// deliberate differences from that eviction sweep:
+///
+/// - No pin-state skip: sign-out must sweep pinned files too — the account
+///   is leaving the device, so "keep offline" no longer means anything. The
+///   OS-level pin is cleared first (`CfDehydratePlaceholder` fails with
+///   `ERROR_CLOUD_FILE_PINNED` on a still-pinned placeholder).
+/// - A failed dehydrate removes the placeholder FILE instead of leaving the
+///   row `local` for "the next sweep" to retry: `purge_all_local_state` has
+///   already flipped every one of these rows to `cloud_only` unconditionally
+///   (task 1538 finding 2), so there IS no next sweep that would find it —
+///   leaving the dehydrate half-done would orphan plaintext exactly like the
+///   bug this function fixes. A stale Explorer entry self-heals on the next
+///   `windows_cf::seed_placeholders`/reconcile pass after a later sign-in.
+///
+/// Returns the number of placeholders successfully cleared (dehydrated OR
+/// removed) for the caller's log line.
+#[cfg(target_os = "windows")]
+fn purge_windows_placeholders(candidates: &[(String, PathBuf)]) -> usize {
+    let mut cleared = 0usize;
+    for (file_id, path) in candidates {
+        if let Err(error) = crate::windows_cf::placeholders::set_pin_state(path, false, false) {
+            tracing::warn!(
+                file_id = %file_id,
+                error = %error,
+                "sign-out purge: OS unpin before dehydrate failed; attempting dehydrate anyway"
+            );
+        }
+        match crate::windows_cf::placeholders::dehydrate_placeholder(path) {
+            Ok(_freed) => {
+                cleared += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    file_id = %file_id,
+                    error = %error,
+                    "sign-out purge: CfDehydratePlaceholder failed; removing the placeholder file instead"
+                );
+                match std::fs::remove_file(path) {
+                    Ok(()) => cleared += 1,
+                    Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {
+                        cleared += 1;
+                    }
+                    Err(remove_error) => {
+                        tracing::warn!(
+                            file_id = %file_id,
+                            error = %remove_error,
+                            "sign-out purge: could not remove placeholder file after a failed dehydrate"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    cleared
 }
 
 #[cfg(unix)]
@@ -1473,7 +1723,14 @@ async fn persist_sync_root_and_start_engine(
         let pause_flag = acct.sync_paused.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
+            // Task 1538 Codex P1: this is a re-login/sync-root-change
+            // respawn, not sign-out — there's no purge to gate here, but an
+            // unconfirmed stop is still worth knowing about (a not-really-
+            // gone previous task could still be touching the same state.db
+            // the freshly spawned runner is about to open).
+            if !prev.abort().await {
+                tracing::warn!("previous engine did not confirm termination before respawning a new one");
+            }
         }
         *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag));
     }
@@ -1540,7 +1797,11 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     let Ok(acct) = state.active_account() else { return };
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
+        // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
+        // respawn guard.
+        if !prev.abort().await {
+            tracing::warn!("pending-finder-install engine did not confirm termination on stop");
+        }
     }
 }
 
@@ -1891,8 +2152,13 @@ async fn reset_macos_integration(
     let acct = state.active_account()?;
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
-        tracing::info!("engine aborted for macOS integration reset");
+        // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
+        // respawn guard.
+        if !prev.abort().await {
+            tracing::warn!("engine did not confirm termination before macOS integration reset");
+        } else {
+            tracing::info!("engine aborted for macOS integration reset");
+        }
     }
     drop(engine_slot);
     if let Ok(mut guard) = acct.engine_state.lock() {
@@ -3116,7 +3382,11 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             let pause_flag = acct.sync_paused.clone();
             let mut engine_slot = acct.engine.lock().await;
             if let Some(prev) = engine_slot.take() {
-                prev.abort().await;
+                // Task 1538 Codex P1 — see `start_engine_if_possible`'s
+                // identical respawn guard.
+                if !prev.abort().await {
+                    tracing::warn!("previous engine did not confirm termination before respawning a new one");
+                }
             }
             *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag));
         }
@@ -7924,7 +8194,7 @@ mod tests {
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target,
         file_versions_payload_for_frontend, newly_excluded_ids, next_menu_zoom_scale,
         normalize_recovery_phrase_input, now_unix_seconds, purge_local_state_files, queued_restore_version_response,
-        real_app_version,
+        real_app_version, resolve_purge_placeholder_paths, state_db_from_state_dir,
         release_channel_from_version, release_notes_url_for_version, shared_roots_from_db,
         should_offer_channel_update, should_show_conflict_notification, should_show_quota_warning_notification,
         should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
@@ -8043,7 +8313,7 @@ mod tests {
         })
         .unwrap();
 
-        let summary = purge_local_state_files(&db).expect("purge succeeds");
+        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
 
         assert_eq!(summary.queued_ops_purged, 1);
         assert_eq!(
@@ -8098,7 +8368,7 @@ mod tests {
         db.mark_cached("file-b", outside_path.to_str().unwrap(), 12, 10)
             .unwrap();
 
-        let summary = purge_local_state_files(&db).expect("purge succeeds");
+        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
 
         assert_eq!(summary.files_removed, 0);
         assert_eq!(summary.files_skipped, 1);
@@ -8106,6 +8376,102 @@ mod tests {
             outside_path.exists(),
             "a path outside the known roots must never be deleted"
         );
+    }
+
+    // ── Task 1538 Codex P1 (PR #49, lib.rs:1085 thread): DB resolution
+    //    independent of DesktopConfig ─────────────────────────────────────
+
+    /// `state_db_from_state_dir` opens `state.db` from a directory it is
+    /// handed directly — there is no `DesktopConfig` parameter for it to
+    /// depend on, so a missing/corrupt/unreadable `desktop.toml` (or one
+    /// whose `sync_root` was rejected) structurally cannot make this skip
+    /// the sign-out purge the way the old `DesktopConfig::load().ok()...`
+    /// gate could.
+    #[test]
+    fn state_db_from_state_dir_opens_an_existing_db_with_no_config_involved() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create the DB first (as a prior engine run would have).
+        let _ = crate::state_db::StateDb::open(dir.path().join(crate::state_paths::STATE_DB_FILENAME)).unwrap();
+
+        let result = state_db_from_state_dir(dir.path());
+
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "an existing state.db must open even though no DesktopConfig was ever read"
+        );
+    }
+
+    /// A fresh install that has never synced anything has no `state.db` yet
+    /// — `Ok(None)`, not an error, and not a reason to fail sign-out.
+    #[test]
+    fn state_db_from_state_dir_returns_none_when_the_db_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = state_db_from_state_dir(dir.path());
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    // ── Task 1538 Codex P1 (PR #49, state_db.rs:1785 thread): Windows
+    //    placeholder path resolution — cross-platform decision logic ──────
+
+    /// The "which files, which safe paths" decision `resolve_purge_placeholder_paths`
+    /// makes is plain path-joining + canonicalize + an allowed-roots check —
+    /// none of it is Windows-specific, so it must run (and be provable
+    /// correct) on every host, even though only a Windows build ever ACTS on
+    /// the result via `purge_windows_placeholders`.
+    #[test]
+    fn resolve_purge_placeholder_paths_resolves_candidates_under_sync_root() {
+        let sync_root = tempfile::tempdir().unwrap();
+        let nested_dir = sync_root.path().join("Docs");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let file_path = nested_dir.join("report.docx");
+        std::fs::write(&file_path, b"placeholder content").unwrap();
+
+        let candidates = vec![("win-local".to_string(), "/Docs/report.docx".to_string())];
+        let resolved = resolve_purge_placeholder_paths(&candidates, sync_root.path());
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "win-local");
+        assert_eq!(resolved[0].1, file_path.canonicalize().unwrap());
+    }
+
+    /// A candidate whose resolved path escapes the sync root (or the engine
+    /// cache dir) — e.g. a corrupt `path` column — is dropped, never handed
+    /// to a caller that might delete it. Same fail-closed invariant
+    /// `purge_local_state_files_refuses_paths_outside_known_roots` above
+    /// already proves for the `cache_path` list.
+    #[test]
+    fn resolve_purge_placeholder_paths_drops_candidates_outside_allowed_roots() {
+        let sync_root = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("not-in-sync-root.bin");
+        std::fs::write(&outside_file, b"must survive").unwrap();
+
+        // An absolute-looking `path` value that, joined naively onto
+        // sync_root, would still land inside sync_root — so instead prove
+        // the guard by resolving a path that canonicalizes OUTSIDE the
+        // allowed roots entirely: a `..`-relative escape.
+        let candidates = vec![("escaping".to_string(), "../../../../../../etc/hosts".to_string())];
+        let resolved = resolve_purge_placeholder_paths(&candidates, sync_root.path());
+
+        assert!(
+            resolved.is_empty(),
+            "a candidate resolving outside the sync root / engine cache dir must never be returned"
+        );
+    }
+
+    /// A candidate whose file no longer exists on disk (already cleaned up,
+    /// or a stale/corrupt row) fails to canonicalize and is dropped, not
+    /// treated as an error — sign-out must still succeed.
+    #[test]
+    fn resolve_purge_placeholder_paths_drops_missing_files() {
+        let sync_root = tempfile::tempdir().unwrap();
+        let candidates = vec![("gone".to_string(), "/never/existed.txt".to_string())];
+
+        let resolved = resolve_purge_placeholder_paths(&candidates, sync_root.path());
+
+        assert!(resolved.is_empty());
     }
 
     #[test]

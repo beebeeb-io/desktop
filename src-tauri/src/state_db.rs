@@ -402,6 +402,14 @@ pub struct LocalStatePurge {
     /// Every `files.cache_path` that was cleared — the on-disk file at each
     /// path must still be removed by the caller.
     pub cache_paths: Vec<String>,
+    /// `(file_id, server_relative_path)` for every row that was in `local`
+    /// status (task 1538 Codex P1) — captured BEFORE the status flip, so a
+    /// Windows Cloud Files placeholder (whose plaintext lives in the sync
+    /// root, not at `cache_path`) can still be found and dehydrated/removed
+    /// by the caller even though `cache_paths` above never pointed at it.
+    /// Present regardless of platform (the query itself is cross-platform);
+    /// only the Windows caller acts on it.
+    pub local_placeholder_paths: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1779,8 +1787,44 @@ impl StateDb {
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>>>()?
         };
+
+        // Task 1538 Codex P1 (PR #49, state_db.rs review thread): capture
+        // every `local`-status row's (file_id, server-relative path) BEFORE
+        // the status flip below runs — regardless of pin state (unlike
+        // `unpinned_local_files_for_dehydration`, sign-out must sweep pinned
+        // files too; the account is leaving the device, so "keep offline"
+        // no longer means anything).
+        //
+        // On Windows, a materialized Cloud Files placeholder holds its
+        // plaintext directly in the sync root — `cache_path` is at best a
+        // stale, already-deleted `%TEMP%` decrypt path and at worst NULL
+        // (see `unpinned_local_files_for_dehydration`'s doc comment), so the
+        // `cache_paths` list above can never be the caller's cue to clean up
+        // that plaintext. Flipping `status` to `cloud_only` without first
+        // dehydrating/removing the real placeholder would also hide the row
+        // from `unpinned_local_files_for_dehydration()` forever, orphaning
+        // it — so this list MUST be read before that UPDATE runs, in the
+        // same transaction, and the caller must act on it before (or
+        // instead of) trusting the status flip alone.
+        //
+        // On macOS/Linux this list is a harmless superset of `cache_paths`
+        // (those platforms store hydrated bytes as a separate cache copy,
+        // already covered above); the File Provider domain removal
+        // `clear_session_impl` also runs on macOS handles cleanup there.
+        let local_placeholder_paths: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT file_id, path FROM files WHERE status = 'local'")?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        // Broadened to `OR status = 'local'` (was `cache_path IS NOT NULL`
+        // alone) so a Windows `local` row with a NULL `cache_path` — which
+        // `local_placeholder_paths` above has already captured for the
+        // caller to dehydrate — still loses its stale `local` status here
+        // too, instead of surviving the purge unchanged.
         tx.execute(
-            "UPDATE files SET cache_path = NULL, cache_bytes = 0, status = 'cloud_only' WHERE cache_path IS NOT NULL",
+            "UPDATE files SET cache_path = NULL, cache_bytes = 0, status = 'cloud_only' \
+             WHERE cache_path IS NOT NULL OR status = 'local'",
             [],
         )?;
 
@@ -1789,6 +1833,7 @@ impl StateDb {
             queued_ops_purged,
             payload_paths,
             cache_paths,
+            local_placeholder_paths,
         })
     }
 
@@ -3265,6 +3310,13 @@ mod tests {
             cache_paths,
             vec!["/cache/pinned".to_string(), "/cache/uploading".to_string()]
         );
+        // Only the `local`-status row ("pinned") is a placeholder-dehydration
+        // candidate — "uploading" is mid-transfer, not a materialized local
+        // copy, so it must not appear here.
+        assert_eq!(
+            purge.local_placeholder_paths,
+            vec![("pinned".to_string(), "/Pinned.txt".to_string())]
+        );
 
         // Nothing is left behind to be found by a later account's engine.
         assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
@@ -3274,6 +3326,55 @@ mod tests {
         assert_eq!(
             db.get_file_contract_state("uploading").unwrap().unwrap().cache_path,
             None
+        );
+    }
+
+    /// Task 1538 Codex P1 (PR #49, state_db.rs:1785 thread): a Windows Cloud
+    /// Files placeholder stores its plaintext directly in the sync root, not
+    /// at `cache_path` — a materialized `local` row can have `cache_path =
+    /// NULL` the whole time (see `unpinned_local_files_for_dehydration`'s doc
+    /// comment). The OLD `cache_path IS NOT NULL`-only purge silently skips
+    /// such a row entirely: it stays `local` forever, and its on-disk
+    /// plaintext (the placeholder) is never found by ANY later cleanup pass,
+    /// because `unpinned_local_files_for_dehydration()` also filters on
+    /// `status = 'local'` — a status this purge would have left unchanged.
+    #[test]
+    fn test_purge_all_local_state_captures_windows_style_local_row_with_no_cache_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // A materialized Windows placeholder: `local` status, PINNED (a
+        // sign-out purge must sweep it anyway — pins don't survive the
+        // account that set them), and — unlike every other seeded row in
+        // this file — `cache_path` is never populated via `mark_cached`.
+        // This is the exact shape a real Windows Cloud Files placeholder
+        // leaves in the DB (the fetch callback's `%TEMP%` decrypt copy is
+        // already deleted by the time the placeholder is materialized).
+        seed_contract_row(&db, "win-local", "/Docs/report.docx", None, FileStatus::Local, 4096);
+        db.set_recursive_pin("win-local", true, 10).unwrap();
+        assert_eq!(
+            db.get_file_contract_state("win-local").unwrap().unwrap().cache_path,
+            None,
+            "precondition: this row must never have a cache_path, like a real Windows placeholder"
+        );
+
+        let purge = db.purge_all_local_state().unwrap();
+
+        // The row has no cache_path, so it can never appear in `cache_paths`
+        // — proving the assertions below exercise a genuinely different code
+        // path, not a duplicate of the existing cache_path-based one.
+        assert!(purge.cache_paths.is_empty());
+        assert_eq!(
+            purge.local_placeholder_paths,
+            vec![("win-local".to_string(), "/Docs/report.docx".to_string())],
+            "a `local` row with no cache_path must still surface as a purge candidate \
+             for the caller to dehydrate/remove"
+        );
+        assert_eq!(
+            db.get_file("win-local").unwrap().unwrap().status,
+            FileStatus::CloudOnly,
+            "the row must not be left at `local` status after a sign-out purge — a \
+             lingering `local` row hides real on-disk plaintext from every later cleanup pass"
         );
     }
 
