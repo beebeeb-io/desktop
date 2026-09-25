@@ -116,31 +116,90 @@ const CAP_WRITE: u32 = 1 << 1;
 const CAP_RENAME: u32 = 1 << 2;
 const CAP_DELETE: u32 = 1 << 3;
 
+/// The macOS App Group shared between the containing app
+/// (`src-tauri/entitlements.plist`) and the File Provider extension
+/// (`BeebeebFileProvider/BeebeebFileProvider.entitlements`) — both declare
+/// `com.apple.security.application-groups: [<this>]`. This is the ONE place
+/// the id is defined on the Rust side; `BeebeebFileProvider/XPCBridge.swift`
+/// mirrors the identical literal (Swift has no practical way to `include!` a
+/// Rust const, and there is no existing shared-codegen step in this repo —
+/// see `docs/MACOS_BRINGUP_BRIEF.md`). Keep all three in sync if it ever
+/// changes.
+#[cfg(target_os = "macos")]
+pub const MACOS_APP_GROUP_ID: &str = "R8352WDJJR.io.beebeeb.app.fileprovider";
+
+/// Deliberately short — see [`macos_ipc_socket_path_in`]'s doc comment.
+#[cfg(target_os = "macos")]
+const MACOS_IPC_SOCKET_FILENAME: &str = "ipc.sock";
+
+/// Resolve the daemon's IPC socket path inside the macOS shared App Group
+/// container, given a caller-supplied home directory (a pure function so the
+/// length budget is unit-testable without depending on the real environment
+/// or the app-group entitlement itself).
+///
+/// This plays the same role as `FileManager
+/// .containerURL(forSecurityApplicationGroupIdentifier:)` on the Swift side:
+/// both the containing app and the File Provider extension
+/// (`XPCBridge.swift`) resolve to the SAME real directory purely by sharing
+/// the `application-groups` entitlement — `~/Library/Group Containers/<group
+/// id>/` is not a guess, it's how macOS defines that entitlement. The daemon
+/// builds the path directly rather than calling the real Foundation API
+/// because that API requires the calling process to actually hold the
+/// entitlement (a plain `cargo test` binary does not), which would make the
+/// path-resolution logic itself untestable.
+///
+/// A Unix domain socket path is capped at `sizeof(sockaddr_un.sun_path)` on
+/// macOS: **104 bytes, including the NUL terminator** (`<sys/un.h>`) — so the
+/// file name under the (already fairly long) group-container directory must
+/// stay short. The old `beebeeb-daemon.sock` name does not fit once the
+/// group-container prefix is added, for most real usernames; `ipc.sock`
+/// does, with headroom to spare.
+#[cfg(target_os = "macos")]
+fn macos_ipc_socket_path_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir
+        .join("Library")
+        .join("Group Containers")
+        .join(MACOS_APP_GROUP_ID)
+        .join(MACOS_IPC_SOCKET_FILENAME)
+}
+
+/// Task 1524: the daemon is sandboxed on macOS (`com.apple.security.app-
+/// sandbox`), so `/tmp` and `$XDG_RUNTIME_DIR` (which macOS never sets in the
+/// first place — that's a Linux/systemd convention) are NOT reachable; only
+/// the app's own container and any shared App Group container are. Binding
+/// outside those fails the sandbox's file-access check, which a bare
+/// `.expect()` on the bind turned into a panicked fire-and-forget task and,
+/// from the user's side, an unconditional 3-second timeout on "Install
+/// Finder location" (`Timed out waiting for the local Beebeeb sync daemon…`)
+/// with no indication of the real cause.
+#[cfg(target_os = "macos")]
+pub fn ipc_socket_path() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    macos_ipc_socket_path_in(&home)
+}
+
+/// Linux: unchanged — `$XDG_RUNTIME_DIR` (a systemd-managed, per-user,
+/// tmpfs-backed, already-private directory) with a `/tmp` fallback for
+/// environments without a systemd user session. Linux desktop builds are not
+/// sandboxed, so both are always reachable.
+#[cfg(not(target_os = "macos"))]
 pub fn ipc_socket_path() -> std::path::PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
     std::path::PathBuf::from(runtime_dir).join("beebeeb-daemon.sock")
 }
 
-pub async fn serve_ipc(
-    db: std::sync::Arc<crate::state_db::StateDb>,
-    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
-    cancel: oneshot::Receiver<()>,
-) {
-    serve_ipc_at(ipc_socket_path(), db, bridge, cancel).await
-}
-
-/// Real IPC server, bound to an explicit `path`. `serve_ipc` calls this with the
-/// production `ipc_socket_path()`; tests bind it to a throwaway temp socket so
-/// they can exercise the real accept/dispatch path without touching
-/// `$XDG_RUNTIME_DIR/beebeeb-daemon.sock` (task 1247).
-pub async fn serve_ipc_at(
-    path: std::path::PathBuf,
-    db: std::sync::Arc<crate::state_db::StateDb>,
-    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
-    mut cancel: oneshot::Receiver<()>,
-) {
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).expect("bind IPC socket");
+/// Bind and 0600-harden the daemon's Unix IPC listener at `path`. Split out
+/// of `serve_ipc_at` (task 1524) so a bind failure can be tested in
+/// isolation and, more importantly, so it no longer panics: this used to be
+/// a bare `UnixListener::bind(&path).expect("bind IPC socket")` inside a
+/// fire-and-forget `tokio::spawn`ed task, so a failure (e.g. the sandbox
+/// refusing a path outside the app's container) silently killed the whole
+/// IPC accept loop with no error ever reaching the caller — the readiness
+/// probe just timed out with a generic message. Callers now get the real
+/// `std::io::Error` back and can log/surface it.
+fn bind_ipc_listener(path: &std::path::Path) -> std::io::Result<UnixListener> {
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path)?;
     // Harden the socket file to owner-only (0o600) so no other user can even
     // connect() — defense-in-depth with the per-connection peer-UID check
     // (task 1247). Best-effort: a chmod failure is logged, not fatal. This
@@ -148,10 +207,38 @@ pub async fn serve_ipc_at(
     // non-fatal here since this is a fire-and-forget async server loop.
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             tracing::warn!(error = %e, "failed to chmod IPC socket to 0o600");
         }
     }
+    Ok(listener)
+}
+
+pub async fn serve_ipc(
+    db: std::sync::Arc<crate::state_db::StateDb>,
+    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+    cancel: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    serve_ipc_at(ipc_socket_path(), db, bridge, cancel).await
+}
+
+/// Real IPC server, bound to an explicit `path`. `serve_ipc` calls this with the
+/// production `ipc_socket_path()`; tests bind it to a throwaway temp socket so
+/// they can exercise the real accept/dispatch path without touching the real
+/// production socket path (task 1247).
+///
+/// Returns `Err` if the bind itself fails (see [`bind_ipc_listener`]) —
+/// never panics. A bind failure means the loop below never starts; the
+/// caller is responsible for logging/surfacing the error (`runner.rs` logs
+/// it and records it for `wait_for_file_provider_ipc_ready` to report
+/// verbatim instead of just timing out).
+pub async fn serve_ipc_at(
+    path: std::path::PathBuf,
+    db: std::sync::Arc<crate::state_db::StateDb>,
+    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+    mut cancel: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    let listener = bind_ipc_listener(&path)?;
     tracing::info!("IPC socket listening at {:?}", path);
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
 
@@ -176,6 +263,7 @@ pub async fn serve_ipc_at(
     drop(listener);
     let _ = std::fs::remove_file(&path);
     tracing::info!("IPC socket stopped at {:?}", path);
+    Ok(())
 }
 
 /// Read the connecting peer process's UID from a connected Unix stream.
@@ -769,5 +857,89 @@ mod tests {
         contract.item_kind = ItemKind::Folder;
         contract.content_type = Some("public.folder".into());
         db.set_file_contract_state(&contract).unwrap();
+    }
+
+    // ── Task 1524: macOS IPC socket path + non-panicking bind ──────────────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_ipc_socket_path_is_inside_group_container_not_tmp() {
+        // Regression pin for the actual bug: the daemon must resolve the
+        // socket inside the sandbox-reachable shared App Group container,
+        // never under /tmp or $XDG_RUNTIME_DIR (which the sandbox blocks
+        // entirely, causing the original "Timed out waiting for the local
+        // Beebeeb sync daemon" report).
+        let home = std::path::Path::new("/Users/guuslangelaar");
+        let path = macos_ipc_socket_path_in(home);
+
+        assert!(
+            path.starts_with(home.join("Library").join("Group Containers")),
+            "must live inside the shared App Group container, got {path:?}"
+        );
+        assert!(
+            path.to_str().unwrap().contains(MACOS_APP_GROUP_ID),
+            "must be namespaced under the app's own App Group id, got {path:?}"
+        );
+        assert!(
+            !path.starts_with("/tmp"),
+            "must not fall back to /tmp under the sandbox, got {path:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_ipc_socket_path_fits_sun_path_length_budget() {
+        // sockaddr_un.sun_path on macOS is 104 bytes INCLUDING the NUL
+        // terminator (<sys/un.h>), so the usable path length is 103 bytes.
+        // Exercise a realistically long macOS short username (20 chars,
+        // longer than this dev machine's own "guuslangelaar" at 13, and
+        // longer than macOS's own 20-char "short name" convention allows in
+        // most default cases) to prove there is real headroom, not a value
+        // that only happens to fit this one machine. Built by repetition
+        // (not hand-counted) so the length is exact by construction.
+        let username: String = "x".repeat(20);
+        let home = std::path::PathBuf::from(format!("/Users/{username}"));
+        let home = home.as_path();
+
+        let path = macos_ipc_socket_path_in(home);
+        let byte_len = path.to_str().unwrap().len();
+        assert!(
+            byte_len < 104,
+            "path must fit sockaddr_un.sun_path (104 bytes incl. NUL); \
+             got a {byte_len}-byte path for a 20-char username: {path:?}"
+        );
+    }
+
+    #[test]
+    fn test_bind_ipc_listener_returns_error_instead_of_panicking_on_bad_path() {
+        // A path under a directory that does not exist: UnixListener::bind
+        // must fail with a real OS error (ENOENT), not panic and not
+        // silently succeed. This is the exact failure shape the sandbox
+        // produced on macOS before this fix (bind refused, formerly hidden
+        // behind `.expect()`).
+        let bad_path = std::path::Path::new("/nonexistent-beebeeb-1524-dir/socket.sock");
+
+        let result = std::panic::catch_unwind(|| bind_ipc_listener(bad_path));
+
+        match result {
+            Ok(Ok(_listener)) => panic!("binding under a nonexistent directory must not succeed"),
+            Ok(Err(_io_error)) => {} // expected: a real error, not a panic
+            Err(_) => panic!("bind_ipc_listener must return Err on a bind failure, not panic"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bind_ipc_listener_succeeds_and_chmods_0600_on_a_valid_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("valid.sock");
+
+        let listener = bind_ipc_listener(&sock_path).expect("bind must succeed on a valid, writable path");
+        assert!(sock_path.exists(), "the socket file must exist after a successful bind");
+        let mode = std::fs::metadata(&sock_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the socket file must be chmod 0o600, got {mode:o}");
+
+        drop(listener);
     }
 }

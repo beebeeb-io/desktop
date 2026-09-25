@@ -523,6 +523,12 @@ fn spawn_heartbeat_producer(
 pub struct EngineRunner {
     cancel: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    /// `None` until (and unless) the Unix-socket IPC accept loop fails to
+    /// bind (task 1524). Shared with the spawned task so a caller waiting on
+    /// Finder/File-Provider readiness — [`wait_for_file_provider_ipc_ready`]
+    /// in `lib.rs` — can surface the REAL `std::io::Error` (e.g. the macOS
+    /// sandbox refusing the path) instead of just a generic connect timeout.
+    ipc_bind_error: Arc<Mutex<Option<String>>>,
 }
 
 impl EngineRunner {
@@ -541,15 +547,37 @@ impl EngineRunner {
         sync_paused: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
+        let ipc_bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let ipc_bind_error_for_task = ipc_bind_error.clone();
 
         let task = tokio::spawn(async move {
-            run(app, sync_root, session_token, master_key, rx, sync_paused).await;
+            run(
+                app,
+                sync_root,
+                session_token,
+                master_key,
+                rx,
+                sync_paused,
+                ipc_bind_error_for_task,
+            )
+            .await;
         });
 
         Self {
             cancel: Some(tx),
             task: Some(task),
+            ipc_bind_error,
         }
+    }
+
+    /// A cheap clone of the shared IPC-bind-status cell (task 1524). `None`
+    /// until the accept loop's bind attempt has run AND failed; still `None`
+    /// after a successful bind (there is nothing to report — the readiness
+    /// probe's own socket connect is the success signal). Callers poll this
+    /// alongside that probe so a real bind error surfaces immediately
+    /// instead of only after the full readiness timeout.
+    pub fn ipc_bind_error_handle(&self) -> Arc<Mutex<Option<String>>> {
+        self.ipc_bind_error.clone()
     }
 
     /// Signal the runner to stop and wait for it to do so. Drops the
@@ -591,7 +619,14 @@ async fn run(
     master_key: [u8; 32],
     mut cancel: oneshot::Receiver<()>,
     sync_paused: Arc<AtomicBool>,
+    ipc_bind_error: Arc<Mutex<Option<String>>>,
 ) {
+    // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
+    // no Unix-socket daemon endpoint (see that block's own doc comment), so
+    // the parameter would otherwise go unused on a Windows build.
+    #[cfg(not(unix))]
+    let _ = &ipc_bind_error;
+
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.
@@ -705,8 +740,26 @@ async fn run(
     let mut ipc_task = {
         let db_for_ipc = db.clone();
         let bridge_for_ipc = bridge.clone();
+        let ipc_bind_error = ipc_bind_error.clone();
         tokio::spawn(async move {
-            crate::ipc_socket::serve_ipc(db_for_ipc, bridge_for_ipc, ipc_cancel_rx).await;
+            // A bind failure (task 1524 — e.g. the macOS sandbox refusing a
+            // socket path outside the app's container) no longer panics this
+            // task silently: `serve_ipc` returns the real `std::io::Error`,
+            // which is logged here AND recorded for
+            // `wait_for_file_provider_ipc_ready` (lib.rs) to report verbatim
+            // to the "Install Finder location" caller instead of a generic
+            // timeout.
+            if let Err(e) = crate::ipc_socket::serve_ipc(db_for_ipc, bridge_for_ipc, ipc_cancel_rx).await {
+                let msg = format!("{e}");
+                tracing::error!(
+                    error = %msg,
+                    path = %crate::ipc_socket::ipc_socket_path().display(),
+                    "IPC socket failed to bind; Finder/File Provider cannot reach the sync daemon this session"
+                );
+                if let Ok(mut guard) = ipc_bind_error.lock() {
+                    *guard = Some(msg);
+                }
+            }
         })
     };
 

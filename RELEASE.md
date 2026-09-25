@@ -354,7 +354,12 @@ Manual cleanup checklist while the helper is not yet shipped:
 pkill -x Beebeeb || true
 
 # Remove stale IPC/socket artifacts if present. Do not use sudo unless needed.
-rm -f "${TMPDIR%/}/beebeeb-fileprovider.sock"
+# macOS (task 1524): the socket lives inside the shared App Group container,
+# NOT /tmp or $TMPDIR — the sandbox cannot bind there. See
+# `src-tauri/src/ipc_socket.rs::ipc_socket_path` for the source of truth.
+rm -f "$HOME/Library/Group Containers/R8352WDJJR.io.beebeeb.app.fileprovider/ipc.sock"
+# Linux only: $XDG_RUNTIME_DIR (or /tmp fallback) — unsandboxed, unchanged.
+rm -f "${XDG_RUNTIME_DIR:-/tmp}/beebeeb-daemon.sock"
 rm -f "$HOME/Library/Application Support/io.beebeeb.app/.beebeeb-sync.lock"
 
 # Inspect local app containers before deletion.

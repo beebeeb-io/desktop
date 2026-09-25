@@ -16,11 +16,47 @@ enum BeebeebIPCError: LocalizedError {
 }
 
 final class XPCBridge {
+    /// The App Group shared with the containing app — see
+    /// `BeebeebFileProvider.entitlements`' `com.apple.security.application-
+    /// groups` and `src-tauri/entitlements.plist`'s identical entry. Mirrors
+    /// `crate::ipc_socket::MACOS_APP_GROUP_ID` on the Rust side (task 1524);
+    /// keep both, plus the two entitlements plists, in sync if it ever
+    /// changes.
+    private static let appGroupID = "R8352WDJJR.io.beebeeb.app.fileprovider"
+
+    /// Deliberately short — `sockaddr_un.sun_path` on macOS is 104 bytes
+    /// including the NUL terminator, and the group-container prefix alone
+    /// already uses most of that budget for a real username. Must match
+    /// `crate::ipc_socket::MACOS_IPC_SOCKET_FILENAME`.
+    private static let ipcSocketFileName = "ipc.sock"
+
     private let socketPath: String
 
+    /// Task 1524: this extension is sandboxed (`com.apple.security.app-
+    /// sandbox`), so `/tmp` and `$XDG_RUNTIME_DIR` (which macOS doesn't set
+    /// anyway — that env var is a Linux/systemd convention) are NOT
+    /// reachable; only the app's own container and shared App Group
+    /// containers are. `containerURL(forSecurityApplicationGroupIdentifier:)`
+    /// is the real, sandbox-aware way to resolve that shared directory — the
+    /// daemon (Rust side) resolves the identical path by construction
+    /// (`ipc_socket::ipc_socket_path`) since a plain, unsigned `cargo test`
+    /// binary can't call this API at all.
     init() {
-        let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp"
-        self.socketPath = "\(runtimeDir)/beebeeb-daemon.sock"
+        if let groupContainer = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupID
+        ) {
+            self.socketPath = groupContainer.appendingPathComponent(Self.ipcSocketFileName).path
+        } else {
+            // Should not happen in a properly provisioned build (both
+            // targets declare the same app-group entitlement) — falling
+            // back to the OLD, sandbox-unreachable path rather than crashing
+            // means every IPC call below just fails closed with
+            // `.daemonUnavailable`, which is the same failure shape as a
+            // genuinely-not-running daemon, and is visible via this log.
+            NSLog("BeebeebFileProvider: could not resolve app-group container for \(Self.appGroupID); IPC will not reach the daemon")
+            let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp"
+            self.socketPath = "\(runtimeDir)/beebeeb-daemon.sock"
+        }
     }
 
     func enumerate(containerIdentifier: NSFileProviderItemIdentifier) throws -> [BeebeebProviderItem] {
