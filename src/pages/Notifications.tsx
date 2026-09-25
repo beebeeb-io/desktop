@@ -78,7 +78,7 @@ export default function Notifications() {
       })
   }, [showToast])
 
-  if (!config) return <p style={{ color: '#9ca3af' }}>Loading…</p>
+  if (!config) return <p style={{ color: 'var(--ink-3)' }}>Loading…</p>
 
   const toggle = (key: ToggleSpec['key']) => {
     const next = { ...config, [key]: !config[key] }
@@ -122,7 +122,7 @@ export default function Notifications() {
               />
               <label htmlFor={inputId} style={{ cursor: 'pointer' }}>
                 <span style={{ display: 'block', fontWeight: 500, fontSize: 14 }}>{t.label}</span>
-                <span style={{ display: 'block', color: '#6b7280', fontSize: 12 }}>
+                <span style={{ display: 'block', color: 'var(--ink-3)', fontSize: 12 }}>
                   {t.description}
                 </span>
               </label>

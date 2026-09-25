@@ -30,9 +30,26 @@
   --amber-soft:  oklch(0.94 0.06 90);
   --amber-bg:    oklch(0.97 0.03 92);
 
+  /*
+   * Text/glyph color for content painted directly on a solid --amber fill
+   * (the brand mark's "b", amber CTA button labels, the active onboarding
+   * step number). --amber itself does NOT change between themes, so the
+   * color placed on top of it must not either — using the theme-flipping
+   * --ink here (as several rules did pre-1523) put near-white text on
+   * amber in dark mode, which is close to unreadable. Deliberately declared
+   * ONCE and never redefined in the dark-mode blocks below.
+   */
+  --amber-ink: oklch(0.18 0.01 70);
+
   /* Status */
   --green:  oklch(0.72 0.16 155);
   --red:    oklch(0.62 0.21 25);
+
+  /* Diff highlighting (conflict resolution window) — soft, theme-aware
+   * tints of --green/--red rather than the flat Tailwind gray-50-ish hexes
+   * (#dcfce7/#fee2e2) that used to be hardcoded there. */
+  --diff-add-bg:    oklch(0.94 0.05 155);
+  --diff-remove-bg: oklch(0.93 0.05 25);
 
   /* Shadows */
   --shadow-1: 0 1px 2px rgba(24, 20, 10, 0.04), 0 1px 1px rgba(24, 20, 10, 0.03);
@@ -90,6 +107,9 @@
   --green:  oklch(0.74 0.16 155);
   --red:    oklch(0.68 0.21 25);
 
+  --diff-add-bg:    oklch(0.32 0.06 155);
+  --diff-remove-bg: oklch(0.32 0.07 25);
+
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22), 0 1px 1px rgba(0, 0, 0, 0.18);
   --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.24), 0 4px 14px rgba(0, 0, 0, 0.18);
   --shadow-3: 0 4px 10px rgba(0, 0, 0, 0.28), 0 24px 48px -12px rgba(0, 0, 0, 0.36);
@@ -118,6 +138,9 @@
 
     --green:  oklch(0.74 0.16 155);
     --red:    oklch(0.68 0.21 25);
+
+    --diff-add-bg:    oklch(0.32 0.06 155);
+    --diff-remove-bg: oklch(0.32 0.07 25);
 
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22), 0 1px 1px rgba(0, 0, 0, 0.18);
     --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.24), 0 4px 14px rgba(0, 0, 0, 0.18);
@@ -232,7 +255,7 @@ button {
   height: 32px;
   border-radius: 8px;
   background: var(--amber);
-  color: var(--ink);
+  color: var(--amber-ink);
   display: grid;
   place-items: center;
   font-weight: 800;
@@ -804,7 +827,7 @@ button {
 .button.amber {
   border-color: var(--amber);
   background: var(--amber);
-  color: var(--ink);
+  color: var(--amber-ink);
 }
 
 .button.danger {
@@ -1103,7 +1126,7 @@ button {
 
 .step-row.active .step-number {
   background: var(--amber);
-  color: var(--ink);
+  color: var(--amber-ink);
 }
 
 .auth-card {

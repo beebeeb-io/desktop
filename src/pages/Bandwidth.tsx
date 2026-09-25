@@ -98,7 +98,7 @@ export default function Bandwidth() {
     else writeTimer.current = setTimeout(fire, DEBOUNCE_MS)
   }
 
-  if (!config) return <p style={{ color: '#9ca3af' }}>Loading…</p>
+  if (!config) return <p style={{ color: 'var(--ink-3)' }}>Loading…</p>
 
   const update = (patch: Partial<DesktopConfig>, immediate = false) => {
     const next = { ...config, ...patch }
@@ -126,7 +126,7 @@ export default function Bandwidth() {
           style={{ accentColor: 'var(--amber)' }}
         />
         <span style={{ fontWeight: 500 }}>Pause sync</span>
-        <span style={{ color: '#9ca3af', fontSize: 12 }}>
+        <span style={{ color: 'var(--ink-3)', fontSize: 12 }}>
           Stops upload + download until resumed.
         </span>
       </label>
@@ -141,7 +141,7 @@ export default function Bandwidth() {
           }}
         >
           <span style={{ fontWeight: 500 }}>Upload limit</span>
-          <span style={{ color: '#6b7280' }}>
+          <span style={{ color: 'var(--ink-3)' }}>
             {formatLimit(config.upload_kbps_limit)}
           </span>
         </div>
@@ -168,7 +168,7 @@ export default function Bandwidth() {
           }}
         >
           <span style={{ fontWeight: 500 }}>Download limit</span>
-          <span style={{ color: '#6b7280' }}>
+          <span style={{ color: 'var(--ink-3)' }}>
             {formatLimit(config.download_kbps_limit)}
           </span>
         </div>
@@ -185,7 +185,7 @@ export default function Bandwidth() {
         />
       </div>
 
-      <p style={{ marginTop: 16, fontSize: 12, color: '#9ca3af' }}>
+      <p style={{ marginTop: 16, fontSize: 12, color: 'var(--ink-3)' }}>
         Drag a slider to the far left for unlimited.
       </p>
     </div>

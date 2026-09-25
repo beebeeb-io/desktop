@@ -149,7 +149,7 @@ export default function SyncFolder() {
       <div className="grid two">
         <div className="panel">
           <h2 className="section-title">Location</h2>
-          <div className="panel" style={{ background: '#faf8f5' }}>
+          <div className="panel" style={{ background: 'var(--paper-2)' }}>
             <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
             <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
               {installState?.path ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? 'No location selected')}
@@ -161,7 +161,7 @@ export default function SyncFolder() {
                 Choose location
               </button>
             )}
-            <button className="button primary" onClick={() => void installFinder()} disabled={busy}>
+            <button className="button amber" onClick={() => void installFinder()} disabled={busy}>
               Install in Finder
             </button>
             <button className="button" onClick={() => void openFinder()} disabled={(!isMacos && !syncRoot) || busy}>

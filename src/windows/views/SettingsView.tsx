@@ -29,7 +29,7 @@ import {
   shellIntegrationLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
-import { usePlatform, usePlatformName, type PlatformName } from '../../platform'
+import { usePlatform, usePlatformName, thisDeviceNoun, type PlatformName } from '../../platform'
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
@@ -120,13 +120,6 @@ const THEME_OPTIONS: Array<{ value: DesktopTheme; label: string; hint: string }>
   { value: 'dark', label: 'Dark', hint: 'Use the dark desktop palette.' },
   { value: 'system', label: 'System', hint: 'Follow Windows or macOS.' },
 ]
-
-/** "this Mac" / "this PC" / "this device" — the noun this shell uses for the local machine. */
-function thisDeviceNoun(platform: PlatformName): string {
-  if (platform === 'macos') return 'this Mac'
-  if (platform === 'linux') return 'this device'
-  return 'this PC'
-}
 
 function signInToOsLine(platform: PlatformName): string {
   if (platform === 'macos') return 'Beebeeb launches automatically and resumes syncing when you sign in to macOS.'
