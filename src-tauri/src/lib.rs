@@ -1406,14 +1406,20 @@ async fn start_engine_for_pending_finder_install(
     let paused = DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false);
     acct.sync_paused.store(paused, Ordering::Relaxed);
 
-    let started = {
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let (started, ipc_bind_error) = {
         let pause_flag = acct.sync_paused.clone();
         let mut engine_slot = acct.engine.lock().await;
-        if engine_slot.is_some() {
-            false
+        if let Some(existing) = engine_slot.as_ref() {
+            // Already running (e.g. a retry after a transient failure) —
+            // reuse its bind-status handle so we still see a REAL bind
+            // error instead of just re-timing-out silently.
+            (false, existing.ipc_bind_error_handle())
         } else {
-            *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag));
-            true
+            let runner = EngineRunner::spawn(app, root, token, key, pause_flag);
+            let bind_error = runner.ipc_bind_error_handle();
+            *engine_slot = Some(runner);
+            (true, bind_error)
         }
     };
 
@@ -1422,7 +1428,7 @@ async fn start_engine_for_pending_finder_install(
     // ready. Windows has no such socket (the Cloud Files provider is
     // in-process), so the readiness probe is unix-only.
     #[cfg(unix)]
-    if let Err(error) = wait_for_file_provider_ipc_ready().await {
+    if let Err(error) = wait_for_file_provider_ipc_ready(ipc_bind_error).await {
         stop_pending_finder_install_engine(state, started).await;
         return Err(error);
     }
@@ -1441,8 +1447,15 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     }
 }
 
+/// Poll for the daemon's IPC socket to come up, OR return immediately with
+/// the real bind error if the accept loop already failed to bind (task
+/// 1524) — e.g. the macOS sandbox refusing a socket path outside the app's
+/// container. Before this, a bind failure panicked the fire-and-forget IPC
+/// task silently and this function always burned the full 3-second timeout
+/// before returning a generic "Timed out…" message with no indication of
+/// the real cause.
 #[cfg(unix)]
-async fn wait_for_file_provider_ipc_ready() -> Result<(), String> {
+async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sync::Mutex<Option<String>>>) -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
     use tokio::time::{Duration, Instant, sleep, timeout};
@@ -1453,6 +1466,12 @@ async fn wait_for_file_provider_ipc_ready() -> Result<(), String> {
         .map_err(|e| format!("encode IPC readiness probe: {e}"))?;
 
     loop {
+        if let Ok(guard) = ipc_bind_error.lock()
+            && let Some(bind_error) = guard.as_ref()
+        {
+            return Err(format!("Could not start the local Beebeeb sync socket: {bind_error}"));
+        }
+
         match timeout(Duration::from_millis(300), UnixStream::connect(&path)).await {
             Ok(Ok(mut stream)) => {
                 let mut response = vec![0u8; 4096];
