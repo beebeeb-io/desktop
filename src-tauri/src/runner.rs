@@ -593,6 +593,10 @@ pub struct EngineRunner {
     /// in `lib.rs` — can surface the REAL `std::io::Error` (e.g. the macOS
     /// sandbox refusing the path) instead of just a generic connect timeout.
     ipc_bind_error: Arc<Mutex<Option<String>>>,
+    /// Cooperative stop flag (task 1538 Codex P1). Shared with the
+    /// [`EngineBridge`] `run` builds, so `abort()` can flip it BEFORE even
+    /// sending the tick loop's cancel oneshot.
+    stopping: Arc<AtomicBool>,
 }
 
 impl EngineRunner {
@@ -616,6 +620,8 @@ impl EngineRunner {
         let (tx, rx) = oneshot::channel::<()>();
         let ipc_bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let ipc_bind_error_for_task = ipc_bind_error.clone();
+        let stopping: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let stopping_for_task = stopping.clone();
 
         let task = tokio::spawn(async move {
             run(
@@ -623,10 +629,13 @@ impl EngineRunner {
                 sync_root,
                 session_token,
                 master_key,
-                rx,
-                sync_paused,
-                auth_health,
-                ipc_bind_error_for_task,
+                RunnerControls {
+                    cancel: rx,
+                    sync_paused,
+                    auth_health,
+                    ipc_bind_error: ipc_bind_error_for_task,
+                    stopping: stopping_for_task,
+                },
             )
             .await;
         });
@@ -635,6 +644,7 @@ impl EngineRunner {
             cancel: Some(tx),
             task: Some(task),
             ipc_bind_error,
+            stopping,
         }
     }
 
@@ -648,21 +658,92 @@ impl EngineRunner {
         self.ipc_bind_error.clone()
     }
 
-    /// Signal the runner to stop and wait for it to do so. Drops the
-    /// lock file as part of teardown. Idempotent — calling twice is a
-    /// no-op.
-    pub async fn abort(mut self) {
-        if let Some(tx) = self.cancel.take() {
-            // Ignore send errors — receiver may have already exited.
-            let _ = tx.send(());
-        }
-        if let Some(handle) = self.task.take() {
-            // Bound the wait so a misbehaving tick can't hang
-            // shutdown. The lock file's Drop releases regardless once
-            // the task is forced down.
-            let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
-        }
+    /// Signal the runner to stop and wait for CONFIRMED termination. Drops
+    /// the lock file as part of teardown. Idempotent — calling twice is a
+    /// no-op (the second call has nothing left to wait on and returns
+    /// `true` immediately).
+    ///
+    /// Returns `true` only when the runner's task is actually gone — never
+    /// merely "we gave up waiting" (task 1538 Codex P1, PR #49 lib.rs:1087
+    /// thread). The old version just dropped the `JoinHandle` after a 3s
+    /// timeout, which DETACHES rather than cancels the task: the engine
+    /// (and everything nested inside its single tokio task — the IPC socket
+    /// server, the Windows upload watcher) could keep running after a
+    /// caller believed sign-out/lock had finished, still holding the
+    /// session master key and able to drain/enqueue operations behind a
+    /// purge's back. Callers that need that guarantee — `clear_session_impl`
+    /// gating its cross-account purge on it — must check the return value
+    /// and refuse to proceed when it's `false`.
+    pub async fn abort(mut self) -> bool {
+        // Flip the cooperative flag FIRST, before the cancel oneshot even
+        // sends: `EngineBridge::is_stopping()` (checked by
+        // `process_due_operations` before every operation and by
+        // `queue_finder_create`/`_modify`/`_delete` before enqueuing) then
+        // observes the stop request immediately, without waiting for the
+        // tick loop to next reach its `tokio::select!` boundary.
+        self.stopping.store(true, Ordering::SeqCst);
+        stop_task_and_confirm(self.cancel.take(), self.task.take(), GRACEFUL_ABORT_TIMEOUT, FORCE_ABORT_TIMEOUT).await
     }
+}
+
+/// How long [`EngineRunner::abort`] waits for the tick loop to reach its
+/// cancel-select boundary on its own after the cooperative stop flag + the
+/// cancel oneshot are both signaled.
+const GRACEFUL_ABORT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long, after a forced [`tokio::task::JoinHandle::abort`], we wait for
+/// the runtime to confirm the task is actually gone. Aborting a task that is
+/// suspended mid-`.await` (the common case — mid network call) drops its
+/// future essentially immediately; this is a generous upper bound, not the
+/// expected latency.
+const FORCE_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Signal `cancel` (if any), wait up to `graceful` for `task` to finish on
+/// its own, and — only if that times out — force-abort it and wait up to
+/// `force` for the runtime to confirm it has actually terminated.
+///
+/// Returns `true` only when the task is CONFIRMED gone (finished gracefully,
+/// or the forced abort was observed to complete within `force`); `false`
+/// only in the pathological case where even a forced abort couldn't be
+/// confirmed within `force` (e.g. the task is blocked in non-async code with
+/// no `.await` point to cancel at).
+///
+/// Standalone and Tauri-independent on purpose: this is the part of
+/// [`EngineRunner::abort`] worth unit-testing directly, without spinning up
+/// a real `AppHandle` + sync engine.
+async fn stop_task_and_confirm(
+    cancel: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+    graceful: Duration,
+    force: Duration,
+) -> bool {
+    if let Some(tx) = cancel {
+        // Ignore send errors — receiver may have already exited.
+        let _ = tx.send(());
+    }
+    let Some(mut handle) = task else {
+        // Nothing left to wait on — either already aborted, or the task
+        // never finished spawning. Either way there is nothing that could
+        // still be running.
+        return true;
+    };
+
+    if tokio::time::timeout(graceful, &mut handle).await.is_ok() {
+        return true;
+    }
+
+    // Graceful stop timed out. This is where the pre-fix code just dropped
+    // `handle` here, detaching the task instead of cancelling it. Force it
+    // down for real, then wait to confirm — not just fire-and-hope.
+    tracing::warn!("engine graceful stop timed out; force-aborting the task");
+    handle.abort();
+    let confirmed = tokio::time::timeout(force, handle).await.is_ok();
+    if !confirmed {
+        tracing::error!(
+            "engine did not confirm termination even after a forced abort; it may still be running"
+        );
+    }
+    confirmed
 }
 
 impl Drop for EngineRunner {
@@ -676,20 +757,37 @@ impl Drop for EngineRunner {
     }
 }
 
+/// Shared control handles [`run`]'s tick loop reads/writes for its whole
+/// lifetime, bundled into one struct rather than passed as separate `run`
+/// parameters — task 1538 Codex P1: adding `stopping` pushed the previous
+/// flat parameter list to 8, past clippy's `too_many_arguments` threshold.
+/// `auth_health` (task 1546 finding 5) joined the struct for the same
+/// reason rather than reopening that flat list.
+struct RunnerControls {
+    cancel: oneshot::Receiver<()>,
+    sync_paused: Arc<AtomicBool>,
+    auth_health: Arc<AuthHealth>,
+    ipc_bind_error: Arc<Mutex<Option<String>>>,
+    stopping: Arc<AtomicBool>,
+}
+
 /// The runner task body. Acquires the lock, opens the state DB,
 /// builds the API client + engine bridge, ticks every
 /// [`TICK_INTERVAL`] running [`sync_tick`], exits when the cancel
 /// channel fires.
-async fn run(
-    app: AppHandle,
-    sync_root: PathBuf,
-    session_token: String,
-    master_key: [u8; 32],
-    mut cancel: oneshot::Receiver<()>,
-    sync_paused: Arc<AtomicBool>,
-    auth_health: Arc<AuthHealth>,
-    ipc_bind_error: Arc<Mutex<Option<String>>>,
-) {
+async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_key: [u8; 32], controls: RunnerControls) {
+    // Task 1538 Codex P1: destructured immediately so the rest of this
+    // (already long-standing) function body is untouched — every field
+    // below is used exactly as the old flat `cancel`/`sync_paused`/
+    // `auth_health`/`ipc_bind_error`/`stopping` parameters were.
+    let RunnerControls {
+        mut cancel,
+        sync_paused,
+        auth_health,
+        ipc_bind_error,
+        stopping,
+    } = controls;
+
     // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
     // no Unix-socket daemon endpoint (see that block's own doc comment), so
     // the parameter would otherwise go unused on a Windows build.
@@ -754,7 +852,11 @@ async fn run(
     }
 
     let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api.clone()));
+    // Shares `stopping` with `EngineRunner::abort` (task 1538 Codex P1) so
+    // this bridge — and every clone of it handed to the IPC socket server
+    // (below) and the Windows upload watcher — observes a stop request the
+    // instant `abort()` sets it, not just at this loop's next tick boundary.
+    let bridge = Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping));
 
     // ── Heartbeat telemetry (the WRITE/PRODUCE side of the Bandwidth view) ──
     //
@@ -1410,6 +1512,82 @@ fn _unused_path(_p: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    // ── EngineRunner::abort authoritative-stop mechanics (task 1538 Codex P1) ──
+
+    /// A task that promptly observes its cancel signal is confirmed stopped
+    /// well within the graceful window — the common, happy-path case.
+    #[tokio::test]
+    async fn stop_task_and_confirm_returns_true_for_a_cooperative_task() {
+        let (tx, rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = rx.await;
+        });
+
+        let confirmed =
+            stop_task_and_confirm(Some(tx), Some(task), Duration::from_millis(200), Duration::from_millis(200)).await;
+
+        assert!(confirmed, "a task that honors cancel must be confirmed stopped");
+    }
+
+    /// The regression test for the actual bug: a task that never observes
+    /// its cancel signal (the real-world case is a single tick body stuck
+    /// mid-network-call, well past its last `tokio::select!` check) must
+    /// still be confirmed stopped — and, more importantly, must ACTUALLY
+    /// stop running, not merely be abandoned.
+    ///
+    /// The pre-fix `EngineRunner::abort` just dropped the `JoinHandle` after
+    /// its graceful timeout, which detaches rather than cancels it: swap
+    /// this function's force-abort branch back to a bare `drop(handle)` (no
+    /// `handle.abort()`, no confirmation wait) to reproduce that — the
+    /// second assertion here (`ticks` unchanged after the function returns)
+    /// is what would catch it, since the loop would keep incrementing
+    /// `ticks` in the background forever. This was reasoned through against
+    /// the pre-fix code rather than executed as a live mutation in this
+    /// session (a shared-machine disk-space guard stopped further `cargo`
+    /// builds partway through gating — see the task report).
+    #[tokio::test]
+    async fn stop_task_and_confirm_force_aborts_a_task_that_never_observes_cancel() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticks_for_task = ticks.clone();
+        // Intentionally unused by the task below — simulates a tick body
+        // that never reaches its own `tokio::select!` boundary within this
+        // test's short timeouts, so only a REAL forced abort can stop it.
+        let (_tx, _rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            loop {
+                ticks_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let confirmed =
+            stop_task_and_confirm(Some(_tx), Some(task), Duration::from_millis(30), Duration::from_millis(300)).await;
+
+        assert!(
+            confirmed,
+            "a forced abort of a stuck task must be confirmed, not just given up on"
+        );
+
+        let ticks_at_return = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            ticks_at_return,
+            "the task must have ACTUALLY stopped — a detached task would keep incrementing here"
+        );
+    }
+
+    /// `cancel: None` / `task: None` (the idempotent "already aborted"
+    /// shape `EngineRunner::abort`'s `Option::take()`s produce on a second
+    /// call) has nothing left to confirm and must report success rather
+    /// than hang or falsely report failure.
+    #[tokio::test]
+    async fn stop_task_and_confirm_is_idempotent_with_nothing_left_to_wait_on() {
+        let confirmed = stop_task_and_confirm(None, None, Duration::from_millis(50), Duration::from_millis(50)).await;
+        assert!(confirmed);
+    }
 
     // ── AuthHealth (task 1546 Codex round 2, finding 5) ────────────────────
 
