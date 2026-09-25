@@ -757,6 +757,9 @@ impl EngineBridge {
         // 3. Hand the original path back to the server's current version.
         let edit_on_disk = original_disk.is_file() && files_have_same_bytes(&original_disk, &payload_path)?;
         if edit_on_disk {
+            // Our own rename: keep the watcher from echoing it to the server as
+            // a user rename of the ORIGINAL file to the copy's name.
+            crate::watcher::suppress_engine_rename(&original_disk);
             std::fs::rename(&original_disk, &copy_disk)
                 .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", original_disk.display(), copy_disk.display()))?;
             if let Err(e) = self.hydrate_file(original_id, &original_disk, &[sync_root]).await {
@@ -2936,6 +2939,7 @@ impl EngineBridge {
         }
         let conflict_path = original.with_file_name(&conflict_name);
 
+        crate::watcher::suppress_engine_rename(&original);
         std::fs::rename(&original, &conflict_path)
             .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", original.display(), conflict_path.display()))?;
 
@@ -9246,11 +9250,14 @@ mod tests {
     const STALE_ORIG_ID: &str = "5e0c0b1a-7f55-4c47-9a57-6a3f00000001";
     const STALE_SIBLING_SERVER_ID: &str = "5e0c0b1a-7f55-4c47-9a57-6a3f00000002";
 
-    /// Scripted mock: answers each request through `respond` and exits once it
-    /// has been idle for 400 ms after at least one request (hard cap 10 s).
+    /// Scripted mock: answers each request through `respond` until the test
+    /// calls [`ScriptedMockServer::finish`] (hard cap 60 s). It never stops on
+    /// its own after an idle window, so a slow client on a loaded machine
+    /// cannot find it already closed.
     struct ScriptedMockServer {
         base_url: String,
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
         handle: thread::JoinHandle<()>,
     }
 
@@ -9261,9 +9268,10 @@ mod tests {
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
             let server_requests = Arc::clone(&requests);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_stop = Arc::clone(&stop);
             let handle = thread::spawn(move || {
                 let started = std::time::Instant::now();
-                let mut last_seen = std::time::Instant::now();
                 loop {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
@@ -9282,14 +9290,12 @@ mod tests {
                                     stream.write_all(&body).unwrap();
                                 }
                             }
-                            last_seen = std::time::Instant::now();
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            let seen_any = !server_requests.lock().unwrap().is_empty();
-                            if seen_any && last_seen.elapsed() >= Duration::from_millis(400) {
+                            if server_stop.load(Ordering::SeqCst) {
                                 break;
                             }
-                            if started.elapsed() >= Duration::from_secs(10) {
+                            if started.elapsed() >= Duration::from_secs(60) {
                                 break;
                             }
                             std::thread::sleep(Duration::from_millis(10));
@@ -9301,11 +9307,13 @@ mod tests {
             Self {
                 base_url,
                 requests,
+                stop,
                 handle,
             }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
+            self.stop.store(true, Ordering::SeqCst);
             self.handle.join().unwrap();
             Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
         }
@@ -9553,6 +9561,22 @@ mod tests {
         assert_eq!(
             bridge.db.get_file(STALE_SIBLING_SERVER_ID).unwrap().unwrap().status,
             FileStatus::Local
+        );
+
+        // The keep-both rename is the ENGINE's, not the user's: when the OS
+        // echoes it as a rename NOTIFY (Windows Cloud Files), the watcher must
+        // not queue a server rename of the ORIGINAL file to the copy's name.
+        crate::watcher::dispatch_rename_event(
+            &bridge,
+            &sync_root,
+            &sync_root.join("shared.txt"),
+            &sync_root.join(&name),
+        )
+        .await;
+        let queued = bridge.db.list_due_operations(i64::MAX).unwrap();
+        assert!(
+            queued.is_empty(),
+            "the engine's keep-both rename must not propagate as a user rename: {queued:?}"
         );
     }
 
