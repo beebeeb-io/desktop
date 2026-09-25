@@ -23,6 +23,13 @@ export const T = {
   green: 'var(--green)',
   fontSans: 'var(--font-sans)',
   fontMono: 'var(--font-mono)',
+  // Windows-shell-only composite/overlay colors — see the --win-* comment in
+  // design.css for why these aren't yet dark-mode-hand-tuned.
+  scrim: 'var(--win-scrim)',
+  scrimSoft: 'var(--win-scrim-soft)',
+  knobShadow: 'var(--win-knob-shadow)',
+  knobShadow2: 'var(--win-knob-shadow-2)',
+  dialogShadow: 'var(--win-dialog-shadow)',
 } as const
 
 // ── Mini icon set ────────────────────────────────────────────────────────────
@@ -611,7 +618,7 @@ export function Modal({
         position: 'fixed',
         inset: 0,
         zIndex: 1000,
-        background: 'rgba(24, 20, 10, 0.38)',
+        background: T.scrim,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

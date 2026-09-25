@@ -310,7 +310,7 @@ export default function KnownFolderOnboarding({
         position: 'fixed' as const,
         inset: 0,
         zIndex: 1000,
-        background: 'rgba(24, 20, 10, 0.38)',
+        background: T.scrim,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

@@ -57,6 +57,26 @@
   --shadow-3: 0 4px 10px rgba(24, 20, 10, 0.06), 0 24px 48px -12px rgba(24, 20, 10, 0.12);
   --ring: 0 0 0 3px oklch(0.94 0.06 90 / 0.9);
 
+  /*
+   * Windows-shell-only composite/overlay colors (src/windows/*, WindowsApp.tsx
+   * only). Token-ized 2026-09-25 to clear tests/noHardcodedThemeColors.test.ts
+   * once it was extended (code review, PR #45) to also catch rgb()/rgba()/
+   * hsl()/hsla() literals — these 5 call sites were hardcoded rgba() and the
+   * extended guard correctly flagged them. Deliberately kept at their
+   * PRE-EXISTING numeric values in every theme block below (light, explicit
+   * dark, prefers-color-scheme dark) — i.e. no visual change from before this
+   * patch. --shadow-1/2/3 above got a real dark-mode-specific hand-tune (the
+   * ratios differ per shadow, so it was eyeballed, not formulaic); doing the
+   * same for these needs a visual check this lane could not do (never
+   * launches the built app — see task 1523 Notes). Follow-up: give these a
+   * real dark-mode pass the way --shadow-* got.
+   */
+  --win-scrim:         rgba(24, 20, 10, 0.38);
+  --win-scrim-soft:    rgba(30, 28, 24, 0.18);
+  --win-knob-shadow:   0 1px 3px rgba(0, 0, 0, 0.25);
+  --win-knob-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --win-dialog-shadow: 0 24px 70px rgba(31, 28, 20, 0.22);
+
   /* Type */
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', ui-sans-serif, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -115,6 +135,14 @@
   --shadow-3: 0 4px 10px rgba(0, 0, 0, 0.28), 0 24px 48px -12px rgba(0, 0, 0, 0.36);
   --ring: 0 0 0 3px oklch(0.36 0.08 86 / 0.85);
 
+  /* --win-* : same pre-existing values as :root — see the comment there. Not
+   * yet hand-tuned for dark mode (no visual check available in this lane). */
+  --win-scrim:         rgba(24, 20, 10, 0.38);
+  --win-scrim-soft:    rgba(30, 28, 24, 0.18);
+  --win-knob-shadow:   0 1px 3px rgba(0, 0, 0, 0.25);
+  --win-knob-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --win-dialog-shadow: 0 24px 70px rgba(31, 28, 20, 0.22);
+
   color-scheme: dark;
 }
 
@@ -146,6 +174,13 @@
     --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.24), 0 4px 14px rgba(0, 0, 0, 0.18);
     --shadow-3: 0 4px 10px rgba(0, 0, 0, 0.28), 0 24px 48px -12px rgba(0, 0, 0, 0.36);
     --ring: 0 0 0 3px oklch(0.36 0.08 86 / 0.85);
+
+    /* --win-* : same pre-existing values as :root — see the comment there. */
+    --win-scrim:         rgba(24, 20, 10, 0.38);
+    --win-scrim-soft:    rgba(30, 28, 24, 0.18);
+    --win-knob-shadow:   0 1px 3px rgba(0, 0, 0, 0.25);
+    --win-knob-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --win-dialog-shadow: 0 24px 70px rgba(31, 28, 20, 0.22);
 
     color-scheme: dark;
   }
@@ -830,6 +865,24 @@ button {
   color: var(--amber-ink);
 }
 
+/*
+ * .button:hover:not(:disabled) above (2 pseudo-classes + 1 class-level
+ * selector = specificity 0,3,0) outranks .button.amber (0,2,0), so without
+ * this rule hovering an amber button replaced the amber background with
+ * --paper-2 while the text stayed the fixed-dark --amber-ink — readable in
+ * light mode (paper-2 is light) but unreadable in dark mode (paper-2 is
+ * dark too). Pin the hover background to --amber-deep — a darker/lighter
+ * amber depending on theme, never --paper-2 — so amber buttons keep a
+ * contrasting amber/amber-ink pair on hover in BOTH themes. Specificity
+ * 0,4,0 (.button.amber + :hover + :not(:disabled)) beats the base hover
+ * rule.
+ */
+.button.amber:hover:not(:disabled) {
+  border-color: var(--amber-deep);
+  background: var(--amber-deep);
+  color: var(--amber-ink);
+}
+
 .button.danger {
   border-color: oklch(0.86 0.08 25);
   color: oklch(0.5 0.18 25);
@@ -1162,7 +1215,8 @@ button {
   line-height: 1.55;
 }
 
-.auth-card .button.primary {
+.auth-card .button.primary,
+.auth-card .button.amber {
   width: 100%;
   min-height: 44px;
   margin-top: 4px;

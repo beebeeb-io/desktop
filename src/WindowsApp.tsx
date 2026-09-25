@@ -1032,7 +1032,7 @@ function BackupToggle({
           height: 14,
           borderRadius: 999,
           background: T.paper,
-          boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+          boxShadow: T.knobShadow2,
           transition: 'left 120ms ease',
         }}
       />
@@ -1489,8 +1489,8 @@ function TrashView() {
       )}
 
       {pendingDelete && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(30, 28, 24, 0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }}>
-          <Card style={{ width: 420, padding: 20, boxShadow: '0 24px 70px rgba(31, 28, 20, 0.22)' }}>
+        <div style={{ position: 'fixed', inset: 0, background: T.scrimSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }}>
+          <Card style={{ width: 420, padding: 20, boxShadow: T.dialogShadow }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
               <NavIcon name="trash" size={16} color={FILES_DANGER} />
               <div style={{ fontSize: 14, fontWeight: 700, color: T.ink }}>Delete permanently</div>

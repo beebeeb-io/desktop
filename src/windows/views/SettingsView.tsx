@@ -187,7 +187,7 @@ function Toggle({ on, busy = false, onChange, label }: { on: boolean; busy?: boo
           background: T.paper,
           transform: on ? 'translateX(16px)' : 'translateX(0)',
           transition: 'transform 150ms ease',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+          boxShadow: T.knobShadow,
         }}
       />
     </button>
