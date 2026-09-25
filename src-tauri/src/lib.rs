@@ -1069,6 +1069,49 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
         }
     }
 
+    // Task 1538 findings 1+2: purge every queued operation (so a later
+    // account's engine can never drain THIS account's still-queued uploads —
+    // `operation_queue` carries no account scoping, see
+    // `state_db::StateDb::purge_all_local_state`) and every decrypted cache
+    // file this device holds for this account (so it can't be permanently
+    // orphaned on disk once the next account's first sync prunes the DB row
+    // that pointed at it). Best-effort and non-fatal per file: logout must
+    // always appear to succeed, and the DB rows are already cleared inside
+    // `purge_all_local_state` regardless of whether every on-disk file
+    // removal below succeeds, so nothing can act on a leftover file again
+    // even if this loop can't delete it.
+    if let Some(db) = DesktopConfig::load()
+        .ok()
+        .and_then(|cfg| state_db_for_config(&cfg).ok().flatten())
+    {
+        match purge_local_state_files(&db) {
+            Ok(summary) => {
+                tracing::info!(
+                    queued_ops_purged = summary.queued_ops_purged,
+                    files_removed = summary.files_removed,
+                    files_skipped = summary.files_skipped,
+                    "purged operation queue and decrypted cache on sign-out"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to purge operation queue / decrypted cache on sign-out");
+            }
+        }
+    }
+
+    // macOS: remove the Finder File Provider domain on sign-out — the macOS
+    // analogue of the Windows shell-unregister above, so a logged-out
+    // machine has no live File Provider domain pointing at a folder the user
+    // is no longer signed into (finding 2). Best-effort: a failure (incl.
+    // "not registered") is logged, not surfaced — logout must always appear
+    // to succeed. Re-login re-installs the domain via `install_finder_location`.
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(error) = remove_file_provider_domain() {
+            tracing::warn!(error = %error, "Finder File Provider domain removal on logout failed (best-effort)");
+        }
+    }
+
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
@@ -1336,6 +1379,60 @@ fn is_disposable_cache_path(path: &std::path::Path) -> bool {
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical_path.starts_with(root))
+}
+
+/// Counts from [`purge_local_state_files`] (task 1538), logged by the
+/// sign-out caller.
+struct LocalStatePurgeSummary {
+    queued_ops_purged: usize,
+    files_removed: usize,
+    files_skipped: usize,
+}
+
+/// Task 1538 findings 1+2: delete every queued operation's staged plaintext
+/// payload and every cached plaintext file from disk, on top of
+/// `state_db::StateDb::purge_all_local_state` clearing the DB rows that
+/// pointed at them.
+///
+/// Pure w.r.t. Tauri/OS credential state (takes an already-opened `db`) so
+/// it is directly unit-testable without a live `AppState`/Keychain — see
+/// `clear_session_impl`, the only real caller, which resolves `db` from
+/// `DesktopConfig` and never touches this function's internals.
+///
+/// Each candidate path is gated by `is_disposable_cache_path` — the same
+/// safety check `reset_macos_integration` already uses — before removal, so
+/// a bug that fed this function an unexpected path can never turn a sign-out
+/// into an arbitrary-file-delete. A gated-out or already-missing path is
+/// logged, not fatal: sign-out must always appear to succeed.
+fn purge_local_state_files(db: &state_db::StateDb) -> Result<LocalStatePurgeSummary, String> {
+    let purge = db
+        .purge_all_local_state()
+        .map_err(|e| format!("purge operation queue and cache metadata: {e}"))?;
+
+    let mut files_removed = 0usize;
+    let mut files_skipped = 0usize;
+    for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
+        let path_buf = PathBuf::from(path);
+        if !is_disposable_cache_path(&path_buf) {
+            files_skipped += 1;
+            tracing::warn!(path = %path, "sign-out purge skipped a path outside the known cache/staging roots");
+            continue;
+        }
+        match std::fs::remove_file(&path_buf) {
+            Ok(()) => files_removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                files_skipped += 1;
+                tracing::warn!(path = %path, error = %error, "failed to remove local file on sign-out");
+            }
+        }
+    }
+
+    Ok(LocalStatePurgeSummary {
+        queued_ops_purged: purge.queued_ops_purged,
+        files_removed,
+        files_skipped,
+    })
 }
 
 #[cfg(unix)]
@@ -7826,7 +7923,8 @@ mod tests {
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target,
         file_versions_payload_for_frontend, newly_excluded_ids, next_menu_zoom_scale,
-        normalize_recovery_phrase_input, now_unix_seconds, queued_restore_version_response, real_app_version,
+        normalize_recovery_phrase_input, now_unix_seconds, purge_local_state_files, queued_restore_version_response,
+        real_app_version,
         release_channel_from_version, release_notes_url_for_version, shared_roots_from_db,
         should_offer_channel_update, should_show_conflict_notification, should_show_quota_warning_notification,
         should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
@@ -7887,6 +7985,126 @@ mod tests {
         assert!(
             acct.cached_profile.lock().unwrap().is_none(),
             "cached profile must be cleared on lock/logout"
+        );
+    }
+
+    /// Task 1538 findings 1+2: `purge_local_state_files` is the sign-out-safe
+    /// glue `clear_session_impl` calls — it must delete every queued
+    /// operation's staged plaintext payload AND every cached plaintext file
+    /// from disk (not just clear the DB rows pointing at them), and it must
+    /// refuse anything outside the known cache/staging roots (the same
+    /// `is_disposable_cache_path` gate `reset_macos_integration` already
+    /// uses), so a bug in a future caller can never turn this into an
+    /// arbitrary-file-delete.
+    #[test]
+    fn purge_local_state_files_removes_every_queued_payload_and_cached_file() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+
+        // Real files under the OS temp dir so `is_disposable_cache_path`
+        // (the actual safety gate, not a stub) allows their removal.
+        let staging_root = std::env::temp_dir().join(format!("bb-test-1538-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&staging_root).unwrap();
+        let payload_path = staging_root.join("op-1-payload.bin");
+        let cache_path = staging_root.join("file-a-cache.bin");
+        std::fs::write(&payload_path, b"account A staged plaintext upload").unwrap();
+        std::fs::write(&cache_path, b"account A decrypted cache content").unwrap();
+
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: "file-a".into(),
+            path: "/A.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 34,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-a", cache_path.to_str().unwrap(), 34, 10).unwrap();
+        db.enqueue_operation(&crate::state_db::PendingOperation {
+            op_id: "op-1".into(),
+            kind: crate::state_db::OperationKind::UploadVersion,
+            file_id: Some("file-a".into()),
+            parent_id: None,
+            target_path: Some("/A.txt".into()),
+            metadata_json: None,
+            payload_path: Some(payload_path.to_str().unwrap().to_string()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+
+        let summary = purge_local_state_files(&db).expect("purge succeeds");
+
+        assert_eq!(summary.queued_ops_purged, 1);
+        assert_eq!(
+            summary.files_removed, 2,
+            "both the staged payload and the cache file are removed"
+        );
+        assert_eq!(summary.files_skipped, 0);
+        assert!(!payload_path.exists(), "staged plaintext payload must be deleted from disk");
+        assert!(!cache_path.exists(), "decrypted cache file must be deleted from disk");
+        assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&staging_root).ok();
+    }
+
+    /// A path outside the known cache/staging roots is refused, not deleted —
+    /// the same fail-closed behavior `reset_macos_integration` already relies
+    /// on via `is_disposable_cache_path`. Uses a REAL file that exists but
+    /// sits outside the OS temp/cache dirs (this crate's own source tree),
+    /// so the assertion proves the gate is consulted — not just that a
+    /// nonexistent path happens to be skipped.
+    #[test]
+    fn purge_local_state_files_refuses_paths_outside_known_roots() {
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+
+        let outside_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".test-scratch-1538-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside_root).unwrap();
+        let _cleanup = CleanupDir(outside_root.clone());
+        let outside_path = outside_root.join("not-a-cache-root.bin");
+        std::fs::write(&outside_path, b"must survive").unwrap();
+
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: "file-b".into(),
+            path: "/B.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 12,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-b", outside_path.to_str().unwrap(), 12, 10)
+            .unwrap();
+
+        let summary = purge_local_state_files(&db).expect("purge succeeds");
+
+        assert_eq!(summary.files_removed, 0);
+        assert_eq!(summary.files_skipped, 1);
+        assert!(
+            outside_path.exists(),
+            "a path outside the known roots must never be deleted"
         );
     }
 
