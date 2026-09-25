@@ -10,6 +10,7 @@ import {
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
+import { submitPassword, submitTotpCode } from './onboardingSignIn'
 import logoFull from './assets/logo-full.svg'
 import { useToast } from './windows/ui'
 
@@ -146,26 +147,155 @@ function Field({
   )
 }
 
+/**
+ * Sign-in, including the 2FA sub-step (task 1521).
+ *
+ * `desktop_login` (email + password) can resolve `requiresTotp: true` when
+ * the account has 2FA enabled — the password was correct, but the server has
+ * only issued a short-lived partial token, not a real session. This
+ * component MUST show a code prompt and call `submitTotpCode` before calling
+ * `onDone`; skipping that check is exactly what shipped before this fix (see
+ * `onboardingSignIn.ts`'s doc comment) — sign-in silently "succeeded" with no
+ * session installed, and the next step (vault unlock) failed with "Sign in
+ * before unlocking the vault."
+ *
+ * The 2FA sub-step mirrors the web client's `TwoFactorPrompt`
+ * (`repos/web/src/components/two-factor-prompt.tsx`): a 6-digit authenticator
+ * code by default, with a "Use backup code" toggle for the 8-digit codes
+ * issued at 2FA setup — the server's `/auth/2fa/verify` accepts either in the
+ * same field (`verify_totp_or_backup`).
+ */
 function SignInStep({ onDone }: { onDone: () => void }) {
+  type Mode = 'password' | 'totp' | 'backup'
+  const [mode, setMode] = useState<Mode>('password')
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const { showToast } = useToast()
+  const [passwordError, setPasswordError] = useState<string | null>(null)
 
-  const submit = async (event: FormEvent) => {
+  const [totpCode, setTotpCode] = useState('')
+  const [backupCode, setBackupCode] = useState('')
+  const [totpError, setTotpError] = useState<string | null>(null)
+  const totpInputRef = useRef<HTMLInputElement | null>(null)
+
+  const startTotpStep = (nextMode: 'totp' | 'backup') => {
+    setMode(nextMode)
+    setTotpCode('')
+    setBackupCode('')
+    setTotpError(null)
+    requestAnimationFrame(() => totpInputRef.current?.focus())
+  }
+
+  const submitPasswordForm = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true)
-    const result = await command<void>('desktop_login', { email, password })
+    setPasswordError(null)
+    const result = await submitPassword(email, password)
     setBusy(false)
-    if (result.ok) {
-      onDone()
+    if (!result.ok) {
+      setPasswordError(result.message)
       return
     }
-    showToast({
-      variant: 'error',
-      title: 'Sign-in failed',
-      message: result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason,
-    })
+    if (result.requiresTotp) {
+      startTotpStep('totp')
+      return
+    }
+    onDone()
+  }
+
+  const submitTotpForm = async (event: FormEvent) => {
+    event.preventDefault()
+    const code = mode === 'backup' ? backupCode.trim() : totpCode.trim()
+    if (!code) return
+    setBusy(true)
+    setTotpError(null)
+    const result = await submitTotpCode(code)
+    setBusy(false)
+    if (!result.ok) {
+      // Wrong/expired code is retryable within the partial token's ~5-minute
+      // window — clear the field and keep the user on this step.
+      setTotpCode('')
+      setBackupCode('')
+      setTotpError(result.message)
+      requestAnimationFrame(() => totpInputRef.current?.focus())
+      return
+    }
+    onDone()
+  }
+
+  if (mode === 'totp' || mode === 'backup') {
+    const isBackup = mode === 'backup'
+    return (
+      <Card
+        title="Two-factor authentication"
+        copy={
+          isBackup
+            ? 'Enter one of the 8-digit backup codes you saved when enabling 2FA.'
+            : 'Enter the 6-digit code from your authenticator app.'
+        }
+      >
+        {totpError && <div className="notice">{totpError}</div>}
+        <form onSubmit={submitTotpForm} style={{ marginTop: 16 }}>
+          {isBackup ? (
+            <Field
+              label="Backup code"
+              type="text"
+              value={backupCode}
+              onChange={(value) => {
+                setBackupCode(value.replace(/\D/g, '').slice(0, 8))
+                setTotpError(null)
+              }}
+              disabled={busy}
+              placeholder="12345678"
+            />
+          ) : (
+            <label style={{ display: 'block', marginBottom: 14 }}>
+              <span className="field-label" style={{ display: 'block', marginBottom: 6 }}>
+                Authentication code
+              </span>
+              <input
+                ref={totpInputRef}
+                className="form-input"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                placeholder="000000"
+                disabled={busy}
+                value={totpCode}
+                onChange={(event) => {
+                  setTotpCode(event.currentTarget.value.replace(/\D/g, '').slice(0, 6))
+                  setTotpError(null)
+                }}
+              />
+            </label>
+          )}
+          <button
+            className="button primary"
+            type="submit"
+            disabled={busy || (isBackup ? backupCode.trim().length === 0 : totpCode.trim().length !== 6)}
+          >
+            {busy ? 'Verifying…' : 'Verify'}
+          </button>
+        </form>
+        <div className="button-row" style={{ marginTop: 12 }}>
+          <button className="button" onClick={() => startTotpStep(isBackup ? 'totp' : 'backup')} disabled={busy}>
+            {isBackup ? 'Use authenticator code instead' : 'Use backup code'}
+          </button>
+          <button
+            className="button"
+            onClick={() => {
+              setMode('password')
+              setTotpError(null)
+            }}
+            disabled={busy}
+          >
+            ← Back
+          </button>
+        </div>
+      </Card>
+    )
   }
 
   return (
@@ -173,7 +303,8 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       title="Welcome back"
       copy="Sign in to unlock your encrypted vault."
     >
-      <form onSubmit={submit} style={{ marginTop: 16 }}>
+      {passwordError && <div className="notice" style={{ marginBottom: 14 }}>{passwordError}</div>}
+      <form onSubmit={submitPasswordForm} style={{ marginTop: 16 }}>
         <Field label="Email" type="email" value={email} onChange={setEmail} disabled={busy} placeholder="you@example.com" />
         <Field label="Password" type="password" value={password} onChange={setPassword} disabled={busy} placeholder="Your password" />
         <button className="button primary" type="submit" disabled={!email || !password || busy}>
