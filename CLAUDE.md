@@ -41,6 +41,10 @@ and macOS builds cannot be reproduced locally at all (no cross-compile path from
 Before cutting a desktop release, follow `docs/RELEASING.md`. The release workflow fails closed
 unless the released commit contains a root `RELEASE_NOTES.md` whose contents mention the exact
 semver value passed to the workflow; author and commit per-release notes before triggering it.
+For an `alpha`/`beta` initial channel it also refuses notes that promise automatic delivery to
+existing installs, and only a `stable` publish marks the GitHub release Latest.
+`node scripts/release-channel-checks.mjs delivery` checks the live stable manifest against
+GitHub Latest.
 
 ## Architecture
 
