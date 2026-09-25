@@ -161,8 +161,12 @@ release-version indirection and sends `CARGO_PKG_VERSION` directly).
 
 `src-tauri` is expected to own the background Rust sync runtime and call shared
 core/sync logic instead of duplicating protocol behavior in TypeScript.
-Conflict resolution policy: never silently drop a version — default `KeepBoth`
-(rename loser as `file (Device, HH:MM).ext`). File watcher debounce: 100ms.
+Conflict resolution policy: never silently drop a version. A conflict is flagged and left
+untouched until the user picks Keep Mine / Keep Theirs / Keep Both in the conflict window
+(`resolve_conflict`); Keep Both renames the LOCAL copy to
+`name (conflict - <hostname> - <YYYY-MM-DD>).ext` and hydrates the remote into the original path
+(`EngineBridge::auto_resolve_keep_both`). The 24 h auto-resolution deadline in `conflict.rs` is
+not wired into the runner yet — do not document it as behaviour. File watcher debounce: 100ms.
 The backend must create a new server version for Finder writes when the server
 versioning contract supports it.
 
