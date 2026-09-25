@@ -25,6 +25,31 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use urlencoding::encode;
 
+/// `POST /api/v1/uploads/init` answered `409 Conflict`. Carries the server's
+/// reason so the engine can tell a stale base (resolved with Keep Both) from an
+/// upload that is merely still in flight (retried as usual).
+#[derive(Debug, Clone)]
+pub struct UploadInitConflict {
+    pub message: String,
+}
+
+impl UploadInitConflict {
+    /// The server rejected a replacement upload because its base version is no
+    /// longer current (`routes/uploads.rs`: "stale base version for replacement
+    /// upload").
+    pub fn is_stale_base(&self) -> bool {
+        self.message.to_ascii_lowercase().contains("stale base")
+    }
+}
+
+impl std::fmt::Display for UploadInitConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload init rejected (409 Conflict): {}", self.message)
+    }
+}
+
+impl std::error::Error for UploadInitConflict {}
+
 // ── Writer-provenance headers (task 1436, the desktop/web half of 1392) ────────
 //
 // The server records `X-Beebeeb-Client` / `X-Beebeeb-Client-Version` on every
@@ -687,9 +712,17 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(body)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            // Keep the server's reason: a 409 here is either a stale base
+            // (another device replaced the file first — the engine resolves it
+            // with Keep Both) or an upload already in flight (plain retry).
+            // `error_for_status` would drop the body that tells them apart.
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let message = body["error"].as_str().unwrap_or("conflict").to_string();
+            return Err(UploadInitConflict { message }.into());
+        }
+        Ok(resp.error_for_status()?.json().await?)
     }
 
     pub async fn upload_session_chunk(

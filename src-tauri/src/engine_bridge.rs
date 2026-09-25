@@ -300,6 +300,10 @@ pub struct VersionConflictEntry {
     pub version_id: Option<String>,
     pub base_version: Option<i64>,
     pub last_error: Option<String>,
+    /// Choices [`EngineBridge::resolve_upload_review`] accepts for this entry
+    /// (`keep_both` / `keep_mine` / `discard`); empty when the entry has no
+    /// in-place resolution (conflicts open the conflict window instead).
+    pub resolutions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,8 +524,289 @@ impl EngineBridge {
                 self.api.restore_version(file_id, version_id).await?;
                 Ok(())
             }
-            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op, sync_root).await,
+            OperationKind::UploadVersion | OperationKind::UploadFile => {
+                match self.upload_version(op, sync_root).await {
+                    // Another device replaced this file after our edit's base: the
+                    // server refuses the replacement (409 stale base). Run the
+                    // documented Keep Both policy instead of parking the edit in a
+                    // review queue forever (flow-7 STEP 7).
+                    Err(error) if is_stale_base_conflict(&error) && is_replacement_upload(op) => {
+                        self.keep_both_after_stale_base(op, sync_root).await
+                    }
+                    other => other,
+                }
+            }
         }
+    }
+
+    /// Resolve a queued replacement upload from the Versions & conflicts
+    /// center. `choice` is one of [`UPLOAD_REVIEW_RESOLUTIONS`]:
+    ///
+    ///   - `keep_both` — [`Self::keep_both_after_stale_base`]: the edit uploads
+    ///     as a device-named copy, the original follows the server again;
+    ///   - `keep_mine` — the edit is re-queued WITHOUT its base version, so it
+    ///     lands as the newest server version (the other device's version stays
+    ///     in the file's version history — nothing is dropped);
+    ///   - `discard`   — the queued edit and its staged bytes are removed and
+    ///     the original follows the server version. This is the one choice
+    ///     that deletes local bytes; the UI confirms it first.
+    pub async fn resolve_upload_review(&self, op_id: &str, choice: &str, sync_root: &Path) -> anyhow::Result<()> {
+        if !UPLOAD_REVIEW_RESOLUTIONS.contains(&choice) {
+            return Err(anyhow::anyhow!("invalid upload review choice: {choice}"));
+        }
+        let op = self
+            .db
+            .list_review_operations()?
+            .into_iter()
+            .find(|op| op.op_id == op_id)
+            .ok_or_else(|| anyhow::anyhow!("no queued operation {op_id}"))?;
+        if !is_replacement_upload(&op) {
+            return Err(anyhow::anyhow!("operation {op_id} is not a replacement upload"));
+        }
+        let file_id = op.file_id.clone().unwrap_or_default();
+        match choice {
+            "keep_both" => self.keep_both_after_stale_base(&op, sync_root).await,
+            "keep_mine" => {
+                let mut metadata = operation_metadata(&op)?;
+                if let Some(object) = metadata.as_object_mut() {
+                    object.remove("base_version_identifier");
+                }
+                let now = now_secs();
+                self.db.enqueue_operation(&PendingOperation {
+                    metadata_json: Some(serde_json::to_string(&metadata)?),
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    next_retry_at: now,
+                    last_error: None,
+                    updated_at: now,
+                    ..op
+                })?;
+                Ok(())
+            }
+            "discard" => {
+                let entry = self.db.get_file(&file_id)?;
+                let disk = entry
+                    .as_ref()
+                    .map(|entry| local_file_path_under_sync_root(sync_root, &entry.path))
+                    .transpose()?;
+                // Only a sync-root file that holds exactly the discarded edit is
+                // replaced by the server version; different bytes are a newer
+                // local change and are left alone.
+                let disk_holds_edit = match (disk.as_deref(), op.payload_path.as_deref()) {
+                    (Some(disk), Some(payload)) if disk.is_file() => {
+                        files_have_same_bytes(disk, Path::new(payload)).unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                self.db.remove_operation(&op.op_id)?;
+                if let Some(payload) = op.payload_path.as_deref()
+                    && let Err(e) = std::fs::remove_file(payload)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(error = %e, "failed to remove discarded staged payload");
+                }
+                match disk {
+                    Some(disk) if disk_holds_edit => self.hydrate_file(&file_id, &disk, &[sync_root]).await?,
+                    Some(disk) => {
+                        let status = if disk.exists() {
+                            FileStatus::Local
+                        } else {
+                            FileStatus::CloudOnly
+                        };
+                        self.db.set_status(&file_id, status)?;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            _ => unreachable!("validated above"),
+        }
+    }
+
+    /// Keep Both for a replacement upload the server rejected as stale.
+    ///
+    /// The local edit is re-queued — under the SAME op id, so the rewrite is
+    /// durable before anything else moves — as a brand-new sibling file named
+    /// `file (Device, YYYY-MM-DD HH.MM).ext` ([`keep_both_copy_name`]), and the
+    /// original path goes back to tracking the server's current version:
+    ///
+    ///   1. rewrite the queued op into a `create_file` upload of the copy;
+    ///   2. add the copy's state row (inheriting the original's namespace and
+    ///      share context);
+    ///   3. if the sync-root file still holds exactly the edited bytes, rename
+    ///      it to the copy name and hydrate the server version into the
+    ///      original path (a failed hydrate is queued as a `HydrateFile` op);
+    ///      if the edit lives only in the staged payload (File Provider), the
+    ///      original row returns to `CloudOnly`; a sync-root file with other
+    ///      bytes is never overwritten;
+    ///   4. upload the copy now. A failure here returns `Err`, and the
+    ///      rewritten op retries as an ordinary new-file upload — the edit is
+    ///      never dropped and never re-hits the stale base.
+    async fn keep_both_after_stale_base(&self, op: &PendingOperation, sync_root: &Path) -> anyhow::Result<()> {
+        let original_id = op
+            .file_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("stale upload operation missing file_id"))?;
+        let payload_path = op
+            .payload_path
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("stale upload operation missing staged payload"))?;
+        let original_entry = self.db.get_file(original_id)?;
+        let original_rel = original_entry
+            .as_ref()
+            .map(|entry| entry.path.clone())
+            .or_else(|| op.target_path.clone())
+            .ok_or_else(|| anyhow::anyhow!("stale upload operation has no known path"))?;
+        let original_contract = self.db.get_file_contract_state(original_id)?;
+        let parent_id = original_contract
+            .as_ref()
+            .and_then(|contract| contract.parent_id.clone())
+            .or_else(|| op.parent_id.clone());
+
+        let original_disk = local_file_path_under_sync_root(sync_root, &original_rel)?;
+        let (dir_prefix, original_name) = match original_rel.rsplit_once('/') {
+            Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+            None => (String::new(), original_rel.clone()),
+        };
+        let base_copy_name =
+            keep_both_copy_name(&original_name, &this_device_name(), chrono::Local::now().naive_local());
+        let mut copy_name = base_copy_name.clone();
+        let mut counter = 2;
+        loop {
+            let rel = format!("{dir_prefix}{copy_name}");
+            let taken =
+                self.db.get_file_by_path(&rel)?.is_some() || local_file_path_under_sync_root(sync_root, &rel)?.exists();
+            if !taken {
+                break;
+            }
+            copy_name = numbered_copy_name(&base_copy_name, counter);
+            counter += 1;
+        }
+        let copy_rel = format!("{dir_prefix}{copy_name}");
+        let copy_disk = local_file_path_under_sync_root(sync_root, &copy_rel)?;
+
+        // 1. Durable rewrite: same op id, now a new-file upload of the copy.
+        let copy_id = uuid::Uuid::new_v4().to_string();
+        let mut metadata = operation_metadata(op)?;
+        let content_type = metadata["content_type"].as_str().map(str::to_string);
+        let mime = content_type
+            .as_deref()
+            .or_else(|| beebeeb_core::media::guess_mime_type(&copy_name));
+        metadata["operation"] = serde_json::json!("create_file");
+        metadata["name_encrypted"] = serde_json::json!(encrypted_metadata_for_name(
+            self.api.master_key(),
+            &copy_id,
+            &copy_name,
+            mime
+        )?);
+        metadata["display_name"] = serde_json::json!(copy_name);
+        metadata["keep_both_of"] = serde_json::json!(original_id);
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("base_version_identifier");
+        }
+        let now = now_secs();
+        let copy_op = PendingOperation {
+            op_id: op.op_id.clone(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some(copy_id.clone()),
+            parent_id: parent_id.clone(),
+            target_path: Some(copy_rel.clone()),
+            metadata_json: Some(serde_json::to_string(&metadata)?),
+            payload_path: op.payload_path.clone(),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: op.attempts,
+            max_attempts: op.max_attempts,
+            next_retry_at: now,
+            last_error: None,
+            backup_source_key: op.backup_source_key.clone(),
+            created_at: op.created_at,
+            updated_at: now,
+        };
+        self.db.enqueue_operation(&copy_op)?;
+
+        // 2. The copy's state row, carrying the original's namespace/share context.
+        let size_bytes = std::fs::metadata(&payload_path).map(|m| m.len() as i64).unwrap_or(0);
+        self.db.upsert_file(&FileEntry {
+            file_id: copy_id.clone(),
+            path: copy_rel.clone(),
+            status: FileStatus::Uploading,
+            size_bytes,
+            modified_at: now,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })?;
+        if let Some(mut contract) = self.db.get_file_contract_state(&copy_id)? {
+            contract.item_kind = ItemKind::File;
+            contract.parent_id = parent_id;
+            contract.content_type = content_type;
+            if let Some(original) = original_contract.as_ref() {
+                contract.namespace = original.namespace.clone();
+                contract.shared_root_id = original.shared_root_id.clone();
+                contract.share_id = original.share_id.clone();
+                contract.owner_email = original.owner_email.clone();
+                contract.permission_bits = original.permission_bits;
+            }
+            self.db.set_file_contract_state(&contract)?;
+        }
+
+        // 3. Hand the original path back to the server's current version.
+        let edit_on_disk = original_disk.is_file() && files_have_same_bytes(&original_disk, &payload_path)?;
+        if edit_on_disk {
+            std::fs::rename(&original_disk, &copy_disk)
+                .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", original_disk.display(), copy_disk.display()))?;
+            if let Err(e) = self.hydrate_file(original_id, &original_disk, &[sync_root]).await {
+                tracing::warn!(
+                    file_id = %original_id,
+                    error = %e,
+                    "keep both: re-hydrating the server version failed — queued for retry"
+                );
+                self.db.enqueue_operation(&PendingOperation {
+                    op_id: uuid::Uuid::new_v4().to_string(),
+                    kind: OperationKind::HydrateFile,
+                    file_id: Some(original_id.to_string()),
+                    parent_id: None,
+                    target_path: Some(original_rel.clone()),
+                    metadata_json: None,
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 25,
+                    next_retry_at: now,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at: now,
+                    updated_at: now,
+                })?;
+            }
+        } else if original_entry.is_some() {
+            let status = if original_disk.exists() {
+                FileStatus::Local
+            } else {
+                FileStatus::CloudOnly
+            };
+            self.db.set_status(original_id, status)?;
+        }
+
+        tracing::info!(
+            file_id = %original_id,
+            copy_file_id = %copy_id,
+            "stale base on upload — keeping both: local edit uploads as a device-named copy"
+        );
+
+        // 4. Upload the copy now; on failure the rewritten op retries as a create.
+        self.upload_version(&copy_op, sync_root).await?;
+        if !copy_disk.exists()
+            && let Some(row) = self.db.get_file_by_path(&copy_rel)?
+        {
+            self.db.set_status(&row.file_id, FileStatus::CloudOnly)?;
+        }
+        Ok(())
     }
 
     async fn upload_version(
@@ -2640,17 +2925,15 @@ impl EngineBridge {
             return Ok(entry.path.clone());
         }
 
-        let host = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "device".into());
-        let date = chrono::Utc::now().format("%Y-%m-%d");
-        let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-        let ext = original
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| format!(".{e}"))
-            .unwrap_or_default();
-        let conflict_name = format!("{stem} (conflict - {host} - {date}){ext}");
+        let original_name = original.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+        let base_conflict_name =
+            keep_both_copy_name(original_name, &this_device_name(), chrono::Local::now().naive_local());
+        let mut conflict_name = base_conflict_name.clone();
+        let mut counter = 2;
+        while original.with_file_name(&conflict_name).exists() {
+            conflict_name = numbered_copy_name(&base_conflict_name, counter);
+            counter += 1;
+        }
         let conflict_path = original.with_file_name(&conflict_name);
 
         std::fs::rename(&original, &conflict_path)
@@ -2666,6 +2949,92 @@ impl EngineBridge {
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
         Ok(conflict_name)
     }
+}
+
+/// The documented Keep Both name for the copy that lost a race:
+/// `file (Device, YYYY-MM-DD HH.MM).ext`. The time uses `.` rather than `:`
+/// and the device name is scrubbed of path/reserved characters, because the
+/// copy syncs to every client and `:`, `\`, `*` … are illegal file-name
+/// characters on Windows (and `/` everywhere).
+pub(crate) fn keep_both_copy_name(file_name: &str, device: &str, at: chrono::NaiveDateTime) -> String {
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file_name);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let device: String = device
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let device = device.trim();
+    let device = if device.is_empty() { "device" } else { device };
+    format!("{stem} ({device}, {}){ext}", at.format("%Y-%m-%d %H.%M"))
+}
+
+/// `name (Device, time).ext` → `name (Device, time) N.ext` for the rare
+/// second copy inside the same minute.
+fn numbered_copy_name(copy_name: &str, n: u32) -> String {
+    let path = Path::new(copy_name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(copy_name);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    format!("{stem} {n}{ext}")
+}
+
+fn files_have_same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+    if std::fs::metadata(a)?.len() != std::fs::metadata(b)?.len() {
+        return Ok(false);
+    }
+    let mut fa = std::fs::File::open(a)?;
+    let mut fb = std::fs::File::open(b)?;
+    let mut ba = vec![0u8; 64 * 1024];
+    let mut bb = vec![0u8; 64 * 1024];
+    loop {
+        let read = fa.read(&mut ba)?;
+        if read == 0 {
+            return Ok(true);
+        }
+        fb.read_exact(&mut bb[..read])?;
+        if ba[..read] != bb[..read] {
+            return Ok(false);
+        }
+    }
+}
+
+fn is_stale_base_conflict(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::api_client::UploadInitConflict>()
+        .is_some_and(|conflict| conflict.is_stale_base())
+}
+
+/// A queued upload that replaces an existing server file (not a new file).
+fn is_replacement_upload(op: &PendingOperation) -> bool {
+    matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+        && op.file_id.is_some()
+        && !operation_metadata(op)
+            .map(|metadata| is_create_file_operation(&metadata))
+            .unwrap_or(false)
+}
+
+fn this_device_name() -> String {
+    hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "device".into())
 }
 
 /// Name of the per-sync-root state directory (mirrors `runner::STATE_DIR`).
@@ -2750,6 +3119,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             version_id: None,
             base_version: None,
             last_error: None,
+            resolutions: Vec::new(),
         });
     }
 
@@ -3544,8 +3914,20 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
         version_id: operation_version_id(op),
         base_version: op.base_version,
         last_error: op.last_error.clone(),
+        resolutions: if is_replacement_upload(op) {
+            UPLOAD_REVIEW_RESOLUTIONS
+                .iter()
+                .map(|choice| choice.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        },
     })
 }
+
+/// The in-place resolutions a queued replacement upload offers in the
+/// Versions & conflicts center.
+pub const UPLOAD_REVIEW_RESOLUTIONS: [&str; 3] = ["keep_both", "keep_mine", "discard"];
 
 fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static str, String, &'static str) {
     let error = op.last_error.as_deref().unwrap_or("").to_ascii_lowercase();
@@ -3592,7 +3974,8 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         return (
             "stale_base",
             "stale base kept local",
-            "Local bytes are preserved in the durable queue and need version review before retry.".to_string(),
+            "Another device saved a newer version first. Your edit is kept and uploads as a separate copy named after this device."
+                .to_string(),
             "review_upload",
         );
     }
@@ -6957,9 +7340,9 @@ mod tests {
             .find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("conflict (conflict - ") && name.ends_with(".txt"))
+                    .is_some_and(|name| name.starts_with("conflict (") && name.ends_with(").txt"))
             })
-            .expect("local conflict copy should be renamed with a device/date suffix");
+            .expect("local conflict copy should be renamed `conflict (Device, date time).txt`");
         assert_eq!(std::fs::read(conflict_copy).unwrap(), b"local conflict bytes");
     }
 
@@ -7271,7 +7654,8 @@ mod tests {
             entry.kind == "stale_base"
                 && entry.file_name == "stale.txt"
                 && entry.base_version == Some(7)
-                && entry.detail.contains("preserved")
+                && entry.detail.contains("kept")
+                && entry.detail.contains("separate copy")
         }));
     }
 
@@ -8738,5 +9122,410 @@ mod tests {
         );
 
         server.stop_and_count();
+    }
+
+    // ── Stale-base UploadVersion → automatic Keep Both (flow-7 STEP 7) ────────
+
+    const STALE_ORIG_ID: &str = "5e0c0b1a-7f55-4c47-9a57-6a3f00000001";
+    const STALE_SIBLING_SERVER_ID: &str = "5e0c0b1a-7f55-4c47-9a57-6a3f00000002";
+
+    /// Scripted mock: answers each request through `respond` and exits once it
+    /// has been idle for 400 ms after at least one request (hard cap 10 s).
+    struct ScriptedMockServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl ScriptedMockServer {
+        fn start(respond: impl Fn(&RecordedRequest) -> MockResponse + Send + 'static) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let mut last_seen = std::time::Instant::now();
+                loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let request = read_http_request(&mut stream);
+                            let response = respond(&request);
+                            server_requests.lock().unwrap().push(request);
+                            match response {
+                                MockResponse::Text(body) => stream.write_all(body.as_bytes()).unwrap(),
+                                MockResponse::Binary(body) => {
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        body.len()
+                                    );
+                                    stream.write_all(header.as_bytes()).unwrap();
+                                    stream.write_all(&body).unwrap();
+                                }
+                            }
+                            last_seen = std::time::Instant::now();
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            let seen_any = !server_requests.lock().unwrap().is_empty();
+                            if seen_any && last_seen.elapsed() >= Duration::from_millis(400) {
+                                break;
+                            }
+                            if started.elapsed() >= Duration::from_secs(10) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("scripted mock accept failed: {e}"),
+                    }
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.handle.join().unwrap();
+            Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
+        }
+    }
+
+    /// The real server's answers for flow-7 STEP 7: a replacement upload whose
+    /// base is stale gets `409 {"error":"stale base version …"}`; a brand-new
+    /// file (no `file_id`) is accepted as `STALE_SIBLING_SERVER_ID`; the
+    /// original's current (other-device) bytes are served for re-hydration.
+    fn stale_base_mock_response(request: &RecordedRequest, master_key: [u8; 32], remote_bytes: &[u8]) -> MockResponse {
+        let orig_key = hydration_test_key(master_key, STALE_ORIG_ID);
+        match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/api/v1/uploads/init") => {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                if body["file_id"].as_str() == Some(STALE_ORIG_ID) {
+                    return MockResponse::Text(http_json(
+                        "409 Conflict",
+                        serde_json::json!({ "error": "stale base version for replacement upload" }),
+                    ));
+                }
+                assert!(body["file_id"].is_null(), "keep-both copy must be a NEW file: {body}");
+                assert!(
+                    body["base_version_number"].is_null(),
+                    "keep-both copy must not carry the stale base: {body}"
+                );
+                MockResponse::Text(http_json(
+                    "200 OK",
+                    serde_json::json!({
+                        "file_id": STALE_SIBLING_SERVER_ID,
+                        "tenant_id": "tenant-1",
+                        "object_version_id": "object-sibling-1",
+                        "upload_session_id": "upload-session-sibling",
+                        "chunk_size_bytes": 4 * 1024 * 1024,
+                        "chunk_count": 1,
+                        "storage_format_version": 1,
+                        "storage_pool_id": "pool-1",
+                        "region": "local"
+                    }),
+                ))
+            }
+            ("PATCH", path) if path == format!("/api/v1/files/{STALE_SIBLING_SERVER_ID}") => MockResponse::Text(
+                http_json("200 OK", serde_json::json!({ "id": STALE_SIBLING_SERVER_ID })),
+            ),
+            ("PUT", "/api/v1/uploads/upload-session-sibling/chunks/0") => MockResponse::Text(http_json(
+                "200 OK",
+                serde_json::json!({ "index": 0, "size": request.body.len() as i64, "skipped": false }),
+            )),
+            ("POST", "/api/v1/uploads/upload-session-sibling/complete") => MockResponse::Text(http_json(
+                "200 OK",
+                serde_json::json!({
+                    "file_id": STALE_SIBLING_SERVER_ID,
+                    "version_number": 1,
+                    "current_object_version_id": "object-sibling-complete",
+                    "size_bytes": 12,
+                    "mime_type": "text/plain"
+                }),
+            )),
+            ("GET", path) if path == format!("/api/v1/files/{STALE_ORIG_ID}") => MockResponse::Text(http_json(
+                "200 OK",
+                serde_json::json!({
+                    "id": STALE_ORIG_ID,
+                    "size_bytes": remote_bytes.len(),
+                    "chunk_count": 1,
+                    "chunk_size_bytes": remote_bytes.len(),
+                }),
+            )),
+            ("GET", path) if path == format!("/api/v1/files/{STALE_ORIG_ID}/chunks/0") => {
+                MockResponse::Binary(encrypt_chunk_wire(&orig_key, remote_bytes))
+            }
+            _ => MockResponse::Text(http_json(
+                "404 Not Found",
+                serde_json::json!({ "error": format!("unexpected {} {}", request.method, request.path) }),
+            )),
+        }
+    }
+
+    fn enqueue_stale_upload_version(bridge: &EngineBridge, master_key: [u8; 32], payload: &Path) {
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: STALE_ORIG_ID.into(),
+                path: "shared.txt".into(),
+                status: FileStatus::Uploading,
+                size_bytes: 12,
+                modified_at: 100,
+                content_hash: Some("base-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state(STALE_ORIG_ID).unwrap().unwrap();
+        contract.current_version = 1;
+        contract.local_base_version = 1;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        let name_encrypted =
+            encrypted_metadata_for_name(&master_key, STALE_ORIG_ID, "shared.txt", Some("text/plain")).unwrap();
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-stale-b".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some(STALE_ORIG_ID.into()),
+                parent_id: None,
+                target_path: Some("shared.txt".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "upload_version",
+                        "name_encrypted": name_encrypted,
+                        "content_type": "text/plain",
+                        "size_bytes": 12,
+                        "base_version_identifier": "1:0:0",
+                        "uploaded_by": "authenticated_desktop_user",
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: Some(1),
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+    }
+
+    fn assert_keep_both_copy_uploaded(requests: &[RecordedRequest], master_key: [u8; 32]) -> String {
+        let inits: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/init")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(
+            inits.len(),
+            2,
+            "one stale replacement attempt + one keep-both create: {inits:?}"
+        );
+        assert_eq!(inits[0]["file_id"].as_str(), Some(STALE_ORIG_ID));
+        assert_eq!(inits[0]["base_version_number"].as_i64(), Some(1));
+        assert!(inits[1]["file_id"].is_null());
+
+        let chunk = requests
+            .iter()
+            .find(|r| r.method == "PUT" && r.path == "/api/v1/uploads/upload-session-sibling/chunks/0")
+            .expect("keep-both copy chunk must be uploaded");
+        let sibling_key = hydration_test_key(master_key, STALE_SIBLING_SERVER_ID);
+        let plaintext = decrypt_downloaded_chunk(&sibling_key, &chunk.body).unwrap();
+        assert_eq!(
+            plaintext, b"edited on B\n",
+            "the keep-both copy carries B's local bytes"
+        );
+
+        let patch = requests
+            .iter()
+            .find(|r| r.method == "PATCH" && r.path == format!("/api/v1/files/{STALE_SIBLING_SERVER_ID}"))
+            .expect("keep-both copy name must be committed");
+        let patch: serde_json::Value = serde_json::from_slice(&patch.body).unwrap();
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let name = beebeeb_core::encrypt::decrypt_name(
+            &mk,
+            STALE_SIBLING_SERVER_ID,
+            patch["name_encrypted"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            name.starts_with("shared (") && name.ends_with(").txt") && name != "shared.txt",
+            "keep-both copy is named `shared (Device, time).txt`, got {name:?}"
+        );
+        name
+    }
+
+    #[tokio::test]
+    async fn stale_base_upload_version_keeps_both_when_local_bytes_live_only_in_the_queue() {
+        // flow-7 STEP 7 shape (File Provider): the edit's bytes exist only as the
+        // staged payload, so the sibling is uploaded from the queue and the
+        // original row goes back to CloudOnly (server copy = the other device's).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let payload = dir.path().join("staged-b.txt");
+        std::fs::write(&payload, b"edited on B\n").unwrap();
+        let master_key = [41u8; 32];
+        let server = ScriptedMockServer::start(move |r| stale_base_mock_response(r, master_key, b"edited on A\n"));
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        enqueue_stale_upload_version(&bridge, master_key, &payload);
+
+        let outcome = bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        let requests = server.finish();
+
+        assert_eq!(outcome.completed_op_ids, vec!["op-stale-b".to_string()], "{outcome:?}");
+        assert!(outcome.retried_op_ids.is_empty(), "{outcome:?}");
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        let name = assert_keep_both_copy_uploaded(&requests, master_key);
+
+        let sibling = bridge
+            .db
+            .get_file(STALE_SIBLING_SERVER_ID)
+            .unwrap()
+            .expect("sibling row");
+        assert_eq!(sibling.path, name);
+        assert_eq!(
+            sibling.status,
+            FileStatus::CloudOnly,
+            "no local bytes on disk for the sibling"
+        );
+        let original = bridge.db.get_file(STALE_ORIG_ID).unwrap().unwrap();
+        assert_eq!(original.status, FileStatus::CloudOnly);
+        assert!(
+            !payload.exists(),
+            "staged payload is released once the copy is on the server"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_base_upload_version_keeps_both_on_disk_and_rehydrates_the_original() {
+        // Sync-root shape (watcher / Cloud Files): the local file holds the edit.
+        // It is renamed to the keep-both name and the server's current version is
+        // hydrated back into the original path.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("shared.txt"), b"edited on B\n").unwrap();
+        let payload = dir.path().join("staged-b.txt");
+        std::fs::write(&payload, b"edited on B\n").unwrap();
+        let master_key = [42u8; 32];
+        let server = ScriptedMockServer::start(move |r| stale_base_mock_response(r, master_key, b"edited on A\n"));
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        enqueue_stale_upload_version(&bridge, master_key, &payload);
+
+        let outcome = bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        let requests = server.finish();
+
+        assert_eq!(outcome.completed_op_ids, vec!["op-stale-b".to_string()], "{outcome:?}");
+        let name = assert_keep_both_copy_uploaded(&requests, master_key);
+        assert_eq!(std::fs::read(sync_root.join(&name)).unwrap(), b"edited on B\n");
+        assert_eq!(std::fs::read(sync_root.join("shared.txt")).unwrap(), b"edited on A\n");
+        assert_eq!(
+            bridge.db.get_file(STALE_ORIG_ID).unwrap().unwrap().status,
+            FileStatus::Local
+        );
+        assert_eq!(
+            bridge.db.get_file(STALE_SIBLING_SERVER_ID).unwrap().unwrap().status,
+            FileStatus::Local
+        );
+    }
+
+    #[test]
+    fn keep_both_copy_name_is_filesystem_safe_and_keeps_the_extension() {
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(17, 4, 0)
+            .unwrap();
+        assert_eq!(
+            keep_both_copy_name("shared.txt", "guus-mac", at),
+            "shared (guus-mac, 2026-09-25 17.04).txt"
+        );
+        assert_eq!(
+            keep_both_copy_name("Makefile", "pc", at),
+            "Makefile (pc, 2026-09-25 17.04)"
+        );
+        let name = keep_both_copy_name("a.tar.gz", "host/with:bad*chars", at);
+        assert!(
+            !name.contains(':') && !name.contains('/') && !name.contains('*'),
+            "{name}"
+        );
+        assert!(name.starts_with("a.tar (") && name.ends_with(").gz"), "{name}");
+    }
+
+    #[tokio::test]
+    async fn upload_review_entries_offer_resolutions_and_keep_mine_drops_the_stale_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let payload = dir.path().join("staged-b.txt");
+        std::fs::write(&payload, b"edited on B\n").unwrap();
+        let master_key = [43u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), master_key);
+        enqueue_stale_upload_version(&bridge, master_key, &payload);
+
+        let feed = version_conflict_feed_from_db(&bridge.db).unwrap();
+        let entry = feed.iter().find(|e| e.op_id.as_deref() == Some("op-stale-b")).unwrap();
+        assert_eq!(entry.action, "review_upload");
+        assert_eq!(entry.resolutions, vec!["keep_both", "keep_mine", "discard"]);
+
+        bridge
+            .resolve_upload_review("op-stale-b", "keep_mine", &sync_root)
+            .await
+            .unwrap();
+        let queued = bridge.db.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].op_id, "op-stale-b");
+        assert_eq!(
+            queued[0].base_version, None,
+            "keep mine replaces without the stale base"
+        );
+        assert!(
+            !queued[0]
+                .metadata_json
+                .as_deref()
+                .unwrap()
+                .contains("base_version_identifier")
+        );
+        assert!(payload.exists(), "keep mine must keep the staged bytes");
+
+        assert!(
+            bridge
+                .resolve_upload_review("op-stale-b", "overwrite_everything", &sync_root)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_review_discard_removes_the_queued_edit_and_follows_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let payload = dir.path().join("staged-b.txt");
+        std::fs::write(&payload, b"edited on B\n").unwrap();
+        let master_key = [44u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), master_key);
+        enqueue_stale_upload_version(&bridge, master_key, &payload);
+
+        bridge
+            .resolve_upload_review("op-stale-b", "discard", &sync_root)
+            .await
+            .unwrap();
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        assert!(!payload.exists());
+        assert_eq!(
+            bridge.db.get_file(STALE_ORIG_ID).unwrap().unwrap().status,
+            FileStatus::CloudOnly
+        );
+        assert!(version_conflict_feed_from_db(&bridge.db).unwrap().is_empty());
     }
 }

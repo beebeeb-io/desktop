@@ -1255,7 +1255,7 @@ fn handle_new_conflict(app: &AppHandle, c: &ConflictDetected) {
 /// Walk every file currently in `Conflict` status. For any whose
 /// detection timestamp (stored in `modified_at` after Task 10 anchored
 /// it on detect) is past the 24 h deadline, apply Keep Both: the local
-/// copy gets a `(conflict - <hostname> - <date>)` suffix, the remote
+/// copy is renamed `file (Device, YYYY-MM-DD HH.MM).ext`, the remote
 /// becomes the new authoritative file, status flips back to `Local`.
 ///
 /// Errors are logged per-file and do not stop the sweep — one bad file

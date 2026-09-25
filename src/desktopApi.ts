@@ -140,6 +140,14 @@ export interface VersionConflictEntry {
   version_id?: string | null
   base_version?: number | null
   last_error?: string | null
+  /** In-place choices the daemon accepts via `resolve_upload_review`. */
+  resolutions?: string[]
+}
+
+export type UploadReviewChoice = 'keep_both' | 'keep_mine' | 'discard'
+
+export async function resolveUploadReview(opId: string, choice: UploadReviewChoice): Promise<CommandResult<void>> {
+  return command<void>('resolve_upload_review', { opId, choice })
 }
 
 export interface FileVersionEntry {

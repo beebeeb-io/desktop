@@ -5650,6 +5650,48 @@ async fn resolve_conflict(
     Ok(())
 }
 
+/// Resolve a queued replacement upload from the Versions & conflicts center
+/// (`review_upload` entries). `choice` is `"keep_both"` | `"keep_mine"` |
+/// `"discard"` — see [`engine_bridge::EngineBridge::resolve_upload_review`].
+/// Same fresh-bridge convention as [`resolve_conflict`].
+#[tauri::command]
+async fn resolve_upload_review(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    op_id: String,
+    choice: String,
+) -> Result<(), String> {
+    if !engine_bridge::UPLOAD_REVIEW_RESOLUTIONS.contains(&choice.as_str()) {
+        return Err(format!("invalid upload review choice: {choice}"));
+    }
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+    bridge
+        .resolve_upload_review(&op_id, &choice, &sync_root)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "conflict-resolved",
+        serde_json::json!({
+            "op_id": op_id,
+            "choice": choice,
+        }),
+    );
+    Ok(())
+}
+
 // ── IPC commands: app metadata ────────────────────────────────────────────────
 
 // ── Durations ─────────────────────────────────────────────────────────────────
@@ -6557,6 +6599,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            resolve_upload_review,
             list_file_versions,
             restore_file_version,
             get_sync_root,
