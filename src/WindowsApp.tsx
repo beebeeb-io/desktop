@@ -69,6 +69,7 @@ import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
 import { useRegionLabel } from './windows/useRegion'
+import { usePlatformName, thisDeviceNoun } from './platform'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
 
@@ -265,6 +266,7 @@ function homeHumanizeType(type: string): string {
 // when the API is unavailable (login down in this build): metric strip stays,
 // account body shows a calm signed-out prompt.
 function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage: BillingUsage | null; storage: StorageSummary | null }) {
+  const platform = usePlatformName()
   const stateLabel =
     status == null ? '…'
     : !status.logged_in ? 'Signed out'
@@ -485,7 +487,7 @@ function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
       <PageHeader
         title="Home"
-        subtitle="Everything on this PC, at a glance. Files are encrypted on your device before upload."
+        subtitle={`Everything on ${thisDeviceNoun(platform)}, at a glance. Files are encrypted on your device before upload.`}
         aside={<Chip tone="green"><span style={{ width: 6, height: 6, borderRadius: '50%', background: T.green, display: 'inline-block' }} /> End-to-end encrypted</Chip>}
       />
 
@@ -1030,7 +1032,7 @@ function BackupToggle({
           height: 14,
           borderRadius: 999,
           background: T.paper,
-          boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+          boxShadow: T.knobShadow2,
           transition: 'left 120ms ease',
         }}
       />
@@ -1487,8 +1489,8 @@ function TrashView() {
       )}
 
       {pendingDelete && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(30, 28, 24, 0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }}>
-          <Card style={{ width: 420, padding: 20, boxShadow: '0 24px 70px rgba(31, 28, 20, 0.22)' }}>
+        <div style={{ position: 'fixed', inset: 0, background: T.scrimSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }}>
+          <Card style={{ width: 420, padding: 20, boxShadow: T.dialogShadow }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
               <NavIcon name="trash" size={16} color={FILES_DANGER} />
               <div style={{ fontSize: 14, fontWeight: 700, color: T.ink }}>Delete permanently</div>

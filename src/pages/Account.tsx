@@ -166,7 +166,7 @@ export default function Account() {
             </div>
           </div>
           <div className="button-row">
-            <button className="button primary" disabled={busy === 'unlock_vault'} onClick={() => void unlock()}>
+            <button className="button amber" disabled={busy === 'unlock_vault'} onClick={() => void unlock()}>
               {busy === 'unlock_vault' ? 'Unlocking…' : 'Unlock'}
             </button>
             <button className="button" disabled={busy === 'lock_vault'} onClick={() => void lock()}>

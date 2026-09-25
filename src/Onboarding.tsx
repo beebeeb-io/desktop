@@ -11,7 +11,7 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { submitPassword, submitTotpCode } from './onboardingSignIn'
-import logoFull from './assets/logo-full.svg'
+import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
 
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
@@ -61,7 +61,7 @@ export default function Onboarding() {
       <aside className="onboarding-rail">
         <div>
           <div className="onboarding-brand">
-            <img src={logoFull} alt="beebeeb.io" className="onboarding-logo" />
+            <Wordmark className="onboarding-logo" />
             <div className="brand-subtitle">Private macOS file access</div>
           </div>
           <div className="steps">
@@ -104,7 +104,7 @@ function Card({
   return (
     <section className="auth-card">
       <div className="auth-card-header">
-        <img src={logoFull} alt="beebeeb.io" className="auth-logo" />
+        <Wordmark className="auth-logo" />
       </div>
       <h1 className="page-title">{title}</h1>
       <p className="page-copy" style={{ marginBottom: 22 }}>
@@ -272,7 +272,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
             </label>
           )}
           <button
-            className="button primary"
+            className="button amber"
             type="submit"
             disabled={busy || (isBackup ? backupCode.trim().length === 0 : totpCode.trim().length !== 6)}
           >
@@ -307,7 +307,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       <form onSubmit={submitPasswordForm} style={{ marginTop: 16 }}>
         <Field label="Email" type="email" value={email} onChange={setEmail} disabled={busy} placeholder="you@example.com" />
         <Field label="Password" type="password" value={password} onChange={setPassword} disabled={busy} placeholder="Your password" />
-        <button className="button primary" type="submit" disabled={!email || !password || busy}>
+        <button className="button amber" type="submit" disabled={!email || !password || busy}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
@@ -420,7 +420,7 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
           Paste all 12 words into any box or type them one by one. Beebeeb stores the unlocked vault
           key in macOS Keychain for future unlocks.
         </div>
-        <button className="button primary" type="submit" disabled={busy || !canUnlock}>
+        <button className="button amber" type="submit" disabled={busy || !canUnlock}>
           {busy ? 'Unlocking…' : 'Unlock vault'}
         </button>
       </form>
@@ -520,7 +520,7 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
       }
     >
       {message && <div className="notice">{message}</div>}
-      <div className="panel" style={{ marginTop: 16, background: '#faf8f5' }}>
+      <div className="panel" style={{ marginTop: 16, background: 'var(--paper-2)' }}>
         <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
         <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
           {finderPath ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? '~/Beebeeb')}
@@ -532,7 +532,7 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
             Choose location
           </button>
         )}
-        <button className="button primary" onClick={install} disabled={busy}>
+        <button className="button amber" onClick={install} disabled={busy}>
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
         {/* This escape hatch EXISTS ONLY while `message` is set — it is the gate described
@@ -633,7 +633,7 @@ function PinningStep({ onDone }: { onDone: () => void }) {
         </div>
       )}
       <div className="button-row" style={{ marginTop: 18 }}>
-        <button className="button primary" onClick={onDone}>
+        <button className="button amber" onClick={onDone}>
           Continue with no pinned folders
         </button>
       </div>
@@ -677,7 +677,7 @@ function ReadyStep() {
           <div className="metric-value">{status?.conflicts ?? 0}</div>
         </div>
       </div>
-      <button className="button primary" onClick={() => void finish()} style={{ marginTop: 18 }}>
+      <button className="button amber" onClick={() => void finish()} style={{ marginTop: 18 }}>
         Open control center
       </button>
     </Card>

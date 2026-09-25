@@ -42,13 +42,14 @@ function DiffLine({
   type: 'add' | 'remove' | 'same'
 }) {
   const bg =
-    type === 'add' ? '#dcfce7' : type === 'remove' ? '#fee2e2' : 'transparent'
+    type === 'add' ? 'var(--diff-add-bg)' : type === 'remove' ? 'var(--diff-remove-bg)' : 'transparent'
   const prefix = type === 'add' ? '+' : type === 'remove' ? '-' : ' '
   return (
     <div
       style={{
         background: bg,
-        fontFamily: 'monospace',
+        color: 'var(--ink)',
+        fontFamily: 'var(--font-mono)',
         fontSize: 12,
         padding: '1px 8px',
         whiteSpace: 'pre',
@@ -106,10 +107,11 @@ export default function ConflictWindow() {
           alignItems: 'center',
           justifyContent: 'center',
           height: '100vh',
-          fontFamily: 'Inter, sans-serif',
+          background: 'var(--paper)',
+          fontFamily: 'var(--font-sans)',
         }}
       >
-        <p style={{ color: '#22c55e', fontWeight: 600 }}>
+        <p style={{ color: 'var(--green)', fontWeight: 600 }}>
           ✓ Conflict resolved
         </p>
       </div>
@@ -120,7 +122,9 @@ export default function ConflictWindow() {
     <div
       style={{
         padding: 24,
-        fontFamily: 'Inter, sans-serif',
+        background: 'var(--paper)',
+        color: 'var(--ink)',
+        fontFamily: 'var(--font-sans)',
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
@@ -129,7 +133,7 @@ export default function ConflictWindow() {
       <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>
         Conflict: {fileName}
       </h2>
-      <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 16 }}>
+      <p style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 16 }}>
         This file was modified on two devices. Choose which version to keep.
       </p>
 
@@ -149,7 +153,7 @@ export default function ConflictWindow() {
             </div>
             <div
               style={{
-                border: '1px solid #e5e7eb',
+                border: '1px solid var(--line)',
                 borderRadius: 6,
                 overflow: 'auto',
                 flex: 1,
@@ -164,7 +168,7 @@ export default function ConflictWindow() {
             </div>
             <div
               style={{
-                border: '1px solid #e5e7eb',
+                border: '1px solid var(--line)',
                 borderRadius: 6,
                 overflow: 'auto',
                 flex: 1,
@@ -187,7 +191,7 @@ export default function ConflictWindow() {
             <div
               key={label}
               style={{
-                border: '1px solid #e5e7eb',
+                border: '1px solid var(--line)',
                 borderRadius: 8,
                 padding: 16,
               }}
@@ -201,7 +205,7 @@ export default function ConflictWindow() {
               >
                 {label}
               </div>
-              <div style={{ fontSize: 12, color: '#6b7280' }}>
+              <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>
                 <div>Binary file</div>
                 <div>Click "Keep" to use this version</div>
               </div>
@@ -212,53 +216,26 @@ export default function ConflictWindow() {
 
       <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
         <button
+          className="button amber"
           onClick={() => resolve('local')}
           disabled={busy}
-          style={{
-            flex: 1,
-            padding: '10px',
-            background: '#3b82f6',
-            color: 'white',
-            border: 'none',
-            borderRadius: 6,
-            cursor: busy ? 'not-allowed' : 'pointer',
-            opacity: busy ? 0.6 : 1,
-            fontWeight: 600,
-          }}
+          style={{ flex: 1 }}
         >
           Keep Mine
         </button>
         <button
+          className="button"
           onClick={() => resolve('remote')}
           disabled={busy}
-          style={{
-            flex: 1,
-            padding: '10px',
-            background: '#6b7280',
-            color: 'white',
-            border: 'none',
-            borderRadius: 6,
-            cursor: busy ? 'not-allowed' : 'pointer',
-            opacity: busy ? 0.6 : 1,
-            fontWeight: 600,
-          }}
+          style={{ flex: 1 }}
         >
           Keep Theirs
         </button>
         <button
+          className="button"
           onClick={() => resolve('both')}
           disabled={busy}
-          style={{
-            flex: 1,
-            padding: '10px',
-            background: '#f3f4f6',
-            color: '#374151',
-            border: '1px solid #e5e7eb',
-            borderRadius: 6,
-            cursor: busy ? 'not-allowed' : 'pointer',
-            opacity: busy ? 0.6 : 1,
-            fontWeight: 600,
-          }}
+          style={{ flex: 1 }}
         >
           Keep Both
         </button>

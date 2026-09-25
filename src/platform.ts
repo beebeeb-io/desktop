@@ -99,3 +99,17 @@ export function usePlatformName(fallback?: PlatformName): PlatformName {
   const { name } = usePlatform()
   return name ?? platformFromQueryParam(fallback ?? 'windows')
 }
+
+/**
+ * "this Mac" / "this PC" / "this device" — the noun the shells use for the
+ * local machine in copy (e.g. "Everything on {noun}, at a glance."). Shared
+ * so platform-aware strings stay consistent instead of each screen picking
+ * its own wording (task 1523 — `WindowsApp.tsx`'s Home subtitle hardcoded
+ * "this PC" regardless of the real host platform; extracted from what was
+ * previously a private helper in `windows/views/SettingsView.tsx`).
+ */
+export function thisDeviceNoun(platform: PlatformName): string {
+  if (platform === 'macos') return 'this Mac'
+  if (platform === 'linux') return 'this device'
+  return 'this PC'
+}

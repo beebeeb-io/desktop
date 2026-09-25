@@ -29,7 +29,7 @@ import {
   shellIntegrationLabel,
   type SettingsNavId,
 } from '../settingsNavigation'
-import { usePlatform, usePlatformName, type PlatformName } from '../../platform'
+import { usePlatform, usePlatformName, thisDeviceNoun, type PlatformName } from '../../platform'
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
@@ -121,13 +121,6 @@ const THEME_OPTIONS: Array<{ value: DesktopTheme; label: string; hint: string }>
   { value: 'system', label: 'System', hint: 'Follow Windows or macOS.' },
 ]
 
-/** "this Mac" / "this PC" / "this device" — the noun this shell uses for the local machine. */
-function thisDeviceNoun(platform: PlatformName): string {
-  if (platform === 'macos') return 'this Mac'
-  if (platform === 'linux') return 'this device'
-  return 'this PC'
-}
-
 function signInToOsLine(platform: PlatformName): string {
   if (platform === 'macos') return 'Beebeeb launches automatically and resumes syncing when you sign in to macOS.'
   if (platform === 'linux') return 'Beebeeb launches automatically and resumes syncing when you sign in.'
@@ -194,7 +187,7 @@ function Toggle({ on, busy = false, onChange, label }: { on: boolean; busy?: boo
           background: T.paper,
           transform: on ? 'translateX(16px)' : 'translateX(0)',
           transition: 'transform 150ms ease',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+          boxShadow: T.knobShadow,
         }}
       />
     </button>

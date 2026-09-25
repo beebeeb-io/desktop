@@ -76,3 +76,6 @@ graphify-out/cache/
 
 # Tauri generated schemas
 src-tauri/gen/
+
+# Local scratch (verification screenshots, throwaway scripts) — never committed
+scratch/
