@@ -1,0 +1,126 @@
+name: Desktop CI
+
+# Every PR and every push to main is built and tested on all three desktop
+# targets. Before this workflow the only CI was release.yml (workflow_dispatch),
+# so the Windows/Linux `#[cfg(...)]` code paths (windows_cf, linux_fuse, the
+# Windows Credential Manager store) were first compiled at release time.
+#
+# Job names are stable on purpose: branch protection requires them by name.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend (bun test + tsc + eslint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run frontend tests
+        run: bun test
+
+      - name: Typecheck
+        run: bunx tsc --noEmit -p .
+
+      - name: Lint
+        run: bun run lint
+
+  rust-linux:
+    name: Rust test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2 \
+            libfuse-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        env:
+          # Keep the app's config/lock files out of the runner's real home.
+          XDG_CONFIG_HOME: ${{ runner.temp }}/beebeeb-xdg-config
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
+          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+          # A green run with zero executed tests is a red: require at least one
+          # `test result: ok. N passed` line with N > 0.
+          passed=$(grep -Eo 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/cargo-test.log" | awk '{s+=$4} END {print s+0}')
+          echo "Total Rust tests passed: $passed"
+          test "$passed" -gt 0
+
+  rust-check:
+    name: Rust check (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      # --all-targets also type-checks the #[cfg(test)] modules and tests/
+      # for this OS, so a Windows-only test helper cannot rot unnoticed.
+      - name: Cargo check
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
