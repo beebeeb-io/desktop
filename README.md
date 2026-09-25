@@ -20,8 +20,13 @@
 > **[desktop-v0.8.3](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
 > release** — `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
 > each with a minisign `.sig` for the auto-updater. v0.8.3's assets are signed with key ID
-> `545D7BA77EDEA7E1` (the pre-rotation key; see `docs/RELEASING.md` — v0.8.3 is the key-rotation
-> transition release and already bakes the new key `C6FADFD59D732197` in for future updates). **Neither
+> `545D7BA77EDEA7E1` (the pre-rotation key). **Known problem: in-app updates do not work for
+> installs on 0.3.0 or later.** Those versions trust only the new key `C6FADFD59D732197`, but
+> every release through 0.8.3 was still signed with the old one, so the updater rejects them. If
+> you are on 0.3.0-0.8.2, install 0.8.3 manually from the GitHub release — it carries a
+> security fix for the sync daemon. The next release is signed with the new key and restores
+> in-app updates for 0.3.0+; installs older than 0.3.0 will need one manual reinstall then
+> (see `docs/RELEASING.md`). **Neither
 > installer carries an OS-trusted code-signing certificate yet** — Windows shows an "unknown
 > publisher" SmartScreen warning until that's wired up. **macOS has no published release yet** (development-signed builds already run on real Mac
 > hardware with the Finder File Provider mount — see `docs/MACOS_BRINGUP_BRIEF.md`): the

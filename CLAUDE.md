@@ -197,7 +197,12 @@ on 2026-05-07.
   unset for the current passwordless setup
 
 To inspect the public key locally: `cat ~/.tauri/beebeeb-desktop.key.pub`.
-The fingerprint at time of generation is `545D7BA77EDEA7E1`.
+The fingerprint at time of generation is `545D7BA77EDEA7E1`. Since 0.3.0 the baked pubkey is the
+rotated key `C6FADFD59D732197`, but CI kept signing with `545D7BA77EDEA7E1` through 0.8.3, which
+broke in-app updates for every 0.3.0+ install (see `docs/RELEASING.md` → "Current state"). The
+release workflow now fails closed when a signature's key ID differs from the baked one
+(`scripts/check-updater-signature-key.mjs`); `updater_key_transition=true` is only for a
+deliberate transition release.
 
 If the key is lost, no clients with already-installed builds can verify
 new updates — they'll need a manual reinstall to onboard the new pubkey.
