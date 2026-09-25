@@ -21,6 +21,11 @@ on:
         required: true
         default: false
         type: boolean
+      updater_key_transition:
+        description: ONLY for a deliberate updater-key transition release N (docs/RELEASING.md) - downgrade the signature-key guard to a warning
+        required: true
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -309,6 +314,24 @@ jobs:
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm release-assets/
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm.sig release-assets/
 
+      # Every updater signature must be made by the key baked into this build's
+      # tauri.conf.json. 0.3.0-0.8.3 baked C6FADFD59D732197 while CI signed with
+      # 545D7BA77EDEA7E1, so every install >= 0.3.0 rejected every update and no
+      # step noticed. Fail here, before anything is published.
+      - name: Check updater signature key matches baked pubkey
+        shell: bash
+        env:
+          KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sigs=(release-assets/*.sig)
+          if [[ ${#sigs[@]} -eq 0 ]]; then
+            echo "::error::No updater .sig files staged in release-assets/"
+            exit 1
+          fi
+          node scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG --sig "${sigs[@]}"
+
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -417,6 +440,17 @@ jobs:
           token: ${{ secrets.RELEASES_PUSH_TOKEN }}
           persist-credentials: false
           path: releases-repo
+
+      - name: Checkout updater key guard at the release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: desktop-v${{ inputs.version }}
+          persist-credentials: false
+          path: desktop-src
+          sparse-checkout: |
+            scripts/check-updater-signature-key.mjs
+            src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
 
       - name: Generate desktop channel manifest
         env:
@@ -542,6 +576,27 @@ jobs:
                 )
               )
             }' > "releases-repo/$MANIFEST_PATH"
+
+      # Same guard as the build job, on what installs will actually fetch. This
+      # also covers publish_existing=true promotions, which never run the build.
+      # Tags cut before this guard existed lack the script and cannot be promoted
+      # without a transition flag; that is deliberate (all of them are 545D-signed).
+      - name: Check manifest signatures match the baked updater key
+        env:
+          KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f desktop-src/scripts/check-updater-signature-key.mjs ]]; then
+            if [[ -n "$KEY_TRANSITION_FLAG" ]]; then
+              echo "::warning::desktop-v${{ inputs.version }} predates the updater key guard; publishing under updater_key_transition=true without a key check."
+              exit 0
+            fi
+            echo "::error::desktop-v${{ inputs.version }} predates the updater key guard, so its signatures cannot be checked. Cut a new release, or rerun with updater_key_transition=true only for a deliberate transition release (docs/RELEASING.md)."
+            exit 1
+          fi
+          node desktop-src/scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG \
+            --config desktop-src/src-tauri/tauri.conf.json \
+            --manifest "releases-repo/$DESKTOP_MANIFEST_PATH"
 
       - name: Commit and push to releases repo
         working-directory: releases-repo
