@@ -454,6 +454,28 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// Persisted resumable upload session for one queued upload op (flow 7).
+/// See the `upload_resume` table in [`StateDb::open`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadResume {
+    pub op_id: String,
+    pub payload_path: String,
+    pub payload_size: i64,
+    pub payload_mtime_ns: i64,
+    pub upload_session_id: String,
+    pub server_file_id: String,
+    pub object_version_id: String,
+    pub chunk_size_bytes: i64,
+    pub chunk_count: i64,
+    /// Chunks `0..acked_chunks` were acknowledged (2xx) by the server.
+    pub acked_chunks: i64,
+    /// The post-init `PATCH /files/{id}` (encrypted name/parent) succeeded.
+    pub metadata_applied: bool,
+    /// The op created a NEW server file (no prior version): on abandonment
+    /// its `is_uploading` row is an orphan the client may trash.
+    pub is_create: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum OperationPauseReason {
     Auth,
@@ -616,6 +638,27 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
+            -- Flow 7 (interrupted upload resume): the server upload session an
+            -- UploadVersion/UploadFile op is writing to, persisted the moment
+            -- `POST /uploads/init` returns and advanced after every
+            -- acknowledged chunk, so a retry resumes instead of minting a
+            -- second server file row. Keyed by op_id; the payload fingerprint
+            -- (path + size + mtime) guards against resuming onto other bytes.
+            CREATE TABLE IF NOT EXISTS upload_resume (
+                op_id TEXT PRIMARY KEY,
+                payload_path TEXT NOT NULL,
+                payload_size INTEGER NOT NULL,
+                payload_mtime_ns INTEGER NOT NULL,
+                upload_session_id TEXT NOT NULL,
+                server_file_id TEXT NOT NULL,
+                object_version_id TEXT NOT NULL,
+                chunk_size_bytes INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                acked_chunks INTEGER NOT NULL DEFAULT 0,
+                metadata_applied INTEGER NOT NULL DEFAULT 0,
+                is_create INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )?;
         Ok(Self(Mutex::new(conn)))
@@ -1806,6 +1849,103 @@ impl StateDb {
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+        Ok(())
+    }
+
+    /// Persist (insert or replace) the resumable upload session for `op_id`.
+    pub fn put_upload_resume(&self, resume: &UploadResume) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO upload_resume (
+                op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                acked_chunks, metadata_applied, is_create, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now'))
+             ON CONFLICT(op_id) DO UPDATE SET
+                payload_path = excluded.payload_path,
+                payload_size = excluded.payload_size,
+                payload_mtime_ns = excluded.payload_mtime_ns,
+                upload_session_id = excluded.upload_session_id,
+                server_file_id = excluded.server_file_id,
+                object_version_id = excluded.object_version_id,
+                chunk_size_bytes = excluded.chunk_size_bytes,
+                chunk_count = excluded.chunk_count,
+                acked_chunks = excluded.acked_chunks,
+                metadata_applied = excluded.metadata_applied,
+                is_create = excluded.is_create,
+                updated_at = excluded.updated_at",
+            params![
+                resume.op_id,
+                resume.payload_path,
+                resume.payload_size,
+                resume.payload_mtime_ns,
+                resume.upload_session_id,
+                resume.server_file_id,
+                resume.object_version_id,
+                resume.chunk_size_bytes,
+                resume.chunk_count,
+                resume.acked_chunks,
+                resume.metadata_applied,
+                resume.is_create,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_upload_resume(&self, op_id: &str) -> Result<Option<UploadResume>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                    server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                    acked_chunks, metadata_applied, is_create
+             FROM upload_resume WHERE op_id = ?1",
+            params![op_id],
+            |row| {
+                Ok(UploadResume {
+                    op_id: row.get(0)?,
+                    payload_path: row.get(1)?,
+                    payload_size: row.get(2)?,
+                    payload_mtime_ns: row.get(3)?,
+                    upload_session_id: row.get(4)?,
+                    server_file_id: row.get(5)?,
+                    object_version_id: row.get(6)?,
+                    chunk_size_bytes: row.get(7)?,
+                    chunk_count: row.get(8)?,
+                    acked_chunks: row.get(9)?,
+                    metadata_applied: row.get(10)?,
+                    is_create: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Advance the acknowledged-chunk watermark. Monotonic: a late write can
+    /// never move it backwards.
+    pub fn set_upload_resume_acked(&self, op_id: &str, acked_chunks: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume
+             SET acked_chunks = MAX(acked_chunks, ?2), updated_at = strftime('%s','now')
+             WHERE op_id = ?1",
+            params![op_id, acked_chunks],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_upload_resume_metadata_applied(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume SET metadata_applied = 1, updated_at = strftime('%s','now') WHERE op_id = ?1",
+            params![op_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_upload_resume(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
         Ok(())
     }
 
