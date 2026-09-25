@@ -892,12 +892,16 @@ async fn desktop_unlock_with_recovery_phrase(
     let token = load_session_token_from_keychain(&account_id)?
         .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let recovery_phrase = normalize_recovery_phrase_input(&recovery_phrase)?;
-    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
-        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
-    let master_key: [u8; 32] = master_key_struct.to_bytes();
-
-    persist_vault_key_to_keychain(&account_id, master_key)?;
+    let base_url = runner::api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .default_headers(api_client::provenance_headers())
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+    let master_key = provision_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase, |key| {
+        persist_vault_key_to_keychain(&account_id, key)
+    })
+    .await?;
     // `desktop_login` already persisted the email when it stored the token, but
     // persist again here (idempotent) so the invariant "a fully-provisioned
     // session has its email in the store" holds even if memory and store drift.
@@ -921,6 +925,84 @@ async fn desktop_unlock_with_recovery_phrase(
     tracing::info!("vault provisioned from recovery phrase");
     start_engine_if_possible(app, &state, token, master_key).await;
     Ok(())
+}
+
+const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
+
+/// Derive the vault key from a recovery phrase, prove it belongs to the
+/// signed-in account, and only then hand it to `persist`.
+///
+/// `recover_from_phrase` derives *a* key from ANY checksum-valid BIP39 phrase —
+/// it does not prove the phrase is this account's. Persisting an unverified key
+/// keys the sync engine with a foreign key, so every upload from this device is
+/// undecryptable on every other device (flow 7 P0). Same gate as web's
+/// device-provision (`recoveredKeyMatchesAccount`, task 0874).
+async fn provision_vault_key_from_phrase<P>(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    recovery_phrase: &str,
+    persist: P,
+) -> Result<[u8; 32], String>
+where
+    P: FnOnce([u8; 32]) -> Result<(), String>,
+{
+    let recovery_phrase = normalize_recovery_phrase_input(recovery_phrase)?;
+    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
+        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
+    if !recovered_key_matches_account(client, base_url, session_token, &master_key_struct).await? {
+        // `master_key_struct` zeroizes on drop.
+        return Err(INCORRECT_RECOVERY_PHRASE.to_string());
+    }
+    let master_key: [u8; 32] = master_key_struct.to_bytes();
+    persist(master_key)?;
+    Ok(master_key)
+}
+
+/// Ask the server whether `master_key` is the signed-in account's key by
+/// comparing its `recovery_check` (HKDF of the key; never the key itself)
+/// against the stored one: `POST /api/v1/auth/verify-recovery-check`.
+///
+/// `Ok(true)` on a match; `Ok(false)` ONLY on a server-confirmed mismatch
+/// (400 `invalid_recovery_phrase`, which the server also returns for an account
+/// with no check on file — web applies the same policy). Any other outcome
+/// (network error, 401, 5xx, unparseable body) is `Err`: an unreachable
+/// verifier must never be read as "valid", so the caller fails closed.
+async fn recovered_key_matches_account(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    master_key: &beebeeb_core::kdf::MasterKey,
+) -> Result<bool, String> {
+    let recovery_check = encode_base64(&*beebeeb_core::opaque::compute_recovery_check(master_key));
+    let resp = client
+        .post(format!("{base_url}/api/v1/auth/verify-recovery-check"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "recovery_check": recovery_check }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not verify the recovery phrase (network error: {e}). Try again."))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        return Ok(false);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Your session expired. Sign in again before unlocking the vault.".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "Could not verify the recovery phrase (server returned {status}). Try again."
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Could not verify the recovery phrase (unreadable response: {e}). Try again."))?;
+    if body.get("valid").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(true)
+    } else {
+        Err("Could not verify the recovery phrase (unexpected response). Try again.".to_string())
+    }
 }
 
 fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
@@ -8847,5 +8929,253 @@ mod tests {
 
         assert_eq!(next.file_name().unwrap().to_string_lossy(), "Report 2.pdf");
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Flow 7 P0: a recovery-phrase unlock must prove the phrase belongs to the
+/// signed-in account (server-side `recovery_check` compare) BEFORE the derived
+/// key is persisted. `recover_from_phrase` accepts ANY checksum-valid BIP39
+/// phrase, so without this gate a wrong phrase (or a typo that still passes the
+/// checksum, ~1 in 16) keys the desktop engine with a foreign key and every
+/// upload from this device becomes undecryptable everywhere else.
+#[cfg(test)]
+mod recovery_phrase_unlock_tests {
+    use super::{encode_base64, provision_vault_key_from_phrase};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug)]
+    struct SeenRequest {
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// Behave like the server: 200 `{valid:true}` when the submitted check
+        /// equals the stored one, else 400 `invalid_recovery_phrase`.
+        CompareAgainstStored,
+        /// Server fault — must never be read as "phrase is valid".
+        InternalError,
+    }
+
+    /// Minimal loop-accepting HTTP/1.1 mock of
+    /// `POST /api/v1/auth/verify-recovery-check` (same raw-TCP technique as
+    /// `api_client.rs`'s `HeaderMockServer`; desktop has no axum dev-dep).
+    struct VerifyMockServer {
+        base_url: String,
+        seen: Arc<Mutex<Vec<SeenRequest>>>,
+    }
+
+    impl VerifyMockServer {
+        fn start(stored_check_b64: Option<String>, reply: Reply) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let seen_thread = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut buffer = Vec::new();
+                    let mut temp = [0u8; 4096];
+                    let header_end = loop {
+                        let read = stream.read(&mut temp).unwrap_or(0);
+                        if read == 0 {
+                            break None;
+                        }
+                        buffer.extend_from_slice(&temp[..read]);
+                        if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(pos + 4);
+                        }
+                    };
+                    let Some(header_end) = header_end else { continue };
+                    let head = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
+                    let mut content_length = 0usize;
+                    let mut authorization = None;
+                    for line in head.lines().skip(1) {
+                        if let Some((name, value)) = line.split_once(':') {
+                            match name.trim().to_ascii_lowercase().as_str() {
+                                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                                "authorization" => authorization = Some(value.trim().to_string()),
+                                _ => {}
+                            }
+                        }
+                    }
+                    while buffer.len() < header_end + content_length {
+                        let read = stream.read(&mut temp).unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        buffer.extend_from_slice(&temp[..read]);
+                    }
+                    let body = String::from_utf8_lossy(&buffer[header_end..]).to_string();
+                    let submitted = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("recovery_check").and_then(|c| c.as_str()).map(str::to_string));
+                    seen_thread.lock().unwrap().push(SeenRequest {
+                        path: path.clone(),
+                        authorization,
+                        body,
+                    });
+                    let (status, payload) = match reply {
+                        Reply::InternalError => ("500 Internal Server Error", r#"{"error":"internal"}"#.to_string()),
+                        Reply::CompareAgainstStored => {
+                            let matches = path == "/api/v1/auth/verify-recovery-check"
+                                && stored_check_b64.is_some()
+                                && submitted == stored_check_b64;
+                            if matches {
+                                ("200 OK", r#"{"valid":true}"#.to_string())
+                            } else {
+                                ("400 Bad Request", r#"{"error":"invalid_recovery_phrase"}"#.to_string())
+                            }
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { base_url, seen }
+        }
+
+        fn requests(&self) -> Vec<SeenRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn check_b64_for_phrase(phrase: &str) -> String {
+        let key = beebeeb_core::recovery::recover_from_phrase(phrase).expect("valid phrase");
+        encode_base64(&*beebeeb_core::opaque::compute_recovery_check(&key))
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap()
+    }
+
+    /// The account's own phrase (P1) and another checksum-valid phrase (P2).
+    fn two_phrases() -> (String, String) {
+        let (p1, _) = beebeeb_core::recovery::generate_recovery_phrase().unwrap();
+        let (p2, _) = beebeeb_core::recovery::generate_recovery_phrase().unwrap();
+        assert_ne!(p1, p2);
+        (p1, p2)
+    }
+
+    #[tokio::test]
+    async fn wrong_but_valid_phrase_is_rejected_and_never_persisted() {
+        let (p1, p2) = two_phrases();
+        // Precondition of the bug: P2 is a perfectly valid phrase on its own.
+        assert!(beebeeb_core::recovery::recover_from_phrase(&p2).is_ok());
+        let server = VerifyMockServer::start(Some(check_b64_for_phrase(&p1)), Reply::CompareAgainstStored);
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        let result = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p2, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("Incorrect recovery phrase. Check your words and try again."),
+            "a valid phrase that is not the account's must be refused"
+        );
+        assert!(
+            persisted.lock().unwrap().is_none(),
+            "the wrong key must never reach the keychain"
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "exactly one verify call: {requests:?}");
+        assert_eq!(requests[0].path, "/api/v1/auth/verify-recovery-check");
+    }
+
+    #[tokio::test]
+    async fn account_phrase_is_verified_with_session_then_persisted() {
+        let (p1, _) = two_phrases();
+        let stored = check_b64_for_phrase(&p1);
+        let server = VerifyMockServer::start(Some(stored.clone()), Reply::CompareAgainstStored);
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        let key = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await
+        .expect("the account's own phrase must unlock");
+
+        let expected = beebeeb_core::recovery::recover_from_phrase(&p1).unwrap().to_bytes();
+        assert_eq!(key, expected);
+        assert_eq!(*persisted.lock().unwrap(), Some(expected));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "exactly one verify call: {requests:?}");
+        assert_eq!(requests[0].path, "/api/v1/auth/verify-recovery-check");
+        assert_eq!(requests[0].authorization.as_deref(), Some("Bearer sess-tok"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["recovery_check"].as_str(), Some(stored.as_str()));
+    }
+
+    #[tokio::test]
+    async fn account_without_stored_check_is_refused_like_web() {
+        // Server returns 400 invalid_recovery_phrase when no check is on file
+        // (server routes/recovery.rs); web treats that as a mismatch (task
+        // 0874/0875) and so does desktop.
+        let (p1, _) = two_phrases();
+        let server = VerifyMockServer::start(None, Reply::CompareAgainstStored);
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        let result = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("Incorrect recovery phrase. Check your words and try again.")
+        );
+        assert!(persisted.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn verifier_failure_fails_closed() {
+        let (p1, _) = two_phrases();
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        // Server error: never read as "valid".
+        let server = VerifyMockServer::start(Some(check_b64_for_phrase(&p1)), Reply::InternalError);
+        let result = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+        let err = result.expect_err("a 500 from the verifier must not unlock");
+        assert!(
+            !err.starts_with("Incorrect recovery phrase"),
+            "server fault is not a wrong phrase: {err}"
+        );
+        assert_eq!(server.requests().len(), 1);
+
+        // Unreachable server: bind then drop a listener so the port refuses.
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_url = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let result = provision_vault_key_from_phrase(&client(), &dead_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err(), "a network error must not unlock");
+
+        assert!(
+            persisted.lock().unwrap().is_none(),
+            "nothing may be persisted when unverified"
+        );
     }
 }
