@@ -4877,7 +4877,9 @@ fn apply_snapshot(
             None => String::new(),
         };
 
-        if let Some((rel_path, _kind)) = process_metadata_row(bridge, f, &parent_rel_path, now_secs, conflicts)? {
+        if let Some((rel_path, _kind)) =
+            process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
+        {
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
@@ -5087,7 +5089,7 @@ fn apply_sync_op(
             let new_name = payload["new_name_encrypted"].as_str();
             let row = synthesize_op_row(bridge, id, op, new_name);
             let parent_rel = existing_parent_rel_path(bridge, id);
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
         }
         "file_move" | "folder_move" => {
             // Re-parent. The op gives `new_parent_id`; the leaf name is unchanged.
@@ -5101,7 +5103,7 @@ fn apply_sync_op(
             // at the sync root. If the new parent isn't locally known yet, fall
             // back to a re-snapshot rather than mis-placing the row at root.
             let parent_rel = parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str());
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
         }
         "file_create" | "folder_create" | "file_update" => {
             let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
@@ -5118,7 +5120,7 @@ fn apply_sync_op(
             } else {
                 parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
             };
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, conflicts)?;
+            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
         }
         other => {
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
@@ -5196,8 +5198,18 @@ fn synthesize_op_row(
     if let Some(v) = version {
         row["version_number"] = serde_json::json!(v);
     }
-    // updated_at: stamp "now" so the conflict check treats an op as a fresh
-    // remote change (the op log carries no file timestamp the client can read).
+    // current_object_version_id: a `file_update` carries the new version's
+    // object id; without it the contract keeps pointing at the old version.
+    // `apply_metadata_file_row` keeps the existing id when the op omits it.
+    if let Some(ov) = payload["current_object_version_id"].as_str() {
+        row["current_object_version_id"] = serde_json::json!(ov);
+    }
+    // updated_at: the op log carries no file timestamp the client can read, so
+    // stamp "now" as the row's `remote_updated_at` / `modified_at` value. This
+    // is NOT a freshness token: several ops routinely land in the same second
+    // (a version upload emits `file_rename` + `file_update` together), so
+    // `process_metadata_row` never gates an op-derived row on it — see
+    // [`RowSource::Op`].
     row["updated_at"] = serde_json::json!(now_secs());
     row
 }
@@ -5255,6 +5267,23 @@ fn existing_parent_rel_path(bridge: &EngineBridge, id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Where a row fed to [`process_metadata_row`] came from. Decides whether the
+/// `updated_at` short-circuit for an already-`Local` row may fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowSource {
+    /// A `/sync/snapshot` node. The whole tree is re-ingested, so an unchanged
+    /// row must be skipped; `updated_at` is the server's own timestamp.
+    Snapshot,
+    /// A row synthesised from ONE `/sync/ops` delta. Every op is a real remote
+    /// change delivered exactly once (the cursor advances past it), and its
+    /// `updated_at` is only the local wall-clock second `synthesize_op_row`
+    /// stamped — two ops in one tick share it. Gating on it dropped the
+    /// `file_update` that follows a same-second `file_rename` (flow-7 P0), so
+    /// op rows are always applied. Re-applying an op after a crash before the
+    /// cursor persisted is idempotent: ops replay in order to the same state.
+    Op,
+}
+
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
 /// running the same three-way decision the flat sweep used (new → cloud_only;
 /// local + remote-moved → conflict check; otherwise refresh metadata). On
@@ -5266,6 +5295,7 @@ fn process_metadata_row(
     f: &serde_json::Value,
     parent_rel_path: &str,
     now_secs: i64,
+    source: RowSource,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> anyhow::Result<Option<(String, ItemKind)>> {
     let file_id = f["id"].as_str().unwrap_or_default();
@@ -5317,7 +5347,9 @@ fn process_metadata_row(
             // (2) Local copy + remote moved? Nothing to check if the
             // timestamps haven't drifted past base. Still report the row's
             // path/kind so a folder we already have locally is still descended.
-            if remote_updated <= entry.remote_updated_at {
+            // Snapshot rows only: an op row's `updated_at` is a local
+            // same-second stamp, not a freshness token (see `RowSource::Op`).
+            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at {
                 return Ok(Some((entry.path, entry.item_kind)));
             }
 
@@ -8261,6 +8293,91 @@ mod tests {
             Some(3),
             "cursor advanced to max seq_id"
         );
+    }
+
+    /// Flow-7 P0 regression: a desktop/web version upload emits `file_rename`
+    /// (name re-encrypt) + `file_update` together, and both land in ONE
+    /// `/sync/ops` response. `synthesize_op_row` used to stamp both rows with
+    /// the same wall-clock second, so on a hydrated (`Local`) row the rename
+    /// bumped `remote_updated_at` to `now` and the `file_update` with the very
+    /// same `now` hit the `remote_updated <= remote_updated_at` short-circuit —
+    /// then the cursor advanced past it. The device kept v1 forever while
+    /// claiming to be in sync.
+    async fn assert_rename_then_update_in_one_tick_applies_update(new_name: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [21u8; 32];
+        let id = "dddd0000-0000-4000-8000-000000000001";
+        let server_ops = serde_json::json!({
+            "since": 5,
+            "ops": [
+                { "seq_id": 6, "op_type": "file_rename",
+                  "payload": { "id": id, "new_name_encrypted": enc_name(&mk, id, new_name) } },
+                { "seq_id": 7, "op_type": "file_update",
+                  "payload": { "id": id, "name_encrypted": enc_name(&mk, id, new_name),
+                               "parent_id": serde_json::Value::Null, "size_bytes": 32,
+                               "storage_pool_id": "pool",
+                               "current_object_version_id": "ov-2",
+                               "version_number": 2 } },
+            ],
+        });
+        let server = SyncMockServer::start(vec![("200 OK".into(), server_ops)]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
+
+        // A bootstrapped device that has report.txt v1 (8 B) hydrated locally.
+        bridge.db().set_sync_cursor(5).unwrap();
+        bridge
+            .db()
+            .upsert_file(&FileEntry {
+                file_id: id.into(),
+                path: "report.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 8,
+                modified_at: 100,
+                content_hash: None,
+                remote_updated_at: 100,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge.db().get_file_contract_state(id).unwrap().unwrap();
+        contract.current_version = 1;
+        contract.local_base_version = 1;
+        contract.current_object_version_id = Some("ov-1".into());
+        bridge.db().set_file_contract_state(&contract).unwrap();
+
+        let conflicts = sync_tick(&bridge, dir.path()).await.unwrap();
+        assert!(conflicts.is_empty());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/api/v1/sync/ops?since=5");
+
+        let entry = bridge.db().get_file(id).unwrap().unwrap();
+        let contract = bridge.db().get_file_contract_state(id).unwrap().unwrap();
+        assert_eq!(entry.path, new_name, "rename applied");
+        assert_eq!(entry.size_bytes, 32, "file_update applied: size is v2's, not v1's 8 B");
+        assert_eq!(contract.current_version, 2, "file_update applied: current_version is 2");
+        assert_eq!(contract.current_object_version_id.as_deref(), Some("ov-2"));
+        // The cached bytes are still v1: the row must read as stale (remote
+        // version ahead of the local base) so the next open re-hydrates.
+        assert!(
+            contract.current_version > contract.local_base_version,
+            "local copy marked stale: current_version {} must exceed local_base_version {}",
+            contract.current_version,
+            contract.local_base_version
+        );
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_rename_then_update_same_tick_applies_update() {
+        assert_rename_then_update_in_one_tick_applies_update("report-final.txt").await;
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_name_reencrypt_then_update_same_tick_applies_update() {
+        // The FLOW7_NO_RENAME shape: a plain content edit still emits a
+        // same-name `file_rename` (name re-encrypt) before the `file_update`.
+        assert_rename_then_update_in_one_tick_applies_update("report.txt").await;
     }
 
     #[tokio::test]
