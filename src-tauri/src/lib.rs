@@ -536,6 +536,7 @@ async fn start_engine_if_possible(
         // always defaults to false; desktop.toml is the source of truth).
         acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
         let pause_flag = acct.sync_paused.clone();
+        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             // Task 1538 Codex P1: this is a re-login/sync-root-change
@@ -547,7 +548,7 @@ async fn start_engine_if_possible(
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
             }
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag, auth_health));
     }
 }
 
@@ -1265,6 +1266,10 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
+    // Sign out = clean slate for the auth-health streak too (task 1546
+    // finding 5): the engine that was feeding it just stopped, and a fresh
+    // sign-in must not inherit a stale `auth_expired: true` banner.
+    acct.auth_health.note_result(None);
     clear_keychain_session(acct.id.as_str())?;
     set_auth_present(state, false);
     set_auth_email(state, None);
@@ -1803,6 +1808,7 @@ async fn persist_sync_root_and_start_engine(
         // Rehydrate the persisted pause state before spawning.
         acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
         let pause_flag = acct.sync_paused.clone();
+        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
             // Task 1538 Codex P1: this is a re-login/sync-root-change
@@ -1814,7 +1820,7 @@ async fn persist_sync_root_and_start_engine(
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
             }
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag, auth_health));
     }
 
     Ok(())
@@ -1845,6 +1851,7 @@ async fn start_engine_for_pending_finder_install(
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (started, ipc_bind_error) = {
         let pause_flag = acct.sync_paused.clone();
+        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(existing) = engine_slot.as_ref() {
             // Already running (e.g. a retry after a transient failure) —
@@ -1852,7 +1859,7 @@ async fn start_engine_for_pending_finder_install(
             // error instead of just re-timing-out silently.
             (false, existing.ipc_bind_error_handle())
         } else {
-            let runner = EngineRunner::spawn(app, root, token, key, pause_flag);
+            let runner = EngineRunner::spawn(app, root, token, key, pause_flag, auth_health);
             let bind_error = runner.ipc_bind_error_handle();
             *engine_slot = Some(runner);
             (true, bind_error)
@@ -2813,6 +2820,12 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
+    // Task 1546 finding 5: 3+ consecutive 401s from the engine's heartbeat /
+    // sync-tick calls flip this — the trigger for the persistent "signed out
+    // on this device" banner. Explicit and independent of `logged_in`: the
+    // stale token can still be installed (so `logged_in` reads `true`) while
+    // every call it makes fails.
+    let auth_expired = acct.auth_health.is_expired();
     let sync_root_path = DesktopConfig::load().ok().and_then(|c| c.sync_root);
     #[cfg(target_os = "macos")]
     let sync_root = None::<String>;
@@ -2887,6 +2900,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 
     Ok(serde_json::json!({
         "logged_in": logged_in,
+        "auth_expired": auth_expired,
         "sync_root": sync_root,
         "engine_running": engine_running,
         "vault_unlocked": vault_unlocked,
@@ -3462,6 +3476,7 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             // Rehydrate the persisted pause state before spawning.
             acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
             let pause_flag = acct.sync_paused.clone();
+            let auth_health = acct.auth_health.clone();
             let mut engine_slot = acct.engine.lock().await;
             if let Some(prev) = engine_slot.take() {
                 // Task 1538 Codex P1 — see `start_engine_if_possible`'s
@@ -3470,7 +3485,7 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
                     tracing::warn!("previous engine did not confirm termination before respawning a new one");
                 }
             }
-            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag));
+            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag, auth_health));
         }
 
         Ok(Some(path.to_string_lossy().into_owned()))
@@ -6099,6 +6114,41 @@ async fn resolve_conflict(
     Ok(())
 }
 
+/// Real content preview for the conflict-resolution window (task 1546 finding
+/// 2), replacing ConflictWindow.tsx's previous hardcoded placeholder diff
+/// body. Read-only — does not resolve anything or touch state.db; see
+/// [`engine_bridge::EngineBridge::conflict_content_preview`] for why.
+///
+/// Same session/sync-root/bridge-construction pattern as `resolve_conflict`
+/// just above.
+#[tauri::command]
+async fn conflict_content_preview(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<engine_bridge::ConflictContentPreview, String> {
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
+
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+
+    bridge
+        .conflict_content_preview(&file_id, &sync_root)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── IPC commands: app metadata ────────────────────────────────────────────────
 
 // ── Durations ─────────────────────────────────────────────────────────────────
@@ -7068,6 +7118,8 @@ pub fn run() {
             // Task 12 — conflict window IPC
             open_conflict_window,
             resolve_conflict,
+            // Task 1546 finding 2 — real (non-placeholder) conflict content preview
+            conflict_content_preview,
             // Task 11 — native conflict notification
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)

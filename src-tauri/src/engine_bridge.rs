@@ -2307,6 +2307,25 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
+        self.do_hydrate_with_meta(file_id, &meta).await
+    }
+
+    /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
+    /// (task 1546 Codex round 2, finding 1): downloads + decrypts every chunk
+    /// for `file_id` given ALREADY-FETCHED metadata. `remote_content_preview`
+    /// needs the metadata anyway to check the remote size before deciding
+    /// whether to download at all — routing through this shared helper
+    /// instead of `do_hydrate` means that check doesn't cost a second
+    /// `GET /files/{id}` round trip for files it does end up downloading.
+    ///
+    /// Internal helper only — callers are responsible for their own
+    /// `file_id` UUID validation (both current callers already do theirs
+    /// before this is reached).
+    async fn do_hydrate_with_meta(
+        &self,
+        file_id: &str,
+        meta: &serde_json::Value,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let chunk_count = meta
             .get("chunk_count")
             .and_then(|v| v.as_i64())
@@ -2730,6 +2749,235 @@ impl EngineBridge {
         }
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
         Ok(conflict_name)
+    }
+
+    /// Read-only content preview for the conflict-resolution window (task
+    /// 1546 finding 2): reads the LOCAL file straight off disk and
+    /// downloads+decrypts the CURRENT REMOTE version, without touching
+    /// state.db — unlike [`Self::hydrate_file`] / [`Self::hydrate_file_to_memory`],
+    /// which both flip the row's status to `Downloading`/`Local` and record a
+    /// cache entry. The row is mid-conflict and neither side has been chosen
+    /// yet, so daemon bookkeeping must not move just because the user opened
+    /// the window — that's why this calls the private `do_hydrate` directly
+    /// instead of either public hydrate wrapper.
+    ///
+    /// Replaces `ConflictWindow.tsx`'s previous hardcoded placeholder text
+    /// ("Content from this device…" / "Content from other device…"), which
+    /// its own doc-comment admitted was fake for every conflict.
+    ///
+    /// Task 1546 Codex round 2, finding 3: textness is decided HERE, from
+    /// the file's own path via [`is_text_file`], never taken from a
+    /// caller-supplied flag — the VersionCenter-initiated open always passed
+    /// a hardcoded `isText: false` (only the daemon's auto-open path derived
+    /// it correctly from the filename), which made every manually-reviewed
+    /// text conflict render as binary and silently discard both text bodies.
+    pub async fn conflict_content_preview(
+        &self,
+        file_id: &str,
+        sync_root: &Path,
+    ) -> anyhow::Result<ConflictContentPreview> {
+        let entry = self
+            .db
+            .get_file(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let is_text = is_text_file(&entry.path);
+
+        let local = self.local_content_preview(sync_root, &entry.path, is_text);
+        let remote = self.remote_content_preview(file_id, is_text).await;
+
+        Ok(ConflictContentPreview { is_text, local, remote })
+    }
+
+    /// Local half of [`Self::conflict_content_preview`] (task 1546 Codex
+    /// round 2, finding 1): stats the file to learn its size WITHOUT reading
+    /// it, and only reads bytes at all when a text preview applies AND the
+    /// file is within [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`] — bounded to one
+    /// byte past the cap via [`std::io::Read::take`] so a race where the
+    /// file grows between the stat and the read can only ever push the
+    /// result to "too large," never load an oversized buffer. Conflict
+    /// windows open automatically, so a multi-gigabyte local file must never
+    /// be pulled fully into memory just to report its size.
+    fn local_content_preview(&self, sync_root: &Path, entry_path: &str, is_text: bool) -> ConflictContentSide {
+        let local_path = match local_file_path_under_sync_root(sync_root, entry_path) {
+            Ok(p) => p,
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: None,
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't locate the local file: {e}")),
+                };
+            }
+        };
+
+        let size_bytes = match std::fs::metadata(&local_path) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: None,
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't read the local file: {e}")),
+                };
+            }
+        };
+
+        if !is_text {
+            // Binary preview only ever shows size — the bytes are never read.
+            return ConflictContentSide { size_bytes: Some(size_bytes), text: None, unavailable_reason: None };
+        }
+        if size_bytes > CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 {
+            return ConflictContentSide {
+                size_bytes: Some(size_bytes),
+                text: None,
+                unavailable_reason: Some(format!("File is too large to preview, {size_bytes} bytes")),
+            };
+        }
+
+        let file = match std::fs::File::open(&local_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: Some(size_bytes),
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't read the local file: {e}")),
+                };
+            }
+        };
+        let mut bytes = Vec::with_capacity((size_bytes as usize).min(CONFLICT_PREVIEW_TEXT_MAX_BYTES) + 1);
+        // `take(LIMIT + 1)` bounds the read itself — never `std::fs::read`
+        // (unbounded) — so even a TOCTOU race where the file grows after the
+        // `metadata()` call above can produce at most LIMIT+1 bytes.
+        match file.take(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1).read_to_end(&mut bytes) {
+            Ok(_) => content_side_from_bytes(bytes, is_text),
+            Err(e) => ConflictContentSide {
+                size_bytes: Some(size_bytes),
+                text: None,
+                unavailable_reason: Some(format!("Couldn't read the local file: {e}")),
+            },
+        }
+    }
+
+    /// Remote half of [`Self::conflict_content_preview`] (task 1546 Codex
+    /// round 2, finding 1): fetches file metadata — one small JSON response —
+    /// to learn the remote size BEFORE deciding whether to download
+    /// anything. [`Self::do_hydrate_with_meta`] (which downloads and
+    /// decrypts every chunk) is called only when BOTH a text preview applies
+    /// AND the metadata size is within [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`] —
+    /// a multi-gigabyte conflict, text or binary, therefore never costs
+    /// bandwidth or a full decrypt just to be previewed. Reuses the SAME
+    /// metadata fetch `do_hydrate_with_meta` needs instead of letting
+    /// `do_hydrate` re-fetch it, so the small-file path costs exactly the
+    /// metadata GET + the chunk GETs it always cost.
+    async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> ConflictContentSide {
+        if let Err(e) = file_id.parse::<uuid::Uuid>() {
+            return ConflictContentSide {
+                size_bytes: None,
+                text: None,
+                unavailable_reason: Some(format!("invalid file_id (not a UUID): {e}")),
+            };
+        }
+
+        let meta = match self.api.get_file(file_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: None,
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+                };
+            }
+        };
+        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
+
+        if !is_text {
+            // Binary preview only ever shows size — never download the bytes.
+            return ConflictContentSide { size_bytes, text: None, unavailable_reason: None };
+        }
+        let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
+        if !within_limit {
+            return ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: Some(match size_bytes {
+                    Some(s) => format!("File is too large to preview, {s} bytes"),
+                    None => "Couldn't determine the other device's file size".to_string(),
+                }),
+            };
+        }
+
+        match self.do_hydrate_with_meta(file_id, &meta).await {
+            Ok(mut bytes) => {
+                // Move the plaintext out instead of `bytes.to_vec()` — a
+                // clone would briefly hold two live copies of the remote
+                // plaintext in memory. `content_side_from_bytes` consumes
+                // the Vec by value (no further copy), and the now-empty
+                // `bytes` is zeroized below for defense in depth.
+                let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
+                bytes.zeroize();
+                side
+            }
+            Err(e) => ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+            },
+        }
+    }
+}
+
+/// One side (local or remote) of a conflict-resolution content preview.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConflictContentSide {
+    pub size_bytes: Option<u64>,
+    /// UTF-8 text content — present only when the caller asked for a text
+    /// preview AND the bytes are valid UTF-8 AND within
+    /// [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`]. `None` always means "see
+    /// `unavailable_reason`", never a silent truncation.
+    pub text: Option<String>,
+    /// Human-readable reason `text` is absent (too large, not UTF-8, local
+    /// read failed, remote download failed) — `None` when `text` is present
+    /// or this is the (expected-textless) binary branch.
+    pub unavailable_reason: Option<String>,
+}
+
+/// Result of [`EngineBridge::conflict_content_preview`] — the real content
+/// (or an honest reason it's unavailable) for both sides of a conflict.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConflictContentPreview {
+    pub is_text: bool,
+    pub local: ConflictContentSide,
+    pub remote: ConflictContentSide,
+}
+
+/// Cap on how large a text file's content preview may be. Deliberately
+/// small: the whole file round-trips over Tauri's IPC as a JSON string and
+/// is diffed synchronously in the webview, so this bounds both the IPC
+/// payload and the diff algorithm's input size.
+const CONFLICT_PREVIEW_TEXT_MAX_BYTES: usize = 256 * 1024;
+
+/// Pure classifier: turns real file bytes into what the conflict window can
+/// safely show. Never fabricates content — a non-text file, an oversized
+/// file, or invalid UTF-8 all report `text: None` plus an honest
+/// `unavailable_reason`, never a placeholder string.
+fn content_side_from_bytes(bytes: Vec<u8>, is_text: bool) -> ConflictContentSide {
+    let size_bytes = Some(bytes.len() as u64);
+    if !is_text {
+        return ConflictContentSide { size_bytes, text: None, unavailable_reason: None };
+    }
+    if bytes.len() > CONFLICT_PREVIEW_TEXT_MAX_BYTES {
+        return ConflictContentSide {
+            size_bytes,
+            text: None,
+            unavailable_reason: Some("File is too large to preview inline".to_string()),
+        };
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => ConflictContentSide { size_bytes, text: Some(text), unavailable_reason: None },
+        Err(_) => ConflictContentSide {
+            size_bytes,
+            text: None,
+            unavailable_reason: Some("File isn't valid UTF-8 text".to_string()),
+        },
     }
 }
 
@@ -3613,7 +3861,8 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
 }
 
 fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static str, String, &'static str) {
-    let error = op.last_error.as_deref().unwrap_or("").to_ascii_lowercase();
+    let raw_error = op.last_error.as_deref().unwrap_or("");
+    let error = raw_error.to_ascii_lowercase();
     let metadata = op.metadata_json.as_deref().unwrap_or("").to_ascii_lowercase();
     let stale_base = error.contains("stale")
         || error.contains("base version")
@@ -3627,6 +3876,23 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
             "Restore is queued or failed; the server restore endpoint creates a new current version when it succeeds."
                 .to_string(),
             "restore_review",
+        );
+    }
+
+    // Auth failures take priority over quota/permission/stale-base: an
+    // expired session's 401 unblocks nothing until the user signs in again,
+    // and "sign in again" is a strictly more actionable message than "your
+    // storage is full" or "permission denied" would be for the same root
+    // cause. Reuses `classify_operation_error`'s stripped-URL substring
+    // matching (task 1252 — a reqwest error's `" for url (…)"` suffix can
+    // embed a port number containing "401") instead of re-deriving a second,
+    // looser copy of the same check here (task 1546 finding 3).
+    if matches!(classify_operation_error(raw_error), OperationFailureClass::Auth) {
+        return (
+            "auth_failure",
+            "sign-in needed",
+            "Your session has expired. Sign in again to resume syncing.".to_string(),
+            "sign_in_again",
         );
     }
     if error.contains("quota") || error.contains("insufficient storage") {
@@ -5171,6 +5437,42 @@ mod tests {
     }
 
     #[test]
+    fn test_content_side_from_bytes_covers_text_binary_and_size_cap() {
+        // Task 1546 finding 2: the conflict window's diff body was a
+        // hardcoded placeholder for EVERY conflict, text or binary,
+        // regardless of actual file content. `content_side_from_bytes` is
+        // the pure classifier `EngineBridge::conflict_content_preview` uses
+        // to turn real bytes into what the window can safely show.
+        let small_text = content_side_from_bytes(b"hello world".to_vec(), true);
+        assert_eq!(small_text.text.as_deref(), Some("hello world"));
+        assert_eq!(small_text.size_bytes, Some(11));
+        assert!(small_text.unavailable_reason.is_none());
+
+        // Binary side never carries text, even for tiny content — only size.
+        let binary = content_side_from_bytes(b"hello world".to_vec(), false);
+        assert!(binary.text.is_none());
+        assert_eq!(binary.size_bytes, Some(11));
+        assert!(binary.unavailable_reason.is_none());
+
+        // Invalid UTF-8 for a file the caller marked as text: honest
+        // "isn't valid UTF-8" reason, never fabricated text.
+        let invalid_utf8 = content_side_from_bytes(vec![0xFF, 0xFE, 0xFD], true);
+        assert!(invalid_utf8.text.is_none());
+        assert_eq!(invalid_utf8.size_bytes, Some(3));
+        assert!(invalid_utf8.unavailable_reason.unwrap().contains("UTF-8"));
+
+        // Oversized text: the whole file round-trips over Tauri's IPC as a
+        // JSON string and is diffed synchronously, so there is a real cap —
+        // over it, size is still reported honestly but text is withheld
+        // rather than silently truncated (which would corrupt the diff).
+        let oversized = vec![b'a'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1];
+        let too_big = content_side_from_bytes(oversized, true);
+        assert!(too_big.text.is_none());
+        assert_eq!(too_big.size_bytes, Some((CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1) as u64));
+        assert!(too_big.unavailable_reason.unwrap().contains("too large"));
+    }
+
+    #[test]
     fn test_base_version_parser_reads_current_version_prefix() {
         assert_eq!(parse_base_version_number(Some("7:1700000000:1024")), Some(7));
         assert_eq!(parse_base_version_number(Some("0:1700000000:1024")), None);
@@ -5355,6 +5657,25 @@ mod tests {
                 loop {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // The listener above is non-blocking so this accept
+                            // loop can poll it (see the WouldBlock arm below),
+                            // but the *accepted* stream must be put back into
+                            // blocking mode before handing it to
+                            // `read_http_request`, which does a raw, un-retried
+                            // `.read().unwrap()`. Without this, under enough
+                            // scheduler contention the request bytes can still
+                            // be in flight when `read` is called, and a
+                            // non-blocking read returns `WouldBlock` instead of
+                            // waiting — panicking the mock server's accept
+                            // thread. `IpcHydrationMock::start` (below) already
+                            // does this; this server predates that fix and was
+                            // missing it, causing an intermittent
+                            // `Os { code: 35, kind: WouldBlock }` panic under
+                            // shared-machine load (confirmed via task 1546's
+                            // and task 1538's independent gate runs: 3 distinct
+                            // tests using this helper each panicked here under
+                            // load and passed 3/3 when rerun in isolation).
+                            stream.set_nonblocking(false).unwrap();
                             idle_after_min_since = None;
                             let request = read_http_request(&mut stream);
                             let response = upload_mock_response(&request, fail_chunk);
@@ -6456,6 +6777,55 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_review_operation_recognizes_expired_session_as_auth_failure() {
+        // Task 1546 finding 3: an expired-session (401) upload failure fell
+        // through to the generic `failed_upload` bucket with the raw HTTP
+        // error text and no "sign in again" path. `classify_review_operation`
+        // is the function VersionCenter's list actually reads (NOT
+        // `classify_operation_error`, which already classified this
+        // correctly for backoff purposes but was never consulted here).
+        let op = PendingOperation {
+            op_id: "op-auth-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("server-file-1".into()),
+            parent_id: None,
+            target_path: Some("Docs/notes.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: Some(
+                "HTTP status client error (401 Unauthorized) for url (http://127.0.0.1:8080/api/v1/uploads/init)"
+                    .to_string(),
+            ),
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        };
+
+        let (kind, _status, detail, action) = classify_review_operation(&op);
+        assert_eq!(kind, "auth_failure");
+        assert_eq!(action, "sign_in_again");
+        assert!(
+            detail.to_ascii_lowercase().contains("sign in"),
+            "detail should tell the user to sign in again, got: {detail}"
+        );
+
+        // A completely unrelated failure (no 401/unauthorized/invalid-token
+        // substring) must still classify as a plain upload review, not auth —
+        // this guards against the new check being too broad.
+        let unrelated = PendingOperation {
+            last_error: Some("500 Internal Server Error".to_string()),
+            ..op
+        };
+        let (kind, _status, _detail, _action) = classify_review_operation(&unrelated);
+        assert_eq!(kind, "failed_upload");
+    }
+
+    #[test]
     fn classify_ignores_status_like_digits_in_the_request_url() {
         // Task 1252: reqwest's Display suffixes `" for url (…)"`, and the URL's
         // ephemeral port / path ids can contain "401", "403", etc. Those are not
@@ -7000,6 +7370,261 @@ mod tests {
         );
         assert_eq!(requests[3].method, "POST");
         assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_reads_local_disk_and_downloads_real_remote_content() {
+        // Task 1546 finding 2: ConflictWindow.tsx's own doc-comment admitted the
+        // diff body was a hardcoded placeholder for EVERY conflict ("Content
+        // from this device…" / "Content from other device…"), never the
+        // file's real content, because "actual diffing needs the daemon to
+        // expose both blob bytes". This is that daemon-side exposure.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("notes.txt"), b"local version text").unwrap();
+
+        let master_key = [21u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let remote_chunks = vec![b"remote version text".to_vec()];
+        let server = HydrationMockServer::start(file_key, remote_chunks, 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 18,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge
+            .conflict_content_preview(TEST_FILE_ID, &sync_root)
+            .await
+            .unwrap();
+
+        // The two sides must be the REAL, DIFFERENT content, not the old
+        // "Content from this device…" / "Content from other device…" pair.
+        assert_eq!(preview.local.text.as_deref(), Some("local version text"));
+        assert_eq!(preview.remote.text.as_deref(), Some("remote version text"));
+        assert!(preview.local.unavailable_reason.is_none());
+        assert!(preview.remote.unavailable_reason.is_none());
+
+        // A preview must be read-only: the row is mid-conflict and neither
+        // side has been chosen, so daemon bookkeeping (status, cache) must
+        // not move just because the user opened the window. This is exactly
+        // why the implementation calls `do_hydrate` directly instead of
+        // `hydrate_file`/`hydrate_file_to_memory`, which both flip status.
+        let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Conflict);
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_reports_a_local_read_failure_without_failing_the_whole_call() {
+        // The local file may be missing (e.g. deleted outside the daemon) even
+        // though the row is Conflict; the remote side must still load so the
+        // user isn't left with neither pane.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        // Deliberately do NOT write sync_root/notes.txt.
+
+        let master_key = [22u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![b"remote only".to_vec()], 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 0,
+                modified_at: 100,
+                content_hash: None,
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge
+            .conflict_content_preview(TEST_FILE_ID, &sync_root)
+            .await
+            .unwrap();
+
+        assert!(preview.local.text.is_none());
+        assert!(preview.local.unavailable_reason.is_some());
+        assert_eq!(preview.remote.text.as_deref(), Some("remote only"));
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_skips_remote_download_when_metadata_reports_oversized_file() {
+        // Codex round 2, finding 1: the remote size must be checked from
+        // metadata BEFORE any chunk is downloaded. `requests: 1` means the
+        // mock server serves ONLY the metadata GET and then stops — if the
+        // implementation regresses to downloading anyway, the resulting
+        // chunk GET either fails to connect (server already exited) or hits
+        // a closed listener, so `remote.unavailable_reason` would report a
+        // download/connection failure instead of "too large," and this test
+        // would fail (not hang: the listener is dropped, not left open).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("notes.txt"), b"small local text").unwrap();
+
+        let master_key = [23u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        // The chunk bytes are real (so `size_bytes` in the mocked metadata
+        // response is real and over the cap) but must NEVER be fetched.
+        let oversized_chunk = vec![b'z'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 100];
+        let expected_size = oversized_chunk.len() as u64;
+        let server = HydrationMockServer::start(file_key, vec![oversized_chunk], 1);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 16,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
+
+        assert!(preview.is_text, "notes.txt must classify as text");
+        assert!(preview.remote.text.is_none());
+        assert_eq!(preview.remote.size_bytes, Some(expected_size));
+        let reason = preview.remote.unavailable_reason.expect("must explain why text is absent");
+        assert!(reason.contains("too large"), "reason was: {reason}");
+        assert!(reason.contains(&expected_size.to_string()), "reason was: {reason}");
+
+        // The local side is untouched by this finding and must still work.
+        assert_eq!(preview.local.text.as_deref(), Some("small local text"));
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_local_bounded_read_reports_too_large_with_accurate_size() {
+        // Codex round 2, finding 1's local half: a local file over the cap
+        // must report "too large" with the REAL size (from `fs::metadata`,
+        // not from reading the whole file — `local_content_preview` never
+        // calls `std::fs::read` on an oversized file).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let oversized = vec![b'x'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1];
+        let expected_size = oversized.len() as u64;
+        std::fs::write(sync_root.join("notes.txt"), &oversized).unwrap();
+
+        let master_key = [24u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![b"remote version text".to_vec()], 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: expected_size as i64,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
+
+        assert!(preview.local.text.is_none());
+        assert_eq!(preview.local.size_bytes, Some(expected_size));
+        let reason = preview.local.unavailable_reason.expect("must explain why text is absent");
+        assert!(reason.contains("too large"), "reason was: {reason}");
+        assert!(reason.contains(&expected_size.to_string()), "reason was: {reason}");
+
+        // The remote side (small, real content) is untouched by this finding.
+        assert_eq!(preview.remote.text.as_deref(), Some("remote version text"));
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_determines_textness_from_the_file_path_not_a_caller_flag() {
+        // Codex round 2, finding 3: `conflict_content_preview` no longer
+        // takes an `is_text` parameter at all — the daemon decides from the
+        // row's own `path` via `is_text_file`. This is exactly the bug:
+        // VersionCenter's `open_conflict_window` call always hardcoded
+        // `isText: false`, which (before this fix) discarded valid text
+        // content for every conflict opened that way. Here the path has a
+        // binary extension (`.jpg`) even though the bytes on both sides
+        // happen to be valid UTF-8 — the response must still classify as
+        // binary and never surface `text`, proving the decision comes from
+        // the path, not from any UTF-8-validity heuristic on the bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("photo.jpg"), b"not really jpeg bytes").unwrap();
+
+        let master_key = [25u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        // requests: 1 — a binary preview must fetch ONLY the metadata GET
+        // (to learn `size_bytes`) and never a chunk GET, so the mock server
+        // must never need to serve a 2nd request. If the implementation
+        // regresses to always downloading, that 2nd request fails to
+        // connect (the server thread already exited after 1) rather than
+        // hanging, so this stays a fast, deterministic red, not a hang.
+        let server = HydrationMockServer::start(file_key, vec![b"also not really jpeg bytes".to_vec()], 1);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "photo.jpg".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 21,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
+
+        assert!(!preview.is_text, "a .jpg path must classify as binary");
+        assert!(preview.local.text.is_none());
+        assert!(preview.remote.text.is_none());
+        assert!(preview.local.unavailable_reason.is_none(), "binary is an expected, not an error, state");
+        assert!(preview.remote.unavailable_reason.is_none(), "binary is an expected, not an error, state");
+        assert_eq!(preview.local.size_bytes, Some(21));
+        assert_eq!(preview.remote.size_bytes, Some(26));
+
+        server.finish();
     }
 
     #[tokio::test]

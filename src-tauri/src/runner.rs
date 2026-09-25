@@ -31,7 +31,7 @@
 //! consume this stream.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,10 +41,69 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_bridge::{ConflictDetected, EngineBridge, WireCounters, sync_tick};
+use crate::engine_bridge::{
+    ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick,
+};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 use crate::state_paths;
+
+/// After this many CONSECUTIVE auth (401) failures across a session's
+/// heartbeat + sync-tick API calls, [`AuthHealth::expired`] flips true and
+/// `sync_status` starts reporting `auth_expired: true` — the trigger for the
+/// persistent "You're signed out on this device" banner (task 1546 Codex
+/// round 2, finding 5 / lead decision). ANY successful call resets the
+/// streak to 0 (and clears `expired`) — a single working request means the
+/// session is fine again.
+const AUTH_EXPIRED_THRESHOLD: u32 = 3;
+
+/// Shared, per-account auth-health tracker (task 1546 Codex round 2, finding
+/// 5). Fed by BOTH the heartbeat producer's `post_heartbeat` calls and the
+/// main tick loop's `sync_tick` calls — whichever one talks to the server
+/// next advances or resets the streak. Lives on `AccountRuntime` (`Arc`'d,
+/// same pattern as `sync_paused`) so `sync_status` can read [`Self::is_expired`]
+/// without touching the engine task, and is cloned into [`EngineRunner::spawn`]
+/// / [`run`] the same way `sync_paused` already is.
+#[derive(Default)]
+pub struct AuthHealth {
+    consecutive_failures: AtomicU32,
+    expired: AtomicBool,
+}
+
+impl AuthHealth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.expired.load(Ordering::Relaxed)
+    }
+
+    /// Record the outcome of one API call. `error` is `None` on success,
+    /// which always clears the streak and the expired flag — a working
+    /// request proves the session is fine again. `Some(e)` on failure
+    /// advances the streak only when `e` classifies as an auth (401)
+    /// failure via [`classify_operation_error`]; any other error (network
+    /// blip, 5xx, …) leaves the streak untouched rather than resetting OR
+    /// advancing it, so an unrelated hiccup between two real 401s doesn't
+    /// erase the count that matters. `pub(crate)`: also called from
+    /// `lib.rs`'s `clear_session_impl` to reset the streak on sign-out.
+    pub(crate) fn note_result(&self, error: Option<&anyhow::Error>) {
+        match error {
+            None => {
+                self.consecutive_failures.store(0, Ordering::Relaxed);
+                self.expired.store(false, Ordering::Relaxed);
+            }
+            Some(e) if matches!(classify_operation_error(&e.to_string()), OperationFailureClass::Auth) => {
+                let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= AUTH_EXPIRED_THRESHOLD {
+                    self.expired.store(true, Ordering::Relaxed);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+}
 
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
@@ -447,6 +506,7 @@ fn spawn_heartbeat_producer(
     telemetry: Arc<Mutex<TelemetryState>>,
     sync_paused: Arc<AtomicBool>,
     wire: Arc<WireCounters>,
+    auth_health: Arc<AuthHealth>,
     mut cancel: oneshot::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -505,11 +565,15 @@ fn spawn_heartbeat_producer(
 
                     last_beat_secs = now;
 
-                    if let Err(e) = api.post_heartbeat(&session_id, &body).await {
-                        // Fire-and-forget: a missed beat is non-fatal (the next
-                        // beat refreshes the row). Network blips + token-rotation
-                        // 401s are expected; log at debug to avoid noise.
-                        tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
+                    match api.post_heartbeat(&session_id, &body).await {
+                        Ok(()) => auth_health.note_result(None),
+                        Err(e) => {
+                            // Fire-and-forget: a missed beat is non-fatal (the next
+                            // beat refreshes the row). Network blips + token-rotation
+                            // 401s are expected; log at debug to avoid noise.
+                            tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
+                            auth_health.note_result(Some(&e));
+                        }
                     }
                 }
             }
@@ -542,13 +606,16 @@ impl EngineRunner {
     ///
     /// `sync_paused` is shared with [`crate::AppState`] so the
     /// `tray_pause_sync` / `tray_resume_sync` IPC commands can signal
-    /// the loop without restarting the runner.
+    /// the loop without restarting the runner. `auth_health` is likewise
+    /// shared with the account runtime so `sync_status` can read the
+    /// consecutive-401 streak this task feeds (task 1546 finding 5).
     pub fn spawn(
         app: AppHandle,
         sync_root: PathBuf,
         session_token: String,
         master_key: [u8; 32],
         sync_paused: Arc<AtomicBool>,
+        auth_health: Arc<AuthHealth>,
     ) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
         let ipc_bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -565,6 +632,7 @@ impl EngineRunner {
                 RunnerControls {
                     cancel: rx,
                     sync_paused,
+                    auth_health,
                     ipc_bind_error: ipc_bind_error_for_task,
                     stopping: stopping_for_task,
                 },
@@ -693,9 +761,12 @@ impl Drop for EngineRunner {
 /// lifetime, bundled into one struct rather than passed as separate `run`
 /// parameters — task 1538 Codex P1: adding `stopping` pushed the previous
 /// flat parameter list to 8, past clippy's `too_many_arguments` threshold.
+/// `auth_health` (task 1546 finding 5) joined the struct for the same
+/// reason rather than reopening that flat list.
 struct RunnerControls {
     cancel: oneshot::Receiver<()>,
     sync_paused: Arc<AtomicBool>,
+    auth_health: Arc<AuthHealth>,
     ipc_bind_error: Arc<Mutex<Option<String>>>,
     stopping: Arc<AtomicBool>,
 }
@@ -708,10 +779,11 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     // Task 1538 Codex P1: destructured immediately so the rest of this
     // (already long-standing) function body is untouched — every field
     // below is used exactly as the old flat `cancel`/`sync_paused`/
-    // `ipc_bind_error`/`stopping` parameters were.
+    // `auth_health`/`ipc_bind_error`/`stopping` parameters were.
     let RunnerControls {
         mut cancel,
         sync_paused,
+        auth_health,
         ipc_bind_error,
         stopping,
     } = controls;
@@ -814,6 +886,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                     telemetry.clone(),
                     sync_paused.clone(),
                     bridge.wire.clone(),
+                    auth_health.clone(),
                     hb_cancel_rx,
                 );
                 Some((hb_cancel_tx, handle, session_id))
@@ -961,6 +1034,11 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                 }
                 match sync_tick(&*bridge, &sync_root).await {
                     Ok(conflicts) => {
+                        // A successful tick is a real, authenticated API round
+                        // trip — clears the auth-failure streak (task 1546
+                        // finding 5) alongside every other post-tick bookkeeping
+                        // step below.
+                        auth_health.note_result(None);
                         // Task 10 — surface freshly detected conflicts.
                         // The engine bridge already flipped status to
                         // Conflict; we own the UI side: open a window
@@ -1086,6 +1164,10 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         // are normal — log and continue, surface the
                         // error to the WebView so the tray reflects it.
                         tracing::warn!(error = %e, "sync tick failed");
+                        // Task 1546 finding 5: a run of these that classify as
+                        // auth failures (not network blips) is what flips
+                        // `auth_health` and surfaces the persistent banner.
+                        auth_health.note_result(Some(&e));
                         emit_status(&app, "error", Some(&sync_root), Some(&e.to_string()));
                         set_telemetry_state(&telemetry, "error");
                         // Windows breadcrumb flyout: surface the tick failure as
@@ -1505,6 +1587,73 @@ mod tests {
     async fn stop_task_and_confirm_is_idempotent_with_nothing_left_to_wait_on() {
         let confirmed = stop_task_and_confirm(None, None, Duration::from_millis(50), Duration::from_millis(50)).await;
         assert!(confirmed);
+    }
+
+    // ── AuthHealth (task 1546 Codex round 2, finding 5) ────────────────────
+
+    fn auth_error() -> anyhow::Error {
+        anyhow::anyhow!("HTTP 401 Unauthorized: invalid token")
+    }
+
+    fn other_error() -> anyhow::Error {
+        anyhow::anyhow!("HTTP 500 Internal Server Error: db unavailable")
+    }
+
+    #[test]
+    fn auth_health_starts_not_expired() {
+        let health = AuthHealth::new();
+        assert!(!health.is_expired());
+    }
+
+    #[test]
+    fn auth_health_flips_expired_only_at_the_threshold_of_consecutive_auth_failures() {
+        let health = AuthHealth::new();
+        assert_eq!(AUTH_EXPIRED_THRESHOLD, 3, "test assumes the documented threshold");
+
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired(), "1 failure must not trip the banner");
+
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired(), "2 failures must not trip the banner");
+
+        health.note_result(Some(&auth_error()));
+        assert!(health.is_expired(), "the 3rd CONSECUTIVE auth failure must trip it");
+    }
+
+    #[test]
+    fn auth_health_non_auth_failures_neither_advance_nor_reset_the_streak() {
+        // A network blip / 5xx between two real 401s must not erase progress
+        // toward the threshold, and must not itself count as progress.
+        let health = AuthHealth::new();
+
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired());
+
+        health.note_result(Some(&other_error()));
+        assert!(!health.is_expired(), "an unrelated error must not itself trip the banner");
+
+        // The streak must still be at 2 — one more REAL auth failure trips it.
+        health.note_result(Some(&auth_error()));
+        assert!(health.is_expired(), "the unrelated error must not have reset the streak back to 0");
+    }
+
+    #[test]
+    fn auth_health_any_success_resets_the_streak_and_clears_expired() {
+        let health = AuthHealth::new();
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        assert!(health.is_expired());
+
+        health.note_result(None);
+        assert!(!health.is_expired(), "a success must clear an already-tripped banner");
+
+        // And the streak is genuinely back to 0, not just the flag flipped:
+        // two more failures alone must not re-trip it.
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired(), "the streak must have been reset to 0, not left at 3");
     }
 
     #[test]
