@@ -174,8 +174,75 @@ fn macos_ipc_socket_path_in(home_dir: &std::path::Path) -> std::path::PathBuf {
 /// with no indication of the real cause.
 #[cfg(target_os = "macos")]
 pub fn ipc_socket_path() -> std::path::PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    macos_ipc_socket_path_in(&home)
+    macos_ipc_socket_path_in(&macos_real_home_dir())
+}
+
+/// Task 1524 follow-up: resolve the real user home directory from the OS
+/// password database (`getpwuid_r(getuid())` → `pw_dir`), never from `$HOME`.
+///
+/// A sandboxed macOS process has `$HOME` rewritten by the OS to the app's
+/// *container* directory (`~/Library/Containers/io.beebeeb.app/Data`), so
+/// `dirs::home_dir()` — which is just a `$HOME` read — returned a path ~40
+/// bytes longer than the real home once joined with `Library/Group
+/// Containers/<group id>/ipc.sock`: 132 bytes, over the 104-byte
+/// `sockaddr_un.sun_path` budget (`macos_ipc_socket_path_in`'s doc comment),
+/// so the bind failed and "Install Finder location" still timed out even
+/// after the first 1524 fix moved the socket into the group container.
+///
+/// `pw_dir` from the password database is NOT redirected by the sandbox — it
+/// is the same real home the Swift side resolves via `FileManager
+/// .homeDirectoryForCurrentUser` / `NSHomeDirectory()`, and the same one a
+/// plain `getpwuid` reads outside any container. Falls back to
+/// `dirs::home_dir()` only if the password-database lookup itself fails
+/// (not expected on a real macOS install).
+#[cfg(target_os = "macos")]
+fn macos_real_home_dir() -> std::path::PathBuf {
+    match getpwuid_home_dir() {
+        Some(dir) => {
+            tracing::debug!("ipc_socket_path: resolved real home via getpwuid_r (bypassing $HOME)");
+            dir
+        }
+        None => {
+            tracing::warn!(
+                "ipc_socket_path: getpwuid_r lookup failed; falling back to dirs::home_dir(), \
+                 which reads $HOME and is WRONG under the app sandbox"
+            );
+            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        }
+    }
+}
+
+/// `getpwuid_r(getuid())` → `pw_dir`, as a `PathBuf`. `None` on any failure
+/// (lookup error, null result, non-UTF8 or empty `pw_dir`) so the caller can
+/// fall back. Split out as a pure(ish) helper so the mutation test in `mod
+/// tests` can compute the expected real-home path directly, independent of
+/// `$HOME`.
+#[cfg(target_os = "macos")]
+fn getpwuid_home_dir() -> Option<std::path::PathBuf> {
+    use std::ffi::CStr;
+
+    // SAFETY: `pwd` is a plain-old-data struct the libc call fills in place;
+    // `buf` backs any string fields `pwd` points into for the duration of
+    // this call, and we only read through `pwd.pw_dir` after checking `rc`
+    // and `result` for success. `getuid()` never fails.
+    let uid = unsafe { libc::getuid() };
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf: Vec<libc::c_char> = vec![0; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: `pwd.pw_dir` is non-null (checked above) and, on success,
+    // points at a NUL-terminated string owned by `buf`, which is still
+    // alive here.
+    let s = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_str().ok()?;
+    if s.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s))
 }
 
 /// Linux: unchanged — `$XDG_RUNTIME_DIR` (a systemd-managed, per-user,
@@ -907,6 +974,81 @@ mod tests {
             byte_len < 104,
             "path must fit sockaddr_un.sun_path (104 bytes incl. NUL); \
              got a {byte_len}-byte path for a 20-char username: {path:?}"
+        );
+    }
+
+    /// Serializes every test that mutates the process-wide `$HOME` env var,
+    /// so `cargo test`'s default parallel test threads can't interleave two
+    /// mutations of the same global state.
+    #[cfg(target_os = "macos")]
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_ipc_socket_path_ignores_sandboxed_home_env_var() {
+        // Task 1524 follow-up regression pin: a sandboxed process has $HOME
+        // rewritten to the app's container directory by macOS itself. This
+        // proves `ipc_socket_path()` does NOT trust $HOME for that — it must
+        // resolve the same real home regardless of what $HOME says, via the
+        // password database (getpwuid_r), matching the Swift side's
+        // `FileManager.homeDirectoryForCurrentUser`.
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let real_home =
+            getpwuid_home_dir().expect("getpwuid_r must resolve a real home directory on this machine");
+        let expected = macos_ipc_socket_path_in(&real_home);
+
+        let original_home = std::env::var_os("HOME");
+        // A realistic sandboxed $HOME, per the task 1524 root-cause report:
+        // "/Users/guuslangelaar/Library/Containers/io.beebeeb.app/Data".
+        let sandbox_home = "/Users/x/Library/Containers/io.beebeeb.app/Data";
+        // SAFETY: mutation is serialized by HOME_ENV_LOCK above, and every
+        // path out of this test (including panics, via catch_unwind below)
+        // restores the original value before returning.
+        unsafe { std::env::set_var("HOME", sandbox_home) };
+
+        let result = std::panic::catch_unwind(ipc_socket_path);
+
+        // SAFETY: same guard as the set_var above.
+        match &original_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        let path = result.unwrap_or_else(|e| std::panic::resume_unwind(e));
+
+        assert_eq!(
+            path, expected,
+            "ipc_socket_path() must ignore a sandboxed $HOME and resolve the real home via \
+             getpwuid_r instead, got {path:?}, expected {expected:?}"
+        );
+        assert!(
+            !path.to_str().unwrap().contains("/Library/Containers/"),
+            "must never resolve into the sandbox container path even when $HOME points there, \
+             got {path:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_ipc_socket_path_fits_sun_path_on_this_machine() {
+        // Complements test_macos_ipc_socket_path_fits_sun_path_budget's
+        // synthetic 20-char username: this exercises the REAL
+        // `ipc_socket_path()` (through getpwuid_home_dir()/the dirs
+        // fallback) against whatever machine cargo test actually runs on,
+        // so a regression that only shows up with this machine's real home
+        // directory doesn't hide behind the synthetic case.
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let path = ipc_socket_path();
+        let byte_len = path.to_str().expect("path must be valid UTF-8").len();
+        // `byte_len + 1 <= 104` (path bytes + NUL terminator, within the
+        // 104-byte sun_path budget) rewritten as `byte_len < 104` for clippy
+        // (int_plus_one) — same inequality, since both sides are integers.
+        assert!(
+            byte_len < 104,
+            "ipc_socket_path() ({byte_len} bytes) + NUL terminator must fit \
+             sockaddr_un.sun_path (104 bytes total) on this machine, got {path:?}"
         );
     }
 
