@@ -4123,6 +4123,23 @@ fn resolve_relative_path(f: &serde_json::Value, file_id: &str, master_key: &[u8;
         .to_string()
 }
 
+/// Compose `<parent>/<leaf>` for a row's stored relative path. An empty leaf
+/// means the name didn't decrypt; keep it empty so the placeholder seeder skips
+/// the row (and retries next tick) rather than seeding a bare parent dir. A leaf
+/// that already carries a leading slash (legacy plaintext-`path` fallback) is
+/// normalised.
+fn compose_rel_path(parent_rel_path: &str, leaf: String) -> String {
+    if parent_rel_path.is_empty() || leaf.is_empty() {
+        leaf
+    } else {
+        format!(
+            "{}/{}",
+            parent_rel_path.trim_end_matches('/'),
+            leaf.trim_start_matches('/')
+        )
+    }
+}
+
 fn apply_metadata_file_row(
     db: &StateDb,
     f: &serde_json::Value,
@@ -4147,19 +4164,8 @@ fn apply_metadata_file_row(
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
     let leaf = resolve_relative_path(f, file_id, master_key);
-    // Compose the nested path. An empty leaf means the name didn't decrypt;
-    // keep it empty so the placeholder seeder skips the row (and retries next
-    // tick) rather than seeding a bare parent dir. A leaf that already carries
-    // a leading slash (legacy plaintext-`path` fallback) is normalised.
-    let path = if parent_rel_path.is_empty() || leaf.is_empty() {
-        leaf
-    } else {
-        format!(
-            "{}/{}",
-            parent_rel_path.trim_end_matches('/'),
-            leaf.trim_start_matches('/')
-        )
-    };
+    // Compose the nested path (see `compose_rel_path` for the empty-leaf rule).
+    let path = compose_rel_path(parent_rel_path, leaf);
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
@@ -4706,7 +4712,9 @@ fn apply_sync_op(
             let new_name = payload["new_name_encrypted"].as_str();
             let row = synthesize_op_row(bridge, id, op, new_name);
             let parent_rel = existing_parent_rel_path(bridge, id);
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            if !apply_metadata_only_op_to_local_row(bridge, id, &row, &parent_rel)? {
+                process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            }
         }
         "file_move" | "folder_move" => {
             // Re-parent. The op gives `new_parent_id`; the leaf name is unchanged.
@@ -4720,7 +4728,9 @@ fn apply_sync_op(
             // at the sync root. If the new parent isn't locally known yet, fall
             // back to a re-snapshot rather than mis-placing the row at root.
             let parent_rel = parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str());
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            if !apply_metadata_only_op_to_local_row(bridge, id, &row, &parent_rel)? {
+                process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            }
         }
         "file_create" | "folder_create" | "file_update" => {
             let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
@@ -4744,6 +4754,61 @@ fn apply_sync_op(
         }
     }
     Ok(())
+}
+
+/// Apply a remote rename/move (metadata-only op) to a row this device holds
+/// LOCALLY (`FileStatus::Local`). Returns `Ok(true)` when it handled the op,
+/// `Ok(false)` when the row is not `Local` and the caller should fall through
+/// to the generic [`process_metadata_row`] ingest.
+///
+/// Why a dedicated path: [`process_metadata_row`] gates a `Local` row on a
+/// content-freshness check (`remote_updated <= entry.remote_updated_at` →
+/// no-op) and then runs the three-way content-conflict predicate. Both are
+/// meaningless for a rename/move — the op changes the name/parent, not the
+/// bytes — and the freshness gate is actively wrong here: op rows are stamped
+/// with wall-clock SECONDS (`synthesize_op_row`), so the first rename re-anchors
+/// `remote_updated_at` to "now" and a second rename/move for the same file in
+/// the same `/sync/ops` batch (same second) was silently dropped while the
+/// cursor advanced past it — a permanent path divergence (flow 7,
+/// `flow7_double_rename_between_ticks`).
+///
+/// So a metadata-only op on a `Local` row ALWAYS applies the new path and
+/// parent, and touches nothing else: status, `content_hash`, size, `modified_at`
+/// and `remote_updated_at` (the content anchors the conflict check relies on)
+/// are preserved, and no conflict is ever raised.
+fn apply_metadata_only_op_to_local_row(
+    bridge: &EngineBridge,
+    id: &str,
+    row: &serde_json::Value,
+    parent_rel_path: &str,
+) -> anyhow::Result<bool> {
+    let Some(entry) = bridge.db().get_file(id)? else {
+        return Ok(false);
+    };
+    if entry.status != FileStatus::Local {
+        return Ok(false);
+    }
+    let leaf = resolve_relative_path(row, id, bridge.api().master_key());
+    if leaf.is_empty() {
+        // Undecryptable/missing name: never blank a Local row's path. Keep the
+        // row as-is and let an authoritative snapshot reconcile it next tick.
+        tracing::warn!(file_id = %id, "sync_tick: rename/move op name unresolvable; scheduling re-snapshot");
+        bridge.db().request_resnapshot()?;
+        return Ok(true);
+    }
+    let new_parent_id = row["parent_id"].as_str().map(str::to_string);
+
+    let mut updated = entry.clone();
+    updated.path = compose_rel_path(parent_rel_path, leaf);
+    updated.parent_id = new_parent_id.clone();
+    bridge.db().upsert_file(&updated)?;
+
+    // `files.parent_id` is persisted through the contract state, not upsert_file.
+    if let Some(mut contract) = bridge.db().get_file_contract_state(id)? {
+        contract.parent_id = new_parent_id;
+        bridge.db().set_file_contract_state(&contract)?;
+    }
+    Ok(true)
 }
 
 /// Build a `/files`-shaped `serde_json::Value` from a sync op + the existing
@@ -8855,5 +8920,152 @@ mod tests {
         );
 
         server.stop_and_count();
+    }
+
+    // ── Flow 7: two remote metadata ops in ONE /sync/ops batch on a Local row ──
+    // Repro of flow7_double_rename_between_ticks: device A renames
+    // draft.txt → draft-v2.txt → final.txt between two of B's ticks, so B's
+    // single /sync/ops response carries BOTH renames. B holds the file locally
+    // (status Local). Before the fix the first rename re-anchored
+    // `remote_updated_at` to wall-clock seconds and the second (same second)
+    // hit the `remote_updated <= entry.remote_updated_at` early return in
+    // `process_metadata_row` — the rename was dropped while the cursor advanced
+    // past it, leaving B permanently at `draft-v2.txt`.
+
+    fn seed_local_with_hash(bridge: &EngineBridge, file_id: &str, path: &str) {
+        seed_bridge_entry(bridge, file_id, path, None, FileStatus::Local, false, 10);
+        let mut row = bridge.db().get_file(file_id).unwrap().unwrap();
+        row.content_hash = Some("local-hash-abc".into());
+        bridge.db().upsert_file(&row).unwrap();
+    }
+
+    fn apply_batch(
+        bridge: &EngineBridge,
+        root: &Path,
+        ops: &[(i64, &str, serde_json::Value)],
+    ) -> Vec<ConflictDetected> {
+        let mut conflicts = Vec::new();
+        for (seq_id, op_type, payload) in ops {
+            let op = crate::api_client::SyncOp {
+                seq_id: *seq_id,
+                op_type: (*op_type).into(),
+                payload: payload.clone(),
+            };
+            apply_sync_op(bridge, root, &op, 200, &mut conflicts).unwrap();
+        }
+        conflicts
+    }
+
+    #[test]
+    fn flow7_two_renames_in_one_batch_land_final_name_on_local_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let file = "dbl00000-0000-4000-8000-000000000001";
+        seed_local_with_hash(&bridge, file, "draft.txt");
+
+        let conflicts = apply_batch(
+            &bridge,
+            dir.path(),
+            &[
+                (
+                    21,
+                    "file_rename",
+                    serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "draft-v2.txt") }),
+                ),
+                (
+                    22,
+                    "file_rename",
+                    serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "final.txt") }),
+                ),
+            ],
+        );
+
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(
+            row.path, "final.txt",
+            "second rename in the same batch must not be dropped"
+        );
+        assert_eq!(
+            row.status,
+            FileStatus::Local,
+            "a rename is metadata-only; the local copy stays Local"
+        );
+        assert_eq!(
+            row.content_hash.as_deref(),
+            Some("local-hash-abc"),
+            "rename must not disturb the content anchor"
+        );
+        assert!(
+            conflicts.is_empty(),
+            "a metadata-only op never raises a content conflict"
+        );
+    }
+
+    #[test]
+    fn flow7_move_then_rename_in_one_batch_lands_under_dest_on_local_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let dest = "dst00000-0000-4000-8000-000000000001";
+        let file = "mvr00000-0000-4000-8000-000000000002";
+        seed_bridge_entry(&bridge, dest, "Dest", None, FileStatus::CloudOnly, true, 10);
+        seed_local_with_hash(&bridge, file, "draft.txt");
+
+        let conflicts = apply_batch(
+            &bridge,
+            dir.path(),
+            &[
+                (
+                    31,
+                    "file_move",
+                    serde_json::json!({ "id": file, "new_parent_id": dest }),
+                ),
+                (
+                    32,
+                    "file_rename",
+                    serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "n2.txt") }),
+                ),
+            ],
+        );
+
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(row.path, "Dest/n2.txt", "move then rename in one batch must both apply");
+        assert_eq!(row.status, FileStatus::Local);
+        assert_eq!(row.content_hash.as_deref(), Some("local-hash-abc"));
+        let contract = bridge.db().get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.parent_id.as_deref(), Some(dest));
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn flow7_rename_on_locally_edited_local_row_moves_path_without_conflict() {
+        // A remote rename is metadata-only: even when the remote row looks
+        // "fresher" than base AND the local copy has its own hash, the rename
+        // must apply the new path and must NOT flip the row to Conflict.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let file = "edt00000-0000-4000-8000-000000000003";
+        seed_local_with_hash(&bridge, file, "notes.txt");
+
+        let conflicts = apply_batch(
+            &bridge,
+            dir.path(),
+            &[(
+                41,
+                "file_rename",
+                serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "notes-renamed.txt") }),
+            )],
+        );
+
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(row.path, "notes-renamed.txt");
+        assert_eq!(row.status, FileStatus::Local);
+        assert_eq!(
+            row.remote_updated_at, 10,
+            "a rename must not re-anchor the content freshness clock"
+        );
+        assert!(conflicts.is_empty());
     }
 }
