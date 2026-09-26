@@ -13,6 +13,12 @@ export interface SyncStatus {
   syncing: number
   cloud_only: number
   conflicts: number
+  // Task 1546 finding 5: set once the engine sees 3+ consecutive 401s from
+  // its heartbeat/sync-tick calls, reset by any success. Independent of
+  // `logged_in` — the stale token can still be installed (`logged_in: true`)
+  // while every call it makes fails. Drives the persistent "You're signed
+  // out on this device" banner.
+  auth_expired?: boolean
 }
 
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
@@ -132,6 +138,10 @@ export interface VersionConflictEntry {
     | 'restore'
     | 'metadata'
     | 'delete'
+    // Task 1546 finding 3: a 401/unauthorized/invalid-token operation failure.
+    // Previously fell through to the generic 'failed_upload' bucket with the
+    // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
+    | 'auth_failure'
   status: string
   updated_at?: number
   detail: string
@@ -140,6 +150,36 @@ export interface VersionConflictEntry {
   version_id?: string | null
   base_version?: number | null
   last_error?: string | null
+}
+
+/** billing/upgrade destination shared by the Plan panel and any review-row
+ * "Upgrade" action — same URL Windows' StorageWidget already opens. */
+export const BILLING_URL = 'https://app.beebeeb.io/billing'
+
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+
+export interface ReviewEntryAction {
+  kind: ReviewEntryActionKind
+  label: string
+}
+
+/**
+ * The single actionable button (if any) a Versions & conflicts row should
+ * show, decided from its `kind`/`action` fields. VersionCenter.tsx renders
+ * through this instead of the old inline `entry.action === 'open_conflict'`
+ * check, which is why `quota_failure` (task 1546 finding 1) and
+ * `auth_failure` (finding 3) rows previously got no button at all — every
+ * other `review_upload` kind (failed_upload, permission_failure, stale_base,
+ * metadata, delete) still gets none: there is no generic "retry"/"dismiss"
+ * IPC command yet, and a fake button would be worse than none.
+ */
+export function reviewEntryAction(
+  entry: Pick<VersionConflictEntry, 'kind' | 'action'>,
+): ReviewEntryAction | null {
+  if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
+  if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
+  if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  return null
 }
 
 export interface FileVersionEntry {
@@ -317,6 +357,32 @@ export function restorableFileVersions(versions: FileVersionEntry[]): FileVersio
 
 export function restoreVersionId(version: FileVersionEntry): string {
   return version.id
+}
+
+// ── Conflict content preview (task 1546 finding 2) ──────────────────────────
+// Mirrors src-tauri/src/engine_bridge.rs's `ConflictContentSide` /
+// `ConflictContentPreview`. Real content (or an honest reason it's
+// unavailable) for both sides of a conflict — replaces ConflictWindow.tsx's
+// previous hardcoded placeholder diff body.
+
+export interface ConflictContentSide {
+  size_bytes?: number | null
+  text?: string | null
+  unavailable_reason?: string | null
+}
+
+export interface ConflictContentPreview {
+  is_text: boolean
+  local: ConflictContentSide
+  remote: ConflictContentSide
+}
+
+// `is_text` is no longer a caller-supplied argument (task 1546 Codex round 2,
+// finding 3): the daemon determines textness itself, from the file's own
+// path, and returns it on `ConflictContentPreview.is_text` — a caller-passed
+// flag could never be trusted (VersionCenter's open always guessed `false`).
+export function conflictContentPreview(fileId: string): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('conflict_content_preview', { fileId })
 }
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
@@ -961,6 +1027,36 @@ export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
  */
 export function clearSession(): Promise<CommandResult<void>> {
   return command<void>('clear_session')
+}
+
+export interface ForceReauthApi {
+  clearSession: typeof clearSession
+  openOnboardingWindow: () => Promise<CommandResult<void>>
+}
+
+const defaultForceReauthApi: ForceReauthApi = {
+  clearSession,
+  openOnboardingWindow: () => command<void>('open_onboarding_window'),
+}
+
+/**
+ * Force a fresh sign-in (task 1546 Codex round 2, finding 2). Clears the
+ * (expired/invalid) session on the Rust side FIRST — via `clearSession`, so
+ * `sync_status` reports `logged_in: false` and `auth_expired: false` — THEN
+ * opens the onboarding window. Routing straight to `open_onboarding_window`
+ * while the stale session/token was still installed let onboarding
+ * fast-forward an "unlocked, configured" user straight past the sign-in
+ * form. Shared by VersionCenter's "Sign in again" review action and the
+ * persistent auth-expired banner, so both use the exact same forced flow.
+ *
+ * Takes an injectable `api` (default: the real Tauri commands) so the
+ * ordering + short-circuit-on-failure decision is unit-testable without a
+ * Tauri runtime — mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
+ */
+export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<void>> {
+  const cleared = await api.clearSession()
+  if (!cleared.ok) return cleared
+  return api.openOnboardingWindow()
 }
 
 // ── Selective sync (wave-2) ──────────────────────────────────────────────────
