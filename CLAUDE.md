@@ -166,6 +166,14 @@ Conflict resolution policy: never silently drop a version — default `KeepBoth`
 The backend must create a new server version for Finder writes when the server
 versioning contract supports it.
 
+Uploads resume instead of restarting (flow 7): when `POST /uploads/init` returns, the op's
+session (`upload_session_id`, server `file_id`, chunk plan) is persisted in the `upload_resume`
+table (keyed by `op_id`, fingerprinted by staged-payload path + size + mtime) and the
+acknowledged-chunk watermark advances after every 2xx chunk PUT. A retry resumes from that
+watermark; a changed payload, a gone session (400/404/410), or a given-up op abandons it —
+a create's orphaned `is_uploading` server row is trashed, a replace's never is. Snapshot rows
+still `is_uploading` and unknown locally are not materialised as placeholders.
+
 Advanced desktop settings live in `DesktopConfig` (`desktop.toml`). `theme` is
 `light` / `dark` / `system` and is applied in the WebView through CSS variables.
 `local_cache_limit_bytes` is a per-device file-content cap over pinned plus

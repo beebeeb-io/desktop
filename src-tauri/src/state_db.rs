@@ -478,6 +478,38 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// Drop every persisted upload session whose queued op no longer exists.
+/// Called by the bulk `operation_queue` purges so a session never outlives
+/// its op (`remove_operation` already clears its own row).
+fn drop_orphaned_upload_resumes(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
+        [],
+    )
+}
+
+/// Persisted resumable upload session for one queued upload op (flow 7).
+/// See the `upload_resume` table in [`StateDb::open`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadResume {
+    pub op_id: String,
+    pub payload_path: String,
+    pub payload_size: i64,
+    pub payload_mtime_ns: i64,
+    pub upload_session_id: String,
+    pub server_file_id: String,
+    pub object_version_id: String,
+    pub chunk_size_bytes: i64,
+    pub chunk_count: i64,
+    /// Chunks `0..acked_chunks` were acknowledged (2xx) by the server.
+    pub acked_chunks: i64,
+    /// The post-init `PATCH /files/{id}` (encrypted name/parent) succeeded.
+    pub metadata_applied: bool,
+    /// The op created a NEW server file (no prior version): on abandonment
+    /// its `is_uploading` row is an orphan the client may trash.
+    pub is_create: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum OperationPauseReason {
     Auth,
@@ -640,6 +672,27 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
+            -- Flow 7 (interrupted upload resume): the server upload session an
+            -- UploadVersion/UploadFile op is writing to, persisted the moment
+            -- `POST /uploads/init` returns and advanced after every
+            -- acknowledged chunk, so a retry resumes instead of minting a
+            -- second server file row. Keyed by op_id; the payload fingerprint
+            -- (path + size + mtime) guards against resuming onto other bytes.
+            CREATE TABLE IF NOT EXISTS upload_resume (
+                op_id TEXT PRIMARY KEY,
+                payload_path TEXT NOT NULL,
+                payload_size INTEGER NOT NULL,
+                payload_mtime_ns INTEGER NOT NULL,
+                upload_session_id TEXT NOT NULL,
+                server_file_id TEXT NOT NULL,
+                object_version_id TEXT NOT NULL,
+                chunk_size_bytes INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                acked_chunks INTEGER NOT NULL DEFAULT 0,
+                metadata_applied INTEGER NOT NULL DEFAULT 0,
+                is_create INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )?;
         Ok(Self(Mutex::new(conn)))
@@ -1607,6 +1660,7 @@ impl StateDb {
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
             revoked.push(RevokedSharedCache { file_id, cache_path });
         }
+        drop_orphaned_upload_resumes(&tx)?;
         tx.commit()?;
         Ok(revoked)
     }
@@ -1738,11 +1792,14 @@ impl StateDb {
     /// user-initiated op) and rows tagged with a DIFFERENT folder's key are never
     /// touched. Returns the number of rows deleted (for the disable log).
     pub fn purge_backup_source_ops(&self, source_key: &str) -> Result<usize> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let deleted = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
             "DELETE FROM operation_queue WHERE backup_source_key = ?1",
             params![source_key],
         )?;
+        drop_orphaned_upload_resumes(&tx)?;
+        tx.commit()?;
         Ok(deleted)
     }
 
@@ -1781,6 +1838,9 @@ impl StateDb {
             rows.collect::<Result<Vec<_>>>()?
         };
         let queued_ops_purged = tx.execute("DELETE FROM operation_queue", [])?;
+        // Flow 7: the leaving account's persisted upload sessions (session id,
+        // server file id, staged path) go with its queue.
+        tx.execute("DELETE FROM upload_resume", [])?;
 
         let cache_paths: Vec<String> = {
             let mut stmt = tx.prepare("SELECT cache_path FROM files WHERE cache_path IS NOT NULL")?;
@@ -1921,6 +1981,103 @@ impl StateDb {
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+        Ok(())
+    }
+
+    /// Persist (insert or replace) the resumable upload session for `op_id`.
+    pub fn put_upload_resume(&self, resume: &UploadResume) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO upload_resume (
+                op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                acked_chunks, metadata_applied, is_create, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now'))
+             ON CONFLICT(op_id) DO UPDATE SET
+                payload_path = excluded.payload_path,
+                payload_size = excluded.payload_size,
+                payload_mtime_ns = excluded.payload_mtime_ns,
+                upload_session_id = excluded.upload_session_id,
+                server_file_id = excluded.server_file_id,
+                object_version_id = excluded.object_version_id,
+                chunk_size_bytes = excluded.chunk_size_bytes,
+                chunk_count = excluded.chunk_count,
+                acked_chunks = excluded.acked_chunks,
+                metadata_applied = excluded.metadata_applied,
+                is_create = excluded.is_create,
+                updated_at = excluded.updated_at",
+            params![
+                resume.op_id,
+                resume.payload_path,
+                resume.payload_size,
+                resume.payload_mtime_ns,
+                resume.upload_session_id,
+                resume.server_file_id,
+                resume.object_version_id,
+                resume.chunk_size_bytes,
+                resume.chunk_count,
+                resume.acked_chunks,
+                resume.metadata_applied,
+                resume.is_create,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_upload_resume(&self, op_id: &str) -> Result<Option<UploadResume>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                    server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                    acked_chunks, metadata_applied, is_create
+             FROM upload_resume WHERE op_id = ?1",
+            params![op_id],
+            |row| {
+                Ok(UploadResume {
+                    op_id: row.get(0)?,
+                    payload_path: row.get(1)?,
+                    payload_size: row.get(2)?,
+                    payload_mtime_ns: row.get(3)?,
+                    upload_session_id: row.get(4)?,
+                    server_file_id: row.get(5)?,
+                    object_version_id: row.get(6)?,
+                    chunk_size_bytes: row.get(7)?,
+                    chunk_count: row.get(8)?,
+                    acked_chunks: row.get(9)?,
+                    metadata_applied: row.get(10)?,
+                    is_create: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Advance the acknowledged-chunk watermark. Monotonic: a late write can
+    /// never move it backwards.
+    pub fn set_upload_resume_acked(&self, op_id: &str, acked_chunks: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume
+             SET acked_chunks = MAX(acked_chunks, ?2), updated_at = strftime('%s','now')
+             WHERE op_id = ?1",
+            params![op_id, acked_chunks],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_upload_resume_metadata_applied(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume SET metadata_applied = 1, updated_at = strftime('%s','now') WHERE op_id = ?1",
+            params![op_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_upload_resume(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
         Ok(())
     }
 
@@ -4094,5 +4251,91 @@ mod tests {
             .delete_orphaned_children_of_absent_folder("nonexistent-folder")
             .unwrap();
         assert!(removed.is_empty(), "no children → should return empty vec");
+    }
+
+    /// Flow 7 / PR #58 merge with task 1538: every purge that drops queued
+    /// upload ops must drop their persisted upload sessions too. A resume row
+    /// outliving its op is dead state; across a sign-out it would carry the
+    /// previous account's upload session id, server file id and staged path
+    /// into the next account's database.
+    #[test]
+    fn test_every_operation_purge_drops_the_upload_resume_rows() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let mk_op = |op_id: &str, file_id: &str, key: Option<&str>| PendingOperation {
+            op_id: op_id.into(),
+            kind: OperationKind::UploadFile,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: Some(format!("/{op_id}.bin")),
+            metadata_json: Some(r#"{"operation":"create_file"}"#.into()),
+            payload_path: Some(format!("/staging/{op_id}")),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: key.map(str::to_string),
+            created_at: 100,
+            updated_at: 100,
+        };
+        let mk_resume = |op_id: &str| UploadResume {
+            op_id: op_id.into(),
+            payload_path: format!("/staging/{op_id}"),
+            payload_size: 3 * 1024,
+            payload_mtime_ns: 42,
+            upload_session_id: format!("session-{op_id}"),
+            server_file_id: format!("server-{op_id}"),
+            object_version_id: format!("ov-{op_id}"),
+            chunk_size_bytes: 1024,
+            chunk_count: 3,
+            acked_chunks: 1,
+            metadata_applied: true,
+            is_create: true,
+        };
+        let seed = |op_id: &str, file_id: &str, key: Option<&str>| {
+            db.enqueue_operation(&mk_op(op_id, file_id, key)).unwrap();
+            db.put_upload_resume(&mk_resume(op_id)).unwrap();
+        };
+
+        // (1) Disabling a known-folder backup: only that folder's session goes.
+        seed("music-1", "file-music-1", Some("music"));
+        seed("normal-1", "file-normal-1", None);
+        assert_eq!(db.purge_backup_source_ops("music").unwrap(), 1);
+        assert!(
+            db.get_upload_resume("music-1").unwrap().is_none(),
+            "a purged backup op's upload session must go with it"
+        );
+        assert!(
+            db.get_upload_resume("normal-1").unwrap().is_some(),
+            "a surviving op keeps its upload session"
+        );
+
+        // (2) Revoked shared content: the revoked file's queued upload goes, and
+        //     so does its session.
+        seed_contract_row(&db, "revoked", "/Shared with me/Revoked", None, FileStatus::Local, 20);
+        let mut revoked = db.get_file_contract_state("revoked").unwrap().unwrap();
+        revoked.namespace = Namespace::SharedWithMe;
+        revoked.shared_root_id = Some("revoked".into());
+        revoked.share_id = Some("invite-revoked".into());
+        revoked.permission_bits = PERMISSION_READ | PERMISSION_WRITE;
+        db.set_file_contract_state(&revoked).unwrap();
+        seed("shared-1", "revoked", None);
+        db.purge_revoked_shared_content(&[]).unwrap();
+        assert!(
+            db.get_upload_resume("shared-1").unwrap().is_none(),
+            "a revoked share's queued upload must not keep its upload session"
+        );
+        assert!(db.get_upload_resume("normal-1").unwrap().is_some());
+
+        // (3) Sign-out: nothing of the leaving account's uploads survives.
+        let purge = db.purge_all_local_state().unwrap();
+        assert!(purge.queued_ops_purged >= 1);
+        assert!(
+            db.get_upload_resume("normal-1").unwrap().is_none(),
+            "sign-out must purge every persisted upload session"
+        );
     }
 }
