@@ -57,8 +57,9 @@ See `HiSelectiveSync` in `design/hifi/hifi-desktop.jsx`.
 ## Conflict resolver
 
 Side-by-side diff view showing both versions with change summaries.
-NEVER silently drops a version -- loser is kept as
-`file (Device, HH:MM).ext`.
+NEVER silently drops a version -- the user picks Keep Mine / Keep Theirs /
+Keep Both; Keep Both (also applied automatically after 24 h without a choice)
+keeps the local copy as `name (conflict - <hostname> - <YYYY-MM-DD>).ext`.
 See `HiConflict` in `design/hifi/hifi-desktop.jsx`.
 
 ## First-run wizard

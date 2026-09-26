@@ -17,11 +17,12 @@
 
 ## Status — Windows + Linux released, macOS not yet
 
-> **[desktop-v0.8.3](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
+> **[desktop-v0.8.4](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
 > release** — `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
-> each with a minisign `.sig` for the auto-updater. v0.8.3's assets are signed with key ID
-> `545D7BA77EDEA7E1` (the pre-rotation key; see `docs/RELEASING.md` — v0.8.3 is the key-rotation
-> transition release and already bakes the new key `C6FADFD59D732197` in for future updates). **Neither
+> each with a minisign `.sig` for the auto-updater. v0.8.4 is the first release signed with key ID
+> `C6FADFD59D732197`, the updater key every build since 0.3.0 has trusted; releases up to and
+> including v0.8.3 were signed with the pre-rotation key `545D7BA77EDEA7E1` (see
+> [Verify your download](#verify-your-download) and `docs/RELEASING.md`). **Neither
 > installer carries an OS-trusted code-signing certificate yet** — Windows shows an "unknown
 > publisher" SmartScreen warning until that's wired up. **macOS has no published release yet** (development-signed builds already run on real Mac
 > hardware with the Finder File Provider mount — see `docs/MACOS_BRINGUP_BRIEF.md`): the
@@ -35,7 +36,7 @@ The [beebeeb](https://beebeeb.io) desktop client gives you a native sync folder 
 
 ## Install
 
-Download the installer for your system from the [latest release](https://github.com/beebeeb-io/desktop/releases/latest). Each installer has a matching `.sig` file next to it — you can use it to [check your download](#verify-your-download) before you install. The examples below use version `0.8.3`; replace it with the version you downloaded.
+Download the installer for your system from the [latest release](https://github.com/beebeeb-io/desktop/releases/latest). Each installer has a matching `.sig` file next to it — you can use it to [check your download](#verify-your-download) before you install. The examples below use version `0.8.4`; replace it with the version you downloaded.
 
 ### Windows (64-bit)
 
@@ -55,16 +56,16 @@ If you would rather check the file first, [verify it](#verify-your-download) bef
 
 - **Debian / Ubuntu (`.deb`):**
   ```sh
-  sudo apt install ./Beebeeb_0.8.3_amd64.deb
+  sudo apt install ./Beebeeb_0.8.4_amd64.deb
   ```
 - **Fedora / RHEL / openSUSE (`.rpm`):**
   ```sh
-  sudo dnf install ./Beebeeb-0.8.3-1.x86_64.rpm      # openSUSE: sudo zypper install ./Beebeeb-0.8.3-1.x86_64.rpm
+  sudo dnf install ./Beebeeb-0.8.4-1.x86_64.rpm      # openSUSE: sudo zypper install ./Beebeeb-0.8.4-1.x86_64.rpm
   ```
 - **Any distribution (`.AppImage`):** no install step — make it executable and run it:
   ```sh
-  chmod +x Beebeeb_0.8.3_amd64.AppImage
-  ./Beebeeb_0.8.3_amd64.AppImage
+  chmod +x Beebeeb_0.8.4_amd64.AppImage
+  ./Beebeeb_0.8.4_amd64.AppImage
   ```
   AppImages need FUSE 2. If it does not start, install it (Ubuntu 22.04: `sudo apt install libfuse2`; Ubuntu 24.04 and later: `sudo apt install libfuse2t64`).
 
@@ -76,43 +77,46 @@ No macOS release is published yet (see [Status](#status--windows--linux-released
 
 Every installer is signed with [minisign](https://jedisct1.github.io/minisign/). Checking the signature proves the file is exactly what our release workflow built and has not been changed since.
 
-The key that signs the **current** release (`desktop-v0.8.3`) — key ID `545D7BA77EDEA7E1`:
+Which key to use depends on the version you downloaded:
 
-```
-RWThp95+p3tdVI3intgGfThMBLsjCtlCF7eV0hTY478SM1BoLKwU4Fl4
-```
+| Release | Key ID | Public key |
+|---|---|---|
+| **`0.8.4` and later** (current) | `C6FADFD59D732197` | `RWSXIXOd1d/6xmhr0T+FTeFjSnInaMvbhgL5vxbt51DFLwl2qIC8jU6Z` |
+| `0.8.3` and earlier | `545D7BA77EDEA7E1` | `RWThp95+p3tdVI3intgGfThMBLsjCtlCF7eV0hTY478SM1BoLKwU4Fl4` |
 
-The same key is published on [beebeeb.io/download](https://beebeeb.io/download). The `.sig` files are in the auto-updater's format (a minisign signature, base64-encoded once more), so decode it first, then verify.
+The current key is the same one the app itself uses to check updates (it is in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json), `plugins.updater.pubkey`). The `.sig` files are in the auto-updater's format (a minisign signature, base64-encoded once more), so decode it first, then verify.
 
 **Linux / macOS** (install minisign with `apt install minisign`, `dnf install minisign`, or `brew install minisign`):
 
 ```sh
-base64 -d < Beebeeb_0.8.3_amd64.deb.sig > Beebeeb_0.8.3_amd64.deb.minisig
-minisign -Vm Beebeeb_0.8.3_amd64.deb -P RWThp95+p3tdVI3intgGfThMBLsjCtlCF7eV0hTY478SM1BoLKwU4Fl4
+base64 -d < Beebeeb_0.8.4_amd64.deb.sig > Beebeeb_0.8.4_amd64.deb.minisig
+minisign -Vm Beebeeb_0.8.4_amd64.deb -P RWSXIXOd1d/6xmhr0T+FTeFjSnInaMvbhgL5vxbt51DFLwl2qIC8jU6Z
 ```
 
 **Windows** (PowerShell; install minisign with `scoop install minisign`, or download it from the [minisign releases](https://github.com/jedisct1/minisign/releases)):
 
 ```powershell
-[IO.File]::WriteAllBytes("$PWD\Beebeeb_0.8.3_x64-setup.exe.minisig", [Convert]::FromBase64String((Get-Content Beebeeb_0.8.3_x64-setup.exe.sig -Raw)))
-minisign -Vm Beebeeb_0.8.3_x64-setup.exe -P RWThp95+p3tdVI3intgGfThMBLsjCtlCF7eV0hTY478SM1BoLKwU4Fl4
+[IO.File]::WriteAllBytes("$PWD\Beebeeb_0.8.4_x64-setup.exe.minisig", [Convert]::FromBase64String((Get-Content Beebeeb_0.8.4_x64-setup.exe.sig -Raw)))
+minisign -Vm Beebeeb_0.8.4_x64-setup.exe -P RWSXIXOd1d/6xmhr0T+FTeFjSnInaMvbhgL5vxbt51DFLwl2qIC8jU6Z
 ```
 
 A good file prints `Signature and comment signature verified`, followed by a trusted comment that names the file. Anything else — `Signature verification failed`, or a message that the key IDs do not match — means **do not install it**; download it again from the release page, and if it still fails, tell us at security@beebeeb.io.
 
-> **This key will change.** The app is moving to a new signing key, `C6FADFD59D732197` (see [`docs/RELEASING.md`](docs/RELEASING.md)). Releases up to and including `0.8.3` are signed with `545D7BA77EDEA7E1`; the first release signed with the new key will update this section and the download page. If the key ID a release was signed with does not match the one shown here, stop and ask us.
+The commands above use the current key. To check an older download (`0.8.3` or earlier), use the `RWThp95…` key from the table instead. If a release's signature does not match the key listed for its version, stop and ask us.
 
 ## Updating
 
-**In-app updates do not work for most installs right now — update by reinstalling.** Every build from `0.3.0` onwards only accepts updates signed with the new key `C6FADFD59D732197`, but every release published so far, including `0.8.3`, is still signed with the old key `545D7BA77EDEA7E1`. So when one of those installs finds an update, it rejects the signature and stays where it is. (Separately, the update feed currently still offers `0.8.2`, not `0.8.3`.) This is fixed by the first release signed with the new key — the key rotation plan is in [`docs/RELEASING.md`](docs/RELEASING.md).
+**Installed `0.3.0` or later:** the app updates itself. Every build since `0.3.0` checks updates against key `C6FADFD59D732197`, and `0.8.4` is the first release signed with it, so these installs can verify and install `0.8.4` from the update feed. (Releases `0.3.0` to `0.8.3` were signed with the old key `545D7BA77EDEA7E1`, so none of them could update in-app — if you are on one of those, this is the first update you will see.)
 
-Until then, to update: download the newest installer from the [latest release](https://github.com/beebeeb-io/desktop/releases/latest), [verify it](#verify-your-download), and install it over your current version — same installer type as before (setup.exe or .msi on Windows; your package manager on Linux; for the AppImage, replace the old file). Your settings (`desktop.toml` in your user config folder) and your sync folder are outside the install location and are not touched by the installer.
+**Installed a version older than `0.3.0`:** those builds only trust the old key, so they reject `0.8.4` and every later release. Update by reinstalling once. The key rotation plan is in [`docs/RELEASING.md`](docs/RELEASING.md).
+
+To update by hand (any version): download the newest installer from the [latest release](https://github.com/beebeeb-io/desktop/releases/latest), [verify it](#verify-your-download), and install it over your current version — same installer type as before (setup.exe or .msi on Windows; your package manager on Linux; for the AppImage, replace the old file). Your settings (`desktop.toml` in your user config folder) and your sync folder are outside the install location and are not touched by the installer.
 
 ## Features
 
 - **Automatic sync** — files in your beebeeb folder are encrypted and synced in the background
 - **Selective sync** — choose which folders sync locally; the rest stay as online-only placeholders until you open them
-- **Conflict resolution** — never silently drops a version. A file changed both here and elsewhere is flagged, and nothing is overwritten until you choose Keep Mine, Keep Theirs, or Keep Both
+- **Conflict resolution** — never silently drops a version. A file changed both here and elsewhere is flagged and a conflict window opens; you choose Keep Mine, Keep Theirs, or Keep Both. If you have not chosen after 24 hours, the app applies Keep Both for you, so both versions stay on disk
 - **Online-only files** — FUSE mount on Linux, native placeholder APIs on macOS and Windows
 - **Zero-knowledge encryption** — per-file keys derived via HKDF; the server stores only ciphertext
 - **Native shell, not Electron** — Tauri uses the OS WebView (~10 MB binaries vs ~150 MB), with a Rust backend that imports `core` directly
@@ -160,7 +164,11 @@ To develop against the real web client instead of the placeholder, run `repos/we
 The sync engine (`beebeeb-sync`, from the [core](https://github.com/beebeeb-io/core) repo) handles:
 
 - **File watching** — debounced at 100 ms; ignores `.DS_Store`, `Thumbs.db`, and temp files
-- **Conflict resolution** — never silently drops data. When a file changed both on this device and on the server, it is marked as a conflict and you get a notification; the file stays as it is until you resolve it in the conflict window. **Keep Both** renames *your local copy* to `name (conflict - <device name> - <YYYY-MM-DD>).ext` and downloads the server's version under the original name. **Keep Mine** uploads your local copy as the new version; **Keep Theirs** replaces your local copy with the server's version
+- **Conflict resolution** — never silently drops data. When a sync tick finds a file changed both on this device and on the server since the last synced version, it marks the file as a conflict, opens the conflict window (with a line diff for text files, sizes for other files) and sends a notification. The file on disk is left as it is until the conflict is resolved:
+  - **Keep Mine** uploads your local copy as the new server version.
+  - **Keep Theirs** replaces your local copy with the server's version.
+  - **Keep Both** renames *your local copy* to `name (conflict - <device name> - <YYYY-MM-DD>).ext` (date in UTC) and downloads the server's version under the original name.
+  - **After 24 hours with no choice**, every sync tick checks for conflicts older than that and applies Keep Both automatically (`sweep_auto_resolutions` in `src-tauri/src/runner.rs`). If the download of the server's version fails, your renamed copy stays on disk and the next tick retries.
 - **Selective sync** — the vault stays remote by default. Folders marked locally available are hydrated and kept in sync; other items remain online-only placeholders until opened
 
 ## Contributing

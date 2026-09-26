@@ -161,12 +161,14 @@ release-version indirection and sends `CARGO_PKG_VERSION` directly).
 
 `src-tauri` is expected to own the background Rust sync runtime and call shared
 core/sync logic instead of duplicating protocol behavior in TypeScript.
-Conflict resolution policy: never silently drop a version. A conflict is flagged and left
-untouched until the user picks Keep Mine / Keep Theirs / Keep Both in the conflict window
-(`resolve_conflict`); Keep Both renames the LOCAL copy to
-`name (conflict - <hostname> - <YYYY-MM-DD>).ext` and hydrates the remote into the original path
-(`EngineBridge::auto_resolve_keep_both`). The 24 h auto-resolution deadline in `conflict.rs` is
-not wired into the runner yet — do not document it as behaviour. File watcher debounce: 100ms.
+Conflict resolution policy: never silently drop a version. A detected conflict is flagged
+(`FileStatus::Conflict`, `modified_at` anchored to detection time), the conflict window opens and a
+notification fires; the file is left untouched until the user picks Keep Mine / Keep Theirs / Keep
+Both (`resolve_conflict`). Keep Both renames the LOCAL copy to
+`name (conflict - <hostname> - <YYYY-MM-DD>).ext` (UTC date) and hydrates the remote into the
+original path (`EngineBridge::auto_resolve_keep_both`). If the user has not chosen within 24 h,
+`runner::sweep_auto_resolutions` (called every tick after detection) applies the same Keep Both
+(`conflict::auto_resolution_deadline`). File watcher debounce: 100ms.
 The backend must create a new server version for Finder writes when the server
 versioning contract supports it.
 
@@ -201,7 +203,9 @@ on 2026-05-07.
   unset for the current passwordless setup
 
 To inspect the public key locally: `cat ~/.tauri/beebeeb-desktop.key.pub`.
-The fingerprint at time of generation is `545D7BA77EDEA7E1`.
+That was the pre-rotation key, fingerprint `545D7BA77EDEA7E1` (signed releases up to and
+including 0.8.3). Since 0.8.4 releases are signed with the rotated key `C6FADFD59D732197`, the
+key baked into `tauri.conf.json` since 0.3.0 — see `docs/RELEASING.md`.
 
 If the key is lost, no clients with already-installed builds can verify
 new updates — they'll need a manual reinstall to onboard the new pubkey.

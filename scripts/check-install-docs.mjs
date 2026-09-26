@@ -61,6 +61,15 @@ check(/\.deb\b/.test(readme) && /\.rpm\b/.test(readme) && /\.msi\b/.test(readme)
   'README names every published installer type (.deb, .rpm, .msi, setup.exe)')
 check(!/older version is renamed `?file \(Device, HH:MM\)/.test(readme),
   'README does not repeat the false "older version is renamed file (Device, HH:MM)" conflict claim')
+// The conflict description must match what the runner actually does: if the
+// runner calls sweep_auto_resolutions (24 h auto Keep Both), the README must
+// say so, and must not claim a conflict waits for the user indefinitely.
+const runnerPath = process.env.RUNNER_PATH ?? path.join(repoRoot, 'src-tauri', 'src', 'runner.rs')
+const runnerSweeps = /^\s*sweep_auto_resolutions\(/m.test(fs.readFileSync(runnerPath, 'utf8'))
+check(!runnerSweeps || /24 hours[^\n]*Keep Both/i.test(readme),
+  `README describes the 24 h automatic Keep Both (runner calls sweep_auto_resolutions: ${runnerSweeps})`)
+check(!runnerSweeps || !/nothing is overwritten until you choose/i.test(readme),
+  'README does not claim a conflict waits for the user indefinitely')
 
 // ── 3. The README key verifies the latest release's real signature ───────────
 function decodeMinisignPublicKey(b64) {
@@ -113,6 +122,13 @@ try {
   check(verifying.length > 0,
     `README's minisign command key verifies the real signature of ${release.tag_name} (signing key ID ${sig.keyId})`)
   check(readme.includes(sig.keyId), `README names the signing key ID ${sig.keyId} next to the key`)
+  // The updater key baked into the app must be the key that signs "latest",
+  // otherwise in-app updates are broken and the README's Updating section lies.
+  const conf = JSON.parse(fs.readFileSync(path.join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'))
+  const bakedB64 = Buffer.from(conf.plugins.updater.pubkey, 'base64').toString('utf8').split('\n')[1] ?? ''
+  const baked = decodeMinisignPublicKey(bakedB64.trim())
+  check(Boolean(baked) && baked.keyId === sig.keyId && commandKeys.includes(bakedB64.trim()),
+    `README's minisign command uses the app's baked updater key (${baked?.keyId ?? 'unparseable'}), which signs ${release.tag_name}`)
 } catch (error) {
   check(false, `could not prove the README key against the latest release: ${error.message}`)
 }
