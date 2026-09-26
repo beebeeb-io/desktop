@@ -620,12 +620,12 @@ impl EngineBridge {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("upload operation missing encrypted name"))?;
         let content_type = metadata["content_type"].as_str().map(str::to_string);
+        // An empty (0-byte) file is a normal upload: the canonical plan for it is
+        // ONE chunk carrying the AEAD of zero bytes (`plan_chunks(0, _)` →
+        // `chunk_count == 1`), which the chunk loop below sends as a 28-byte
+        // nonce + tag. Requires a server whose `/uploads/init` accepts
+        // `file_size_bytes: 0`.
         let plaintext_size = std::fs::metadata(payload_path)?.len();
-        if plaintext_size == 0 {
-            return Err(anyhow::anyhow!(
-                "empty Finder uploads are not supported by the v2 upload endpoint yet"
-            ));
-        }
 
         let is_create = is_create_file_operation(&metadata);
         let payload_path_str = payload_path.to_string_lossy().into_owned();
@@ -815,7 +815,9 @@ impl EngineBridge {
 
         for chunk_index in first_chunk..chunk_count {
             let read = read_full_chunk(&mut file, &mut buffer)?;
-            if read == 0 {
+            // A zero-length read is only legitimate for the single chunk of an
+            // empty file; anywhere else the staged payload is truncated.
+            if read == 0 && session.payload_size > 0 {
                 return Err(anyhow::anyhow!(
                     "staged upload ended before expected chunk {} of {}",
                     chunk_index + 1,
@@ -7611,6 +7613,104 @@ mod tests {
         );
         assert_eq!(requests[3].method, "POST");
         assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    /// Empty (0-byte) files — `.gitkeep`, `__init__.py`, `touch` placeholders —
+    /// must sync like any other file. The canonical empty-file plan is ONE chunk
+    /// carrying the AEAD of zero bytes (`plan_chunks(0, _)` → `chunk_count == 1`),
+    /// so the upload is init(size 0) → one 28-byte chunk PUT → complete, and the
+    /// op completes instead of landing in `Error` and being retried.
+    #[tokio::test]
+    async fn test_process_due_operations_uploads_empty_file_as_one_encrypted_empty_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("empty.txt");
+        std::fs::write(&payload, b"").unwrap();
+        let server = UploadMockServer::start(false);
+        let master_key = [12u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-empty".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-file-empty".into()),
+                parent_id: Some("folder-1".into()),
+                target_path: Some("Project/empty.txt".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "empty.txt",
+                        "content_type": "text/plain"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert!(
+            outcome.retried_op_ids.is_empty(),
+            "an empty file must not be retried: {:?}",
+            bridge.db.queue_diagnostics(200).unwrap().last_error
+        );
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-empty".to_string()]);
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert_eq!(entry.path, "Project/empty.txt");
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(init_body["file_size_bytes"], 0);
+        assert_eq!(init_body["chunk_count"], 1);
+        assert_eq!(requests[2].method, "PUT");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_eq!(requests[2].body.len(), 28, "nonce + tag, no payload");
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        assert!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    /// Device B side of the empty-file round trip: a server file with
+    /// `size_bytes: 0` and one encrypted empty chunk hydrates to a 0-byte file.
+    #[test]
+    fn hydrate_file_writes_empty_file_from_single_empty_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [14u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        // 1 metadata GET + 1 chunk GET.
+        let server = HydrationMockServer::start(file_key, vec![Vec::new()], 2);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/empty.txt", None, FileStatus::CloudOnly, 0);
+
+        let dest = dir.path().join("empty.txt");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir.path()]).await })
+            .unwrap();
+        server.finish();
+
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 0);
+        let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
     }
 
     #[tokio::test]
