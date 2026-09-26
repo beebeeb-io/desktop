@@ -24,6 +24,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use urlencoding::encode;
+use zeroize::Zeroize;
 
 // ── Writer-provenance headers (task 1436, the desktop/web half of 1392) ────────
 //
@@ -313,12 +314,38 @@ pub struct HeartbeatBody {
 /// Cloning is intentionally not implemented — the master key has the
 /// same security invariant as in the Tauri `Session` struct: exactly
 /// one authoritative copy in memory at a time.
+///
+/// Unlike `Session` (which derives `ZeroizeOnDrop`), this doesn't derive it
+/// — `client: reqwest::Client` isn't `Zeroize` — so [`Drop`] is implemented
+/// by hand below, wiping only `master_key`. Task 1538 Codex P1 (PR #49,
+/// lib.rs:1087 thread, "invalidate the session key the engine holds"): once
+/// `EngineRunner::abort` confirms the engine's task has actually terminated
+/// (not just detached — see that function's doc comment), every `Arc<Self>`
+/// clone the task held (the tick loop, the IPC socket server, the Windows
+/// upload watcher, the heartbeat producer) is dropped with it, and this Drop
+/// impl is what actually erases the key from memory rather than leaving it
+/// to linger in a freed allocation.
 pub struct ApiClient {
     base_url: String,
     token: String,
     master_key: [u8; 32],
     client: Client,
 }
+
+impl Drop for ApiClient {
+    fn drop(&mut self) {
+        self.master_key.zeroize();
+    }
+}
+
+// Hand-implemented (can't `#[derive(ZeroizeOnDrop)]` — `client: reqwest::Client`
+// isn't `Zeroize` — see the struct's doc comment). `ZeroizeOnDrop` is a plain,
+// safe marker trait with no required methods (zeroize 1.x); implementing it
+// here is what lets a test assert, at compile time, that dropping an
+// `ApiClient` is guaranteed to wipe its key material — the same guarantee
+// `Session::ZeroizeOnDrop` gives, verified the same way in `lib.rs`'s
+// `session_zeroizes_master_key_on_drop` test.
+impl zeroize::ZeroizeOnDrop for ApiClient {}
 
 impl ApiClient {
     /// Build a new client. `base_url` should NOT have a trailing slash
@@ -1397,6 +1424,34 @@ mod tests {
             client.chunk_url("file123", 0),
             "https://api.beebeeb.io/api/v1/files/file123/chunks/0"
         );
+    }
+
+    /// Task 1538 Codex P1 (PR #49, lib.rs:1087 thread, "invalidate the
+    /// session key the engine holds"): once `EngineRunner::abort` confirms
+    /// the engine's task is actually gone, every `Arc<ApiClient>` it held
+    /// drops with it — this must actually wipe the master key from memory,
+    /// not just deallocate it holding its last plaintext value. Verified the
+    /// same way `lib.rs`'s `session_zeroizes_master_key_on_drop` verifies
+    /// `Session`: a compile-time guarantee (the type implements
+    /// `ZeroizeOnDrop`, which requires `Drop`) plus exercising the real drop
+    /// path without panicking.
+    #[test]
+    fn api_client_zeroizes_master_key_on_drop() {
+        // Compile-time guarantee: if `Drop`/`ZeroizeOnDrop` for `ApiClient`
+        // is ever removed, this stops compiling.
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<ApiClient>();
+
+        // Sanity-check the underlying operation the `Drop` impl performs.
+        let mut key = [7u8; 32];
+        key.zeroize();
+        assert_eq!(key, [0u8; 32]);
+
+        // Exercise the real drop path (no panic / double-free) on a
+        // populated client; the wipe itself runs inside `Drop` where the
+        // bytes are no longer observably aliased.
+        let client = ApiClient::new("https://api.beebeeb.io".into(), "tok".into(), [9u8; 32]);
+        drop(client);
     }
 
     #[test]

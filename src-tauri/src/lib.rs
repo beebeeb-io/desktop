@@ -536,11 +536,19 @@ async fn start_engine_if_possible(
         // always defaults to false; desktop.toml is the source of truth).
         acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
         let pause_flag = acct.sync_paused.clone();
+        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
+            // Task 1538 Codex P1: this is a re-login/sync-root-change
+            // respawn, not sign-out — there's no purge to gate here, but an
+            // unconfirmed stop is still worth knowing about (a not-really-
+            // gone previous task could still be touching the same state.db
+            // the freshly spawned runner is about to open).
+            if !prev.abort().await {
+                tracing::warn!("previous engine did not confirm termination before respawning a new one");
+            }
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag, auth_health));
     }
 }
 
@@ -891,12 +899,16 @@ async fn desktop_unlock_with_recovery_phrase(
     let token = load_session_token_from_keychain(&account_id)?
         .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let recovery_phrase = normalize_recovery_phrase_input(&recovery_phrase)?;
-    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
-        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
-    let master_key: [u8; 32] = master_key_struct.to_bytes();
-
-    persist_vault_key_to_keychain(&account_id, master_key)?;
+    let base_url = runner::api_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .default_headers(api_client::provenance_headers())
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+    let master_key = provision_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase, |key| {
+        persist_vault_key_to_keychain(&account_id, key)
+    })
+    .await?;
     // `desktop_login` already persisted the email when it stored the token, but
     // persist again here (idempotent) so the invariant "a fully-provisioned
     // session has its email in the store" holds even if memory and store drift.
@@ -920,6 +932,84 @@ async fn desktop_unlock_with_recovery_phrase(
     tracing::info!("vault provisioned from recovery phrase");
     start_engine_if_possible(app, &state, token, master_key).await;
     Ok(())
+}
+
+const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
+
+/// Derive the vault key from a recovery phrase, prove it belongs to the
+/// signed-in account, and only then hand it to `persist`.
+///
+/// `recover_from_phrase` derives *a* key from ANY checksum-valid BIP39 phrase —
+/// it does not prove the phrase is this account's. Persisting an unverified key
+/// keys the sync engine with a foreign key, so every upload from this device is
+/// undecryptable on every other device (flow 7 P0). Same gate as web's
+/// device-provision (`recoveredKeyMatchesAccount`, task 0874).
+async fn provision_vault_key_from_phrase<P>(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    recovery_phrase: &str,
+    persist: P,
+) -> Result<[u8; 32], String>
+where
+    P: FnOnce([u8; 32]) -> Result<(), String>,
+{
+    let recovery_phrase = normalize_recovery_phrase_input(recovery_phrase)?;
+    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
+        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
+    if !recovered_key_matches_account(client, base_url, session_token, &master_key_struct).await? {
+        // `master_key_struct` zeroizes on drop.
+        return Err(INCORRECT_RECOVERY_PHRASE.to_string());
+    }
+    let master_key: [u8; 32] = master_key_struct.to_bytes();
+    persist(master_key)?;
+    Ok(master_key)
+}
+
+/// Ask the server whether `master_key` is the signed-in account's key by
+/// comparing its `recovery_check` (HKDF of the key; never the key itself)
+/// against the stored one: `POST /api/v1/auth/verify-recovery-check`.
+///
+/// `Ok(true)` on a match; `Ok(false)` ONLY on a server-confirmed mismatch
+/// (400 `invalid_recovery_phrase`, which the server also returns for an account
+/// with no check on file — web applies the same policy). Any other outcome
+/// (network error, 401, 5xx, unparseable body) is `Err`: an unreachable
+/// verifier must never be read as "valid", so the caller fails closed.
+async fn recovered_key_matches_account(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    master_key: &beebeeb_core::kdf::MasterKey,
+) -> Result<bool, String> {
+    let recovery_check = encode_base64(&*beebeeb_core::opaque::compute_recovery_check(master_key));
+    let resp = client
+        .post(format!("{base_url}/api/v1/auth/verify-recovery-check"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "recovery_check": recovery_check }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not verify the recovery phrase (network error: {e}). Try again."))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        return Ok(false);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Your session expired. Sign in again before unlocking the vault.".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "Could not verify the recovery phrase (server returned {status}). Try again."
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Could not verify the recovery phrase (unreadable response: {e}). Try again."))?;
+    if body.get("valid").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(true)
+    } else {
+        Err("Could not verify the recovery phrase (unexpected response). Try again.".to_string())
+    }
 }
 
 fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
@@ -1044,12 +1134,35 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     let acct = state.active_account()?;
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
+    //
+    // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): `abort()` now returns
+    // whether the engine's task is CONFIRMED terminated, not just "we asked
+    // and waited a bit". The purge below is a cross-account data-
+    // exfiltration control (findings 1+2) — it is only safe to run once the
+    // OLD engine (and everything nested in its single task: the IPC socket
+    // server, the Windows upload watcher) is genuinely gone and can no
+    // longer drain or enqueue operations behind its back. If we can't
+    // confirm that, refuse to complete sign-out rather than purge anyway
+    // and hand the next account's engine a false sense of a clean slate.
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
+        let stopped = prev.abort().await;
+        drop(engine_slot);
+        if !stopped {
+            tracing::error!(
+                "sign-out refused: could not confirm the sync engine stopped; \
+                 refusing to purge local state or clear credentials while it may still be running"
+            );
+            return Err(
+                "Could not stop the sync engine. Please try signing out again; if this keeps \
+                 happening, restart Beebeeb before signing in with a different account."
+                    .to_string(),
+            );
+        }
         tracing::info!("engine aborted on logout");
+    } else {
+        drop(engine_slot);
     }
-    drop(engine_slot);
 
     // Windows: remove the Explorer SHELL registration (nav-pane entry, Status
     // column, overlays) on sign-out so a logged-out machine doesn't show a dead
@@ -1066,6 +1179,70 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
             if let Err(error) = windows_cf::unregister_shell_sync_root(&root) {
                 tracing::warn!(error = %error, "Explorer shell sync-root unregister on logout failed (best-effort)");
             }
+        }
+    }
+
+    // Task 1538 findings 1+2: purge every queued operation (so a later
+    // account's engine can never drain THIS account's still-queued uploads —
+    // `operation_queue` carries no account scoping, see
+    // `state_db::StateDb::purge_all_local_state`) and every decrypted cache
+    // file this device holds for this account (so it can't be permanently
+    // orphaned on disk once the next account's first sync prunes the DB row
+    // that pointed at it). Best-effort and non-fatal per file: logout must
+    // always appear to succeed, and the DB rows are already cleared inside
+    // `purge_all_local_state` regardless of whether every on-disk file
+    // removal below succeeds, so nothing can act on a leftover file again
+    // even if this loop can't delete it.
+    //
+    // Task 1538 Codex P1 (lib.rs:1085 thread): `db` is resolved from the
+    // app-local state dir DIRECTLY — `state_db_from_app_local_state_dir`,
+    // not the old `DesktopConfig::load().ok().and_then(state_db_for_config)`
+    // chain — because `state.db` lives there independently of
+    // `desktop.toml`/`sync_root`. A missing, corrupt, or unreadable config
+    // (or one whose `sync_root` was rejected on load) must never silently
+    // skip this security purge. `sync_root` itself is still read from
+    // `DesktopConfig` best-effort, separately — it is used ONLY to resolve
+    // Windows placeholder paths below, never to gate whether the purge runs
+    // at all.
+    let cfg_sync_root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    match state_db_from_app_local_state_dir() {
+        Ok(Some(db)) => match purge_local_state_files(&db, cfg_sync_root.as_deref()) {
+            Ok(summary) => {
+                tracing::info!(
+                    queued_ops_purged = summary.queued_ops_purged,
+                    files_removed = summary.files_removed,
+                    files_skipped = summary.files_skipped,
+                    windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
+                    "purged operation queue and decrypted cache on sign-out"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to purge operation queue / decrypted cache on sign-out");
+            }
+        },
+        Ok(None) => {
+            // No state.db yet — a fresh install that never synced anything.
+            // Nothing to purge; not an error.
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "sign-out purge: could not resolve the local state database; \
+                 operation queue / decrypted cache may not have been cleared"
+            );
+        }
+    }
+
+    // macOS: remove the Finder File Provider domain on sign-out — the macOS
+    // analogue of the Windows shell-unregister above, so a logged-out
+    // machine has no live File Provider domain pointing at a folder the user
+    // is no longer signed into (finding 2). Best-effort: a failure (incl.
+    // "not registered") is logged, not surfaced — logout must always appear
+    // to succeed. Re-login re-installs the domain via `install_finder_location`.
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(error) = remove_file_provider_domain() {
+            tracing::warn!(error = %error, "Finder File Provider domain removal on logout failed (best-effort)");
         }
     }
 
@@ -1089,6 +1266,10 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
     }
+    // Sign out = clean slate for the auth-health streak too (task 1546
+    // finding 5): the engine that was feeding it just stopped, and a fresh
+    // sign-in must not inherit a stale `auth_expired: true` banner.
+    acct.auth_health.note_result(None);
     clear_keychain_session(acct.id.as_str())?;
     set_auth_present(state, false);
     set_auth_email(state, None);
@@ -1146,8 +1327,18 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     let acct = state.active_account()?;
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
-        tracing::info!("engine aborted on vault lock");
+        // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
+        // session/master key right after this — an unconfirmed stop means
+        // the old engine could still be alive and using it. No purge is
+        // gated on this (lock keeps the account's Keychain session, so
+        // there's nothing cross-account to protect here), but it's still
+        // worth a loud warning rather than a silent "we waited 3s and moved
+        // on".
+        if !prev.abort().await {
+            tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
+        } else {
+            tracing::info!("engine aborted on vault lock");
+        }
     }
     drop(engine_slot);
 
@@ -1308,6 +1499,51 @@ fn state_db_for_config(cfg: &DesktopConfig) -> Result<Option<state_db::StateDb>,
         .map_err(|e| format!("open state.db: {e}"))
 }
 
+/// Resolve the local `state.db` from the app-local data dir alone — task
+/// 1538 Codex P1 (PR #49, lib.rs:1085 thread).
+///
+/// `state.db` lives in `state_paths::beebeeb_state_dir()`, which resolves
+/// purely from Tauri's `app_local_data_dir()`; it has NEVER depended on
+/// `DesktopConfig`/`desktop.toml` (see that function's own doc comment).
+/// `state_db_for_config` above nonetheless GATES on a successfully-loaded
+/// `DesktopConfig` with a non-`None`, accepted `sync_root` — so a missing,
+/// corrupt, unreadable `desktop.toml`, or one whose `sync_root` was rejected
+/// on load, makes the caller's `.ok()` chain silently skip the ENTIRE
+/// sign-out purge. That purge is a cross-account data-exfiltration control
+/// (task 1538 findings 1+2); it must not be able to depend on config health
+/// it needs no part of.
+///
+/// This resolves + opens `state.db` directly against the app-local state
+/// dir, with no `DesktopConfig` involved at all. `Ok(None)` only when the
+/// file genuinely doesn't exist yet (a fresh install that has never synced
+/// anything — nothing to purge); any OTHER failure (state dir not
+/// initialized, DB open/migration error) is returned as `Err` so the caller
+/// logs it loudly instead of treating it the same as "nothing to do".
+///
+/// Thin wrapper around [`state_db_from_state_dir`] — the ONLY thing this
+/// adds is resolving Tauri's global app-local-data path; that split exists
+/// so the actual decision logic is unit-testable without a live Tauri
+/// `AppHandle` having called `state_paths::init_from_app` first.
+fn state_db_from_app_local_state_dir() -> Result<Option<state_db::StateDb>, String> {
+    state_db_from_state_dir(&state_paths::beebeeb_state_dir()?)
+}
+
+/// Pure core of [`state_db_from_app_local_state_dir`]: open `state.db`
+/// directly under `state_dir`, given explicitly — no Tauri global, no
+/// `DesktopConfig`. Task 1538 Codex P1 (PR #49, lib.rs:1085 thread): this
+/// signature is the proof the sign-out purge's DB resolution cannot depend
+/// on `desktop.toml` health, because there is no `DesktopConfig` parameter
+/// for it to depend on.
+fn state_db_from_state_dir(state_dir: &std::path::Path) -> Result<Option<state_db::StateDb>, String> {
+    let db_path = state_dir.join(state_paths::STATE_DB_FILENAME);
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    state_db::StateDb::open(&db_path)
+        .map(Some)
+        .map_err(|e| format!("open state.db: {e}"))
+}
+
 fn disposable_cache_roots() -> Vec<PathBuf> {
     let mut roots = vec![std::env::temp_dir()];
     if let Some(cache_dir) = dirs::cache_dir() {
@@ -1336,6 +1572,204 @@ fn is_disposable_cache_path(path: &std::path::Path) -> bool {
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical_path.starts_with(root))
+}
+
+/// Counts from [`purge_local_state_files`] (task 1538), logged by the
+/// sign-out caller.
+struct LocalStatePurgeSummary {
+    queued_ops_purged: usize,
+    files_removed: usize,
+    files_skipped: usize,
+    /// Windows Cloud Files placeholders dehydrated (or, failing that,
+    /// removed outright) — task 1538 Codex P1, PR #49 state_db.rs:1785
+    /// thread. Always `0` on macOS/Linux.
+    windows_placeholders_dehydrated: usize,
+}
+
+/// Task 1538 findings 1+2: delete every queued operation's staged plaintext
+/// payload and every cached plaintext file from disk, on top of
+/// `state_db::StateDb::purge_all_local_state` clearing the DB rows that
+/// pointed at them.
+///
+/// Pure w.r.t. Tauri/OS credential state (takes an already-opened `db`) so
+/// it is directly unit-testable without a live `AppState`/Keychain — see
+/// `clear_session_impl`, the only real caller, which resolves `db`
+/// independently of `DesktopConfig` (task 1538 Codex P1) and never touches
+/// this function's internals. `sync_root`, by contrast, is ONLY needed to
+/// resolve Windows Cloud Files placeholder paths below — best-effort and
+/// `None`-able; every other step here is sync-root-independent.
+///
+/// Each candidate path is gated by `is_disposable_cache_path` — the same
+/// safety check `reset_macos_integration` already uses — before removal, so
+/// a bug that fed this function an unexpected path can never turn a sign-out
+/// into an arbitrary-file-delete. A gated-out or already-missing path is
+/// logged, not fatal: sign-out must always appear to succeed.
+fn purge_local_state_files(
+    db: &state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+) -> Result<LocalStatePurgeSummary, String> {
+    let purge = db
+        .purge_all_local_state()
+        .map_err(|e| format!("purge operation queue and cache metadata: {e}"))?;
+
+    let mut files_removed = 0usize;
+    let mut files_skipped = 0usize;
+    for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
+        let path_buf = PathBuf::from(path);
+        if !is_disposable_cache_path(&path_buf) {
+            files_skipped += 1;
+            tracing::warn!(path = %path, "sign-out purge skipped a path outside the known cache/staging roots");
+            continue;
+        }
+        match std::fs::remove_file(&path_buf) {
+            Ok(()) => files_removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                files_skipped += 1;
+                tracing::warn!(path = %path, error = %error, "failed to remove local file on sign-out");
+            }
+        }
+    }
+
+    // Task 1538 Codex P1 (state_db.rs:1785 thread): a Windows Cloud Files
+    // placeholder's plaintext lives in the sync root, not at `cache_path` —
+    // the loop above can never find it. `local_placeholder_paths` is the
+    // cross-platform candidate list `purge_all_local_state` captured before
+    // flipping those rows' status. `resolve_purge_placeholder_paths` (the
+    // "which files, which safe paths" decision) runs on every platform so
+    // it stays exercised and unit-testable without a Windows host; only the
+    // actual `CfDehydratePlaceholder` FFI call is Windows-only. macOS/Linux
+    // both store hydrated bytes as a separate cache copy already covered by
+    // `cache_paths` above, and macOS's File Provider domain removal
+    // (`clear_session_impl`, right after this function returns) handles the
+    // analogous cleanup there — so this list is a deliberate no-op on those
+    // platforms, not an oversight.
+    let windows_placeholders_dehydrated: usize = if purge.local_placeholder_paths.is_empty() {
+        0
+    } else {
+        match sync_root {
+            Some(root) => {
+                let resolved = resolve_purge_placeholder_paths(&purge.local_placeholder_paths, root);
+                #[cfg(target_os = "windows")]
+                {
+                    purge_windows_placeholders(&resolved)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = resolved;
+                    0
+                }
+            }
+            None => {
+                #[cfg(target_os = "windows")]
+                tracing::warn!(
+                    candidate_count = purge.local_placeholder_paths.len(),
+                    "sign-out purge: no sync root known; Windows placeholders could not be dehydrated/removed"
+                );
+                0
+            }
+        }
+    };
+
+    Ok(LocalStatePurgeSummary {
+        queued_ops_purged: purge.queued_ops_purged,
+        files_removed,
+        files_skipped,
+        windows_placeholders_dehydrated,
+    })
+}
+
+/// Resolve every `(file_id, server_relative_path)` candidate from
+/// [`state_db::LocalStatePurge::local_placeholder_paths`] to an absolute,
+/// safety-checked on-disk path under `sync_root` — the same canonicalize +
+/// allowed-roots invariant [`free_up_space_windows`] already enforces for
+/// the analogous eviction sweep, reused here (task 1538 Codex P1, PR #49
+/// state_db.rs:1785 thread).
+///
+/// Pure and platform-independent on purpose: the actual
+/// `CfDehydratePlaceholder` FFI call that ACTS on this list is Windows-only
+/// ([`purge_windows_placeholders`] below); this is only the "which files,
+/// which paths" decision, so it is unit-testable on any host. A candidate is
+/// silently dropped (not an error — sign-out must still succeed) when it
+/// doesn't resolve to a real file under an allowed root: an
+/// already-cleaned-up or corrupt row has nothing for the caller to act on.
+fn resolve_purge_placeholder_paths(candidates: &[(String, String)], sync_root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    candidates
+        .iter()
+        .filter_map(|(file_id, rel_path)| {
+            let rel = rel_path.trim_matches('/');
+            if rel.is_empty() {
+                return None;
+            }
+            let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let canonical = local_path.canonicalize().ok()?;
+            if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+                return None;
+            }
+            Some((file_id.clone(), canonical))
+        })
+        .collect()
+}
+
+/// Dehydrate (or, failing that, remove outright) every Windows Cloud Files
+/// placeholder [`resolve_purge_placeholder_paths`] resolved — task 1538
+/// Codex P1, PR #49 state_db.rs:1785 thread. Mirrors
+/// [`free_up_space_windows`]'s `dehydrate_placeholder` call, with two
+/// deliberate differences from that eviction sweep:
+///
+/// - No pin-state skip: sign-out must sweep pinned files too — the account
+///   is leaving the device, so "keep offline" no longer means anything. The
+///   OS-level pin is cleared first (`CfDehydratePlaceholder` fails with
+///   `ERROR_CLOUD_FILE_PINNED` on a still-pinned placeholder).
+/// - A failed dehydrate removes the placeholder FILE instead of leaving the
+///   row `local` for "the next sweep" to retry: `purge_all_local_state` has
+///   already flipped every one of these rows to `cloud_only` unconditionally
+///   (task 1538 finding 2), so there IS no next sweep that would find it —
+///   leaving the dehydrate half-done would orphan plaintext exactly like the
+///   bug this function fixes. A stale Explorer entry self-heals on the next
+///   `windows_cf::seed_placeholders`/reconcile pass after a later sign-in.
+///
+/// Returns the number of placeholders successfully cleared (dehydrated OR
+/// removed) for the caller's log line.
+#[cfg(target_os = "windows")]
+fn purge_windows_placeholders(candidates: &[(String, PathBuf)]) -> usize {
+    let mut cleared = 0usize;
+    for (file_id, path) in candidates {
+        if let Err(error) = crate::windows_cf::placeholders::set_pin_state(path, false, false) {
+            tracing::warn!(
+                file_id = %file_id,
+                error = %error,
+                "sign-out purge: OS unpin before dehydrate failed; attempting dehydrate anyway"
+            );
+        }
+        match crate::windows_cf::placeholders::dehydrate_placeholder(path) {
+            Ok(_freed) => {
+                cleared += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    file_id = %file_id,
+                    error = %error,
+                    "sign-out purge: CfDehydratePlaceholder failed; removing the placeholder file instead"
+                );
+                match std::fs::remove_file(path) {
+                    Ok(()) => cleared += 1,
+                    Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {
+                        cleared += 1;
+                    }
+                    Err(remove_error) => {
+                        tracing::warn!(
+                            file_id = %file_id,
+                            error = %remove_error,
+                            "sign-out purge: could not remove placeholder file after a failed dehydrate"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    cleared
 }
 
 #[cfg(unix)]
@@ -1374,11 +1808,19 @@ async fn persist_sync_root_and_start_engine(
         // Rehydrate the persisted pause state before spawning.
         acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
         let pause_flag = acct.sync_paused.clone();
+        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(prev) = engine_slot.take() {
-            prev.abort().await;
+            // Task 1538 Codex P1: this is a re-login/sync-root-change
+            // respawn, not sign-out — there's no purge to gate here, but an
+            // unconfirmed stop is still worth knowing about (a not-really-
+            // gone previous task could still be touching the same state.db
+            // the freshly spawned runner is about to open).
+            if !prev.abort().await {
+                tracing::warn!("previous engine did not confirm termination before respawning a new one");
+            }
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag));
+        *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag, auth_health));
     }
 
     Ok(())
@@ -1409,6 +1851,7 @@ async fn start_engine_for_pending_finder_install(
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (started, ipc_bind_error) = {
         let pause_flag = acct.sync_paused.clone();
+        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
         if let Some(existing) = engine_slot.as_ref() {
             // Already running (e.g. a retry after a transient failure) —
@@ -1416,7 +1859,7 @@ async fn start_engine_for_pending_finder_install(
             // error instead of just re-timing-out silently.
             (false, existing.ipc_bind_error_handle())
         } else {
-            let runner = EngineRunner::spawn(app, root, token, key, pause_flag);
+            let runner = EngineRunner::spawn(app, root, token, key, pause_flag, auth_health);
             let bind_error = runner.ipc_bind_error_handle();
             *engine_slot = Some(runner);
             (true, bind_error)
@@ -1443,7 +1886,11 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     let Ok(acct) = state.active_account() else { return };
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
+        // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
+        // respawn guard.
+        if !prev.abort().await {
+            tracing::warn!("pending-finder-install engine did not confirm termination on stop");
+        }
     }
 }
 
@@ -1794,8 +2241,13 @@ async fn reset_macos_integration(
     let acct = state.active_account()?;
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
-        prev.abort().await;
-        tracing::info!("engine aborted for macOS integration reset");
+        // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
+        // respawn guard.
+        if !prev.abort().await {
+            tracing::warn!("engine did not confirm termination before macOS integration reset");
+        } else {
+            tracing::info!("engine aborted for macOS integration reset");
+        }
     }
     drop(engine_slot);
     if let Ok(mut guard) = acct.engine_state.lock() {
@@ -2368,6 +2820,12 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
+    // Task 1546 finding 5: 3+ consecutive 401s from the engine's heartbeat /
+    // sync-tick calls flip this — the trigger for the persistent "signed out
+    // on this device" banner. Explicit and independent of `logged_in`: the
+    // stale token can still be installed (so `logged_in` reads `true`) while
+    // every call it makes fails.
+    let auth_expired = acct.auth_health.is_expired();
     let sync_root_path = DesktopConfig::load().ok().and_then(|c| c.sync_root);
     #[cfg(target_os = "macos")]
     let sync_root = None::<String>;
@@ -2442,6 +2900,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 
     Ok(serde_json::json!({
         "logged_in": logged_in,
+        "auth_expired": auth_expired,
         "sync_root": sync_root,
         "engine_running": engine_running,
         "vault_unlocked": vault_unlocked,
@@ -3017,11 +3476,16 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             // Rehydrate the persisted pause state before spawning.
             acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
             let pause_flag = acct.sync_paused.clone();
+            let auth_health = acct.auth_health.clone();
             let mut engine_slot = acct.engine.lock().await;
             if let Some(prev) = engine_slot.take() {
-                prev.abort().await;
+                // Task 1538 Codex P1 — see `start_engine_if_possible`'s
+                // identical respawn guard.
+                if !prev.abort().await {
+                    tracing::warn!("previous engine did not confirm termination before respawning a new one");
+                }
             }
-            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag));
+            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag, auth_health));
         }
 
         Ok(Some(path.to_string_lossy().into_owned()))
@@ -5650,6 +6114,41 @@ async fn resolve_conflict(
     Ok(())
 }
 
+/// Real content preview for the conflict-resolution window (task 1546 finding
+/// 2), replacing ConflictWindow.tsx's previous hardcoded placeholder diff
+/// body. Read-only — does not resolve anything or touch state.db; see
+/// [`engine_bridge::EngineBridge::conflict_content_preview`] for why.
+///
+/// Same session/sync-root/bridge-construction pattern as `resolve_conflict`
+/// just above.
+#[tauri::command]
+async fn conflict_content_preview(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<engine_bridge::ConflictContentPreview, String> {
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+
+    let cfg = DesktopConfig::load()?;
+    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
+
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    let bridge = engine_bridge::EngineBridge::new(db, api);
+
+    bridge
+        .conflict_content_preview(&file_id, &sync_root)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── IPC commands: app metadata ────────────────────────────────────────────────
 
 // ── Durations ─────────────────────────────────────────────────────────────────
@@ -6619,6 +7118,8 @@ pub fn run() {
             // Task 12 — conflict window IPC
             open_conflict_window,
             resolve_conflict,
+            // Task 1546 finding 2 — real (non-placeholder) conflict content preview
+            conflict_content_preview,
             // Task 11 — native conflict notification
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)
@@ -7826,7 +8327,8 @@ mod tests {
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target,
         file_versions_payload_for_frontend, newly_excluded_ids, next_menu_zoom_scale,
-        normalize_recovery_phrase_input, now_unix_seconds, queued_restore_version_response, real_app_version,
+        normalize_recovery_phrase_input, now_unix_seconds, purge_local_state_files, queued_restore_version_response,
+        real_app_version, resolve_purge_placeholder_paths, state_db_from_state_dir,
         release_channel_from_version, release_notes_url_for_version, shared_roots_from_db,
         should_offer_channel_update, should_show_conflict_notification, should_show_quota_warning_notification,
         should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
@@ -7888,6 +8390,222 @@ mod tests {
             acct.cached_profile.lock().unwrap().is_none(),
             "cached profile must be cleared on lock/logout"
         );
+    }
+
+    /// Task 1538 findings 1+2: `purge_local_state_files` is the sign-out-safe
+    /// glue `clear_session_impl` calls — it must delete every queued
+    /// operation's staged plaintext payload AND every cached plaintext file
+    /// from disk (not just clear the DB rows pointing at them), and it must
+    /// refuse anything outside the known cache/staging roots (the same
+    /// `is_disposable_cache_path` gate `reset_macos_integration` already
+    /// uses), so a bug in a future caller can never turn this into an
+    /// arbitrary-file-delete.
+    #[test]
+    fn purge_local_state_files_removes_every_queued_payload_and_cached_file() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+
+        // Real files under the OS temp dir so `is_disposable_cache_path`
+        // (the actual safety gate, not a stub) allows their removal.
+        let staging_root = std::env::temp_dir().join(format!("bb-test-1538-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&staging_root).unwrap();
+        let payload_path = staging_root.join("op-1-payload.bin");
+        let cache_path = staging_root.join("file-a-cache.bin");
+        std::fs::write(&payload_path, b"account A staged plaintext upload").unwrap();
+        std::fs::write(&cache_path, b"account A decrypted cache content").unwrap();
+
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: "file-a".into(),
+            path: "/A.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 34,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-a", cache_path.to_str().unwrap(), 34, 10).unwrap();
+        db.enqueue_operation(&crate::state_db::PendingOperation {
+            op_id: "op-1".into(),
+            kind: crate::state_db::OperationKind::UploadVersion,
+            file_id: Some("file-a".into()),
+            parent_id: None,
+            target_path: Some("/A.txt".into()),
+            metadata_json: None,
+            payload_path: Some(payload_path.to_str().unwrap().to_string()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+
+        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
+
+        assert_eq!(summary.queued_ops_purged, 1);
+        assert_eq!(
+            summary.files_removed, 2,
+            "both the staged payload and the cache file are removed"
+        );
+        assert_eq!(summary.files_skipped, 0);
+        assert!(!payload_path.exists(), "staged plaintext payload must be deleted from disk");
+        assert!(!cache_path.exists(), "decrypted cache file must be deleted from disk");
+        assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&staging_root).ok();
+    }
+
+    /// A path outside the known cache/staging roots is refused, not deleted —
+    /// the same fail-closed behavior `reset_macos_integration` already relies
+    /// on via `is_disposable_cache_path`. Uses a REAL file that exists but
+    /// sits outside the OS temp/cache dirs (this crate's own source tree),
+    /// so the assertion proves the gate is consulted — not just that a
+    /// nonexistent path happens to be skipped.
+    #[test]
+    fn purge_local_state_files_refuses_paths_outside_known_roots() {
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+
+        let outside_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".test-scratch-1538-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside_root).unwrap();
+        let _cleanup = CleanupDir(outside_root.clone());
+        let outside_path = outside_root.join("not-a-cache-root.bin");
+        std::fs::write(&outside_path, b"must survive").unwrap();
+
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: "file-b".into(),
+            path: "/B.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 12,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-b", outside_path.to_str().unwrap(), 12, 10)
+            .unwrap();
+
+        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
+
+        assert_eq!(summary.files_removed, 0);
+        assert_eq!(summary.files_skipped, 1);
+        assert!(
+            outside_path.exists(),
+            "a path outside the known roots must never be deleted"
+        );
+    }
+
+    // ── Task 1538 Codex P1 (PR #49, lib.rs:1085 thread): DB resolution
+    //    independent of DesktopConfig ─────────────────────────────────────
+
+    /// `state_db_from_state_dir` opens `state.db` from a directory it is
+    /// handed directly — there is no `DesktopConfig` parameter for it to
+    /// depend on, so a missing/corrupt/unreadable `desktop.toml` (or one
+    /// whose `sync_root` was rejected) structurally cannot make this skip
+    /// the sign-out purge the way the old `DesktopConfig::load().ok()...`
+    /// gate could.
+    #[test]
+    fn state_db_from_state_dir_opens_an_existing_db_with_no_config_involved() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create the DB first (as a prior engine run would have).
+        let _ = crate::state_db::StateDb::open(dir.path().join(crate::state_paths::STATE_DB_FILENAME)).unwrap();
+
+        let result = state_db_from_state_dir(dir.path());
+
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "an existing state.db must open even though no DesktopConfig was ever read"
+        );
+    }
+
+    /// A fresh install that has never synced anything has no `state.db` yet
+    /// — `Ok(None)`, not an error, and not a reason to fail sign-out.
+    #[test]
+    fn state_db_from_state_dir_returns_none_when_the_db_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = state_db_from_state_dir(dir.path());
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    // ── Task 1538 Codex P1 (PR #49, state_db.rs:1785 thread): Windows
+    //    placeholder path resolution — cross-platform decision logic ──────
+
+    /// The "which files, which safe paths" decision `resolve_purge_placeholder_paths`
+    /// makes is plain path-joining + canonicalize + an allowed-roots check —
+    /// none of it is Windows-specific, so it must run (and be provable
+    /// correct) on every host, even though only a Windows build ever ACTS on
+    /// the result via `purge_windows_placeholders`.
+    #[test]
+    fn resolve_purge_placeholder_paths_resolves_candidates_under_sync_root() {
+        let sync_root = tempfile::tempdir().unwrap();
+        let nested_dir = sync_root.path().join("Docs");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let file_path = nested_dir.join("report.docx");
+        std::fs::write(&file_path, b"placeholder content").unwrap();
+
+        let candidates = vec![("win-local".to_string(), "/Docs/report.docx".to_string())];
+        let resolved = resolve_purge_placeholder_paths(&candidates, sync_root.path());
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "win-local");
+        assert_eq!(resolved[0].1, file_path.canonicalize().unwrap());
+    }
+
+    /// A candidate whose resolved path escapes the sync root (or the engine
+    /// cache dir) — e.g. a corrupt `path` column — is dropped, never handed
+    /// to a caller that might delete it. Same fail-closed invariant
+    /// `purge_local_state_files_refuses_paths_outside_known_roots` above
+    /// already proves for the `cache_path` list.
+    #[test]
+    fn resolve_purge_placeholder_paths_drops_candidates_outside_allowed_roots() {
+        let sync_root = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("not-in-sync-root.bin");
+        std::fs::write(&outside_file, b"must survive").unwrap();
+
+        // An absolute-looking `path` value that, joined naively onto
+        // sync_root, would still land inside sync_root — so instead prove
+        // the guard by resolving a path that canonicalizes OUTSIDE the
+        // allowed roots entirely: a `..`-relative escape.
+        let candidates = vec![("escaping".to_string(), "../../../../../../etc/hosts".to_string())];
+        let resolved = resolve_purge_placeholder_paths(&candidates, sync_root.path());
+
+        assert!(
+            resolved.is_empty(),
+            "a candidate resolving outside the sync root / engine cache dir must never be returned"
+        );
+    }
+
+    /// A candidate whose file no longer exists on disk (already cleaned up,
+    /// or a stale/corrupt row) fails to canonicalize and is dropped, not
+    /// treated as an error — sign-out must still succeed.
+    #[test]
+    fn resolve_purge_placeholder_paths_drops_missing_files() {
+        let sync_root = tempfile::tempdir().unwrap();
+        let candidates = vec![("gone".to_string(), "/never/existed.txt".to_string())];
+
+        let resolved = resolve_purge_placeholder_paths(&candidates, sync_root.path());
+
+        assert!(resolved.is_empty());
     }
 
     #[test]
@@ -8795,5 +9513,253 @@ mod tests {
 
         assert_eq!(next.file_name().unwrap().to_string_lossy(), "Report 2.pdf");
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Flow 7 P0: a recovery-phrase unlock must prove the phrase belongs to the
+/// signed-in account (server-side `recovery_check` compare) BEFORE the derived
+/// key is persisted. `recover_from_phrase` accepts ANY checksum-valid BIP39
+/// phrase, so without this gate a wrong phrase (or a typo that still passes the
+/// checksum, ~1 in 16) keys the desktop engine with a foreign key and every
+/// upload from this device becomes undecryptable everywhere else.
+#[cfg(test)]
+mod recovery_phrase_unlock_tests {
+    use super::{encode_base64, provision_vault_key_from_phrase};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug)]
+    struct SeenRequest {
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// Behave like the server: 200 `{valid:true}` when the submitted check
+        /// equals the stored one, else 400 `invalid_recovery_phrase`.
+        CompareAgainstStored,
+        /// Server fault — must never be read as "phrase is valid".
+        InternalError,
+    }
+
+    /// Minimal loop-accepting HTTP/1.1 mock of
+    /// `POST /api/v1/auth/verify-recovery-check` (same raw-TCP technique as
+    /// `api_client.rs`'s `HeaderMockServer`; desktop has no axum dev-dep).
+    struct VerifyMockServer {
+        base_url: String,
+        seen: Arc<Mutex<Vec<SeenRequest>>>,
+    }
+
+    impl VerifyMockServer {
+        fn start(stored_check_b64: Option<String>, reply: Reply) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let seen_thread = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut buffer = Vec::new();
+                    let mut temp = [0u8; 4096];
+                    let header_end = loop {
+                        let read = stream.read(&mut temp).unwrap_or(0);
+                        if read == 0 {
+                            break None;
+                        }
+                        buffer.extend_from_slice(&temp[..read]);
+                        if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(pos + 4);
+                        }
+                    };
+                    let Some(header_end) = header_end else { continue };
+                    let head = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
+                    let mut content_length = 0usize;
+                    let mut authorization = None;
+                    for line in head.lines().skip(1) {
+                        if let Some((name, value)) = line.split_once(':') {
+                            match name.trim().to_ascii_lowercase().as_str() {
+                                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                                "authorization" => authorization = Some(value.trim().to_string()),
+                                _ => {}
+                            }
+                        }
+                    }
+                    while buffer.len() < header_end + content_length {
+                        let read = stream.read(&mut temp).unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        buffer.extend_from_slice(&temp[..read]);
+                    }
+                    let body = String::from_utf8_lossy(&buffer[header_end..]).to_string();
+                    let submitted = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("recovery_check").and_then(|c| c.as_str()).map(str::to_string));
+                    seen_thread.lock().unwrap().push(SeenRequest {
+                        path: path.clone(),
+                        authorization,
+                        body,
+                    });
+                    let (status, payload) = match reply {
+                        Reply::InternalError => ("500 Internal Server Error", r#"{"error":"internal"}"#.to_string()),
+                        Reply::CompareAgainstStored => {
+                            let matches = path == "/api/v1/auth/verify-recovery-check"
+                                && stored_check_b64.is_some()
+                                && submitted == stored_check_b64;
+                            if matches {
+                                ("200 OK", r#"{"valid":true}"#.to_string())
+                            } else {
+                                ("400 Bad Request", r#"{"error":"invalid_recovery_phrase"}"#.to_string())
+                            }
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { base_url, seen }
+        }
+
+        fn requests(&self) -> Vec<SeenRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn check_b64_for_phrase(phrase: &str) -> String {
+        let key = beebeeb_core::recovery::recover_from_phrase(phrase).expect("valid phrase");
+        encode_base64(&*beebeeb_core::opaque::compute_recovery_check(&key))
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap()
+    }
+
+    /// The account's own phrase (P1) and another checksum-valid phrase (P2).
+    fn two_phrases() -> (String, String) {
+        let (p1, _) = beebeeb_core::recovery::generate_recovery_phrase().unwrap();
+        let (p2, _) = beebeeb_core::recovery::generate_recovery_phrase().unwrap();
+        assert_ne!(p1, p2);
+        (p1, p2)
+    }
+
+    #[tokio::test]
+    async fn wrong_but_valid_phrase_is_rejected_and_never_persisted() {
+        let (p1, p2) = two_phrases();
+        // Precondition of the bug: P2 is a perfectly valid phrase on its own.
+        assert!(beebeeb_core::recovery::recover_from_phrase(&p2).is_ok());
+        let server = VerifyMockServer::start(Some(check_b64_for_phrase(&p1)), Reply::CompareAgainstStored);
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        let result = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p2, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("Incorrect recovery phrase. Check your words and try again."),
+            "a valid phrase that is not the account's must be refused"
+        );
+        assert!(
+            persisted.lock().unwrap().is_none(),
+            "the wrong key must never reach the keychain"
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "exactly one verify call: {requests:?}");
+        assert_eq!(requests[0].path, "/api/v1/auth/verify-recovery-check");
+    }
+
+    #[tokio::test]
+    async fn account_phrase_is_verified_with_session_then_persisted() {
+        let (p1, _) = two_phrases();
+        let stored = check_b64_for_phrase(&p1);
+        let server = VerifyMockServer::start(Some(stored.clone()), Reply::CompareAgainstStored);
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        let key = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await
+        .expect("the account's own phrase must unlock");
+
+        let expected = beebeeb_core::recovery::recover_from_phrase(&p1).unwrap().to_bytes();
+        assert_eq!(key, expected);
+        assert_eq!(*persisted.lock().unwrap(), Some(expected));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "exactly one verify call: {requests:?}");
+        assert_eq!(requests[0].path, "/api/v1/auth/verify-recovery-check");
+        assert_eq!(requests[0].authorization.as_deref(), Some("Bearer sess-tok"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["recovery_check"].as_str(), Some(stored.as_str()));
+    }
+
+    #[tokio::test]
+    async fn account_without_stored_check_is_refused_like_web() {
+        // Server returns 400 invalid_recovery_phrase when no check is on file
+        // (server routes/recovery.rs); web treats that as a mismatch (task
+        // 0874/0875) and so does desktop.
+        let (p1, _) = two_phrases();
+        let server = VerifyMockServer::start(None, Reply::CompareAgainstStored);
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        let result = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("Incorrect recovery phrase. Check your words and try again.")
+        );
+        assert!(persisted.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn verifier_failure_fails_closed() {
+        let (p1, _) = two_phrases();
+        let persisted: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+        // Server error: never read as "valid".
+        let server = VerifyMockServer::start(Some(check_b64_for_phrase(&p1)), Reply::InternalError);
+        let result = provision_vault_key_from_phrase(&client(), &server.base_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+        let err = result.expect_err("a 500 from the verifier must not unlock");
+        assert!(
+            !err.starts_with("Incorrect recovery phrase"),
+            "server fault is not a wrong phrase: {err}"
+        );
+        assert_eq!(server.requests().len(), 1);
+
+        // Unreachable server: bind then drop a listener so the port refuses.
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_url = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let result = provision_vault_key_from_phrase(&client(), &dead_url, "sess-tok", &p1, |key| {
+            *persisted.lock().unwrap() = Some(key);
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err(), "a network error must not unlock");
+
+        assert!(
+            persisted.lock().unwrap().is_none(),
+            "nothing may be persisted when unverified"
+        );
     }
 }

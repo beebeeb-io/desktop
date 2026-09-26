@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { command, loadSyncStatus, type SyncStatus } from './desktopApi'
+import { command, loadSyncStatus, type DesktopPlatform, type SyncStatus } from './desktopApi'
 import Status from './pages/Status'
 import SyncFolder from './pages/SyncFolder'
 import SelectiveSync from './pages/SelectiveSync'
@@ -9,9 +9,15 @@ import Notifications from './pages/Notifications'
 import Account from './pages/Account'
 import VersionCenter from './pages/VersionCenter'
 import UpdateBanner from './UpdateBanner'
+import AuthExpiredBanner from './AuthExpiredBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
 import DesktopVersionHistory, { DesktopVersionHistoryTrigger } from './DesktopVersionHistory'
-import { COMPACT_NAV_ITEMS, compactPageFromString, type CompactPage as Page } from './compactNavigation'
+import {
+  brandSubtitleForPlatform,
+  COMPACT_NAV_ITEMS,
+  compactPageFromString,
+  type CompactPage as Page,
+} from './compactNavigation'
 
 const COMPACT_APP_NAV_EVENT = 'compact-app:navigate'
 
@@ -27,6 +33,7 @@ export default function App() {
   const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)
   const [searchOpen, setSearchOpen] = useState(false)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
+  const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
 
   useEffect(() => {
     let cancelled = false
@@ -45,6 +52,12 @@ export default function App() {
   useEffect(() => {
     command<string>('app_version').then((result) => {
       if (result.ok) setVersion(result.value)
+    })
+  }, [])
+
+  useEffect(() => {
+    command<DesktopPlatform>('desktop_platform').then((result) => {
+      if (result.ok) setPlatform(result.value)
     })
   }, [])
 
@@ -102,6 +115,7 @@ export default function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <UpdateBanner />
+      <AuthExpiredBanner authExpired={status?.auth_expired ?? false} />
       <DesktopQuickSearch
         open={searchOpen}
         onOpen={() => setSearchOpen(true)}
@@ -118,7 +132,7 @@ export default function App() {
             <div className="brand-mark">b</div>
             <div>
               <div className="brand-name">Beebeeb</div>
-              <div className="brand-subtitle">macOS Drive</div>
+              <div className="brand-subtitle">{brandSubtitleForPlatform(platform)}</div>
             </div>
           </div>
 

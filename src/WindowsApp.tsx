@@ -56,6 +56,7 @@ import {
   type RecentFile,
 } from './desktopApi'
 import UpdateBanner from './UpdateBanner'
+import AuthExpiredBanner from './AuthExpiredBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
 import DesktopVersionHistory, { DesktopVersionHistoryTrigger } from './DesktopVersionHistory'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card, useToast } from './windows/ui'
@@ -1807,6 +1808,7 @@ export default function WindowsApp() {
           inline — so any view can use them without mounting UpdateBanner). */}
       <style>{'@keyframes bb-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } } @keyframes bb-spin { to { transform: rotate(360deg); } }'}</style>
       <UpdateBanner />
+      <AuthExpiredBanner authExpired={status?.auth_expired ?? false} />
       <DesktopQuickSearch
         open={searchOpen}
         onOpen={() => setSearchOpen(true)}
