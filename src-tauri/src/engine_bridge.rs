@@ -5918,11 +5918,6 @@ mod tests {
                             // load and passed 3/3 when rerun in isolation).
                             stream.set_nonblocking(false).unwrap();
                             idle_after_min_since = None;
-                            // BSD/macOS: an accepted socket inherits the
-                            // listener's O_NONBLOCK, so a body that has not
-                            // arrived yet surfaced as a WouldBlock panic under
-                            // full-suite load. Read it blocking.
-                            stream.set_nonblocking(false).unwrap();
                             let request = read_http_request(&mut stream);
                             let response = upload_mock_response(&request, fail_chunk);
                             server_requests.lock().unwrap().push(request);
@@ -8546,7 +8541,7 @@ mod tests {
             "is_uploading": true,
             "updated_at": 100
         });
-        let resolved = process_metadata_row(&bridge, &row, "", 200, &mut conflicts).unwrap();
+        let resolved = process_metadata_row(&bridge, &row, "", 200, RowSource::Snapshot, &mut conflicts).unwrap();
         assert!(resolved.is_none());
         assert!(
             bridge.db.get_file("partial-upload-1").unwrap().is_none(),

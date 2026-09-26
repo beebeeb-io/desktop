@@ -478,6 +478,16 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// Drop every persisted upload session whose queued op no longer exists.
+/// Called by the bulk `operation_queue` purges so a session never outlives
+/// its op (`remove_operation` already clears its own row).
+fn drop_orphaned_upload_resumes(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
+        [],
+    )
+}
+
 /// Persisted resumable upload session for one queued upload op (flow 7).
 /// See the `upload_resume` table in [`StateDb::open`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1650,6 +1660,7 @@ impl StateDb {
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
             revoked.push(RevokedSharedCache { file_id, cache_path });
         }
+        drop_orphaned_upload_resumes(&tx)?;
         tx.commit()?;
         Ok(revoked)
     }
@@ -1781,11 +1792,14 @@ impl StateDb {
     /// user-initiated op) and rows tagged with a DIFFERENT folder's key are never
     /// touched. Returns the number of rows deleted (for the disable log).
     pub fn purge_backup_source_ops(&self, source_key: &str) -> Result<usize> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let deleted = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
             "DELETE FROM operation_queue WHERE backup_source_key = ?1",
             params![source_key],
         )?;
+        drop_orphaned_upload_resumes(&tx)?;
+        tx.commit()?;
         Ok(deleted)
     }
 
@@ -1824,6 +1838,9 @@ impl StateDb {
             rows.collect::<Result<Vec<_>>>()?
         };
         let queued_ops_purged = tx.execute("DELETE FROM operation_queue", [])?;
+        // Flow 7: the leaving account's persisted upload sessions (session id,
+        // server file id, staged path) go with its queue.
+        tx.execute("DELETE FROM upload_resume", [])?;
 
         let cache_paths: Vec<String> = {
             let mut stmt = tx.prepare("SELECT cache_path FROM files WHERE cache_path IS NOT NULL")?;
@@ -4234,5 +4251,91 @@ mod tests {
             .delete_orphaned_children_of_absent_folder("nonexistent-folder")
             .unwrap();
         assert!(removed.is_empty(), "no children → should return empty vec");
+    }
+
+    /// Flow 7 / PR #58 merge with task 1538: every purge that drops queued
+    /// upload ops must drop their persisted upload sessions too. A resume row
+    /// outliving its op is dead state; across a sign-out it would carry the
+    /// previous account's upload session id, server file id and staged path
+    /// into the next account's database.
+    #[test]
+    fn test_every_operation_purge_drops_the_upload_resume_rows() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let mk_op = |op_id: &str, file_id: &str, key: Option<&str>| PendingOperation {
+            op_id: op_id.into(),
+            kind: OperationKind::UploadFile,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: Some(format!("/{op_id}.bin")),
+            metadata_json: Some(r#"{"operation":"create_file"}"#.into()),
+            payload_path: Some(format!("/staging/{op_id}")),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: key.map(str::to_string),
+            created_at: 100,
+            updated_at: 100,
+        };
+        let mk_resume = |op_id: &str| UploadResume {
+            op_id: op_id.into(),
+            payload_path: format!("/staging/{op_id}"),
+            payload_size: 3 * 1024,
+            payload_mtime_ns: 42,
+            upload_session_id: format!("session-{op_id}"),
+            server_file_id: format!("server-{op_id}"),
+            object_version_id: format!("ov-{op_id}"),
+            chunk_size_bytes: 1024,
+            chunk_count: 3,
+            acked_chunks: 1,
+            metadata_applied: true,
+            is_create: true,
+        };
+        let seed = |op_id: &str, file_id: &str, key: Option<&str>| {
+            db.enqueue_operation(&mk_op(op_id, file_id, key)).unwrap();
+            db.put_upload_resume(&mk_resume(op_id)).unwrap();
+        };
+
+        // (1) Disabling a known-folder backup: only that folder's session goes.
+        seed("music-1", "file-music-1", Some("music"));
+        seed("normal-1", "file-normal-1", None);
+        assert_eq!(db.purge_backup_source_ops("music").unwrap(), 1);
+        assert!(
+            db.get_upload_resume("music-1").unwrap().is_none(),
+            "a purged backup op's upload session must go with it"
+        );
+        assert!(
+            db.get_upload_resume("normal-1").unwrap().is_some(),
+            "a surviving op keeps its upload session"
+        );
+
+        // (2) Revoked shared content: the revoked file's queued upload goes, and
+        //     so does its session.
+        seed_contract_row(&db, "revoked", "/Shared with me/Revoked", None, FileStatus::Local, 20);
+        let mut revoked = db.get_file_contract_state("revoked").unwrap().unwrap();
+        revoked.namespace = Namespace::SharedWithMe;
+        revoked.shared_root_id = Some("revoked".into());
+        revoked.share_id = Some("invite-revoked".into());
+        revoked.permission_bits = PERMISSION_READ | PERMISSION_WRITE;
+        db.set_file_contract_state(&revoked).unwrap();
+        seed("shared-1", "revoked", None);
+        db.purge_revoked_shared_content(&[]).unwrap();
+        assert!(
+            db.get_upload_resume("shared-1").unwrap().is_none(),
+            "a revoked share's queued upload must not keep its upload session"
+        );
+        assert!(db.get_upload_resume("normal-1").unwrap().is_some());
+
+        // (3) Sign-out: nothing of the leaving account's uploads survives.
+        let purge = db.purge_all_local_state().unwrap();
+        assert!(purge.queued_ops_purged >= 1);
+        assert!(
+            db.get_upload_resume("normal-1").unwrap().is_none(),
+            "sign-out must purge every persisted upload session"
+        );
     }
 }
