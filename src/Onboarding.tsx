@@ -77,7 +77,7 @@ export default function Onboarding() {
           </div>
         </div>
         <div className="sidebar-footer">
-          End-to-end encrypted | EU servers | Zero-knowledge
+          End-to-end encrypted | Falkenstein | Zero-knowledge
         </div>
       </aside>
 

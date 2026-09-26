@@ -31,7 +31,7 @@
 //! consume this stream.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,10 +41,69 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_bridge::{ConflictDetected, EngineBridge, WireCounters, sync_tick};
+use crate::engine_bridge::{
+    ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick,
+};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 use crate::state_paths;
+
+/// After this many CONSECUTIVE auth (401) failures across a session's
+/// heartbeat + sync-tick API calls, [`AuthHealth::expired`] flips true and
+/// `sync_status` starts reporting `auth_expired: true` — the trigger for the
+/// persistent "You're signed out on this device" banner (task 1546 Codex
+/// round 2, finding 5 / lead decision). ANY successful call resets the
+/// streak to 0 (and clears `expired`) — a single working request means the
+/// session is fine again.
+const AUTH_EXPIRED_THRESHOLD: u32 = 3;
+
+/// Shared, per-account auth-health tracker (task 1546 Codex round 2, finding
+/// 5). Fed by BOTH the heartbeat producer's `post_heartbeat` calls and the
+/// main tick loop's `sync_tick` calls — whichever one talks to the server
+/// next advances or resets the streak. Lives on `AccountRuntime` (`Arc`'d,
+/// same pattern as `sync_paused`) so `sync_status` can read [`Self::is_expired`]
+/// without touching the engine task, and is cloned into [`EngineRunner::spawn`]
+/// / [`run`] the same way `sync_paused` already is.
+#[derive(Default)]
+pub struct AuthHealth {
+    consecutive_failures: AtomicU32,
+    expired: AtomicBool,
+}
+
+impl AuthHealth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.expired.load(Ordering::Relaxed)
+    }
+
+    /// Record the outcome of one API call. `error` is `None` on success,
+    /// which always clears the streak and the expired flag — a working
+    /// request proves the session is fine again. `Some(e)` on failure
+    /// advances the streak only when `e` classifies as an auth (401)
+    /// failure via [`classify_operation_error`]; any other error (network
+    /// blip, 5xx, …) leaves the streak untouched rather than resetting OR
+    /// advancing it, so an unrelated hiccup between two real 401s doesn't
+    /// erase the count that matters. `pub(crate)`: also called from
+    /// `lib.rs`'s `clear_session_impl` to reset the streak on sign-out.
+    pub(crate) fn note_result(&self, error: Option<&anyhow::Error>) {
+        match error {
+            None => {
+                self.consecutive_failures.store(0, Ordering::Relaxed);
+                self.expired.store(false, Ordering::Relaxed);
+            }
+            Some(e) if matches!(classify_operation_error(&e.to_string()), OperationFailureClass::Auth) => {
+                let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= AUTH_EXPIRED_THRESHOLD {
+                    self.expired.store(true, Ordering::Relaxed);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+}
 
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
@@ -447,6 +506,7 @@ fn spawn_heartbeat_producer(
     telemetry: Arc<Mutex<TelemetryState>>,
     sync_paused: Arc<AtomicBool>,
     wire: Arc<WireCounters>,
+    auth_health: Arc<AuthHealth>,
     mut cancel: oneshot::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -505,11 +565,15 @@ fn spawn_heartbeat_producer(
 
                     last_beat_secs = now;
 
-                    if let Err(e) = api.post_heartbeat(&session_id, &body).await {
-                        // Fire-and-forget: a missed beat is non-fatal (the next
-                        // beat refreshes the row). Network blips + token-rotation
-                        // 401s are expected; log at debug to avoid noise.
-                        tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
+                    match api.post_heartbeat(&session_id, &body).await {
+                        Ok(()) => auth_health.note_result(None),
+                        Err(e) => {
+                            // Fire-and-forget: a missed beat is non-fatal (the next
+                            // beat refreshes the row). Network blips + token-rotation
+                            // 401s are expected; log at debug to avoid noise.
+                            tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
+                            auth_health.note_result(Some(&e));
+                        }
                     }
                 }
             }
@@ -529,6 +593,10 @@ pub struct EngineRunner {
     /// in `lib.rs` — can surface the REAL `std::io::Error` (e.g. the macOS
     /// sandbox refusing the path) instead of just a generic connect timeout.
     ipc_bind_error: Arc<Mutex<Option<String>>>,
+    /// Cooperative stop flag (task 1538 Codex P1). Shared with the
+    /// [`EngineBridge`] `run` builds, so `abort()` can flip it BEFORE even
+    /// sending the tick loop's cancel oneshot.
+    stopping: Arc<AtomicBool>,
 }
 
 impl EngineRunner {
@@ -538,17 +606,22 @@ impl EngineRunner {
     ///
     /// `sync_paused` is shared with [`crate::AppState`] so the
     /// `tray_pause_sync` / `tray_resume_sync` IPC commands can signal
-    /// the loop without restarting the runner.
+    /// the loop without restarting the runner. `auth_health` is likewise
+    /// shared with the account runtime so `sync_status` can read the
+    /// consecutive-401 streak this task feeds (task 1546 finding 5).
     pub fn spawn(
         app: AppHandle,
         sync_root: PathBuf,
         session_token: String,
         master_key: [u8; 32],
         sync_paused: Arc<AtomicBool>,
+        auth_health: Arc<AuthHealth>,
     ) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
         let ipc_bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let ipc_bind_error_for_task = ipc_bind_error.clone();
+        let stopping: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let stopping_for_task = stopping.clone();
 
         let task = tokio::spawn(async move {
             run(
@@ -556,9 +629,13 @@ impl EngineRunner {
                 sync_root,
                 session_token,
                 master_key,
-                rx,
-                sync_paused,
-                ipc_bind_error_for_task,
+                RunnerControls {
+                    cancel: rx,
+                    sync_paused,
+                    auth_health,
+                    ipc_bind_error: ipc_bind_error_for_task,
+                    stopping: stopping_for_task,
+                },
             )
             .await;
         });
@@ -567,6 +644,7 @@ impl EngineRunner {
             cancel: Some(tx),
             task: Some(task),
             ipc_bind_error,
+            stopping,
         }
     }
 
@@ -580,21 +658,92 @@ impl EngineRunner {
         self.ipc_bind_error.clone()
     }
 
-    /// Signal the runner to stop and wait for it to do so. Drops the
-    /// lock file as part of teardown. Idempotent — calling twice is a
-    /// no-op.
-    pub async fn abort(mut self) {
-        if let Some(tx) = self.cancel.take() {
-            // Ignore send errors — receiver may have already exited.
-            let _ = tx.send(());
-        }
-        if let Some(handle) = self.task.take() {
-            // Bound the wait so a misbehaving tick can't hang
-            // shutdown. The lock file's Drop releases regardless once
-            // the task is forced down.
-            let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
-        }
+    /// Signal the runner to stop and wait for CONFIRMED termination. Drops
+    /// the lock file as part of teardown. Idempotent — calling twice is a
+    /// no-op (the second call has nothing left to wait on and returns
+    /// `true` immediately).
+    ///
+    /// Returns `true` only when the runner's task is actually gone — never
+    /// merely "we gave up waiting" (task 1538 Codex P1, PR #49 lib.rs:1087
+    /// thread). The old version just dropped the `JoinHandle` after a 3s
+    /// timeout, which DETACHES rather than cancels the task: the engine
+    /// (and everything nested inside its single tokio task — the IPC socket
+    /// server, the Windows upload watcher) could keep running after a
+    /// caller believed sign-out/lock had finished, still holding the
+    /// session master key and able to drain/enqueue operations behind a
+    /// purge's back. Callers that need that guarantee — `clear_session_impl`
+    /// gating its cross-account purge on it — must check the return value
+    /// and refuse to proceed when it's `false`.
+    pub async fn abort(mut self) -> bool {
+        // Flip the cooperative flag FIRST, before the cancel oneshot even
+        // sends: `EngineBridge::is_stopping()` (checked by
+        // `process_due_operations` before every operation and by
+        // `queue_finder_create`/`_modify`/`_delete` before enqueuing) then
+        // observes the stop request immediately, without waiting for the
+        // tick loop to next reach its `tokio::select!` boundary.
+        self.stopping.store(true, Ordering::SeqCst);
+        stop_task_and_confirm(self.cancel.take(), self.task.take(), GRACEFUL_ABORT_TIMEOUT, FORCE_ABORT_TIMEOUT).await
     }
+}
+
+/// How long [`EngineRunner::abort`] waits for the tick loop to reach its
+/// cancel-select boundary on its own after the cooperative stop flag + the
+/// cancel oneshot are both signaled.
+const GRACEFUL_ABORT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long, after a forced [`tokio::task::JoinHandle::abort`], we wait for
+/// the runtime to confirm the task is actually gone. Aborting a task that is
+/// suspended mid-`.await` (the common case — mid network call) drops its
+/// future essentially immediately; this is a generous upper bound, not the
+/// expected latency.
+const FORCE_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Signal `cancel` (if any), wait up to `graceful` for `task` to finish on
+/// its own, and — only if that times out — force-abort it and wait up to
+/// `force` for the runtime to confirm it has actually terminated.
+///
+/// Returns `true` only when the task is CONFIRMED gone (finished gracefully,
+/// or the forced abort was observed to complete within `force`); `false`
+/// only in the pathological case where even a forced abort couldn't be
+/// confirmed within `force` (e.g. the task is blocked in non-async code with
+/// no `.await` point to cancel at).
+///
+/// Standalone and Tauri-independent on purpose: this is the part of
+/// [`EngineRunner::abort`] worth unit-testing directly, without spinning up
+/// a real `AppHandle` + sync engine.
+async fn stop_task_and_confirm(
+    cancel: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+    graceful: Duration,
+    force: Duration,
+) -> bool {
+    if let Some(tx) = cancel {
+        // Ignore send errors — receiver may have already exited.
+        let _ = tx.send(());
+    }
+    let Some(mut handle) = task else {
+        // Nothing left to wait on — either already aborted, or the task
+        // never finished spawning. Either way there is nothing that could
+        // still be running.
+        return true;
+    };
+
+    if tokio::time::timeout(graceful, &mut handle).await.is_ok() {
+        return true;
+    }
+
+    // Graceful stop timed out. This is where the pre-fix code just dropped
+    // `handle` here, detaching the task instead of cancelling it. Force it
+    // down for real, then wait to confirm — not just fire-and-hope.
+    tracing::warn!("engine graceful stop timed out; force-aborting the task");
+    handle.abort();
+    let confirmed = tokio::time::timeout(force, handle).await.is_ok();
+    if !confirmed {
+        tracing::error!(
+            "engine did not confirm termination even after a forced abort; it may still be running"
+        );
+    }
+    confirmed
 }
 
 impl Drop for EngineRunner {
@@ -608,19 +757,37 @@ impl Drop for EngineRunner {
     }
 }
 
+/// Shared control handles [`run`]'s tick loop reads/writes for its whole
+/// lifetime, bundled into one struct rather than passed as separate `run`
+/// parameters — task 1538 Codex P1: adding `stopping` pushed the previous
+/// flat parameter list to 8, past clippy's `too_many_arguments` threshold.
+/// `auth_health` (task 1546 finding 5) joined the struct for the same
+/// reason rather than reopening that flat list.
+struct RunnerControls {
+    cancel: oneshot::Receiver<()>,
+    sync_paused: Arc<AtomicBool>,
+    auth_health: Arc<AuthHealth>,
+    ipc_bind_error: Arc<Mutex<Option<String>>>,
+    stopping: Arc<AtomicBool>,
+}
+
 /// The runner task body. Acquires the lock, opens the state DB,
 /// builds the API client + engine bridge, ticks every
 /// [`TICK_INTERVAL`] running [`sync_tick`], exits when the cancel
 /// channel fires.
-async fn run(
-    app: AppHandle,
-    sync_root: PathBuf,
-    session_token: String,
-    master_key: [u8; 32],
-    mut cancel: oneshot::Receiver<()>,
-    sync_paused: Arc<AtomicBool>,
-    ipc_bind_error: Arc<Mutex<Option<String>>>,
-) {
+async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_key: [u8; 32], controls: RunnerControls) {
+    // Task 1538 Codex P1: destructured immediately so the rest of this
+    // (already long-standing) function body is untouched — every field
+    // below is used exactly as the old flat `cancel`/`sync_paused`/
+    // `auth_health`/`ipc_bind_error`/`stopping` parameters were.
+    let RunnerControls {
+        mut cancel,
+        sync_paused,
+        auth_health,
+        ipc_bind_error,
+        stopping,
+    } = controls;
+
     // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
     // no Unix-socket daemon endpoint (see that block's own doc comment), so
     // the parameter would otherwise go unused on a Windows build.
@@ -685,7 +852,11 @@ async fn run(
     }
 
     let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api.clone()));
+    // Shares `stopping` with `EngineRunner::abort` (task 1538 Codex P1) so
+    // this bridge — and every clone of it handed to the IPC socket server
+    // (below) and the Windows upload watcher — observes a stop request the
+    // instant `abort()` sets it, not just at this loop's next tick boundary.
+    let bridge = Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping));
 
     // ── Heartbeat telemetry (the WRITE/PRODUCE side of the Bandwidth view) ──
     //
@@ -715,6 +886,7 @@ async fn run(
                     telemetry.clone(),
                     sync_paused.clone(),
                     bridge.wire.clone(),
+                    auth_health.clone(),
                     hb_cancel_rx,
                 );
                 Some((hb_cancel_tx, handle, session_id))
@@ -862,6 +1034,11 @@ async fn run(
                 }
                 match sync_tick(&*bridge, &sync_root).await {
                     Ok(conflicts) => {
+                        // A successful tick is a real, authenticated API round
+                        // trip — clears the auth-failure streak (task 1546
+                        // finding 5) alongside every other post-tick bookkeeping
+                        // step below.
+                        auth_health.note_result(None);
                         // Task 10 — surface freshly detected conflicts.
                         // The engine bridge already flipped status to
                         // Conflict; we own the UI side: open a window
@@ -987,6 +1164,10 @@ async fn run(
                         // are normal — log and continue, surface the
                         // error to the WebView so the tray reflects it.
                         tracing::warn!(error = %e, "sync tick failed");
+                        // Task 1546 finding 5: a run of these that classify as
+                        // auth failures (not network blips) is what flips
+                        // `auth_health` and surfaces the persistent banner.
+                        auth_health.note_result(Some(&e));
                         emit_status(&app, "error", Some(&sync_root), Some(&e.to_string()));
                         set_telemetry_state(&telemetry, "error");
                         // Windows breadcrumb flyout: surface the tick failure as
@@ -1331,6 +1512,149 @@ fn _unused_path(_p: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    // ── EngineRunner::abort authoritative-stop mechanics (task 1538 Codex P1) ──
+
+    /// A task that promptly observes its cancel signal is confirmed stopped
+    /// well within the graceful window — the common, happy-path case.
+    #[tokio::test]
+    async fn stop_task_and_confirm_returns_true_for_a_cooperative_task() {
+        let (tx, rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = rx.await;
+        });
+
+        let confirmed =
+            stop_task_and_confirm(Some(tx), Some(task), Duration::from_millis(200), Duration::from_millis(200)).await;
+
+        assert!(confirmed, "a task that honors cancel must be confirmed stopped");
+    }
+
+    /// The regression test for the actual bug: a task that never observes
+    /// its cancel signal (the real-world case is a single tick body stuck
+    /// mid-network-call, well past its last `tokio::select!` check) must
+    /// still be confirmed stopped — and, more importantly, must ACTUALLY
+    /// stop running, not merely be abandoned.
+    ///
+    /// The pre-fix `EngineRunner::abort` just dropped the `JoinHandle` after
+    /// its graceful timeout, which detaches rather than cancels it: swap
+    /// this function's force-abort branch back to a bare `drop(handle)` (no
+    /// `handle.abort()`, no confirmation wait) to reproduce that — the
+    /// second assertion here (`ticks` unchanged after the function returns)
+    /// is what would catch it, since the loop would keep incrementing
+    /// `ticks` in the background forever. This was reasoned through against
+    /// the pre-fix code rather than executed as a live mutation in this
+    /// session (a shared-machine disk-space guard stopped further `cargo`
+    /// builds partway through gating — see the task report).
+    #[tokio::test]
+    async fn stop_task_and_confirm_force_aborts_a_task_that_never_observes_cancel() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticks_for_task = ticks.clone();
+        // Intentionally unused by the task below — simulates a tick body
+        // that never reaches its own `tokio::select!` boundary within this
+        // test's short timeouts, so only a REAL forced abort can stop it.
+        let (_tx, _rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            loop {
+                ticks_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let confirmed =
+            stop_task_and_confirm(Some(_tx), Some(task), Duration::from_millis(30), Duration::from_millis(300)).await;
+
+        assert!(
+            confirmed,
+            "a forced abort of a stuck task must be confirmed, not just given up on"
+        );
+
+        let ticks_at_return = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            ticks_at_return,
+            "the task must have ACTUALLY stopped — a detached task would keep incrementing here"
+        );
+    }
+
+    /// `cancel: None` / `task: None` (the idempotent "already aborted"
+    /// shape `EngineRunner::abort`'s `Option::take()`s produce on a second
+    /// call) has nothing left to confirm and must report success rather
+    /// than hang or falsely report failure.
+    #[tokio::test]
+    async fn stop_task_and_confirm_is_idempotent_with_nothing_left_to_wait_on() {
+        let confirmed = stop_task_and_confirm(None, None, Duration::from_millis(50), Duration::from_millis(50)).await;
+        assert!(confirmed);
+    }
+
+    // ── AuthHealth (task 1546 Codex round 2, finding 5) ────────────────────
+
+    fn auth_error() -> anyhow::Error {
+        anyhow::anyhow!("HTTP 401 Unauthorized: invalid token")
+    }
+
+    fn other_error() -> anyhow::Error {
+        anyhow::anyhow!("HTTP 500 Internal Server Error: db unavailable")
+    }
+
+    #[test]
+    fn auth_health_starts_not_expired() {
+        let health = AuthHealth::new();
+        assert!(!health.is_expired());
+    }
+
+    #[test]
+    fn auth_health_flips_expired_only_at_the_threshold_of_consecutive_auth_failures() {
+        let health = AuthHealth::new();
+        assert_eq!(AUTH_EXPIRED_THRESHOLD, 3, "test assumes the documented threshold");
+
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired(), "1 failure must not trip the banner");
+
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired(), "2 failures must not trip the banner");
+
+        health.note_result(Some(&auth_error()));
+        assert!(health.is_expired(), "the 3rd CONSECUTIVE auth failure must trip it");
+    }
+
+    #[test]
+    fn auth_health_non_auth_failures_neither_advance_nor_reset_the_streak() {
+        // A network blip / 5xx between two real 401s must not erase progress
+        // toward the threshold, and must not itself count as progress.
+        let health = AuthHealth::new();
+
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired());
+
+        health.note_result(Some(&other_error()));
+        assert!(!health.is_expired(), "an unrelated error must not itself trip the banner");
+
+        // The streak must still be at 2 — one more REAL auth failure trips it.
+        health.note_result(Some(&auth_error()));
+        assert!(health.is_expired(), "the unrelated error must not have reset the streak back to 0");
+    }
+
+    #[test]
+    fn auth_health_any_success_resets_the_streak_and_clears_expired() {
+        let health = AuthHealth::new();
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        assert!(health.is_expired());
+
+        health.note_result(None);
+        assert!(!health.is_expired(), "a success must clear an already-tripped banner");
+
+        // And the streak is genuinely back to 0, not just the flag flipped:
+        // two more failures alone must not re-trip it.
+        health.note_result(Some(&auth_error()));
+        health.note_result(Some(&auth_error()));
+        assert!(!health.is_expired(), "the streak must have been reset to 0, not left at 3");
+    }
 
     #[test]
     fn test_file_provider_invalidation_payload_contains_only_reason_and_ids() {
