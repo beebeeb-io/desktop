@@ -48,7 +48,7 @@ use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
     FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput, LocalActivityKind, Namespace,
     OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE,
-    PendingOperation, QueueDiagnostics, StateDb,
+    PendingOperation, QueueDiagnostics, StateDb, UploadResume,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -461,6 +461,9 @@ impl EngineBridge {
                             next_retry_at,
                             Some(&error.to_string()),
                         )?;
+                        if attempts >= op.max_attempts {
+                            self.abandon_upload_after_give_up(&op).await;
+                        }
                         outcome.retried_op_ids.push(op.op_id);
                     }
                 }
@@ -624,47 +627,184 @@ impl EngineBridge {
         // `file_size_bytes: 0`.
         let plaintext_size = std::fs::metadata(payload_path)?.len();
 
-        let init_request = upload_init_request_for_operation(
-            local_file_id,
-            name_encrypted,
-            content_type.clone(),
-            op.parent_id.clone(),
-            plaintext_size,
-            op.base_version,
-            is_create_file_operation(&metadata),
-        );
-        let upload = self.api.init_upload(&init_request).await?;
+        let is_create = is_create_file_operation(&metadata);
+        let payload_path_str = payload_path.to_string_lossy().into_owned();
+        let payload_mtime_ns = payload_mtime_ns(payload_path);
 
-        let server_file_id = upload.file_id.clone();
-        let effective_name_encrypted = if server_file_id != local_file_id {
-            encrypted_metadata_for_name(
-                self.api.master_key(),
-                &server_file_id,
-                metadata_display_name(&metadata, op)
-                    .as_deref()
-                    .unwrap_or(&server_file_id),
-                content_type.as_deref(),
-            )?
-        } else {
-            name_encrypted.to_string()
+        // Flow 7: resume the persisted upload session when the retry is for the
+        // SAME staged bytes. Re-running `init` would mint a second server file
+        // row (the first left behind as a broken `is_uploading` duplicate) and
+        // re-send every chunk from zero.
+        let mut session: Option<UploadResume> = None;
+        if let Some(previous) = self.db.get_upload_resume(&op.op_id)? {
+            let same_payload = previous.payload_path == payload_path_str
+                && previous.payload_size == plaintext_size as i64
+                && previous.payload_mtime_ns == payload_mtime_ns
+                && previous.chunk_size_bytes > 0
+                && previous.chunk_count > 0
+                && previous.acked_chunks >= 0
+                && previous.acked_chunks <= previous.chunk_count;
+            if same_payload {
+                tracing::info!(
+                    op_id = %op.op_id,
+                    file_id = %previous.server_file_id,
+                    acked_chunks = previous.acked_chunks,
+                    chunk_count = previous.chunk_count,
+                    "upload: resuming persisted upload session"
+                );
+                session = Some(previous);
+            } else {
+                tracing::info!(
+                    op_id = %op.op_id,
+                    file_id = %previous.server_file_id,
+                    "upload: staged payload changed since the persisted session — abandoning it"
+                );
+                self.abandon_upload_session(&previous).await?;
+            }
+        }
+
+        let session = match session {
+            Some(session) => session,
+            None => {
+                let init_request = upload_init_request_for_operation(
+                    local_file_id,
+                    name_encrypted,
+                    content_type.clone(),
+                    op.parent_id.clone(),
+                    plaintext_size,
+                    op.base_version,
+                    is_create,
+                );
+                let upload = self.api.init_upload(&init_request).await?;
+                if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
+                    return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+                }
+                let session = UploadResume {
+                    op_id: op.op_id.clone(),
+                    payload_path: payload_path_str.clone(),
+                    payload_size: plaintext_size as i64,
+                    payload_mtime_ns,
+                    upload_session_id: upload.upload_session_id,
+                    server_file_id: upload.file_id,
+                    object_version_id: upload.object_version_id,
+                    chunk_size_bytes: upload.chunk_size_bytes,
+                    chunk_count: upload.chunk_count,
+                    acked_chunks: 0,
+                    metadata_applied: false,
+                    // Only a create (no `file_id` sent to init) owns the server
+                    // row outright; a replace targets the user's existing file.
+                    is_create: init_request.file_id.is_none(),
+                };
+                // Persist BEFORE the next await: a cut anywhere after init must
+                // leave the session discoverable by the retry.
+                self.db.put_upload_resume(&session)?;
+                session
+            }
         };
-        self.api
-            .update_metadata(
-                &server_file_id,
-                Some(&effective_name_encrypted),
-                op.parent_id.as_deref(),
-            )
-            .await?;
 
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, server_file_id.as_bytes());
+        let body = self
+            .upload_session_body(
+                local_file_id,
+                op,
+                &metadata,
+                name_encrypted,
+                content_type.clone(),
+                payload_path,
+                &session,
+            )
+            .await;
+        match body {
+            Ok(completed) => {
+                let server_file_id = session.server_file_id.clone();
+                let file_key = file_key_for(self.api.master_key(), &server_file_id);
+                let thumbnail_content_type = content_type.clone();
+                self.apply_completed_upload(
+                    local_file_id,
+                    &server_file_id,
+                    op,
+                    &completed,
+                    plaintext_size,
+                    content_type,
+                    Some(session.object_version_id.clone()),
+                )?;
+                self.db.clear_upload_resume(&op.op_id)?;
+                self.finish_completed_upload(
+                    op,
+                    &server_file_id,
+                    payload_path,
+                    thumbnail_content_type,
+                    &file_key,
+                    sync_root,
+                )
+                .await;
+                Ok(())
+            }
+            Err(error) => {
+                if upload_session_is_gone(&error) {
+                    tracing::warn!(
+                        op_id = %op.op_id,
+                        file_id = %session.server_file_id,
+                        error = %error,
+                        "upload: server no longer accepts the persisted session — abandoning it; the retry starts a fresh upload"
+                    );
+                    self.abandon_upload_session(&session).await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Everything between init and a successful `complete`: the post-init
+    /// metadata PATCH and the chunk PUTs from the acknowledged watermark on.
+    /// Every step's success is persisted before the next await so a cut
+    /// resumes exactly where the server's acknowledgements stop.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_session_body(
+        &self,
+        local_file_id: &str,
+        op: &PendingOperation,
+        metadata: &serde_json::Value,
+        name_encrypted: &str,
+        content_type: Option<String>,
+        payload_path: &Path,
+        session: &UploadResume,
+    ) -> anyhow::Result<serde_json::Value> {
+        let server_file_id = session.server_file_id.clone();
+        if !session.metadata_applied {
+            let effective_name_encrypted = if server_file_id != local_file_id {
+                encrypted_metadata_for_name(
+                    self.api.master_key(),
+                    &server_file_id,
+                    metadata_display_name(metadata, op)
+                        .as_deref()
+                        .unwrap_or(&server_file_id),
+                    content_type.as_deref(),
+                )?
+            } else {
+                name_encrypted.to_string()
+            };
+            self.api
+                .update_metadata(
+                    &server_file_id,
+                    Some(&effective_name_encrypted),
+                    op.parent_id.as_deref(),
+                )
+                .await?;
+            self.db.set_upload_resume_metadata_applied(&op.op_id)?;
+        }
+
+        let file_key = file_key_for(self.api.master_key(), &server_file_id);
 
         let mut file = std::fs::File::open(payload_path)?;
-        let chunk_size = upload.chunk_size_bytes as usize;
-        let chunk_count = upload.chunk_count as u64;
+        let chunk_size = session.chunk_size_bytes as usize;
+        let chunk_count = session.chunk_count as u64;
         if chunk_size == 0 || chunk_count == 0 {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+        }
+        let first_chunk = session.acked_chunks.max(0) as u64;
+        if first_chunk > 0 {
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(first_chunk * chunk_size as u64))?;
         }
         let mut buffer = vec![0u8; chunk_size];
         // Rate-limit ceiling: read once per file, not per chunk (config is on
@@ -673,11 +813,11 @@ impl EngineBridge {
             .map(|c| c.upload_kbps_limit)
             .unwrap_or(0);
 
-        for chunk_index in 0..chunk_count {
-            let read = file.read(&mut buffer)?;
+        for chunk_index in first_chunk..chunk_count {
+            let read = read_full_chunk(&mut file, &mut buffer)?;
             // A zero-length read is only legitimate for the single chunk of an
             // empty file; anywhere else the staged payload is truncated.
-            if read == 0 && plaintext_size > 0 {
+            if read == 0 && session.payload_size > 0 {
                 return Err(anyhow::anyhow!(
                     "staged upload ended before expected chunk {} of {}",
                     chunk_index + 1,
@@ -688,8 +828,9 @@ impl EngineBridge {
                 .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
             let chunk_start = std::time::Instant::now();
             self.api
-                .upload_session_chunk(&upload.upload_session_id, chunk_index as u32, &encrypted)
+                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted)
                 .await?;
+            self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
 
             // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
             self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
@@ -708,23 +849,27 @@ impl EngineBridge {
             }
         }
 
-        let completed = self.api.complete_upload_session(&upload.upload_session_id).await?;
-        let thumbnail_content_type = content_type.clone();
-        self.apply_completed_upload(
-            local_file_id,
-            &server_file_id,
-            op,
-            &completed,
-            plaintext_size,
-            content_type,
-            Some(upload.object_version_id),
-        )?;
+        self.api.complete_upload_session(&session.upload_session_id).await
+    }
+
+    /// Post-`complete` best-effort work: thumbnails, staged-payload cleanup and
+    /// (Windows) placeholder conversion. Never fails the upload.
+    async fn finish_completed_upload(
+        &self,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] op: &PendingOperation,
+        server_file_id: &str,
+        payload_path: &Path,
+        thumbnail_content_type: Option<String>,
+        file_key: &beebeeb_core::kdf::FileKey,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    ) {
+        let server_file_id = server_file_id.to_string();
         if let Err(e) = self
             .upload_thumbnails_for_plaintext_media(
                 &server_file_id,
                 payload_path,
                 thumbnail_content_type.as_deref(),
-                &file_key,
+                file_key,
             )
             .await
         {
@@ -752,8 +897,51 @@ impl EngineBridge {
         // it just won't show the synced overlay until the next reconcile.
         #[cfg(target_os = "windows")]
         self.finalize_local_upload_placeholder(op, &server_file_id, sync_root);
+    }
 
+    /// Give up on a persisted upload session (payload changed, session gone,
+    /// or the op exhausted its retries). For a CREATE the server row minted by
+    /// `init` holds no completed content and is only a broken `is_uploading`
+    /// duplicate, so it is trashed (best-effort: the server's stale-upload
+    /// sweep still hard-deletes it after 7 days if this fails). A REPLACE
+    /// targets the user's existing file and is never trashed. The resume row
+    /// is always dropped so the next attempt starts a fresh session.
+    async fn abandon_upload_session(&self, session: &UploadResume) -> anyhow::Result<()> {
+        if session.is_create {
+            match self.api.trash_file(&session.server_file_id).await {
+                Ok(_) => tracing::info!(
+                    op_id = %session.op_id,
+                    file_id = %session.server_file_id,
+                    "upload: trashed orphaned in-progress server row of an abandoned create"
+                ),
+                Err(e) => tracing::warn!(
+                    op_id = %session.op_id,
+                    file_id = %session.server_file_id,
+                    error = %e,
+                    "upload: could not trash orphaned in-progress server row; the server's stale-upload sweep reaps it"
+                ),
+            }
+        }
+        self.db.clear_upload_resume(&session.op_id)?;
         Ok(())
+    }
+
+    /// Called when an upload op has exhausted its retries: nothing will ever
+    /// resume its session, so abandon it now instead of leaving the orphan
+    /// visible for the server's 7-day stale-upload window.
+    async fn abandon_upload_after_give_up(&self, op: &PendingOperation) {
+        if !matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile) {
+            return;
+        }
+        match self.db.get_upload_resume(&op.op_id) {
+            Ok(Some(session)) => {
+                if let Err(e) = self.abandon_upload_session(&session).await {
+                    tracing::warn!(op_id = %op.op_id, error = %e, "upload: failed to abandon given-up session");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "upload: failed to read resume state"),
+        }
     }
 
     async fn upload_thumbnails_for_plaintext_media(
@@ -2648,6 +2836,8 @@ impl EngineBridge {
         };
 
         if let Err(e) = self.upload_version(&op, sync_root).await {
+            // One-shot op (never queued): nothing will resume its session.
+            self.abandon_upload_after_give_up(&op).await;
             if let Err(cleanup_error) = std::fs::remove_file(&staged_path) {
                 if cleanup_error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
@@ -3395,6 +3585,51 @@ fn encode_base83(mut value: u32, length: usize) -> String {
         value /= 83;
     }
     String::from_utf8(chars).expect("base83 alphabet is ASCII")
+}
+
+fn file_key_for(master_key: &[u8; 32], server_file_id: &str) -> beebeeb_core::kdf::FileKey {
+    let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    beebeeb_core::kdf::derive_file_key(&master_key, server_file_id.as_bytes())
+}
+
+/// Staged-payload modification time in nanoseconds (0 when unavailable). Part
+/// of the resume fingerprint: a session is resumed only onto the same bytes.
+fn payload_mtime_ns(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Fill `buffer` from `file` (short only at EOF). Chunk `k` must be exactly the
+/// bytes at `k * chunk_size`, so a resumed upload that seeks to the
+/// acknowledged watermark lines up with the chunks the server already holds.
+fn read_full_chunk(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
+/// The server no longer accepts writes to this upload session: 404 (session
+/// or file row gone — e.g. reaped by the stale-upload sweep), 410, or 400
+/// (session not writable / chunk plan no longer matches / a chunk the client
+/// believed acknowledged is missing at `complete`). Resuming cannot succeed;
+/// the op must start a fresh session.
+fn upload_session_is_gone(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .filter_map(reqwest::Error::status)
+        .any(|status| matches!(status.as_u16(), 400 | 404 | 410))
 }
 
 fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
@@ -5289,6 +5524,12 @@ fn process_metadata_row(
             // children continue to enumerate; do NOT touch this row's status.
             Ok(Some((entry.path, entry.item_kind)))
         }
+        // (1a) New to us but still an in-progress upload (`is_uploading`): it
+        // has no completed content yet — hydrating it would 409 — so minting a
+        // placeholder shows a broken duplicate in Finder/Explorer (flow 7: an
+        // interrupted upload's orphan row). Skip it; once `complete` lands the
+        // row is listed with `is_uploading = false` and materialises normally.
+        None if f["is_uploading"].as_bool() == Some(true) => Ok(None),
         None => {
             // (1) New to us — insert as cloud_only. base = remote.
             apply(bridge)
@@ -8036,6 +8277,376 @@ mod tests {
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
         assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+    }
+
+    // ── Interrupted upload resume (flow 7, harness STEP 9) ──────────────────
+    //
+    // A desktop upload cut mid-transfer (tokio timeout on the transfer loop,
+    // app quit, network drop) used to re-run `POST /uploads/init` on retry:
+    // every retry minted a NEW server file row + session, re-sent every chunk
+    // from zero, and left the first attempt's row behind as a visible broken
+    // `is_uploading` duplicate (GET → 409) until the server's 7-day
+    // stale-upload sweep. The retry must resume the persisted session instead.
+
+    /// Stateful upload mock: 3-chunk plan (8+8+4 bytes). Each connection is
+    /// served on its own thread so a deliberately hung chunk response cannot
+    /// block the retry's requests.
+    struct ResumableUploadMock {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum ResumeMockMode {
+        /// Chunk 1 of the first session hangs once (the cut), then the
+        /// session keeps accepting chunks.
+        HangOnce,
+        /// Chunk 1 hangs once, and afterwards session 1 is gone server-side
+        /// (404 on every further chunk/complete) — e.g. reaped.
+        HangOnceThenSessionGone,
+    }
+
+    struct ResumeMockState {
+        inits: usize,
+        hung: bool,
+    }
+
+    impl ResumableUploadMock {
+        fn start(mode: ResumeMockMode) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let state = Arc::new(Mutex::new(ResumeMockState { inits: 0, hung: false }));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_requests = Arc::clone(&requests);
+            let server_stop = Arc::clone(&stop);
+            let handle = thread::spawn(move || {
+                let started = std::time::Instant::now();
+                while !server_stop.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let requests = Arc::clone(&server_requests);
+                            let state = Arc::clone(&state);
+                            thread::spawn(move || {
+                                let request = read_http_request(&mut stream);
+                                requests.lock().unwrap().push(request.clone());
+                                let (delay, response) = resumable_mock_response(&request, &state, mode);
+                                if let Some(delay) = delay {
+                                    std::thread::sleep(delay);
+                                }
+                                // The client may have been cancelled meanwhile.
+                                let _ = stream.write_all(response.as_bytes());
+                            });
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("resumable upload mock accept failed: {e}"),
+                    }
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                stop,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.handle.join().unwrap();
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn resumable_mock_response(
+        request: &RecordedRequest,
+        state: &Arc<Mutex<ResumeMockState>>,
+        mode: ResumeMockMode,
+    ) -> (Option<Duration>, String) {
+        let method = request.method.as_str();
+        let path = request.path.as_str();
+        if method == "POST" && path == "/api/v1/uploads/init" {
+            let n = {
+                let mut s = state.lock().unwrap();
+                s.inits += 1;
+                s.inits
+            };
+            return (
+                None,
+                http_json(
+                    "201 Created",
+                    serde_json::json!({
+                        "file_id": format!("server-file-{n}"),
+                        "tenant_id": "tenant-1",
+                        "object_version_id": format!("object-init-{n}"),
+                        "upload_session_id": format!("session-{n}"),
+                        "chunk_size_bytes": 8,
+                        "chunk_count": 3,
+                        "storage_format_version": 2,
+                        "storage_pool_id": "pool-1",
+                        "region": "local"
+                    }),
+                ),
+            );
+        }
+        if method == "PATCH" && path.starts_with("/api/v1/files/server-file-") {
+            return (None, http_json("200 OK", serde_json::json!({ "ok": true })));
+        }
+        if method == "DELETE" && path.starts_with("/api/v1/files/server-file-") {
+            return (None, http_json("200 OK", serde_json::json!({ "trashed": true })));
+        }
+        if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
+            let mut parts = rest.split('/');
+            let session = parts.next().unwrap_or_default().to_string();
+            let action = parts.next().unwrap_or_default();
+            let hung_before = state.lock().unwrap().hung;
+            if mode == ResumeMockMode::HangOnceThenSessionGone && session == "session-1" && hung_before {
+                return (None, http_json("404 Not Found", serde_json::json!({ "error": "not found" })));
+            }
+            if method == "PUT" && action == "chunks" {
+                let index: u32 = parts.next().unwrap_or("0").parse().unwrap();
+                if index == 1 && session == "session-1" {
+                    let mut s = state.lock().unwrap();
+                    if !s.hung {
+                        s.hung = true;
+                        return (
+                            Some(Duration::from_secs(3)),
+                            http_json("200 OK", serde_json::json!({ "index": 1, "size": 0, "skipped": false })),
+                        );
+                    }
+                }
+                return (
+                    None,
+                    http_json(
+                        "200 OK",
+                        serde_json::json!({ "index": index, "size": request.body.len() as i64, "skipped": false }),
+                    ),
+                );
+            }
+            if method == "POST" && action == "complete" {
+                let n = session.trim_start_matches("session-");
+                return (
+                    None,
+                    http_json(
+                        "200 OK",
+                        serde_json::json!({
+                            "file_id": format!("server-file-{n}"),
+                            "version_number": 1,
+                            "current_object_version_id": format!("object-complete-{n}"),
+                            "size_bytes": 20,
+                            "mime_type": "text/plain"
+                        }),
+                    ),
+                );
+            }
+        }
+        (
+            None,
+            http_json(
+                "404 Not Found",
+                serde_json::json!({ "error": format!("unexpected {method} {path}") }),
+            ),
+        )
+    }
+
+    fn resumable_create_op(payload: &Path) -> PendingOperation {
+        PendingOperation {
+            op_id: "op-upload-resume".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("local-file-resume".into()),
+            parent_id: None,
+            target_path: Some("resume.bin".into()),
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "create_file",
+                    "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                    "display_name": "resume.bin",
+                    "content_type": "text/plain"
+                })
+                .to_string(),
+            ),
+            payload_path: Some(payload.to_string_lossy().into_owned()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        }
+    }
+
+    fn count_requests(requests: &[RecordedRequest], method: &str, path: &str) -> usize {
+        requests
+            .iter()
+            .filter(|r| r.method == method && r.path == path)
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flow7_cancelled_upload_resumes_session_instead_of_reinit() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+        // The cut: chunk 1's response hangs; the transfer loop is cancelled
+        // exactly like the harness's tokio timeout (the future is dropped).
+        let cut = tokio::time::timeout(
+            Duration::from_millis(1500),
+            bridge.process_due_operations(dir.path(), 200),
+        )
+        .await;
+        assert!(cut.is_err(), "the first pass must be cut mid-upload");
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+        let requests = server.finish();
+        let inits = count_requests(&requests, "POST", "/api/v1/uploads/init");
+        assert_eq!(inits, 1, "retry must resume the persisted session, not init a second file row");
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
+            1,
+            "chunk 0 was acknowledged before the cut and must not be re-sent"
+        );
+        assert_eq!(count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/1"), 2);
+        assert_eq!(count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/2"), 1);
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"), 1);
+        assert_eq!(
+            requests.iter().filter(|r| r.method == "DELETE").count(),
+            0,
+            "a resumable session must not be trashed"
+        );
+
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert!(
+            bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none(),
+            "resume state must be cleared once the upload completes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flow7_gone_session_trashes_orphan_then_reuploads_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnceThenSessionGone);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [22u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+        let cut = tokio::time::timeout(
+            Duration::from_millis(1500),
+            bridge.process_due_operations(dir.path(), 200),
+        )
+        .await;
+        assert!(cut.is_err(), "the first pass must be cut mid-upload");
+        assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_some());
+
+        // Second pass: the persisted session is gone → the orphan create row is
+        // trashed, resume state dropped, and the op scheduled for retry.
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
+        assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
+
+        // Third pass: a fresh session uploads the file exactly once.
+        let outcome = bridge.process_due_operations(dir.path(), 10_000).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+        let requests = server.finish();
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
+        assert_eq!(
+            count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"),
+            1,
+            "the orphaned is_uploading row from the dead session must be trashed"
+        );
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"), 1);
+        assert!(bridge.db.get_file("server-file-2").unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flow7_changed_payload_does_not_resume_stale_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [23u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+        let cut = tokio::time::timeout(
+            Duration::from_millis(1500),
+            bridge.process_due_operations(dir.path(), 200),
+        )
+        .await;
+        assert!(cut.is_err());
+
+        // The staged payload changes size before the retry: the persisted
+        // chunks belong to other bytes, so the session must NOT be resumed.
+        std::fs::write(&payload, b"0123456789abcdefghijKLMN").unwrap();
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+        let requests = server.finish();
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
+        assert_eq!(count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"), 1);
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"), 0);
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"), 1);
+    }
+
+    #[tokio::test]
+    async fn flow7_given_up_create_upload_trashes_its_orphan_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"retry me").unwrap();
+        let server = UploadMockServer::start(true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [24u8; 32]);
+        let mut op = resumable_create_op(&payload);
+        op.max_attempts = 1;
+        bridge.db.enqueue_operation(&op).unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(), "op exhausted its retries");
+        assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_eq!(requests[3].method, "DELETE");
+        assert_eq!(requests[3].path, "/api/v1/files/server-file-1");
+    }
+
+    #[test]
+    fn flow7_snapshot_skips_new_is_uploading_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let mut conflicts = Vec::new();
+        let row = serde_json::json!({
+            "id": "partial-upload-1",
+            "parent_id": null,
+            "name": "resume.bin",
+            "size_bytes": 50331655,
+            "is_folder": false,
+            "is_uploading": true,
+            "updated_at": 100
+        });
+        let resolved = process_metadata_row(&bridge, &row, "", 200, RowSource::Snapshot, &mut conflicts).unwrap();
+        assert!(resolved.is_none());
+        assert!(
+            bridge.db.get_file("partial-upload-1").unwrap().is_none(),
+            "an in-progress upload has no content yet and must not become a placeholder"
+        );
     }
 
     #[test]
