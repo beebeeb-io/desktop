@@ -388,6 +388,30 @@ pub struct RevokedSharedCache {
     pub cache_path: Option<String>,
 }
 
+/// Result of [`StateDb::purge_all_local_state`] (task 1538): every queued
+/// operation and cached plaintext path that was cleared from the DB, for the
+/// caller to delete from disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalStatePurge {
+    /// Number of `operation_queue` rows deleted.
+    pub queued_ops_purged: usize,
+    /// Staged plaintext payload paths (`stage_finder_payload`) from the
+    /// deleted `operation_queue` rows — the on-disk file at each path must
+    /// still be removed by the caller.
+    pub payload_paths: Vec<String>,
+    /// Every `files.cache_path` that was cleared — the on-disk file at each
+    /// path must still be removed by the caller.
+    pub cache_paths: Vec<String>,
+    /// `(file_id, server_relative_path)` for every row that was in `local`
+    /// status (task 1538 Codex P1) — captured BEFORE the status flip, so a
+    /// Windows Cloud Files placeholder (whose plaintext lives in the sync
+    /// root, not at `cache_path`) can still be found and dehydrated/removed
+    /// by the caller even though `cache_paths` above never pointed at it.
+    /// Present regardless of platform (the query itself is cross-platform);
+    /// only the Windows caller acts on it.
+    pub local_placeholder_paths: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalActivityKind {
@@ -452,6 +476,38 @@ pub struct PendingOperation {
     pub backup_source_key: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Drop every persisted upload session whose queued op no longer exists.
+/// Called by the bulk `operation_queue` purges so a session never outlives
+/// its op (`remove_operation` already clears its own row).
+fn drop_orphaned_upload_resumes(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
+        [],
+    )
+}
+
+/// Persisted resumable upload session for one queued upload op (flow 7).
+/// See the `upload_resume` table in [`StateDb::open`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadResume {
+    pub op_id: String,
+    pub payload_path: String,
+    pub payload_size: i64,
+    pub payload_mtime_ns: i64,
+    pub upload_session_id: String,
+    pub server_file_id: String,
+    pub object_version_id: String,
+    pub chunk_size_bytes: i64,
+    pub chunk_count: i64,
+    /// Chunks `0..acked_chunks` were acknowledged (2xx) by the server.
+    pub acked_chunks: i64,
+    /// The post-init `PATCH /files/{id}` (encrypted name/parent) succeeded.
+    pub metadata_applied: bool,
+    /// The op created a NEW server file (no prior version): on abandonment
+    /// its `is_uploading` row is an orphan the client may trash.
+    pub is_create: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -616,6 +672,27 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
+            -- Flow 7 (interrupted upload resume): the server upload session an
+            -- UploadVersion/UploadFile op is writing to, persisted the moment
+            -- `POST /uploads/init` returns and advanced after every
+            -- acknowledged chunk, so a retry resumes instead of minting a
+            -- second server file row. Keyed by op_id; the payload fingerprint
+            -- (path + size + mtime) guards against resuming onto other bytes.
+            CREATE TABLE IF NOT EXISTS upload_resume (
+                op_id TEXT PRIMARY KEY,
+                payload_path TEXT NOT NULL,
+                payload_size INTEGER NOT NULL,
+                payload_mtime_ns INTEGER NOT NULL,
+                upload_session_id TEXT NOT NULL,
+                server_file_id TEXT NOT NULL,
+                object_version_id TEXT NOT NULL,
+                chunk_size_bytes INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                acked_chunks INTEGER NOT NULL DEFAULT 0,
+                metadata_applied INTEGER NOT NULL DEFAULT 0,
+                is_create INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )?;
         Ok(Self(Mutex::new(conn)))
@@ -1583,6 +1660,7 @@ impl StateDb {
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
             revoked.push(RevokedSharedCache { file_id, cache_path });
         }
+        drop_orphaned_upload_resumes(&tx)?;
         tx.commit()?;
         Ok(revoked)
     }
@@ -1714,12 +1792,109 @@ impl StateDb {
     /// user-initiated op) and rows tagged with a DIFFERENT folder's key are never
     /// touched. Returns the number of rows deleted (for the disable log).
     pub fn purge_backup_source_ops(&self, source_key: &str) -> Result<usize> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let deleted = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
             "DELETE FROM operation_queue WHERE backup_source_key = ?1",
             params![source_key],
         )?;
+        drop_orphaned_upload_resumes(&tx)?;
+        tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Task 1538 findings 1+2: unconditional local-state wipe for sign-out /
+    /// account switch. `operation_queue` and `files.cache_path` are both
+    /// per-device (not per-account) state — see `state_paths::beebeeb_state_dir`,
+    /// which resolves from `app_local_data_dir` alone — so leaving either in
+    /// place across a sign-out lets a LATER account's engine execute an
+    /// earlier account's still-queued upload (finding 1), or leaves an
+    /// earlier account's decrypted file content permanently orphaned on disk
+    /// once the next account's first sync prunes the row that pointed at it
+    /// (finding 2).
+    ///
+    /// Unlike the other `operation_queue`/cache purges in this file —
+    /// `purge_backup_source_ops` (scoped to one backup tag),
+    /// `purge_revoked_shared_content` (scoped to revoked share roots),
+    /// `evict_unpinned_cache_until_under` / `disposable_unpinned_cache_paths`
+    /// (both explicitly skip pinned and non-`local`-status files) — this
+    /// clears EVERY row regardless of tag, pause state, pin state, or
+    /// status: none of those distinctions mean anything once the account
+    /// that created them is gone.
+    ///
+    /// `files` rows themselves are left in place (only `cache_path`/
+    /// `cache_bytes`/`status` are reset) — their metadata isn't secret, and
+    /// the next account's first sync naturally supersedes or prunes them.
+    /// The actual decrypted bytes are what must never survive a sign-out, so
+    /// this returns every `payload_path`/`cache_path` for the caller to
+    /// delete from disk.
+    pub fn purge_all_local_state(&self) -> Result<LocalStatePurge> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+
+        let payload_paths: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        let queued_ops_purged = tx.execute("DELETE FROM operation_queue", [])?;
+        // Flow 7: the leaving account's persisted upload sessions (session id,
+        // server file id, staged path) go with its queue.
+        tx.execute("DELETE FROM upload_resume", [])?;
+
+        let cache_paths: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT cache_path FROM files WHERE cache_path IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        // Task 1538 Codex P1 (PR #49, state_db.rs review thread): capture
+        // every `local`-status row's (file_id, server-relative path) BEFORE
+        // the status flip below runs — regardless of pin state (unlike
+        // `unpinned_local_files_for_dehydration`, sign-out must sweep pinned
+        // files too; the account is leaving the device, so "keep offline"
+        // no longer means anything).
+        //
+        // On Windows, a materialized Cloud Files placeholder holds its
+        // plaintext directly in the sync root — `cache_path` is at best a
+        // stale, already-deleted `%TEMP%` decrypt path and at worst NULL
+        // (see `unpinned_local_files_for_dehydration`'s doc comment), so the
+        // `cache_paths` list above can never be the caller's cue to clean up
+        // that plaintext. Flipping `status` to `cloud_only` without first
+        // dehydrating/removing the real placeholder would also hide the row
+        // from `unpinned_local_files_for_dehydration()` forever, orphaning
+        // it — so this list MUST be read before that UPDATE runs, in the
+        // same transaction, and the caller must act on it before (or
+        // instead of) trusting the status flip alone.
+        //
+        // On macOS/Linux this list is a harmless superset of `cache_paths`
+        // (those platforms store hydrated bytes as a separate cache copy,
+        // already covered above); the File Provider domain removal
+        // `clear_session_impl` also runs on macOS handles cleanup there.
+        let local_placeholder_paths: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT file_id, path FROM files WHERE status = 'local'")?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        // Broadened to `OR status = 'local'` (was `cache_path IS NOT NULL`
+        // alone) so a Windows `local` row with a NULL `cache_path` — which
+        // `local_placeholder_paths` above has already captured for the
+        // caller to dehydrate — still loses its stale `local` status here
+        // too, instead of surviving the purge unchanged.
+        tx.execute(
+            "UPDATE files SET cache_path = NULL, cache_bytes = 0, status = 'cloud_only' \
+             WHERE cache_path IS NOT NULL OR status = 'local'",
+            [],
+        )?;
+
+        tx.commit()?;
+        Ok(LocalStatePurge {
+            queued_ops_purged,
+            payload_paths,
+            cache_paths,
+            local_placeholder_paths,
+        })
     }
 
     pub fn record_operation_attempt(
@@ -1806,6 +1981,103 @@ impl StateDb {
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+        Ok(())
+    }
+
+    /// Persist (insert or replace) the resumable upload session for `op_id`.
+    pub fn put_upload_resume(&self, resume: &UploadResume) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO upload_resume (
+                op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                acked_chunks, metadata_applied, is_create, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now'))
+             ON CONFLICT(op_id) DO UPDATE SET
+                payload_path = excluded.payload_path,
+                payload_size = excluded.payload_size,
+                payload_mtime_ns = excluded.payload_mtime_ns,
+                upload_session_id = excluded.upload_session_id,
+                server_file_id = excluded.server_file_id,
+                object_version_id = excluded.object_version_id,
+                chunk_size_bytes = excluded.chunk_size_bytes,
+                chunk_count = excluded.chunk_count,
+                acked_chunks = excluded.acked_chunks,
+                metadata_applied = excluded.metadata_applied,
+                is_create = excluded.is_create,
+                updated_at = excluded.updated_at",
+            params![
+                resume.op_id,
+                resume.payload_path,
+                resume.payload_size,
+                resume.payload_mtime_ns,
+                resume.upload_session_id,
+                resume.server_file_id,
+                resume.object_version_id,
+                resume.chunk_size_bytes,
+                resume.chunk_count,
+                resume.acked_chunks,
+                resume.metadata_applied,
+                resume.is_create,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_upload_resume(&self, op_id: &str) -> Result<Option<UploadResume>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                    server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                    acked_chunks, metadata_applied, is_create
+             FROM upload_resume WHERE op_id = ?1",
+            params![op_id],
+            |row| {
+                Ok(UploadResume {
+                    op_id: row.get(0)?,
+                    payload_path: row.get(1)?,
+                    payload_size: row.get(2)?,
+                    payload_mtime_ns: row.get(3)?,
+                    upload_session_id: row.get(4)?,
+                    server_file_id: row.get(5)?,
+                    object_version_id: row.get(6)?,
+                    chunk_size_bytes: row.get(7)?,
+                    chunk_count: row.get(8)?,
+                    acked_chunks: row.get(9)?,
+                    metadata_applied: row.get(10)?,
+                    is_create: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Advance the acknowledged-chunk watermark. Monotonic: a late write can
+    /// never move it backwards.
+    pub fn set_upload_resume_acked(&self, op_id: &str, acked_chunks: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume
+             SET acked_chunks = MAX(acked_chunks, ?2), updated_at = strftime('%s','now')
+             WHERE op_id = ?1",
+            params![op_id, acked_chunks],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_upload_resume_metadata_applied(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume SET metadata_applied = 1, updated_at = strftime('%s','now') WHERE op_id = ?1",
+            params![op_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_upload_resume(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
         Ok(())
     }
 
@@ -3140,6 +3412,129 @@ mod tests {
         );
     }
 
+    /// Task 1538 finding 1 + 2: sign-out must purge EVERY queued operation
+    /// (regardless of retry/paused state) and EVERY cached plaintext path
+    /// (regardless of pin state), unlike `purge_backup_source_ops` (scoped to
+    /// one backup tag) or `evict_unpinned_cache_until_under`/
+    /// `disposable_unpinned_cache_paths` (both explicitly skip pinned and
+    /// non-`local`-status files) — a pin set by the previous account must not
+    /// protect that account's plaintext from being purged on sign-out.
+    #[test]
+    fn test_purge_all_local_state_clears_every_queued_op_and_cached_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // A pinned file and an uploading file survive normal cache eviction —
+        // sign-out must clear their cache_path anyway.
+        seed_contract_row(&db, "pinned", "/Pinned.txt", None, FileStatus::Local, 800);
+        seed_contract_row(&db, "uploading", "/Uploading.txt", None, FileStatus::Uploading, 900);
+        db.set_recursive_pin("pinned", true, 10).unwrap();
+        db.mark_cached("pinned", "/cache/pinned", 800, 10).unwrap();
+        db.mark_cached("uploading", "/cache/uploading", 900, 20).unwrap();
+
+        // A paused op (would never show up in `list_due_operations`) still
+        // must be purged — an account switch must not leave it to resume
+        // silently if a later `resume`/retry ever clears the pause.
+        let queued_op = PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("pinned".into()),
+            parent_id: None,
+            target_path: Some("/Pinned.txt".into()),
+            metadata_json: None,
+            payload_path: Some("/staging/op-1-payload".into()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        };
+        db.enqueue_operation(&queued_op).unwrap();
+        db.record_operation_pause("op-1", OperationPauseReason::Auth, Some("offline"), 100)
+            .unwrap();
+
+        let purge = db.purge_all_local_state().unwrap();
+
+        assert_eq!(purge.queued_ops_purged, 1);
+        assert_eq!(purge.payload_paths, vec!["/staging/op-1-payload".to_string()]);
+        let mut cache_paths = purge.cache_paths.clone();
+        cache_paths.sort();
+        assert_eq!(
+            cache_paths,
+            vec!["/cache/pinned".to_string(), "/cache/uploading".to_string()]
+        );
+        // Only the `local`-status row ("pinned") is a placeholder-dehydration
+        // candidate — "uploading" is mid-transfer, not a materialized local
+        // copy, so it must not appear here.
+        assert_eq!(
+            purge.local_placeholder_paths,
+            vec![("pinned".to_string(), "/Pinned.txt".to_string())]
+        );
+
+        // Nothing is left behind to be found by a later account's engine.
+        assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
+        assert!(db.list_review_operations().unwrap().is_empty());
+        assert_eq!(db.get_file("pinned").unwrap().unwrap().status, FileStatus::CloudOnly);
+        assert_eq!(db.get_file_contract_state("pinned").unwrap().unwrap().cache_path, None);
+        assert_eq!(
+            db.get_file_contract_state("uploading").unwrap().unwrap().cache_path,
+            None
+        );
+    }
+
+    /// Task 1538 Codex P1 (PR #49, state_db.rs:1785 thread): a Windows Cloud
+    /// Files placeholder stores its plaintext directly in the sync root, not
+    /// at `cache_path` — a materialized `local` row can have `cache_path =
+    /// NULL` the whole time (see `unpinned_local_files_for_dehydration`'s doc
+    /// comment). The OLD `cache_path IS NOT NULL`-only purge silently skips
+    /// such a row entirely: it stays `local` forever, and its on-disk
+    /// plaintext (the placeholder) is never found by ANY later cleanup pass,
+    /// because `unpinned_local_files_for_dehydration()` also filters on
+    /// `status = 'local'` — a status this purge would have left unchanged.
+    #[test]
+    fn test_purge_all_local_state_captures_windows_style_local_row_with_no_cache_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        // A materialized Windows placeholder: `local` status, PINNED (a
+        // sign-out purge must sweep it anyway — pins don't survive the
+        // account that set them), and — unlike every other seeded row in
+        // this file — `cache_path` is never populated via `mark_cached`.
+        // This is the exact shape a real Windows Cloud Files placeholder
+        // leaves in the DB (the fetch callback's `%TEMP%` decrypt copy is
+        // already deleted by the time the placeholder is materialized).
+        seed_contract_row(&db, "win-local", "/Docs/report.docx", None, FileStatus::Local, 4096);
+        db.set_recursive_pin("win-local", true, 10).unwrap();
+        assert_eq!(
+            db.get_file_contract_state("win-local").unwrap().unwrap().cache_path,
+            None,
+            "precondition: this row must never have a cache_path, like a real Windows placeholder"
+        );
+
+        let purge = db.purge_all_local_state().unwrap();
+
+        // The row has no cache_path, so it can never appear in `cache_paths`
+        // — proving the assertions below exercise a genuinely different code
+        // path, not a duplicate of the existing cache_path-based one.
+        assert!(purge.cache_paths.is_empty());
+        assert_eq!(
+            purge.local_placeholder_paths,
+            vec![("win-local".to_string(), "/Docs/report.docx".to_string())],
+            "a `local` row with no cache_path must still surface as a purge candidate \
+             for the caller to dehydrate/remove"
+        );
+        assert_eq!(
+            db.get_file("win-local").unwrap().unwrap().status,
+            FileStatus::CloudOnly,
+            "the row must not be left at `local` status after a sign-out purge — a \
+             lingering `local` row hides real on-disk plaintext from every later cleanup pass"
+        );
+    }
+
     fn seed_contract_row(
         db: &StateDb,
         file_id: &str,
@@ -3856,5 +4251,91 @@ mod tests {
             .delete_orphaned_children_of_absent_folder("nonexistent-folder")
             .unwrap();
         assert!(removed.is_empty(), "no children → should return empty vec");
+    }
+
+    /// Flow 7 / PR #58 merge with task 1538: every purge that drops queued
+    /// upload ops must drop their persisted upload sessions too. A resume row
+    /// outliving its op is dead state; across a sign-out it would carry the
+    /// previous account's upload session id, server file id and staged path
+    /// into the next account's database.
+    #[test]
+    fn test_every_operation_purge_drops_the_upload_resume_rows() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+
+        let mk_op = |op_id: &str, file_id: &str, key: Option<&str>| PendingOperation {
+            op_id: op_id.into(),
+            kind: OperationKind::UploadFile,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: Some(format!("/{op_id}.bin")),
+            metadata_json: Some(r#"{"operation":"create_file"}"#.into()),
+            payload_path: Some(format!("/staging/{op_id}")),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: key.map(str::to_string),
+            created_at: 100,
+            updated_at: 100,
+        };
+        let mk_resume = |op_id: &str| UploadResume {
+            op_id: op_id.into(),
+            payload_path: format!("/staging/{op_id}"),
+            payload_size: 3 * 1024,
+            payload_mtime_ns: 42,
+            upload_session_id: format!("session-{op_id}"),
+            server_file_id: format!("server-{op_id}"),
+            object_version_id: format!("ov-{op_id}"),
+            chunk_size_bytes: 1024,
+            chunk_count: 3,
+            acked_chunks: 1,
+            metadata_applied: true,
+            is_create: true,
+        };
+        let seed = |op_id: &str, file_id: &str, key: Option<&str>| {
+            db.enqueue_operation(&mk_op(op_id, file_id, key)).unwrap();
+            db.put_upload_resume(&mk_resume(op_id)).unwrap();
+        };
+
+        // (1) Disabling a known-folder backup: only that folder's session goes.
+        seed("music-1", "file-music-1", Some("music"));
+        seed("normal-1", "file-normal-1", None);
+        assert_eq!(db.purge_backup_source_ops("music").unwrap(), 1);
+        assert!(
+            db.get_upload_resume("music-1").unwrap().is_none(),
+            "a purged backup op's upload session must go with it"
+        );
+        assert!(
+            db.get_upload_resume("normal-1").unwrap().is_some(),
+            "a surviving op keeps its upload session"
+        );
+
+        // (2) Revoked shared content: the revoked file's queued upload goes, and
+        //     so does its session.
+        seed_contract_row(&db, "revoked", "/Shared with me/Revoked", None, FileStatus::Local, 20);
+        let mut revoked = db.get_file_contract_state("revoked").unwrap().unwrap();
+        revoked.namespace = Namespace::SharedWithMe;
+        revoked.shared_root_id = Some("revoked".into());
+        revoked.share_id = Some("invite-revoked".into());
+        revoked.permission_bits = PERMISSION_READ | PERMISSION_WRITE;
+        db.set_file_contract_state(&revoked).unwrap();
+        seed("shared-1", "revoked", None);
+        db.purge_revoked_shared_content(&[]).unwrap();
+        assert!(
+            db.get_upload_resume("shared-1").unwrap().is_none(),
+            "a revoked share's queued upload must not keep its upload session"
+        );
+        assert!(db.get_upload_resume("normal-1").unwrap().is_some());
+
+        // (3) Sign-out: nothing of the leaving account's uploads survives.
+        let purge = db.purge_all_local_state().unwrap();
+        assert!(purge.queued_ops_purged >= 1);
+        assert!(
+            db.get_upload_resume("normal-1").unwrap().is_none(),
+            "sign-out must purge every persisted upload session"
+        );
     }
 }

@@ -29,7 +29,7 @@ use crate::AppState;
 use crate::Session;
 use crate::account_dto::AccountProfile;
 use crate::config::DesktopConfig;
-use crate::runner::EngineRunner;
+use crate::runner::{AuthHealth, EngineRunner};
 
 /// Stable identity for one account in the runtime registry.
 ///
@@ -110,6 +110,9 @@ impl AccountConfig {
 ///     last-seen status string + the runtime pause flag.
 ///   - `cached_profile` — the `/auth/me` payload cached at login.
 ///   - `auth_email` — the signed-in address mirrored for the Account page.
+///   - `auth_health` — the consecutive-401 streak fed by the engine's
+///     heartbeat + sync-tick API calls, read by `sync_status` as
+///     `auth_expired` (task 1546 finding 5).
 ///
 /// Accessed via `Arc<AccountRuntime>` from `AppState::active_account()`; callers
 /// lock the inner mutexes. The `Arc` shares the runtime; it never duplicates the
@@ -122,6 +125,7 @@ pub struct AccountRuntime {
     pub sync_paused: Arc<AtomicBool>,
     pub cached_profile: Mutex<Option<AccountProfile>>,
     pub auth_email: Mutex<Option<String>>,
+    pub auth_health: Arc<AuthHealth>,
 }
 
 impl AccountRuntime {
@@ -140,6 +144,7 @@ impl AccountRuntime {
             sync_paused: Arc::new(AtomicBool::new(false)),
             cached_profile: Mutex::new(None),
             auth_email: Mutex::new(None),
+            auth_health: Arc::new(AuthHealth::new()),
         }
     }
 }

@@ -1,14 +1,30 @@
 import { useEffect, useState } from 'react'
 import { useToast } from '../windows/ui'
 import {
+  accountSubscription,
+  BILLING_URL,
   command,
   commandUnavailableLabel,
+  formatBytes,
   loadSyncStatus,
   openUrl,
+  regionCityFromCode,
+  type Subscription,
   type SyncStatus,
 } from '../desktopApi'
+import { planRenewalCopy, planStatusTone, quotaPercent, titleCasePlan } from '../planPresentation'
 
 const WEB_APP_URL = 'https://app.beebeeb.io'
+
+// Task 1546 finding 1: the macOS Account page had NO plan/trial/quota UI
+// anywhere — accountSubscription() was already wired but called only from
+// the Windows views. This mirrors AccountView.tsx's PlanCard content in the
+// macOS page's own panel/row CSS idiom (not its inline-style Windows one).
+type PlanState =
+  | { phase: 'loading' }
+  | { phase: 'unsupported' }
+  | { phase: 'error'; reason: string }
+  | { phase: 'loaded'; sub: Subscription }
 
 export default function Account() {
   const { showToast } = useToast()
@@ -16,6 +32,7 @@ export default function Account() {
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const [plan, setPlan] = useState<PlanState>({ phase: 'loading' })
 
   // Poll sync_status so the component reflects auto-unlock state that
   // occurs on startup — the vault may unlock a few seconds after mount.
@@ -46,6 +63,27 @@ export default function Account() {
       if (result.ok && result.value) setEmail(result.value)
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on the derived loggedInKey, not the full status object; re-fetch should fire only when the auth-state category (out/locked/unlocked) changes, not on every status poll tick
+  }, [loggedInKey])
+
+  // Plan & subscription — same loggedInKey-keyed re-fetch pattern as the
+  // account_email effect above, so it re-runs once per sign-in, not once per
+  // 5s status poll tick.
+  useEffect(() => {
+    if (!status?.logged_in) {
+      setPlan({ phase: 'loading' })
+      return
+    }
+    let cancelled = false
+    setPlan({ phase: 'loading' })
+    accountSubscription().then((result) => {
+      if (cancelled) return
+      if (result.ok) setPlan({ phase: 'loaded', sub: result.value })
+      else setPlan(result.unsupported ? { phase: 'unsupported' } : { phase: 'error', reason: result.reason })
+    })
+    return () => {
+      cancelled = true
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on the derived loggedInKey, matching the account_email effect above
   }, [loggedInKey])
 
   const runAction = async (name: string, args?: Record<string, unknown>) => {
@@ -174,6 +212,65 @@ export default function Account() {
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 14 }}>
+        <h2 className="section-title">Plan & subscription</h2>
+        {!loggedIn ? (
+          <div className="empty-state">Sign in to see your plan.</div>
+        ) : plan.phase === 'loading' ? (
+          <div className="empty-state">Loading plan…</div>
+        ) : plan.phase === 'unsupported' ? (
+          <div className="notice">Plan details aren’t available in this build.</div>
+        ) : plan.phase === 'error' ? (
+          <div className="notice">{plan.reason}</div>
+        ) : (
+          <>
+            <div className="row">
+              <div>
+                <div className="row-title">
+                  {titleCasePlan(plan.sub.plan)}
+                  {plan.sub.billing_cycle ? ` · ${plan.sub.billing_cycle}` : ''}
+                </div>
+                <div className="row-detail">
+                  <span className="status-pill" style={{ marginRight: 8 }}>
+                    <span className={`dot ${planStatusTone(plan.sub.status) === 'green' ? 'ok' : ''}`} />
+                    {titleCasePlan(plan.sub.status)}
+                  </span>
+                  {regionCityFromCode(plan.sub.region)}
+                </div>
+              </div>
+              <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
+                {plan.sub.plan.toLowerCase() === 'free' ? 'Upgrade' : 'Manage plan'}
+              </button>
+            </div>
+            {plan.sub.quota_bytes > 0 && (
+              <div className="row">
+                <div style={{ width: '100%' }}>
+                  <div className="row-title">
+                    {formatBytes(plan.sub.used_bytes)} of {formatBytes(plan.sub.quota_bytes)}
+                  </div>
+                  <div
+                    className="progress-track"
+                    style={{ marginTop: 8 }}
+                    aria-label={`Storage ${Math.round(quotaPercent(plan.sub.used_bytes, plan.sub.quota_bytes))}% full`}
+                  >
+                    <div
+                      className="progress-fill"
+                      style={{ width: `${quotaPercent(plan.sub.used_bytes, plan.sub.quota_bytes)}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="row">
+              <div>
+                <div className="row-title">Renews</div>
+                <div className="row-detail">{planRenewalCopy(plan.sub.current_period_end)}</div>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="grid two" style={{ marginTop: 14 }}>

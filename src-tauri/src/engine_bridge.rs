@@ -34,7 +34,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::{Zeroize, Zeroizing};
@@ -48,7 +48,7 @@ use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
     FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput, LocalActivityKind, Namespace,
     OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE,
-    PendingOperation, QueueDiagnostics, StateDb,
+    PendingOperation, QueueDiagnostics, StateDb, UploadResume,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -210,6 +210,18 @@ pub struct EngineBridge {
     /// Wire-byte counters shared with the heartbeat producer. Both are
     /// drained (swapped to 0) once per beat; incremented by the chunk loops.
     pub wire: Arc<WireCounters>,
+    /// Cooperative stop signal (task 1538 Codex P1, PR #49 lib.rs:1087
+    /// thread). `false` for the lifetime of a normal bridge. Flipped `true`
+    /// by [`crate::runner::EngineRunner::abort`] BEFORE it even sends the
+    /// tick-loop's cancel oneshot, so [`Self::process_due_operations`]
+    /// (checked before every queued operation) and
+    /// [`Self::queue_finder_create`]/[`Self::queue_finder_modify`]/
+    /// [`Self::queue_finder_delete`] (checked before enqueuing) can refuse
+    /// to start/queue further work immediately — instead of relying solely
+    /// on `abort`'s tick-boundary cancel, which could otherwise let an
+    /// entire in-progress due-operations batch, or a fresh watcher/File-
+    /// Provider write landing mid-teardown, through unchecked.
+    stopping: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,12 +372,37 @@ struct SharedRootMapping {
 }
 
 impl EngineBridge {
+    /// Build a bridge with its own private, never-flipped stop flag. Correct
+    /// for the one-shot bridges Tauri IPC commands build over the app-local
+    /// state DB (restore version, set pin, resolve conflict, …) — those are
+    /// each a fresh, independent unit of work, not the long-running engine
+    /// loop `EngineRunner` owns, so there is nothing external that should
+    /// ever ask THIS instance to stop mid-call.
     pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
+        Self::new_with_stop_flag(db, api, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Like [`Self::new`], but shares an externally-owned stop flag —
+    /// [`crate::runner::run`] passes the SAME `Arc<AtomicBool>` its
+    /// `EngineRunner` flips on `abort()`, so this bridge (and every clone of
+    /// it handed to the IPC socket server / Windows upload watcher) observes
+    /// the stop request the instant it's set, not just at the next tick
+    /// boundary (task 1538 Codex P1).
+    pub fn new_with_stop_flag(db: Arc<StateDb>, api: Arc<ApiClient>, stopping: Arc<AtomicBool>) -> Self {
         Self {
             db,
             api,
             wire: WireCounters::new(),
+            stopping,
         }
+    }
+
+    /// `true` once a caller has asked this engine to stop (task 1538).
+    /// `SeqCst` — this flag is the FIRST thing `EngineRunner::abort` sets,
+    /// before it even sends the tick loop's cancel oneshot, specifically so
+    /// this read is guaranteed to observe it promptly from any thread.
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     /// Borrow the underlying state DB so callers (e.g. [`sync_tick`])
@@ -394,6 +431,16 @@ impl EngineBridge {
         let operations = self.db.list_due_operations(now)?;
 
         for op in operations {
+            // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
+            // the queue the instant a caller asks this engine to stop,
+            // rather than finishing every due operation first. `abort()`'s
+            // graceful window is bounded (3s) before it force-terminates the
+            // whole task — a caller waiting on that to purge the queue on
+            // sign-out needs this loop to actually stop promptly on its own,
+            // not "eventually, once the batch happens to finish".
+            if self.is_stopping() {
+                break;
+            }
             let result = self.execute_operation(&op, sync_root, now).await;
             match result {
                 Ok(()) => {
@@ -418,6 +465,9 @@ impl EngineBridge {
                             next_retry_at,
                             Some(&error.to_string()),
                         )?;
+                        if attempts >= op.max_attempts {
+                            self.abandon_upload_after_give_up(&op).await;
+                        }
                         outcome.retried_op_ids.push(op.op_id);
                     }
                 }
@@ -858,54 +908,191 @@ impl EngineBridge {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("upload operation missing encrypted name"))?;
         let content_type = metadata["content_type"].as_str().map(str::to_string);
+        // An empty (0-byte) file is a normal upload: the canonical plan for it is
+        // ONE chunk carrying the AEAD of zero bytes (`plan_chunks(0, _)` →
+        // `chunk_count == 1`), which the chunk loop below sends as a 28-byte
+        // nonce + tag. Requires a server whose `/uploads/init` accepts
+        // `file_size_bytes: 0`.
         let plaintext_size = std::fs::metadata(payload_path)?.len();
-        if plaintext_size == 0 {
-            return Err(anyhow::anyhow!(
-                "empty Finder uploads are not supported by the v2 upload endpoint yet"
-            ));
+
+        let is_create = is_create_file_operation(&metadata);
+        let payload_path_str = payload_path.to_string_lossy().into_owned();
+        let payload_mtime_ns = payload_mtime_ns(payload_path);
+
+        // Flow 7: resume the persisted upload session when the retry is for the
+        // SAME staged bytes. Re-running `init` would mint a second server file
+        // row (the first left behind as a broken `is_uploading` duplicate) and
+        // re-send every chunk from zero.
+        let mut session: Option<UploadResume> = None;
+        if let Some(previous) = self.db.get_upload_resume(&op.op_id)? {
+            let same_payload = previous.payload_path == payload_path_str
+                && previous.payload_size == plaintext_size as i64
+                && previous.payload_mtime_ns == payload_mtime_ns
+                && previous.chunk_size_bytes > 0
+                && previous.chunk_count > 0
+                && previous.acked_chunks >= 0
+                && previous.acked_chunks <= previous.chunk_count;
+            if same_payload {
+                tracing::info!(
+                    op_id = %op.op_id,
+                    file_id = %previous.server_file_id,
+                    acked_chunks = previous.acked_chunks,
+                    chunk_count = previous.chunk_count,
+                    "upload: resuming persisted upload session"
+                );
+                session = Some(previous);
+            } else {
+                tracing::info!(
+                    op_id = %op.op_id,
+                    file_id = %previous.server_file_id,
+                    "upload: staged payload changed since the persisted session — abandoning it"
+                );
+                self.abandon_upload_session(&previous).await?;
+            }
         }
 
-        let init_request = upload_init_request_for_operation(
-            local_file_id,
-            name_encrypted,
-            content_type.clone(),
-            op.parent_id.clone(),
-            plaintext_size,
-            op.base_version,
-            is_create_file_operation(&metadata),
-        );
-        let upload = self.api.init_upload(&init_request).await?;
-
-        let server_file_id = upload.file_id.clone();
-        let effective_name_encrypted = if server_file_id != local_file_id {
-            encrypted_metadata_for_name(
-                self.api.master_key(),
-                &server_file_id,
-                metadata_display_name(&metadata, op)
-                    .as_deref()
-                    .unwrap_or(&server_file_id),
-                content_type.as_deref(),
-            )?
-        } else {
-            name_encrypted.to_string()
+        let session = match session {
+            Some(session) => session,
+            None => {
+                let init_request = upload_init_request_for_operation(
+                    local_file_id,
+                    name_encrypted,
+                    content_type.clone(),
+                    op.parent_id.clone(),
+                    plaintext_size,
+                    op.base_version,
+                    is_create,
+                );
+                let upload = self.api.init_upload(&init_request).await?;
+                if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
+                    return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+                }
+                let session = UploadResume {
+                    op_id: op.op_id.clone(),
+                    payload_path: payload_path_str.clone(),
+                    payload_size: plaintext_size as i64,
+                    payload_mtime_ns,
+                    upload_session_id: upload.upload_session_id,
+                    server_file_id: upload.file_id,
+                    object_version_id: upload.object_version_id,
+                    chunk_size_bytes: upload.chunk_size_bytes,
+                    chunk_count: upload.chunk_count,
+                    acked_chunks: 0,
+                    metadata_applied: false,
+                    // Only a create (no `file_id` sent to init) owns the server
+                    // row outright; a replace targets the user's existing file.
+                    is_create: init_request.file_id.is_none(),
+                };
+                // Persist BEFORE the next await: a cut anywhere after init must
+                // leave the session discoverable by the retry.
+                self.db.put_upload_resume(&session)?;
+                session
+            }
         };
-        self.api
-            .update_metadata(
-                &server_file_id,
-                Some(&effective_name_encrypted),
-                op.parent_id.as_deref(),
-            )
-            .await?;
 
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, server_file_id.as_bytes());
+        let body = self
+            .upload_session_body(
+                local_file_id,
+                op,
+                &metadata,
+                name_encrypted,
+                content_type.clone(),
+                payload_path,
+                &session,
+            )
+            .await;
+        match body {
+            Ok(completed) => {
+                let server_file_id = session.server_file_id.clone();
+                let file_key = file_key_for(self.api.master_key(), &server_file_id);
+                let thumbnail_content_type = content_type.clone();
+                self.apply_completed_upload(
+                    local_file_id,
+                    &server_file_id,
+                    op,
+                    &completed,
+                    plaintext_size,
+                    content_type,
+                    Some(session.object_version_id.clone()),
+                )?;
+                self.db.clear_upload_resume(&op.op_id)?;
+                self.finish_completed_upload(
+                    op,
+                    &server_file_id,
+                    payload_path,
+                    thumbnail_content_type,
+                    &file_key,
+                    sync_root,
+                )
+                .await;
+                Ok(())
+            }
+            Err(error) => {
+                if upload_session_is_gone(&error) {
+                    tracing::warn!(
+                        op_id = %op.op_id,
+                        file_id = %session.server_file_id,
+                        error = %error,
+                        "upload: server no longer accepts the persisted session — abandoning it; the retry starts a fresh upload"
+                    );
+                    self.abandon_upload_session(&session).await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Everything between init and a successful `complete`: the post-init
+    /// metadata PATCH and the chunk PUTs from the acknowledged watermark on.
+    /// Every step's success is persisted before the next await so a cut
+    /// resumes exactly where the server's acknowledgements stop.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_session_body(
+        &self,
+        local_file_id: &str,
+        op: &PendingOperation,
+        metadata: &serde_json::Value,
+        name_encrypted: &str,
+        content_type: Option<String>,
+        payload_path: &Path,
+        session: &UploadResume,
+    ) -> anyhow::Result<serde_json::Value> {
+        let server_file_id = session.server_file_id.clone();
+        if !session.metadata_applied {
+            let effective_name_encrypted = if server_file_id != local_file_id {
+                encrypted_metadata_for_name(
+                    self.api.master_key(),
+                    &server_file_id,
+                    metadata_display_name(metadata, op)
+                        .as_deref()
+                        .unwrap_or(&server_file_id),
+                    content_type.as_deref(),
+                )?
+            } else {
+                name_encrypted.to_string()
+            };
+            self.api
+                .update_metadata(
+                    &server_file_id,
+                    Some(&effective_name_encrypted),
+                    op.parent_id.as_deref(),
+                )
+                .await?;
+            self.db.set_upload_resume_metadata_applied(&op.op_id)?;
+        }
+
+        let file_key = file_key_for(self.api.master_key(), &server_file_id);
 
         let mut file = std::fs::File::open(payload_path)?;
-        let chunk_size = upload.chunk_size_bytes as usize;
-        let chunk_count = upload.chunk_count as u64;
+        let chunk_size = session.chunk_size_bytes as usize;
+        let chunk_count = session.chunk_count as u64;
         if chunk_size == 0 || chunk_count == 0 {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+        }
+        let first_chunk = session.acked_chunks.max(0) as u64;
+        if first_chunk > 0 {
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(first_chunk * chunk_size as u64))?;
         }
         let mut buffer = vec![0u8; chunk_size];
         // Rate-limit ceiling: read once per file, not per chunk (config is on
@@ -914,9 +1101,11 @@ impl EngineBridge {
             .map(|c| c.upload_kbps_limit)
             .unwrap_or(0);
 
-        for chunk_index in 0..chunk_count {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
+        for chunk_index in first_chunk..chunk_count {
+            let read = read_full_chunk(&mut file, &mut buffer)?;
+            // A zero-length read is only legitimate for the single chunk of an
+            // empty file; anywhere else the staged payload is truncated.
+            if read == 0 && session.payload_size > 0 {
                 return Err(anyhow::anyhow!(
                     "staged upload ended before expected chunk {} of {}",
                     chunk_index + 1,
@@ -927,8 +1116,9 @@ impl EngineBridge {
                 .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
             let chunk_start = std::time::Instant::now();
             self.api
-                .upload_session_chunk(&upload.upload_session_id, chunk_index as u32, &encrypted)
+                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted)
                 .await?;
+            self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
 
             // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
             self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
@@ -947,23 +1137,27 @@ impl EngineBridge {
             }
         }
 
-        let completed = self.api.complete_upload_session(&upload.upload_session_id).await?;
-        let thumbnail_content_type = content_type.clone();
-        self.apply_completed_upload(
-            local_file_id,
-            &server_file_id,
-            op,
-            &completed,
-            plaintext_size,
-            content_type,
-            Some(upload.object_version_id),
-        )?;
+        self.api.complete_upload_session(&session.upload_session_id).await
+    }
+
+    /// Post-`complete` best-effort work: thumbnails, staged-payload cleanup and
+    /// (Windows) placeholder conversion. Never fails the upload.
+    async fn finish_completed_upload(
+        &self,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] op: &PendingOperation,
+        server_file_id: &str,
+        payload_path: &Path,
+        thumbnail_content_type: Option<String>,
+        file_key: &beebeeb_core::kdf::FileKey,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    ) {
+        let server_file_id = server_file_id.to_string();
         if let Err(e) = self
             .upload_thumbnails_for_plaintext_media(
                 &server_file_id,
                 payload_path,
                 thumbnail_content_type.as_deref(),
-                &file_key,
+                file_key,
             )
             .await
         {
@@ -991,8 +1185,51 @@ impl EngineBridge {
         // it just won't show the synced overlay until the next reconcile.
         #[cfg(target_os = "windows")]
         self.finalize_local_upload_placeholder(op, &server_file_id, sync_root);
+    }
 
+    /// Give up on a persisted upload session (payload changed, session gone,
+    /// or the op exhausted its retries). For a CREATE the server row minted by
+    /// `init` holds no completed content and is only a broken `is_uploading`
+    /// duplicate, so it is trashed (best-effort: the server's stale-upload
+    /// sweep still hard-deletes it after 7 days if this fails). A REPLACE
+    /// targets the user's existing file and is never trashed. The resume row
+    /// is always dropped so the next attempt starts a fresh session.
+    async fn abandon_upload_session(&self, session: &UploadResume) -> anyhow::Result<()> {
+        if session.is_create {
+            match self.api.trash_file(&session.server_file_id).await {
+                Ok(_) => tracing::info!(
+                    op_id = %session.op_id,
+                    file_id = %session.server_file_id,
+                    "upload: trashed orphaned in-progress server row of an abandoned create"
+                ),
+                Err(e) => tracing::warn!(
+                    op_id = %session.op_id,
+                    file_id = %session.server_file_id,
+                    error = %e,
+                    "upload: could not trash orphaned in-progress server row; the server's stale-upload sweep reaps it"
+                ),
+            }
+        }
+        self.db.clear_upload_resume(&session.op_id)?;
         Ok(())
+    }
+
+    /// Called when an upload op has exhausted its retries: nothing will ever
+    /// resume its session, so abandon it now instead of leaving the orphan
+    /// visible for the server's 7-day stale-upload window.
+    async fn abandon_upload_after_give_up(&self, op: &PendingOperation) {
+        if !matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile) {
+            return;
+        }
+        match self.db.get_upload_resume(&op.op_id) {
+            Ok(Some(session)) => {
+                if let Err(e) = self.abandon_upload_session(&session).await {
+                    tracing::warn!(op_id = %op.op_id, error = %e, "upload: failed to abandon given-up session");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "upload: failed to read resume state"),
+        }
     }
 
     async fn upload_thumbnails_for_plaintext_media(
@@ -1355,6 +1592,16 @@ impl EngineBridge {
     }
 
     pub fn queue_finder_create(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
+        // enqueue once this engine has been asked to stop. Both the Windows
+        // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
+        // macOS/Linux File Provider extension (via `ipc_socket::handle_connection`'s
+        // `QueueFinderCreate` dispatch) call this directly, so this single
+        // check covers "the watcher" on every platform without needing a
+        // separate flag check duplicated in each caller.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
         if is_ignored_finder_name(&target.filename) {
             return Ok(FinderWriteOutcome::Ignored {
                 message: format!("ignored temporary Finder item {}", target.filename),
@@ -1473,6 +1720,10 @@ impl EngineBridge {
     }
 
     pub fn queue_finder_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
         if is_ignored_finder_name(&target.filename) {
             return Ok(FinderWriteOutcome::Ignored {
                 message: format!("ignored temporary Finder item {}", target.filename),
@@ -1553,6 +1804,10 @@ impl EngineBridge {
         file_id: &str,
         base_version_identifier: Option<String>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
         let item_contract = self.ensure_item_allows_shared_write(file_id, "delete")?;
         let mut payload = serde_json::json!({
             "operation": "trash",
@@ -2530,6 +2785,25 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
+        self.do_hydrate_with_meta(file_id, &meta).await
+    }
+
+    /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
+    /// (task 1546 Codex round 2, finding 1): downloads + decrypts every chunk
+    /// for `file_id` given ALREADY-FETCHED metadata. `remote_content_preview`
+    /// needs the metadata anyway to check the remote size before deciding
+    /// whether to download at all — routing through this shared helper
+    /// instead of `do_hydrate` means that check doesn't cost a second
+    /// `GET /files/{id}` round trip for files it does end up downloading.
+    ///
+    /// Internal helper only — callers are responsible for their own
+    /// `file_id` UUID validation (both current callers already do theirs
+    /// before this is reached).
+    async fn do_hydrate_with_meta(
+        &self,
+        file_id: &str,
+        meta: &serde_json::Value,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let chunk_count = meta
             .get("chunk_count")
             .and_then(|v| v.as_i64())
@@ -2850,6 +3124,8 @@ impl EngineBridge {
         };
 
         if let Err(e) = self.upload_version(&op, sync_root).await {
+            // One-shot op (never queued): nothing will resume its session.
+            self.abandon_upload_after_give_up(&op).await;
             if let Err(cleanup_error) = std::fs::remove_file(&staged_path) {
                 if cleanup_error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
@@ -2952,6 +3228,235 @@ impl EngineBridge {
         }
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
         Ok(conflict_name)
+    }
+
+    /// Read-only content preview for the conflict-resolution window (task
+    /// 1546 finding 2): reads the LOCAL file straight off disk and
+    /// downloads+decrypts the CURRENT REMOTE version, without touching
+    /// state.db — unlike [`Self::hydrate_file`] / [`Self::hydrate_file_to_memory`],
+    /// which both flip the row's status to `Downloading`/`Local` and record a
+    /// cache entry. The row is mid-conflict and neither side has been chosen
+    /// yet, so daemon bookkeeping must not move just because the user opened
+    /// the window — that's why this calls the private `do_hydrate` directly
+    /// instead of either public hydrate wrapper.
+    ///
+    /// Replaces `ConflictWindow.tsx`'s previous hardcoded placeholder text
+    /// ("Content from this device…" / "Content from other device…"), which
+    /// its own doc-comment admitted was fake for every conflict.
+    ///
+    /// Task 1546 Codex round 2, finding 3: textness is decided HERE, from
+    /// the file's own path via [`is_text_file`], never taken from a
+    /// caller-supplied flag — the VersionCenter-initiated open always passed
+    /// a hardcoded `isText: false` (only the daemon's auto-open path derived
+    /// it correctly from the filename), which made every manually-reviewed
+    /// text conflict render as binary and silently discard both text bodies.
+    pub async fn conflict_content_preview(
+        &self,
+        file_id: &str,
+        sync_root: &Path,
+    ) -> anyhow::Result<ConflictContentPreview> {
+        let entry = self
+            .db
+            .get_file(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let is_text = is_text_file(&entry.path);
+
+        let local = self.local_content_preview(sync_root, &entry.path, is_text);
+        let remote = self.remote_content_preview(file_id, is_text).await;
+
+        Ok(ConflictContentPreview { is_text, local, remote })
+    }
+
+    /// Local half of [`Self::conflict_content_preview`] (task 1546 Codex
+    /// round 2, finding 1): stats the file to learn its size WITHOUT reading
+    /// it, and only reads bytes at all when a text preview applies AND the
+    /// file is within [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`] — bounded to one
+    /// byte past the cap via [`std::io::Read::take`] so a race where the
+    /// file grows between the stat and the read can only ever push the
+    /// result to "too large," never load an oversized buffer. Conflict
+    /// windows open automatically, so a multi-gigabyte local file must never
+    /// be pulled fully into memory just to report its size.
+    fn local_content_preview(&self, sync_root: &Path, entry_path: &str, is_text: bool) -> ConflictContentSide {
+        let local_path = match local_file_path_under_sync_root(sync_root, entry_path) {
+            Ok(p) => p,
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: None,
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't locate the local file: {e}")),
+                };
+            }
+        };
+
+        let size_bytes = match std::fs::metadata(&local_path) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: None,
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't read the local file: {e}")),
+                };
+            }
+        };
+
+        if !is_text {
+            // Binary preview only ever shows size — the bytes are never read.
+            return ConflictContentSide { size_bytes: Some(size_bytes), text: None, unavailable_reason: None };
+        }
+        if size_bytes > CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 {
+            return ConflictContentSide {
+                size_bytes: Some(size_bytes),
+                text: None,
+                unavailable_reason: Some(format!("File is too large to preview, {size_bytes} bytes")),
+            };
+        }
+
+        let file = match std::fs::File::open(&local_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: Some(size_bytes),
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't read the local file: {e}")),
+                };
+            }
+        };
+        let mut bytes = Vec::with_capacity((size_bytes as usize).min(CONFLICT_PREVIEW_TEXT_MAX_BYTES) + 1);
+        // `take(LIMIT + 1)` bounds the read itself — never `std::fs::read`
+        // (unbounded) — so even a TOCTOU race where the file grows after the
+        // `metadata()` call above can produce at most LIMIT+1 bytes.
+        match file.take(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1).read_to_end(&mut bytes) {
+            Ok(_) => content_side_from_bytes(bytes, is_text),
+            Err(e) => ConflictContentSide {
+                size_bytes: Some(size_bytes),
+                text: None,
+                unavailable_reason: Some(format!("Couldn't read the local file: {e}")),
+            },
+        }
+    }
+
+    /// Remote half of [`Self::conflict_content_preview`] (task 1546 Codex
+    /// round 2, finding 1): fetches file metadata — one small JSON response —
+    /// to learn the remote size BEFORE deciding whether to download
+    /// anything. [`Self::do_hydrate_with_meta`] (which downloads and
+    /// decrypts every chunk) is called only when BOTH a text preview applies
+    /// AND the metadata size is within [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`] —
+    /// a multi-gigabyte conflict, text or binary, therefore never costs
+    /// bandwidth or a full decrypt just to be previewed. Reuses the SAME
+    /// metadata fetch `do_hydrate_with_meta` needs instead of letting
+    /// `do_hydrate` re-fetch it, so the small-file path costs exactly the
+    /// metadata GET + the chunk GETs it always cost.
+    async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> ConflictContentSide {
+        if let Err(e) = file_id.parse::<uuid::Uuid>() {
+            return ConflictContentSide {
+                size_bytes: None,
+                text: None,
+                unavailable_reason: Some(format!("invalid file_id (not a UUID): {e}")),
+            };
+        }
+
+        let meta = match self.api.get_file(file_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                return ConflictContentSide {
+                    size_bytes: None,
+                    text: None,
+                    unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+                };
+            }
+        };
+        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
+
+        if !is_text {
+            // Binary preview only ever shows size — never download the bytes.
+            return ConflictContentSide { size_bytes, text: None, unavailable_reason: None };
+        }
+        let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
+        if !within_limit {
+            return ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: Some(match size_bytes {
+                    Some(s) => format!("File is too large to preview, {s} bytes"),
+                    None => "Couldn't determine the other device's file size".to_string(),
+                }),
+            };
+        }
+
+        match self.do_hydrate_with_meta(file_id, &meta).await {
+            Ok(mut bytes) => {
+                // Move the plaintext out instead of `bytes.to_vec()` — a
+                // clone would briefly hold two live copies of the remote
+                // plaintext in memory. `content_side_from_bytes` consumes
+                // the Vec by value (no further copy), and the now-empty
+                // `bytes` is zeroized below for defense in depth.
+                let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
+                bytes.zeroize();
+                side
+            }
+            Err(e) => ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+            },
+        }
+    }
+}
+
+/// One side (local or remote) of a conflict-resolution content preview.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConflictContentSide {
+    pub size_bytes: Option<u64>,
+    /// UTF-8 text content — present only when the caller asked for a text
+    /// preview AND the bytes are valid UTF-8 AND within
+    /// [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`]. `None` always means "see
+    /// `unavailable_reason`", never a silent truncation.
+    pub text: Option<String>,
+    /// Human-readable reason `text` is absent (too large, not UTF-8, local
+    /// read failed, remote download failed) — `None` when `text` is present
+    /// or this is the (expected-textless) binary branch.
+    pub unavailable_reason: Option<String>,
+}
+
+/// Result of [`EngineBridge::conflict_content_preview`] — the real content
+/// (or an honest reason it's unavailable) for both sides of a conflict.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConflictContentPreview {
+    pub is_text: bool,
+    pub local: ConflictContentSide,
+    pub remote: ConflictContentSide,
+}
+
+/// Cap on how large a text file's content preview may be. Deliberately
+/// small: the whole file round-trips over Tauri's IPC as a JSON string and
+/// is diffed synchronously in the webview, so this bounds both the IPC
+/// payload and the diff algorithm's input size.
+const CONFLICT_PREVIEW_TEXT_MAX_BYTES: usize = 256 * 1024;
+
+/// Pure classifier: turns real file bytes into what the conflict window can
+/// safely show. Never fabricates content — a non-text file, an oversized
+/// file, or invalid UTF-8 all report `text: None` plus an honest
+/// `unavailable_reason`, never a placeholder string.
+fn content_side_from_bytes(bytes: Vec<u8>, is_text: bool) -> ConflictContentSide {
+    let size_bytes = Some(bytes.len() as u64);
+    if !is_text {
+        return ConflictContentSide { size_bytes, text: None, unavailable_reason: None };
+    }
+    if bytes.len() > CONFLICT_PREVIEW_TEXT_MAX_BYTES {
+        return ConflictContentSide {
+            size_bytes,
+            text: None,
+            unavailable_reason: Some("File is too large to preview inline".to_string()),
+        };
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => ConflictContentSide { size_bytes, text: Some(text), unavailable_reason: None },
+        Err(_) => ConflictContentSide {
+            size_bytes,
+            text: None,
+            unavailable_reason: Some("File isn't valid UTF-8 text".to_string()),
+        },
     }
 }
 
@@ -3456,6 +3961,51 @@ fn encode_base83(mut value: u32, length: usize) -> String {
     String::from_utf8(chars).expect("base83 alphabet is ASCII")
 }
 
+fn file_key_for(master_key: &[u8; 32], server_file_id: &str) -> beebeeb_core::kdf::FileKey {
+    let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    beebeeb_core::kdf::derive_file_key(&master_key, server_file_id.as_bytes())
+}
+
+/// Staged-payload modification time in nanoseconds (0 when unavailable). Part
+/// of the resume fingerprint: a session is resumed only onto the same bytes.
+fn payload_mtime_ns(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Fill `buffer` from `file` (short only at EOF). Chunk `k` must be exactly the
+/// bytes at `k * chunk_size`, so a resumed upload that seeks to the
+/// acknowledged watermark lines up with the chunks the server already holds.
+fn read_full_chunk(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
+/// The server no longer accepts writes to this upload session: 404 (session
+/// or file row gone — e.g. reaped by the stale-upload sweep), 410, or 400
+/// (session not writable / chunk plan no longer matches / a chunk the client
+/// believed acknowledged is missing at `complete`). Resuming cannot succeed;
+/// the op must start a fresh session.
+fn upload_session_is_gone(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .filter_map(reqwest::Error::status)
+        .any(|status| matches!(status.as_u16(), 400 | 404 | 410))
+}
+
 fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
     metadata["operation"].as_str() == Some("create_file")
 }
@@ -3934,7 +4484,8 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
 pub const UPLOAD_REVIEW_RESOLUTIONS: [&str; 3] = ["keep_both", "keep_mine", "discard"];
 
 fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static str, String, &'static str) {
-    let error = op.last_error.as_deref().unwrap_or("").to_ascii_lowercase();
+    let raw_error = op.last_error.as_deref().unwrap_or("");
+    let error = raw_error.to_ascii_lowercase();
     let metadata = op.metadata_json.as_deref().unwrap_or("").to_ascii_lowercase();
     let stale_base = error.contains("stale")
         || error.contains("base version")
@@ -3948,6 +4499,23 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
             "Restore is queued or failed; the server restore endpoint creates a new current version when it succeeds."
                 .to_string(),
             "restore_review",
+        );
+    }
+
+    // Auth failures take priority over quota/permission/stale-base: an
+    // expired session's 401 unblocks nothing until the user signs in again,
+    // and "sign in again" is a strictly more actionable message than "your
+    // storage is full" or "permission denied" would be for the same root
+    // cause. Reuses `classify_operation_error`'s stripped-URL substring
+    // matching (task 1252 — a reqwest error's `" for url (…)"` suffix can
+    // embed a port number containing "401") instead of re-deriving a second,
+    // looser copy of the same check here (task 1546 finding 3).
+    if matches!(classify_operation_error(raw_error), OperationFailureClass::Auth) {
+        return (
+            "auth_failure",
+            "sign-in needed",
+            "Your session has expired. Sign in again to resume syncing.".to_string(),
+            "sign_in_again",
         );
     }
     if error.contains("quota") || error.contains("insufficient storage") {
@@ -5343,6 +5911,12 @@ fn process_metadata_row(
             // children continue to enumerate; do NOT touch this row's status.
             Ok(Some((entry.path, entry.item_kind)))
         }
+        // (1a) New to us but still an in-progress upload (`is_uploading`): it
+        // has no completed content yet — hydrating it would 409 — so minting a
+        // placeholder shows a broken duplicate in Finder/Explorer (flow 7: an
+        // interrupted upload's orphan row). Skip it; once `complete` lands the
+        // row is listed with `is_uploading = false` and materialises normally.
+        None if f["is_uploading"].as_bool() == Some(true) => Ok(None),
         None => {
             // (1) New to us — insert as cloud_only. base = remote.
             apply(bridge)
@@ -5490,6 +6064,42 @@ mod tests {
         }
         assert!(!is_ignored_finder_name("report.pdf"));
         assert!(!is_ignored_finder_name(".env.sample"));
+    }
+
+    #[test]
+    fn test_content_side_from_bytes_covers_text_binary_and_size_cap() {
+        // Task 1546 finding 2: the conflict window's diff body was a
+        // hardcoded placeholder for EVERY conflict, text or binary,
+        // regardless of actual file content. `content_side_from_bytes` is
+        // the pure classifier `EngineBridge::conflict_content_preview` uses
+        // to turn real bytes into what the window can safely show.
+        let small_text = content_side_from_bytes(b"hello world".to_vec(), true);
+        assert_eq!(small_text.text.as_deref(), Some("hello world"));
+        assert_eq!(small_text.size_bytes, Some(11));
+        assert!(small_text.unavailable_reason.is_none());
+
+        // Binary side never carries text, even for tiny content — only size.
+        let binary = content_side_from_bytes(b"hello world".to_vec(), false);
+        assert!(binary.text.is_none());
+        assert_eq!(binary.size_bytes, Some(11));
+        assert!(binary.unavailable_reason.is_none());
+
+        // Invalid UTF-8 for a file the caller marked as text: honest
+        // "isn't valid UTF-8" reason, never fabricated text.
+        let invalid_utf8 = content_side_from_bytes(vec![0xFF, 0xFE, 0xFD], true);
+        assert!(invalid_utf8.text.is_none());
+        assert_eq!(invalid_utf8.size_bytes, Some(3));
+        assert!(invalid_utf8.unavailable_reason.unwrap().contains("UTF-8"));
+
+        // Oversized text: the whole file round-trips over Tauri's IPC as a
+        // JSON string and is diffed synchronously, so there is a real cap —
+        // over it, size is still reported honestly but text is withheld
+        // rather than silently truncated (which would corrupt the diff).
+        let oversized = vec![b'a'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1];
+        let too_big = content_side_from_bytes(oversized, true);
+        assert!(too_big.text.is_none());
+        assert_eq!(too_big.size_bytes, Some((CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1) as u64));
+        assert!(too_big.unavailable_reason.unwrap().contains("too large"));
     }
 
     #[test]
@@ -5677,6 +6287,25 @@ mod tests {
                 loop {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // The listener above is non-blocking so this accept
+                            // loop can poll it (see the WouldBlock arm below),
+                            // but the *accepted* stream must be put back into
+                            // blocking mode before handing it to
+                            // `read_http_request`, which does a raw, un-retried
+                            // `.read().unwrap()`. Without this, under enough
+                            // scheduler contention the request bytes can still
+                            // be in flight when `read` is called, and a
+                            // non-blocking read returns `WouldBlock` instead of
+                            // waiting — panicking the mock server's accept
+                            // thread. `IpcHydrationMock::start` (below) already
+                            // does this; this server predates that fix and was
+                            // missing it, causing an intermittent
+                            // `Os { code: 35, kind: WouldBlock }` panic under
+                            // shared-machine load (confirmed via task 1546's
+                            // and task 1538's independent gate runs: 3 distinct
+                            // tests using this helper each panicked here under
+                            // load and passed 3/3 when rerun in isolation).
+                            stream.set_nonblocking(false).unwrap();
                             idle_after_min_since = None;
                             let request = read_http_request(&mut stream);
                             let response = upload_mock_response(&request, fail_chunk);
@@ -6778,6 +7407,55 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_review_operation_recognizes_expired_session_as_auth_failure() {
+        // Task 1546 finding 3: an expired-session (401) upload failure fell
+        // through to the generic `failed_upload` bucket with the raw HTTP
+        // error text and no "sign in again" path. `classify_review_operation`
+        // is the function VersionCenter's list actually reads (NOT
+        // `classify_operation_error`, which already classified this
+        // correctly for backoff purposes but was never consulted here).
+        let op = PendingOperation {
+            op_id: "op-auth-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("server-file-1".into()),
+            parent_id: None,
+            target_path: Some("Docs/notes.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: Some(
+                "HTTP status client error (401 Unauthorized) for url (http://127.0.0.1:8080/api/v1/uploads/init)"
+                    .to_string(),
+            ),
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        };
+
+        let (kind, _status, detail, action) = classify_review_operation(&op);
+        assert_eq!(kind, "auth_failure");
+        assert_eq!(action, "sign_in_again");
+        assert!(
+            detail.to_ascii_lowercase().contains("sign in"),
+            "detail should tell the user to sign in again, got: {detail}"
+        );
+
+        // A completely unrelated failure (no 401/unauthorized/invalid-token
+        // substring) must still classify as a plain upload review, not auth —
+        // this guards against the new check being too broad.
+        let unrelated = PendingOperation {
+            last_error: Some("500 Internal Server Error".to_string()),
+            ..op
+        };
+        let (kind, _status, _detail, _action) = classify_review_operation(&unrelated);
+        assert_eq!(kind, "failed_upload");
+    }
+
+    #[test]
     fn classify_ignores_status_like_digits_in_the_request_url() {
         // Task 1252: reqwest's Display suffixes `" for url (…)"`, and the URL's
         // ephemeral port / path ids can contain "401", "403", etc. Those are not
@@ -7069,6 +7747,125 @@ mod tests {
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
     }
 
+    /// Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): once the bridge's
+    /// stop flag is set, `process_due_operations` must not execute ANY due
+    /// operation — not "finish the current batch, then stop next tick".
+    /// Uses `PinTree` (the cheapest op kind: `execute_operation` returns
+    /// `Ok(())` with no network call) so a failure here can only be the
+    /// missing stop-check, never a flaky mock server.
+    #[tokio::test]
+    async fn test_process_due_operations_stops_immediately_once_engine_is_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.db");
+        let db = Arc::new(StateDb::open(&db_path).unwrap());
+        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping.clone());
+
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-pin-1".into(),
+            kind: OperationKind::PinTree,
+            file_id: Some("folder-1".into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-pin-2".into(),
+            kind: OperationKind::PinTree,
+            file_id: Some("folder-2".into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+
+        // Ask the engine to stop BEFORE draining the queue — simulates
+        // `EngineRunner::abort` flipping the flag while a tick is already
+        // about to process a batch of due operations.
+        stopping.store(true, Ordering::SeqCst);
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        assert!(
+            outcome.completed_op_ids.is_empty(),
+            "no operation may run once the engine has been asked to stop"
+        );
+        assert_eq!(
+            db.list_due_operations(999).unwrap().len(),
+            2,
+            "both queued ops must still be in the queue, untouched, for the caller's purge to clear"
+        );
+    }
+
+    /// Task 1538 Codex P1 — the watcher (Windows upload watcher AND the
+    /// macOS/Linux File Provider IPC handler both call these directly) must
+    /// not be able to slip a fresh write into the queue once the engine has
+    /// been asked to stop, or sign-out's purge could run BEFORE the write
+    /// lands and then miss it entirely.
+    #[test]
+    fn test_queue_finder_writes_refuse_to_enqueue_once_engine_is_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.db");
+        let db = Arc::new(StateDb::open(&db_path).unwrap());
+        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let stopping = Arc::new(AtomicBool::new(true));
+        let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping);
+
+        let create_result = bridge.queue_finder_create(FinderWriteTarget {
+            file_id: None,
+            parent_id: None,
+            filename: "new-file.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        });
+        assert!(create_result.is_err(), "queue_finder_create must refuse while stopping");
+
+        let modify_result = bridge.queue_finder_modify(FinderWriteTarget {
+            file_id: Some("file-1".into()),
+            parent_id: None,
+            filename: "renamed.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        });
+        assert!(modify_result.is_err(), "queue_finder_modify must refuse while stopping");
+
+        let delete_result = bridge.queue_finder_delete("file-1", None);
+        assert!(delete_result.is_err(), "queue_finder_delete must refuse while stopping");
+
+        assert!(
+            db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "not a single one of the refused writes may have reached the operation_queue"
+        );
+    }
+
     #[tokio::test]
     async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
         let dir = tempfile::tempdir().unwrap();
@@ -7203,6 +8000,359 @@ mod tests {
         );
         assert_eq!(requests[3].method, "POST");
         assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    /// Empty (0-byte) files — `.gitkeep`, `__init__.py`, `touch` placeholders —
+    /// must sync like any other file. The canonical empty-file plan is ONE chunk
+    /// carrying the AEAD of zero bytes (`plan_chunks(0, _)` → `chunk_count == 1`),
+    /// so the upload is init(size 0) → one 28-byte chunk PUT → complete, and the
+    /// op completes instead of landing in `Error` and being retried.
+    #[tokio::test]
+    async fn test_process_due_operations_uploads_empty_file_as_one_encrypted_empty_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("empty.txt");
+        std::fs::write(&payload, b"").unwrap();
+        let server = UploadMockServer::start(false);
+        let master_key = [12u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-empty".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-file-empty".into()),
+                parent_id: Some("folder-1".into()),
+                target_path: Some("Project/empty.txt".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "empty.txt",
+                        "content_type": "text/plain"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert!(
+            outcome.retried_op_ids.is_empty(),
+            "an empty file must not be retried: {:?}",
+            bridge.db.queue_diagnostics(200).unwrap().last_error
+        );
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-empty".to_string()]);
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert_eq!(entry.path, "Project/empty.txt");
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(init_body["file_size_bytes"], 0);
+        assert_eq!(init_body["chunk_count"], 1);
+        assert_eq!(requests[2].method, "PUT");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_eq!(requests[2].body.len(), 28, "nonce + tag, no payload");
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        assert!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    }
+
+    /// Device B side of the empty-file round trip: a server file with
+    /// `size_bytes: 0` and one encrypted empty chunk hydrates to a 0-byte file.
+    #[test]
+    fn hydrate_file_writes_empty_file_from_single_empty_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [14u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        // 1 metadata GET + 1 chunk GET.
+        let server = HydrationMockServer::start(file_key, vec![Vec::new()], 2);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/empty.txt", None, FileStatus::CloudOnly, 0);
+
+        let dest = dir.path().join("empty.txt");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir.path()]).await })
+            .unwrap();
+        server.finish();
+
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 0);
+        let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_reads_local_disk_and_downloads_real_remote_content() {
+        // Task 1546 finding 2: ConflictWindow.tsx's own doc-comment admitted the
+        // diff body was a hardcoded placeholder for EVERY conflict ("Content
+        // from this device…" / "Content from other device…"), never the
+        // file's real content, because "actual diffing needs the daemon to
+        // expose both blob bytes". This is that daemon-side exposure.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("notes.txt"), b"local version text").unwrap();
+
+        let master_key = [21u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let remote_chunks = vec![b"remote version text".to_vec()];
+        let server = HydrationMockServer::start(file_key, remote_chunks, 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 18,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge
+            .conflict_content_preview(TEST_FILE_ID, &sync_root)
+            .await
+            .unwrap();
+
+        // The two sides must be the REAL, DIFFERENT content, not the old
+        // "Content from this device…" / "Content from other device…" pair.
+        assert_eq!(preview.local.text.as_deref(), Some("local version text"));
+        assert_eq!(preview.remote.text.as_deref(), Some("remote version text"));
+        assert!(preview.local.unavailable_reason.is_none());
+        assert!(preview.remote.unavailable_reason.is_none());
+
+        // A preview must be read-only: the row is mid-conflict and neither
+        // side has been chosen, so daemon bookkeeping (status, cache) must
+        // not move just because the user opened the window. This is exactly
+        // why the implementation calls `do_hydrate` directly instead of
+        // `hydrate_file`/`hydrate_file_to_memory`, which both flip status.
+        let entry = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Conflict);
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_reports_a_local_read_failure_without_failing_the_whole_call() {
+        // The local file may be missing (e.g. deleted outside the daemon) even
+        // though the row is Conflict; the remote side must still load so the
+        // user isn't left with neither pane.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        // Deliberately do NOT write sync_root/notes.txt.
+
+        let master_key = [22u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![b"remote only".to_vec()], 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 0,
+                modified_at: 100,
+                content_hash: None,
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge
+            .conflict_content_preview(TEST_FILE_ID, &sync_root)
+            .await
+            .unwrap();
+
+        assert!(preview.local.text.is_none());
+        assert!(preview.local.unavailable_reason.is_some());
+        assert_eq!(preview.remote.text.as_deref(), Some("remote only"));
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_skips_remote_download_when_metadata_reports_oversized_file() {
+        // Codex round 2, finding 1: the remote size must be checked from
+        // metadata BEFORE any chunk is downloaded. `requests: 1` means the
+        // mock server serves ONLY the metadata GET and then stops — if the
+        // implementation regresses to downloading anyway, the resulting
+        // chunk GET either fails to connect (server already exited) or hits
+        // a closed listener, so `remote.unavailable_reason` would report a
+        // download/connection failure instead of "too large," and this test
+        // would fail (not hang: the listener is dropped, not left open).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("notes.txt"), b"small local text").unwrap();
+
+        let master_key = [23u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        // The chunk bytes are real (so `size_bytes` in the mocked metadata
+        // response is real and over the cap) but must NEVER be fetched.
+        let oversized_chunk = vec![b'z'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 100];
+        let expected_size = oversized_chunk.len() as u64;
+        let server = HydrationMockServer::start(file_key, vec![oversized_chunk], 1);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 16,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
+
+        assert!(preview.is_text, "notes.txt must classify as text");
+        assert!(preview.remote.text.is_none());
+        assert_eq!(preview.remote.size_bytes, Some(expected_size));
+        let reason = preview.remote.unavailable_reason.expect("must explain why text is absent");
+        assert!(reason.contains("too large"), "reason was: {reason}");
+        assert!(reason.contains(&expected_size.to_string()), "reason was: {reason}");
+
+        // The local side is untouched by this finding and must still work.
+        assert_eq!(preview.local.text.as_deref(), Some("small local text"));
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_local_bounded_read_reports_too_large_with_accurate_size() {
+        // Codex round 2, finding 1's local half: a local file over the cap
+        // must report "too large" with the REAL size (from `fs::metadata`,
+        // not from reading the whole file — `local_content_preview` never
+        // calls `std::fs::read` on an oversized file).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let oversized = vec![b'x'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1];
+        let expected_size = oversized.len() as u64;
+        std::fs::write(sync_root.join("notes.txt"), &oversized).unwrap();
+
+        let master_key = [24u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![b"remote version text".to_vec()], 2);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Conflict,
+                size_bytes: expected_size as i64,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
+
+        assert!(preview.local.text.is_none());
+        assert_eq!(preview.local.size_bytes, Some(expected_size));
+        let reason = preview.local.unavailable_reason.expect("must explain why text is absent");
+        assert!(reason.contains("too large"), "reason was: {reason}");
+        assert!(reason.contains(&expected_size.to_string()), "reason was: {reason}");
+
+        // The remote side (small, real content) is untouched by this finding.
+        assert_eq!(preview.remote.text.as_deref(), Some("remote version text"));
+
+        server.finish();
+    }
+
+    #[tokio::test]
+    async fn test_conflict_content_preview_determines_textness_from_the_file_path_not_a_caller_flag() {
+        // Codex round 2, finding 3: `conflict_content_preview` no longer
+        // takes an `is_text` parameter at all — the daemon decides from the
+        // row's own `path` via `is_text_file`. This is exactly the bug:
+        // VersionCenter's `open_conflict_window` call always hardcoded
+        // `isText: false`, which (before this fix) discarded valid text
+        // content for every conflict opened that way. Here the path has a
+        // binary extension (`.jpg`) even though the bytes on both sides
+        // happen to be valid UTF-8 — the response must still classify as
+        // binary and never surface `text`, proving the decision comes from
+        // the path, not from any UTF-8-validity heuristic on the bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("photo.jpg"), b"not really jpeg bytes").unwrap();
+
+        let master_key = [25u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        // requests: 1 — a binary preview must fetch ONLY the metadata GET
+        // (to learn `size_bytes`) and never a chunk GET, so the mock server
+        // must never need to serve a 2nd request. If the implementation
+        // regresses to always downloading, that 2nd request fails to
+        // connect (the server thread already exited after 1) rather than
+        // hanging, so this stays a fast, deterministic red, not a hang.
+        let server = HydrationMockServer::start(file_key, vec![b"also not really jpeg bytes".to_vec()], 1);
+
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: TEST_FILE_ID.into(),
+                path: "photo.jpg".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 21,
+                modified_at: 100,
+                content_hash: Some("local-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
+
+        assert!(!preview.is_text, "a .jpg path must classify as binary");
+        assert!(preview.local.text.is_none());
+        assert!(preview.remote.text.is_none());
+        assert!(preview.local.unavailable_reason.is_none(), "binary is an expected, not an error, state");
+        assert!(preview.remote.unavailable_reason.is_none(), "binary is an expected, not an error, state");
+        assert_eq!(preview.local.size_bytes, Some(21));
+        assert_eq!(preview.remote.size_bytes, Some(26));
+
+        server.finish();
     }
 
     #[tokio::test]
@@ -7514,6 +8664,376 @@ mod tests {
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
         assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+    }
+
+    // ── Interrupted upload resume (flow 7, harness STEP 9) ──────────────────
+    //
+    // A desktop upload cut mid-transfer (tokio timeout on the transfer loop,
+    // app quit, network drop) used to re-run `POST /uploads/init` on retry:
+    // every retry minted a NEW server file row + session, re-sent every chunk
+    // from zero, and left the first attempt's row behind as a visible broken
+    // `is_uploading` duplicate (GET → 409) until the server's 7-day
+    // stale-upload sweep. The retry must resume the persisted session instead.
+
+    /// Stateful upload mock: 3-chunk plan (8+8+4 bytes). Each connection is
+    /// served on its own thread so a deliberately hung chunk response cannot
+    /// block the retry's requests.
+    struct ResumableUploadMock {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum ResumeMockMode {
+        /// Chunk 1 of the first session hangs once (the cut), then the
+        /// session keeps accepting chunks.
+        HangOnce,
+        /// Chunk 1 hangs once, and afterwards session 1 is gone server-side
+        /// (404 on every further chunk/complete) — e.g. reaped.
+        HangOnceThenSessionGone,
+    }
+
+    struct ResumeMockState {
+        inits: usize,
+        hung: bool,
+    }
+
+    impl ResumableUploadMock {
+        fn start(mode: ResumeMockMode) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let state = Arc::new(Mutex::new(ResumeMockState { inits: 0, hung: false }));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_requests = Arc::clone(&requests);
+            let server_stop = Arc::clone(&stop);
+            let handle = thread::spawn(move || {
+                let started = std::time::Instant::now();
+                while !server_stop.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let requests = Arc::clone(&server_requests);
+                            let state = Arc::clone(&state);
+                            thread::spawn(move || {
+                                let request = read_http_request(&mut stream);
+                                requests.lock().unwrap().push(request.clone());
+                                let (delay, response) = resumable_mock_response(&request, &state, mode);
+                                if let Some(delay) = delay {
+                                    std::thread::sleep(delay);
+                                }
+                                // The client may have been cancelled meanwhile.
+                                let _ = stream.write_all(response.as_bytes());
+                            });
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("resumable upload mock accept failed: {e}"),
+                    }
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                stop,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.handle.join().unwrap();
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn resumable_mock_response(
+        request: &RecordedRequest,
+        state: &Arc<Mutex<ResumeMockState>>,
+        mode: ResumeMockMode,
+    ) -> (Option<Duration>, String) {
+        let method = request.method.as_str();
+        let path = request.path.as_str();
+        if method == "POST" && path == "/api/v1/uploads/init" {
+            let n = {
+                let mut s = state.lock().unwrap();
+                s.inits += 1;
+                s.inits
+            };
+            return (
+                None,
+                http_json(
+                    "201 Created",
+                    serde_json::json!({
+                        "file_id": format!("server-file-{n}"),
+                        "tenant_id": "tenant-1",
+                        "object_version_id": format!("object-init-{n}"),
+                        "upload_session_id": format!("session-{n}"),
+                        "chunk_size_bytes": 8,
+                        "chunk_count": 3,
+                        "storage_format_version": 2,
+                        "storage_pool_id": "pool-1",
+                        "region": "local"
+                    }),
+                ),
+            );
+        }
+        if method == "PATCH" && path.starts_with("/api/v1/files/server-file-") {
+            return (None, http_json("200 OK", serde_json::json!({ "ok": true })));
+        }
+        if method == "DELETE" && path.starts_with("/api/v1/files/server-file-") {
+            return (None, http_json("200 OK", serde_json::json!({ "trashed": true })));
+        }
+        if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
+            let mut parts = rest.split('/');
+            let session = parts.next().unwrap_or_default().to_string();
+            let action = parts.next().unwrap_or_default();
+            let hung_before = state.lock().unwrap().hung;
+            if mode == ResumeMockMode::HangOnceThenSessionGone && session == "session-1" && hung_before {
+                return (None, http_json("404 Not Found", serde_json::json!({ "error": "not found" })));
+            }
+            if method == "PUT" && action == "chunks" {
+                let index: u32 = parts.next().unwrap_or("0").parse().unwrap();
+                if index == 1 && session == "session-1" {
+                    let mut s = state.lock().unwrap();
+                    if !s.hung {
+                        s.hung = true;
+                        return (
+                            Some(Duration::from_secs(3)),
+                            http_json("200 OK", serde_json::json!({ "index": 1, "size": 0, "skipped": false })),
+                        );
+                    }
+                }
+                return (
+                    None,
+                    http_json(
+                        "200 OK",
+                        serde_json::json!({ "index": index, "size": request.body.len() as i64, "skipped": false }),
+                    ),
+                );
+            }
+            if method == "POST" && action == "complete" {
+                let n = session.trim_start_matches("session-");
+                return (
+                    None,
+                    http_json(
+                        "200 OK",
+                        serde_json::json!({
+                            "file_id": format!("server-file-{n}"),
+                            "version_number": 1,
+                            "current_object_version_id": format!("object-complete-{n}"),
+                            "size_bytes": 20,
+                            "mime_type": "text/plain"
+                        }),
+                    ),
+                );
+            }
+        }
+        (
+            None,
+            http_json(
+                "404 Not Found",
+                serde_json::json!({ "error": format!("unexpected {method} {path}") }),
+            ),
+        )
+    }
+
+    fn resumable_create_op(payload: &Path) -> PendingOperation {
+        PendingOperation {
+            op_id: "op-upload-resume".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("local-file-resume".into()),
+            parent_id: None,
+            target_path: Some("resume.bin".into()),
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "create_file",
+                    "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                    "display_name": "resume.bin",
+                    "content_type": "text/plain"
+                })
+                .to_string(),
+            ),
+            payload_path: Some(payload.to_string_lossy().into_owned()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        }
+    }
+
+    fn count_requests(requests: &[RecordedRequest], method: &str, path: &str) -> usize {
+        requests
+            .iter()
+            .filter(|r| r.method == method && r.path == path)
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flow7_cancelled_upload_resumes_session_instead_of_reinit() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+        // The cut: chunk 1's response hangs; the transfer loop is cancelled
+        // exactly like the harness's tokio timeout (the future is dropped).
+        let cut = tokio::time::timeout(
+            Duration::from_millis(1500),
+            bridge.process_due_operations(dir.path(), 200),
+        )
+        .await;
+        assert!(cut.is_err(), "the first pass must be cut mid-upload");
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+        let requests = server.finish();
+        let inits = count_requests(&requests, "POST", "/api/v1/uploads/init");
+        assert_eq!(inits, 1, "retry must resume the persisted session, not init a second file row");
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
+            1,
+            "chunk 0 was acknowledged before the cut and must not be re-sent"
+        );
+        assert_eq!(count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/1"), 2);
+        assert_eq!(count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/2"), 1);
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"), 1);
+        assert_eq!(
+            requests.iter().filter(|r| r.method == "DELETE").count(),
+            0,
+            "a resumable session must not be trashed"
+        );
+
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert!(
+            bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none(),
+            "resume state must be cleared once the upload completes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flow7_gone_session_trashes_orphan_then_reuploads_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnceThenSessionGone);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [22u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+        let cut = tokio::time::timeout(
+            Duration::from_millis(1500),
+            bridge.process_due_operations(dir.path(), 200),
+        )
+        .await;
+        assert!(cut.is_err(), "the first pass must be cut mid-upload");
+        assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_some());
+
+        // Second pass: the persisted session is gone → the orphan create row is
+        // trashed, resume state dropped, and the op scheduled for retry.
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
+        assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
+
+        // Third pass: a fresh session uploads the file exactly once.
+        let outcome = bridge.process_due_operations(dir.path(), 10_000).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+        let requests = server.finish();
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
+        assert_eq!(
+            count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"),
+            1,
+            "the orphaned is_uploading row from the dead session must be trashed"
+        );
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"), 1);
+        assert!(bridge.db.get_file("server-file-2").unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flow7_changed_payload_does_not_resume_stale_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [23u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+        let cut = tokio::time::timeout(
+            Duration::from_millis(1500),
+            bridge.process_due_operations(dir.path(), 200),
+        )
+        .await;
+        assert!(cut.is_err());
+
+        // The staged payload changes size before the retry: the persisted
+        // chunks belong to other bytes, so the session must NOT be resumed.
+        std::fs::write(&payload, b"0123456789abcdefghijKLMN").unwrap();
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+        let requests = server.finish();
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
+        assert_eq!(count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"), 1);
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"), 0);
+        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"), 1);
+    }
+
+    #[tokio::test]
+    async fn flow7_given_up_create_upload_trashes_its_orphan_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"retry me").unwrap();
+        let server = UploadMockServer::start(true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [24u8; 32]);
+        let mut op = resumable_create_op(&payload);
+        op.max_attempts = 1;
+        bridge.db.enqueue_operation(&op).unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(), "op exhausted its retries");
+        assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_eq!(requests[3].method, "DELETE");
+        assert_eq!(requests[3].path, "/api/v1/files/server-file-1");
+    }
+
+    #[test]
+    fn flow7_snapshot_skips_new_is_uploading_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let mut conflicts = Vec::new();
+        let row = serde_json::json!({
+            "id": "partial-upload-1",
+            "parent_id": null,
+            "name": "resume.bin",
+            "size_bytes": 50331655,
+            "is_folder": false,
+            "is_uploading": true,
+            "updated_at": 100
+        });
+        let resolved = process_metadata_row(&bridge, &row, "", 200, RowSource::Snapshot, &mut conflicts).unwrap();
+        assert!(resolved.is_none());
+        assert!(
+            bridge.db.get_file("partial-upload-1").unwrap().is_none(),
+            "an in-progress upload has no content yet and must not become a placeholder"
+        );
     }
 
     #[test]

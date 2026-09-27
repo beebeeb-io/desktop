@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  BILLING_URL,
   command,
   commandUnavailableLabel,
   desktopListFileVersions,
   desktopRestoreFileVersion,
+  forceReauth,
   formatBytes,
+  openUrl,
   resolveUploadReview,
   restoreVersionId,
+  reviewEntryAction,
   type FileVersionEntry,
   type SyncStatus,
   type UploadReviewChoice,
   type VersionConflictEntry,
 } from '../desktopApi'
 import { useToast } from '../windows/ui'
-import { ReviewEntryActions, UPLOAD_REVIEW_LABELS } from './ReviewEntryActions'
+import { ReviewEntryActions, UPLOAD_REVIEW_LABELS, uploadReviewChoices } from './ReviewEntryActions'
 
 function formatTimestamp(value: string | number | null | undefined): string {
   if (typeof value === 'number') {
@@ -166,6 +170,21 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     })
   }
 
+  const signInAgain = async () => {
+    // Task 1546 Codex round 2, finding 2: must clear the expired session
+    // BEFORE opening onboarding, or onboarding fast-forwards an "unlocked,
+    // configured" user straight past the sign-in form — `forceReauth` does
+    // both steps in the right order.
+    const result = await forceReauth()
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open sign-in',
+        message: result.unsupported ? commandUnavailableLabel('open_onboarding_window') : result.reason,
+      })
+    }
+  }
+
   const restoreVersion = async (version: FileVersionEntry) => {
     if (!selectedEntry) return
     const versionId = restoreVersionId(version)
@@ -256,13 +275,38 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                     <span className="row-detail">{entry.detail}</span>
                   </span>
                 </button>
-                <ReviewEntryActions
-                  entry={entry}
-                  busy={resolving?.id === entry.id ? resolving.choice : null}
-                  confirmingDiscard={confirmDiscardId === entry.id}
-                  onOpenConflict={(target) => void openConflict(target)}
-                  onResolve={(target, choice) => void resolveReview(target, choice)}
-                />
+                {entry.action === 'open_conflict' || uploadReviewChoices(entry).length > 0 ? (
+                  <ReviewEntryActions
+                    entry={entry}
+                    busy={resolving?.id === entry.id ? resolving.choice : null}
+                    confirmingDiscard={confirmDiscardId === entry.id}
+                    onOpenConflict={(target) => void openConflict(target)}
+                    onResolve={(target, choice) => void resolveReview(target, choice)}
+                  />
+                ) : (
+                  (() => {
+                    // Falls through here for kinds ReviewEntryActions doesn't
+                    // handle (no `resolve_upload_review` choices offered):
+                    // quota_failure -> Upgrade, auth_failure -> Sign in again.
+                    // open_conflict and review_upload-with-resolutions are
+                    // handled above so ReviewEntryActions stays the single
+                    // source of truth for the daemon-driven resolve flow.
+                    const reviewAction = reviewEntryAction(entry)
+                    if (!reviewAction) return null
+                    if (reviewAction.kind === 'upgrade') {
+                      return (
+                        <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
+                          {reviewAction.label}
+                        </button>
+                      )
+                    }
+                    return (
+                      <button className="button amber" onClick={() => void signInAgain()}>
+                        {reviewAction.label}
+                      </button>
+                    )
+                  })()
+                )}
               </div>
             ))}
           </div>
