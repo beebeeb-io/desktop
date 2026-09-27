@@ -9068,4 +9068,54 @@ mod tests {
         );
         assert!(conflicts.is_empty());
     }
+
+    #[test]
+    fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
+        // apply_metadata_only_op_to_local_row's third property (PR #59 review):
+        // a rename/move op whose new_name_encrypted blob fails to decrypt (wrong
+        // key, corrupted envelope, legacy format never migrated) must NEVER blank
+        // a Local row's path. It must leave the row exactly as it was and
+        // schedule a re-snapshot so the next authoritative sweep recovers the
+        // real name — never covered by a dedicated test until now.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let file = "bad00000-0000-4000-8000-000000000004";
+        seed_local_with_hash(&bridge, file, "notes.txt");
+
+        // Drain any resnapshot flag left over from seeding so the assertion
+        // below is caused by THIS op, not incidental setup.
+        bridge.db().take_needs_resnapshot().unwrap();
+
+        let conflicts = apply_batch(
+            &bridge,
+            dir.path(),
+            &[(
+                51,
+                "file_rename",
+                serde_json::json!({ "id": file, "new_name_encrypted": "not-a-valid-encrypted-blob" }),
+            )],
+        );
+
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(
+            row.path, "notes.txt",
+            "an undecryptable new name must never blank or replace the existing path"
+        );
+        assert_eq!(row.status, FileStatus::Local);
+        assert_eq!(
+            row.content_hash.as_deref(),
+            Some("local-hash-abc"),
+            "an unresolvable rename must not disturb the content anchor either"
+        );
+        assert_eq!(
+            row.remote_updated_at, 10,
+            "an unresolvable rename must not touch the content freshness clock"
+        );
+        assert!(
+            bridge.db().take_needs_resnapshot().unwrap(),
+            "an unresolvable name must schedule a re-snapshot so the real name is recovered"
+        );
+        assert!(conflicts.is_empty());
+    }
 }
