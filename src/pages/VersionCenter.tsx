@@ -8,13 +8,16 @@ import {
   forceReauth,
   formatBytes,
   openUrl,
+  resolveUploadReview,
   restoreVersionId,
   reviewEntryAction,
   type FileVersionEntry,
   type SyncStatus,
+  type UploadReviewChoice,
   type VersionConflictEntry,
 } from '../desktopApi'
 import { useToast } from '../windows/ui'
+import { ReviewEntryActions, UPLOAD_REVIEW_LABELS, uploadReviewChoices } from './ReviewEntryActions'
 
 function formatTimestamp(value: string | number | null | undefined): string {
   if (typeof value === 'number') {
@@ -62,6 +65,9 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   const [notice, setNotice] = useState<string | null>(null)
   const [versionNotice, setVersionNotice] = useState<string | null>(null)
   const [restoring, setRestoring] = useState<string | null>(null)
+  const [resolving, setResolving] = useState<{ id: string; choice: UploadReviewChoice } | null>(null)
+  const [confirmDiscardId, setConfirmDiscardId] = useState<string | null>(null)
+  const [localRefresh, setLocalRefresh] = useState(0)
 
   const selectedEntry = selected ?? entries[0] ?? null
 
@@ -91,7 +97,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     return () => {
       cancelled = true
     }
-  }, [refreshSignal])
+  }, [refreshSignal, localRefresh])
 
   useEffect(() => {
     let cancelled = false
@@ -130,6 +136,38 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
         message: result.unsupported ? commandUnavailableLabel('open_conflict_window') : result.reason,
       })
     }
+  }
+
+  const resolveReview = async (entry: VersionConflictEntry, choice: UploadReviewChoice) => {
+    if (!entry.op_id) return
+    if (choice === 'discard' && confirmDiscardId !== entry.id) {
+      setConfirmDiscardId(entry.id)
+      return
+    }
+    setConfirmDiscardId(null)
+    setResolving({ id: entry.id, choice })
+    const result = await resolveUploadReview(entry.op_id, choice)
+    setResolving(null)
+    if (result.ok) {
+      showToast({
+        variant: 'success',
+        title: `${UPLOAD_REVIEW_LABELS[choice]}: ${entry.file_name}`,
+        message:
+          choice === 'keep_both'
+            ? 'Your edit is uploading as a separate copy named after this device.'
+            : choice === 'keep_mine'
+              ? 'Your edit is queued as the newest version. The other version stays in version history.'
+              : 'Your queued edit was discarded. The file follows the server version.',
+      })
+      setLocalRefresh((value) => value + 1)
+      return
+    }
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t resolve this edit',
+      message: result.unsupported ? commandUnavailableLabel('resolve_upload_review') : result.reason,
+      durationMs: 9000,
+    })
   }
 
   const signInAgain = async () => {
@@ -182,8 +220,9 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
         <div>
           <h1 className="page-title">Versions & conflicts</h1>
           <p className="page-copy">
-            Desktop writes create server-side versions. Stale-base edits, upload failures, quota
-            errors, and restore actions stay visible here until the daemon can finish them.
+            Desktop writes create server-side versions. When another device saves first, your edit is
+            kept as a separate copy. Upload failures, quota errors, and restore actions stay visible
+            here until the daemon can finish them.
           </p>
         </div>
         <span className="status-pill">
@@ -208,7 +247,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
         <div className="metric">
           <div className="metric-label">Stale-base edits</div>
           <div className="metric-value">{metrics.stale}</div>
-          <div className="metric-detail">Local bytes preserved for review</div>
+          <div className="metric-detail">Edits being kept as a separate copy</div>
         </div>
       </div>
 
@@ -236,29 +275,38 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                     <span className="row-detail">{entry.detail}</span>
                   </span>
                 </button>
-                {(() => {
-                  const reviewAction = reviewEntryAction(entry)
-                  if (!reviewAction) return null
-                  if (reviewAction.kind === 'open_conflict') {
+                {entry.action === 'open_conflict' || uploadReviewChoices(entry).length > 0 ? (
+                  <ReviewEntryActions
+                    entry={entry}
+                    busy={resolving?.id === entry.id ? resolving.choice : null}
+                    confirmingDiscard={confirmDiscardId === entry.id}
+                    onOpenConflict={(target) => void openConflict(target)}
+                    onResolve={(target, choice) => void resolveReview(target, choice)}
+                  />
+                ) : (
+                  (() => {
+                    // Falls through here for kinds ReviewEntryActions doesn't
+                    // handle (no `resolve_upload_review` choices offered):
+                    // quota_failure -> Upgrade, auth_failure -> Sign in again.
+                    // open_conflict and review_upload-with-resolutions are
+                    // handled above so ReviewEntryActions stays the single
+                    // source of truth for the daemon-driven resolve flow.
+                    const reviewAction = reviewEntryAction(entry)
+                    if (!reviewAction) return null
+                    if (reviewAction.kind === 'upgrade') {
+                      return (
+                        <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
+                          {reviewAction.label}
+                        </button>
+                      )
+                    }
                     return (
-                      <button className="button" onClick={() => void openConflict(entry)}>
+                      <button className="button amber" onClick={() => void signInAgain()}>
                         {reviewAction.label}
                       </button>
                     )
-                  }
-                  if (reviewAction.kind === 'upgrade') {
-                    return (
-                      <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
-                        {reviewAction.label}
-                      </button>
-                    )
-                  }
-                  return (
-                    <button className="button amber" onClick={() => void signInAgain()}>
-                      {reviewAction.label}
-                    </button>
-                  )
-                })()}
+                  })()
+                )}
               </div>
             ))}
           </div>

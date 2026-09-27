@@ -37,7 +37,7 @@ The [beebeeb](https://beebeeb.io) desktop client gives you a native sync folder 
 
 - **Automatic sync** — files in your beebeeb folder are encrypted and synced in the background
 - **Selective sync** — choose which folders sync locally; the rest stay as online-only placeholders until you open them
-- **Conflict resolution** — never silently drops a version. Default: keep both, rename the older version as `file (Device, HH:MM).ext`
+- **Conflict resolution** — never silently drops a version. Default: keep both — when another device saves first, your edit is kept as `file (Device, YYYY-MM-DD HH.MM).ext` next to the newer version (Versions & conflicts also offers Keep mine or Discard)
 - **Online-only files** — FUSE mount on Linux, native placeholder APIs on macOS and Windows
 - **Zero-knowledge encryption** — per-file keys derived via HKDF; the server stores only ciphertext
 - **Native shell, not Electron** — Tauri uses the OS WebView (~10 MB binaries vs ~150 MB), with a Rust backend that imports `core` directly
@@ -85,7 +85,7 @@ To develop against the real web client instead of the placeholder, run `repos/we
 The sync engine (`beebeeb-sync`, from the [core](https://github.com/beebeeb-io/core) repo) handles:
 
 - **File watching** — debounced at 100 ms; ignores `.DS_Store`, `Thumbs.db`, and temp files
-- **Conflict resolution** — never silently drops data. Default strategy is `KeepBoth`: the older version is renamed `file (Device, HH:MM).ext`
+- **Conflict resolution** — never silently drops data. Default strategy is `KeepBoth`: the copy that lost the race is kept as `file (Device, YYYY-MM-DD HH.MM).ext` (a `.` instead of `:` because `:` is not allowed in Windows file names). This covers both a detected conflict and an upload the server rejects because its base version is stale
 - **Selective sync** — the vault stays remote by default. Folders marked locally available are hydrated and kept in sync; other items remain online-only placeholders until opened
 
 ## Security

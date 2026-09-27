@@ -58,7 +58,7 @@ See `HiSelectiveSync` in `design/hifi/hifi-desktop.jsx`.
 
 Side-by-side diff view showing both versions with change summaries.
 NEVER silently drops a version -- loser is kept as
-`file (Device, HH:MM).ext`.
+`file (Device, YYYY-MM-DD HH.MM).ext`.
 See `HiConflict` in `design/hifi/hifi-desktop.jsx`.
 
 ## First-run wizard

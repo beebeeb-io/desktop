@@ -153,6 +153,38 @@ fn take_engine_delete_suppressed(path: &Path) -> bool {
     }
 }
 
+// ── Engine-rename suppression (flow-7 STEP 7 keep-both) ────────────────────────
+//
+// Keep Both renames the sync-root file that holds a losing edit to its
+// device-named copy (`file (Device, YYYY-MM-DD HH.MM).ext`) and hydrates the
+// server's version back into the original path. On Windows that rename of a
+// placeholder fires `NOTIFY_RENAME_COMPLETION`, which would reach
+// [`handle_rename`] while the ORIGINAL row still sits at the source path — and
+// queue a server RenameFile of the ORIGINAL file to the copy's name. The engine
+// registers the source path here before it renames; [`dispatch_rename_event`]
+// consumes the entry and drops the echo. Same TTL sweep as the delete set.
+static ENGINE_RENAME_SUPPRESS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+
+fn engine_rename_suppress() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+    ENGINE_RENAME_SUPPRESS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register `source` as an ENGINE-ORIGINATED rename (keep-both) so the watcher
+/// does not propagate it to the server as a user rename.
+pub fn suppress_engine_rename(source: &Path) {
+    if let Ok(mut set) = engine_rename_suppress().lock() {
+        set.insert(source.to_path_buf(), Instant::now());
+    }
+}
+
+/// Consume a [`suppress_engine_rename`] entry for `source`; `true` = engine echo.
+fn take_engine_rename_suppressed(source: &Path) -> bool {
+    match engine_rename_suppress().lock() {
+        Ok(mut set) => set.remove(source).is_some(),
+        Err(_) => false,
+    }
+}
+
 /// Drop suppression entries older than this. A registered engine delete whose
 /// NOTIFY never arrives (revert/remove failed, or the OS coalesced the event)
 /// must not linger and swallow a genuine LATER user delete of the same path.
@@ -162,8 +194,11 @@ const ENGINE_SUPPRESS_TTL: Duration = Duration::from_secs(30);
 /// debounce loop's periodic tick so the set can never grow unbounded or shadow a
 /// real user delete indefinitely.
 fn prune_stale_engine_suppressions() {
+    let now = Instant::now();
     if let Ok(mut set) = engine_delete_suppress().lock() {
-        let now = Instant::now();
+        set.retain(|_, registered| now.duration_since(*registered) < ENGINE_SUPPRESS_TTL);
+    }
+    if let Ok(mut set) = engine_rename_suppress().lock() {
         set.retain(|_, registered| now.duration_since(*registered) < ENGINE_SUPPRESS_TTL);
     }
 }
@@ -342,7 +377,7 @@ async fn debounce_loop(
                         // OLD path; the NEW path's close (if any) will arrive on
                         // its own event.
                         pending.remove(&source);
-                        handle_rename(&bridge, &sync_root, &source, &target).await;
+                        dispatch_rename_event(&bridge, &sync_root, &source, &target).await;
                     }
                     // Sender dropped (handle gone) — exit.
                     None => break,
@@ -793,6 +828,21 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
     }
 }
 
+/// Route a rename NOTIFY: an engine-originated keep-both rename (registered via
+/// [`suppress_engine_rename`]) is dropped; everything else is a user rename.
+pub(crate) async fn dispatch_rename_event(
+    bridge: &EngineBridge,
+    sync_root: &std::path::Path,
+    source: &std::path::Path,
+    target: &std::path::Path,
+) {
+    if take_engine_rename_suppressed(source) {
+        tracing::debug!("upload driver: dropping engine-originated rename (keep both)");
+        return;
+    }
+    handle_rename(bridge, sync_root, source, target).await;
+}
+
 /// A local rename/move fired. Resolve the SOURCE path to a known server file and
 /// enqueue a metadata update describing its new name + new parent. The
 /// `queue_finder_modify` metadata path already maps a present `parent_id`
@@ -926,6 +976,26 @@ mod tests {
             !take_engine_delete_suppressed(p),
             "a stale suppression entry must be pruned so a later user delete propagates"
         );
+    }
+
+    #[test]
+    fn engine_rename_suppression_is_consumed_once_and_pruned() {
+        // Keep-both registers the SOURCE of its own rename; the first echo is
+        // dropped, a later user rename of the same path propagates, and an entry
+        // whose echo never arrives is swept after the TTL.
+        let p = std::path::Path::new("/sync/keep-both-rename-unique-a.txt");
+        assert!(!take_engine_rename_suppressed(p));
+        suppress_engine_rename(p);
+        assert!(take_engine_rename_suppressed(p), "first echo is suppressed");
+        assert!(!take_engine_rename_suppressed(p), "consumed once");
+
+        let stale = std::path::Path::new("/sync/keep-both-rename-unique-b.txt");
+        {
+            let mut set = engine_rename_suppress().lock().unwrap();
+            set.insert(stale.to_path_buf(), Instant::now() - ENGINE_SUPPRESS_TTL - Duration::from_secs(1));
+        }
+        prune_stale_engine_suppressions();
+        assert!(!take_engine_rename_suppressed(stale), "stale entry is pruned");
     }
 
     /// Collect every regular file the enumeration scan's [`walk_dir`] visits,

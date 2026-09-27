@@ -76,7 +76,7 @@ See `HiWindowsSettings` in `design/hifi/hifi-desktop.jsx`.
 
 - **Selective sync:** folders can be online-only (placeholders until opened)
 - **Conflict resolution:** NEVER silently drop a version.
-  Default: KeepBoth, rename loser as `file (Device, HH:MM).ext`
+  Default: KeepBoth, keep loser as `file (Device, YYYY-MM-DD HH.MM).ext`
 - **Debounced file watching** (100ms) -- ignores Thumbs.db, desktop.ini,
   temp files
 - **Zero-knowledge:** every byte on disk is ciphertext; Beebeeb servers

@@ -162,7 +162,12 @@ release-version indirection and sends `CARGO_PKG_VERSION` directly).
 `src-tauri` is expected to own the background Rust sync runtime and call shared
 core/sync logic instead of duplicating protocol behavior in TypeScript.
 Conflict resolution policy: never silently drop a version — default `KeepBoth`
-(rename loser as `file (Device, HH:MM).ext`). File watcher debounce: 100ms.
+(keep the loser as `file (Device, YYYY-MM-DD HH.MM).ext` — `engine_bridge::keep_both_copy_name`;
+`.` not `:` because `:` is illegal in Windows file names). A replacement upload the server
+rejects with `409 stale base` is resolved the same way automatically
+(`EngineBridge::keep_both_after_stale_base`); the Versions & conflicts center offers
+Keep both / Keep mine / Discard for queued replacement uploads (`resolve_upload_review`).
+File watcher debounce: 100ms.
 The backend must create a new server version for Finder writes when the server
 versioning contract supports it.
 
