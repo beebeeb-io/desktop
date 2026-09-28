@@ -80,13 +80,36 @@ ENTITLEMENTS="BeebeebFileProvider/BeebeebFileProvider.entitlements"
 rm -rf "$OUT_DIR"
 mkdir -p "$MACOS_DIR"
 
+# Task 1524 issue 5 (P0 crash, 2026-09-28): an app extension has NO main() of
+# its own — Xcode never emits one for an extension target, and Apple's own App
+# Store validator says so explicitly (ITMS-90898: "Please make sure the build
+# system passes '-e _NSExtensionMain' to the linker for the ... extension
+# bundle, or the extension will not function"). This repo used to compile a
+# hand-written BeebeebFileProvider/main.swift that called the real
+# NSExtensionMain via @_silgen_name and then exit()'d. On macOS 26 that
+# indirection recurses forever: NSExtensionMain now delegates into
+# ExtensionFoundation's EXExtensionMain, which re-invokes the process's real
+# Mach-O entry point as part of its own bootstrap — and since our entry point
+# was our own `_main` (not Foundation's `_NSExtensionMain`), that re-invocation
+# landed back in our main.swift, which called NSExtensionMain again, forever
+# (confirmed via crash report + `nm -m`/`otool -l` inspection: entryoff
+# pointed exactly at the locally-defined `_main` symbol, not the imported
+# `_NSExtensionMain` one — verification-evidence/1524/issue5-*).
+#
+# `-parse-as-library`: none of BeebeebFileProvider/*.swift is a `main.swift`
+# or `@main` type anymore, so nothing here should synthesize a `_main` at all.
+# `-Xlinker -e -Xlinker _NSExtensionMain`: sets the Mach-O entry point
+# directly to Foundation's exported `_NSExtensionMain`, exactly as Xcode does
+# for every extension target and as the ITMS-90898 message above documents.
 xcrun swiftc \
   -target "$TARGET_TRIPLE" \
   -module-name "$MODULE_NAME" \
+  -parse-as-library \
   -framework FileProvider \
   -framework Foundation \
   -framework UniformTypeIdentifiers \
   BeebeebFileProvider/*.swift \
+  -Xlinker -e -Xlinker _NSExtensionMain \
   -o "$MACOS_DIR/$APP_EXE"
 
 python3 - <<PY

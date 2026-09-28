@@ -11,8 +11,15 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { submitPassword, submitTotpCode } from './onboardingSignIn'
+import { classifyFinderInstallResult, shouldRetryAfterUserEnabledPoll } from './finderInstallCard'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
+
+// Task 1524 Issue 4: how often the "turned off in System Settings" card polls
+// `finder_domain_user_enabled` to notice the user has re-enabled Beebeeb and
+// continue installation automatically. Stopped on unmount and the moment the
+// card is no longer shown (see the effect in `FinderInstallStep`).
+const USER_ENABLED_POLL_INTERVAL_MS = 2000
 
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
 const RECOVERY_WORD_COUNT = 12
@@ -456,6 +463,12 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   // unlock" escape hatch. See the 1255 task file for the full ruling and the
   // `escapeHatchVisible: true` evidence.
   const [message, setMessage] = useState<string | null>(null)
+  // Task 1524 Issue 4 — true while the Beebeeb File Provider domain exists but is
+  // disabled by the user in System Settings. Drives the "open System Settings" button
+  // and the poll effect below; independent of `message` (which is macOS-safe to keep
+  // set here since the "Continue without install" escape hatch is already `!isMacos`
+  // gated, see the comment above it).
+  const [userDisabled, setUserDisabled] = useState(false)
 
   useEffect(() => {
     command<DesktopPlatform>('desktop_platform').then((result) => {
@@ -465,7 +478,15 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
       if (result.ok) setSyncRoot(result.value)
     })
     command<FinderInstallState>('finder_location_state').then((result) => {
-      if (result.ok) setFinderPath(result.value.path ?? null)
+      if (!result.ok) return
+      setFinderPath(result.value.path ?? null)
+      // Reflect a previously-observed "turned off in System Settings" state on load
+      // (e.g. the user left onboarding, then came back) rather than only detecting it
+      // after a fresh `install_finder_location` attempt.
+      if (!result.value.installed && result.value.reason_category === 'user_disabled') {
+        setMessage(result.value.last_error ?? null)
+        setUserDisabled(true)
+      }
     })
   }, [])
 
@@ -484,17 +505,54 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const install = useCallback(async () => {
     setBusy(true)
     setMessage(null)
+    setUserDisabled(false)
     const result = await command<FinderInstallState>('install_finder_location', {
       path: platform === 'macos' ? null : syncRoot,
     })
     setBusy(false)
-    if (result.ok) {
-      setFinderPath(result.value.path ?? null)
+    // Task 1524 Issue 4: `result.ok` alone is NOT "installed" — a user-disabled
+    // domain also comes back as `Ok`, with `reason_category: "user_disabled"`, so the
+    // real question is `outcome.kind`, not `result.ok`. See finderInstallCard.ts.
+    const outcome = classifyFinderInstallResult(result)
+    if (outcome.kind === 'installed') {
+      setFinderPath(outcome.path)
       onDone()
       return
     }
-    setMessage(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
+    if (outcome.kind === 'user_disabled') {
+      setMessage(outcome.message)
+      setUserDisabled(true)
+      return
+    }
+    setMessage(!result.ok && result.unsupported ? commandUnavailableLabel('install_finder_location') : outcome.message)
   }, [onDone, platform, syncRoot])
+
+  // Task 1524 Issue 4: while the domain is disabled, poll whether the user has
+  // re-enabled it in System Settings and, the moment they have, retry the install
+  // automatically — the user only has to flip the switch, not come back and click
+  // "Install Finder location" again. Stops on unmount or once `userDisabled` clears
+  // (install succeeded, or a fresh attempt started).
+  useEffect(() => {
+    if (!userDisabled) return
+    let cancelled = false
+    const interval = setInterval(() => {
+      command<boolean | null>('finder_domain_user_enabled').then((poll) => {
+        if (cancelled) return
+        if (shouldRetryAfterUserEnabledPoll(poll)) {
+          setUserDisabled(false)
+          void install()
+        }
+      })
+    }, USER_ENABLED_POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [userDisabled, install])
+
+  const openSystemSettings = useCallback(async () => {
+    await command<void>('open_login_items_and_extensions_settings')
+  }, [])
 
   const continueWithoutInstall = useCallback(async () => {
     setBusy(true)
@@ -535,6 +593,15 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
         <button className="button amber" onClick={install} disabled={busy}>
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
+        {/* Task 1524 Issue 4 — only reachable on macOS, once install_finder_location
+            reports the domain is disabled in System Settings. The poll effect above
+            clears `userDisabled` and retries automatically once the user flips it back
+            on, so this button is a shortcut to the right pane, not a required step. */}
+        {userDisabled && (
+          <button className="button" onClick={openSystemSettings} disabled={busy}>
+            Open Login Items &amp; Extensions
+          </button>
+        )}
         {/* This escape hatch EXISTS ONLY while `message` is set — it is the gate described
             on the `message` state above. Removing the inline error removes this button.
             Read that comment before refactoring either one. */}
