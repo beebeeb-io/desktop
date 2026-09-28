@@ -78,8 +78,54 @@ pub fn decide_install_step(lookup: &Result<DomainUserEnabledState, String>) -> I
     }
 }
 
-pub fn status() -> Result<bool, String> {
-    Ok(call_bridge(beebeeb_fp_status)? == 1)
+/// Result of a [`status()`] check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusOutcome {
+    /// The domain is registered, enabled, and stabilized -- Finder integration is live.
+    Installed,
+    /// No Beebeeb domain is registered at all (a fresh install, or after a clean
+    /// `removeDomain`). Not an error.
+    NotInstalled,
+    /// The domain is registered but the user (or macOS) has disabled it in System
+    /// Settings -- Issue 4's condition (task 1524), detected WITHOUT waiting for
+    /// stabilization, which would never complete for a disabled domain.
+    UserDisabled,
+}
+
+/// Pure orchestration for [`status()`], with the live `beebeeb_fp_status` FFI call
+/// injected as `live_status` so this is unit-testable without a live
+/// `NSFileProviderManager` (task 1524 Issue 4, status-path leg -- PR #63 Codex review,
+/// `Onboarding.tsx:488`).
+///
+/// Uses the SAME pure decision ([`decide_install_step`]) as `install()`: a disabled
+/// domain short-circuits to [`StatusOutcome::UserDisabled`] WITHOUT calling
+/// `live_status` at all. That call is exactly the 2s
+/// `waitForStabilizationWithCompletionHandler` that used to always time out for a
+/// disabled domain (`beebeeb_fp_status`'s old unconditional wait) -- surfacing a
+/// fresh, generic "timed out" runtime error that `finder_install_state_from_config`
+/// (lib.rs) then preferred over any persisted `user_disabled` state, so reloading the
+/// onboarding card after leaving and coming back showed the stale timeout copy
+/// instead of the disabled-domain card. Short-circuiting here means the runtime error
+/// `status()` can still produce is only ever a GENUINE stabilization timeout (the
+/// domain is enabled but never came up) -- see [`decide_install_step`]'s own doc
+/// comment for why `Enabled`/`NotRegistered`/lookup-`Err` all fall through to the
+/// normal wait/timeout path.
+fn status_outcome_from(
+    user_enabled: &Result<DomainUserEnabledState, String>,
+    live_status: impl FnOnce() -> Result<bool, String>,
+) -> Result<StatusOutcome, String> {
+    if decide_install_step(user_enabled) == InstallDecision::UserDisabled {
+        return Ok(StatusOutcome::UserDisabled);
+    }
+    Ok(if live_status()? {
+        StatusOutcome::Installed
+    } else {
+        StatusOutcome::NotInstalled
+    })
+}
+
+pub fn status() -> Result<StatusOutcome, String> {
+    status_outcome_from(&domain_user_enabled_state(), || Ok(call_bridge(beebeeb_fp_status)? == 1))
 }
 
 pub fn visible_url() -> Result<Option<String>, String> {
@@ -249,6 +295,66 @@ mod tests {
         assert_eq!(
             decide_install_step(&Err("getDomainsWithCompletionHandler failed".to_string())),
             InstallDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn status_outcome_disabled_short_circuits_without_calling_live_status() {
+        // The whole point of the status-path fix (PR #63 Codex review,
+        // Onboarding.tsx:488): a disabled domain must never reach the
+        // stabilization-wait FFI call at all, not just resolve to the same
+        // answer eventually.
+        let called = std::cell::Cell::new(false);
+        let result = status_outcome_from(&Ok(DomainUserEnabledState::Disabled), || {
+            called.set(true);
+            Ok(true)
+        });
+        assert_eq!(result, Ok(StatusOutcome::UserDisabled));
+        assert!(!called.get(), "live_status must not be called for a disabled domain");
+    }
+
+    #[test]
+    fn status_outcome_enabled_proceeds_to_live_status() {
+        assert_eq!(
+            status_outcome_from(&Ok(DomainUserEnabledState::Enabled), || Ok(true)),
+            Ok(StatusOutcome::Installed)
+        );
+        assert_eq!(
+            status_outcome_from(&Ok(DomainUserEnabledState::Enabled), || Ok(false)),
+            Ok(StatusOutcome::NotInstalled)
+        );
+    }
+
+    #[test]
+    fn status_outcome_not_registered_proceeds_to_live_status() {
+        // A fresh install (domain doesn't exist yet) still goes through the normal
+        // check -- NotRegistered is not itself Issue 4's condition.
+        assert_eq!(
+            status_outcome_from(&Ok(DomainUserEnabledState::NotRegistered), || Ok(false)),
+            Ok(StatusOutcome::NotInstalled)
+        );
+    }
+
+    #[test]
+    fn status_outcome_lookup_error_falls_back_to_live_status() {
+        // Never invent a UserDisabled verdict from an unreliable userEnabled lookup --
+        // fall back to the pre-existing live-status/timeout behavior.
+        assert_eq!(
+            status_outcome_from(&Err("getDomainsWithCompletionHandler failed".to_string()), || Ok(true)),
+            Ok(StatusOutcome::Installed)
+        );
+    }
+
+    #[test]
+    fn status_outcome_propagates_a_genuine_live_status_error() {
+        // When the domain IS enabled but the live stabilization wait itself times out
+        // (a real, unrelated failure), that error must still surface unchanged --
+        // short-circuiting only ever applies to the disabled case.
+        assert_eq!(
+            status_outcome_from(&Ok(DomainUserEnabledState::Enabled), || Err(
+                "Timed out waiting for the Beebeeb File Provider domain to become available".to_string()
+            )),
+            Err("Timed out waiting for the Beebeeb File Provider domain to become available".to_string())
         );
     }
 }

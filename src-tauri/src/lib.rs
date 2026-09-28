@@ -1947,13 +1947,29 @@ async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sy
     }
 }
 
+/// Cross-platform (non-`cfg`-gated) mirror of `macos_file_provider::StatusOutcome`.
+/// `finder_location_state` matches on this directly, so it compiles and reads the same
+/// on every target even though only the macOS arm of `file_provider_installed` can
+/// ever actually produce `UserDisabled` (task 1524, Issue 4 -- status-path leg, PR #63
+/// Codex review, `Onboarding.tsx:488`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileProviderStatusOutcome {
+    Installed,
+    NotInstalled,
+    UserDisabled,
+}
+
 #[cfg(target_os = "macos")]
-fn file_provider_installed() -> Result<bool, String> {
-    macos_file_provider::status()
+fn file_provider_installed() -> Result<FileProviderStatusOutcome, String> {
+    match macos_file_provider::status()? {
+        macos_file_provider::StatusOutcome::Installed => Ok(FileProviderStatusOutcome::Installed),
+        macos_file_provider::StatusOutcome::NotInstalled => Ok(FileProviderStatusOutcome::NotInstalled),
+        macos_file_provider::StatusOutcome::UserDisabled => Ok(FileProviderStatusOutcome::UserDisabled),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn file_provider_installed() -> Result<bool, String> {
+fn file_provider_installed() -> Result<FileProviderStatusOutcome, String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
@@ -2083,11 +2099,32 @@ fn open_login_items_and_extensions_settings() -> Result<(), String> {
 fn finder_location_state() -> Result<FinderInstallState, String> {
     let mut cfg = DesktopConfig::load()?;
     match file_provider_installed() {
-        Ok(installed) => {
-            if installed && cfg.finder_install_status.as_deref() != Some("installed") {
+        Ok(FileProviderStatusOutcome::Installed) => {
+            if cfg.finder_install_status.as_deref() != Some("installed") {
                 persist_finder_install_result(&mut cfg, true, None)?;
             }
-            Ok(finder_install_state_from_config(&cfg, installed, None))
+            Ok(finder_install_state_from_config(&cfg, true, None))
+        }
+        Ok(FileProviderStatusOutcome::NotInstalled) => Ok(finder_install_state_from_config(&cfg, false, None)),
+        Ok(FileProviderStatusOutcome::UserDisabled) => {
+            // Issue 4's status-path leg (PR #63 Codex review, Onboarding.tsx:488): detected
+            // live here, WITHOUT waiting for stabilization (macos_file_provider::status
+            // short-circuits via the same decide_install_step used by install()) -- so this
+            // is a fresh runtime observation, not a stale persisted one. Pass it through as
+            // `runtime_error` using the SAME crafted message `install_finder_location`
+            // persists, so `finder_install_state_from_config`'s existing
+            // "runtime_error always wins over cfg" precedence gives it priority over
+            // whatever is currently persisted (e.g. a stale "timeout" category from before
+            // this fix), and `classify_finder_install_error` maps it back to
+            // "user_disabled" identically to a fresh install attempt. A GENUINE
+            // stabilization timeout (the domain is enabled but never comes up) still falls
+            // through to the `Err(error)` arm below unchanged, so it still shows timeout
+            // copy, never this one.
+            Ok(finder_install_state_from_config(
+                &cfg,
+                false,
+                Some(FINDER_USER_DISABLED_MESSAGE.to_string()),
+            ))
         }
         Err(error) => Ok(finder_install_state_from_config(&cfg, false, Some(error))),
     }
@@ -8865,6 +8902,58 @@ mod tests {
         assert_eq!(state.last_error.as_deref(), Some("Timed out waiting for setup"));
         assert_eq!(state.last_attempt_at, Some(42));
         assert_eq!(state.reason_category.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn fresh_user_disabled_runtime_result_beats_a_stale_persisted_timeout() {
+        // Task 1524 Issue 4, status-path leg (PR #63 Codex review, Onboarding.tsx:488):
+        // before the status-path fix, a remounted card that persisted a "timeout"
+        // category from an OLD attempt would keep showing that stale timeout even
+        // once a FRESH check correctly detected the domain is user-disabled. A fresh
+        // runtime_error must win.
+        let cfg = DesktopConfig {
+            finder_install_status: Some("error".to_string()),
+            finder_install_last_error: Some("Timed out waiting for the Beebeeb File Provider domain to become available".to_string()),
+            finder_install_last_attempt_at: Some(1),
+            finder_install_reason_category: Some("timeout".to_string()),
+            ..DesktopConfig::default()
+        };
+
+        let state = finder_install_state_from_config(&cfg, false, Some(FINDER_USER_DISABLED_MESSAGE.to_string()));
+
+        assert!(!state.installed);
+        assert_eq!(state.reason_category.as_deref(), Some("user_disabled"));
+        assert_eq!(state.last_error.as_deref(), Some(FINDER_USER_DISABLED_MESSAGE));
+    }
+
+    #[test]
+    fn fresh_genuine_timeout_beats_a_stale_persisted_user_disabled_state() {
+        // Reverse of the above: once the user has re-enabled the domain in System
+        // Settings and a later attempt hits a genuine, unrelated stabilization
+        // timeout, that fresh timeout must win over the old persisted
+        // "user_disabled" category -- it must NOT keep showing the stale
+        // disabled-domain card / System Settings button for a condition that no
+        // longer applies.
+        let cfg = DesktopConfig {
+            finder_install_status: Some("error".to_string()),
+            finder_install_last_error: Some(FINDER_USER_DISABLED_MESSAGE.to_string()),
+            finder_install_last_attempt_at: Some(1),
+            finder_install_reason_category: Some("user_disabled".to_string()),
+            ..DesktopConfig::default()
+        };
+
+        let state = finder_install_state_from_config(
+            &cfg,
+            false,
+            Some("Timed out waiting for the Beebeeb File Provider domain to become available".to_string()),
+        );
+
+        assert!(!state.installed);
+        assert_eq!(state.reason_category.as_deref(), Some("timeout"));
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("Timed out waiting for the Beebeeb File Provider domain to become available")
+        );
     }
 
     #[test]
