@@ -1397,7 +1397,12 @@ fn now_unix_seconds() -> i64 {
 
 fn classify_finder_install_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("provision") || lower.contains("entitlement") || lower.contains("app-group") {
+    if lower.contains("turned off in system settings") {
+        // Issue 4 (task 1524): a user-disabled File Provider domain, detected BEFORE
+        // any wait/timeout is attempted -- distinct from the generic "disabled" NSError
+        // case below, which comes from the OS itself mid-operation.
+        "user_disabled".to_string()
+    } else if lower.contains("provision") || lower.contains("entitlement") || lower.contains("app-group") {
         "provisioning".to_string()
     } else if lower.contains("disabled") || lower.contains("-2011") || lower.contains("sync is not enabled") {
         "disabled".to_string()
@@ -1952,13 +1957,34 @@ fn file_provider_installed() -> Result<bool, String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
+/// Cross-platform (non-`cfg`-gated) mirror of `macos_file_provider::InstallOutcome`.
+/// `install_finder_location` matches on this directly, so it compiles and reads the
+/// same on every target even though only the macOS arm of `install_file_provider_domain`
+/// can ever actually produce `UserDisabled` (task 1524, Issue 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileProviderInstallOutcome {
+    Installed,
+    UserDisabled,
+}
+
+/// Shown to the user (and persisted as `finder_install_last_error`) when Issue 4's
+/// condition is detected: the Beebeeb File Provider domain exists but the user (or
+/// macOS) has turned it off in System Settings, so waiting for it to come up would
+/// never succeed. `classify_finder_install_error` recognizes this exact copy and
+/// maps it to the `"user_disabled"` reason category the frontend switches on.
+const FINDER_USER_DISABLED_MESSAGE: &str = "Beebeeb is turned off in System Settings. Open Login \
+    Items & Extensions, turn on Beebeeb under File Providers, then try again.";
+
 #[cfg(target_os = "macos")]
-fn install_file_provider_domain() -> Result<(), String> {
-    macos_file_provider::install()
+fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> {
+    match macos_file_provider::install()? {
+        macos_file_provider::InstallOutcome::Installed => Ok(FileProviderInstallOutcome::Installed),
+        macos_file_provider::InstallOutcome::UserDisabled => Ok(FileProviderInstallOutcome::UserDisabled),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_file_provider_domain() -> Result<(), String> {
+fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
@@ -1980,6 +2006,77 @@ fn file_provider_visible_location() -> Result<Option<String>, String> {
 #[cfg(not(target_os = "macos"))]
 fn file_provider_visible_location() -> Result<Option<String>, String> {
     Ok(None)
+}
+
+/// `Some(true)` = the Beebeeb domain is user-enabled, `Some(false)` = the user (or
+/// macOS) has disabled it in System Settings, `None` = the domain isn't registered
+/// yet. Backs the `finder_domain_user_enabled` poll the "turned off in System
+/// Settings" onboarding card uses to notice when the user flips it back on.
+#[cfg(target_os = "macos")]
+fn file_provider_domain_user_enabled() -> Result<Option<bool>, String> {
+    match macos_file_provider::domain_user_enabled()? {
+        macos_file_provider::DomainUserEnabledState::Enabled => Ok(Some(true)),
+        macos_file_provider::DomainUserEnabledState::Disabled => Ok(Some(false)),
+        macos_file_provider::DomainUserEnabledState::NotRegistered => Ok(None),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_provider_domain_user_enabled() -> Result<Option<bool>, String> {
+    Err("File Provider is only available on macOS.".to_string())
+}
+
+#[tauri::command]
+fn finder_domain_user_enabled() -> Result<Option<bool>, String> {
+    file_provider_domain_user_enabled()
+}
+
+/// x-apple.systempreferences URL for the "Login Items & Extensions" pane (System
+/// Settings -> General -> Login Items & Extensions on macOS 13+/Ventura's System
+/// Settings rewrite onward), which lists File Providers -- the exact screen Issue 4's
+/// fix (task 1524) needs the user to open to re-enable the Beebeeb domain. No
+/// dedicated "File Providers" sub-anchor is documented anywhere, so this opens the
+/// pane itself; the user finds "File Providers" as one of its listed sections (the
+/// same path Guus's own screenshot showed: System Settings -> General -> Login Items
+/// & Extensions -> File Providers).
+///
+/// Source (cross-checked 2026-09-28, no official Apple reference exists for these
+/// URL schemes): <https://gist.github.com/rmcdongit/f66ff91e0dad78d4d6346a75ded4b751>
+/// and <https://github.com/jaywcjlove/SystemSettings-URLs-macOS>, both listing
+/// `x-apple.systempreferences:com.apple.LoginItems-Settings.extension` as this pane's
+/// stable bundle id since System Settings replaced System Preferences (macOS 13
+/// Ventura); still current as of macOS 15 Sequoia per the same sources.
+const MACOS_LOGIN_ITEMS_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
+/// Fallback used only if the deep link above fails to launch (e.g. a future macOS
+/// renames or removes that pane id) -- opens System Settings at its default pane.
+const MACOS_SYSTEM_SETTINGS_FALLBACK_URL: &str = "x-apple.systempreferences:";
+
+#[tauri::command]
+fn open_login_items_and_extensions_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let primary = std::process::Command::new("open")
+            .arg(MACOS_LOGIN_ITEMS_SETTINGS_URL)
+            .status();
+        if matches!(&primary, Ok(status) if status.success()) {
+            return Ok(());
+        }
+        std::process::Command::new("open")
+            .arg(MACOS_SYSTEM_SETTINGS_FALLBACK_URL)
+            .status()
+            .map_err(|e| format!("open System Settings: {e}"))
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("open System Settings exited with status {status}"))
+                }
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Only available on macOS.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -2020,10 +2117,22 @@ async fn install_finder_location(
     let mut cfg = DesktopConfig::load()?;
     let started_pending_engine = start_engine_for_pending_finder_install(app.clone(), &state, root.clone()).await?;
 
-    if let Err(error) = install_file_provider_domain() {
-        stop_pending_finder_install_engine(&state, started_pending_engine).await;
-        persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
-        return Err(error);
+    match install_file_provider_domain() {
+        Err(error) => {
+            stop_pending_finder_install_engine(&state, started_pending_engine).await;
+            persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
+            return Err(error);
+        }
+        Ok(FileProviderInstallOutcome::UserDisabled) => {
+            // Issue 4: do not wait, do not treat this as a "Continue without install"
+            // situation -- persist a distinct, classifiable reason so the frontend can
+            // show the real cause and offer the System Settings deep link instead of a
+            // generic error or a silent fall-through to no Finder integration at all.
+            stop_pending_finder_install_engine(&state, started_pending_engine).await;
+            persist_finder_install_result(&mut cfg, false, Some(FINDER_USER_DISABLED_MESSAGE.to_string()))?;
+            return Ok(finder_install_state_from_config(&cfg, false, None));
+        }
+        Ok(FileProviderInstallOutcome::Installed) => {}
     }
     if let Err(error) = persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await {
         stop_pending_finder_install_engine(&state, started_pending_engine).await;
@@ -7065,6 +7174,9 @@ pub fn run() {
             finder_location_state,
             install_finder_location,
             continue_without_finder_location,
+            // Task 1524 Issue 4 — user-disabled File Provider domain detection
+            finder_domain_user_enabled,
+            open_login_items_and_extensions_settings,
             // Windows shell integration (Cloud Files) — parallels the macOS finder cmds
             windows_shell_integration_state,
             install_windows_shell_integration,
@@ -8316,7 +8428,8 @@ fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, DesktopMenuAction, DesktopMenuView, MENU_CHECK_UPDATES_ID, MENU_HELP_DOCS_ID, MENU_HELP_REPORT_ID,
+        AppState, DesktopMenuAction, DesktopMenuView, FINDER_USER_DISABLED_MESSAGE, MENU_CHECK_UPDATES_ID,
+        MENU_HELP_DOCS_ID, MENU_HELP_REPORT_ID,
         MENU_HELP_SHORTCUTS_ID, MENU_HELP_STATUS_ID, MENU_NEW_FOLDER_ID, MENU_OPEN_FOLDER_ID, MENU_OPEN_WEB_APP_ID,
         MENU_PREFERENCES_ID, MENU_QUIT_ID, MENU_SETTINGS_ID, MENU_SIGN_OUT_ID, MENU_TOGGLE_SYNC_ID,
         MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
@@ -8725,6 +8838,14 @@ mod tests {
             classify_finder_install_error("Timed out waiting for the Beebeeb File Provider domain"),
             "timeout"
         );
+    }
+
+    #[test]
+    fn classifies_user_disabled_domain_distinctly_from_the_generic_disabled_case() {
+        // Task 1524 Issue 4: the crafted "turned off in System Settings" copy must
+        // classify as "user_disabled", never falling through to the older generic
+        // "disabled" NSError-code branch (which stays keyed on "-2011"/"disabled").
+        assert_eq!(classify_finder_install_error(FINDER_USER_DISABLED_MESSAGE), "user_disabled");
     }
 
     #[test]
