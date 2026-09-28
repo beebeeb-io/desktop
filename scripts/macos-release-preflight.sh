@@ -61,10 +61,72 @@ PY
   rm -f /tmp/beebeeb-profile.plist
 }
 
+# Task 1524 issue 5 (P0 crash, 2026-09-28): an app extension binary must have
+# NO main() of its own — the Mach-O entry point has to be Foundation's own
+# exported `_NSExtensionMain` (set via the linker's `-e` flag, exactly as
+# Xcode does for every extension target; Apple's own App Store validator
+# enforces this — ITMS-90898: "Please make sure the build system passes
+# '-e _NSExtensionMain' to the linker for the ... extension bundle, or the
+# extension will not function"). A hand-written main.swift that calls
+# NSExtensionMain() as an ordinary function (the pre-fix shape here) recurses
+# forever on macOS 26: NSExtensionMain now delegates into ExtensionFoundation,
+# which re-invokes the process's real entry point as part of its own
+# bootstrap, landing back in our main.swift, which calls NSExtensionMain
+# again. Guard both ends: no source file may reintroduce a custom entry, and
+# (when a built .appex is available) the linked binary's actual entry point
+# must resolve to the imported `_NSExtensionMain` stub, not a locally defined
+# `_main`.
+verify_fileprovider_no_custom_main_source() {
+  if [[ -f "BeebeebFileProvider/main.swift" ]]; then
+    fail "BeebeebFileProvider/main.swift must not exist — an app extension's entry point is set via the linker (-e _NSExtensionMain in scripts/build-fileprovider-extension.sh), never a hand-written main.swift (task 1524 issue 5)"
+  fi
+  if grep -rn "NSExtensionMain" BeebeebFileProvider/*.swift 2>/dev/null; then
+    fail "a BeebeebFileProvider/*.swift file references NSExtensionMain directly — the extension entry point must be set purely via the -e _NSExtensionMain linker flag in scripts/build-fileprovider-extension.sh, never called/declared from Swift source (task 1524 issue 5)"
+  fi
+  printf 'ok: no custom NSExtensionMain wrapper in BeebeebFileProvider/*.swift\n'
+}
+
+verify_fileprovider_entry_point_binary() {
+  local appex_bin="$1"
+  [[ -x "$appex_bin" ]] || fail "File Provider extension binary not found or not executable: $appex_bin"
+
+  if nm -m "$appex_bin" 2>/dev/null | grep -Eq '\bexternal _main$'; then
+    fail "$appex_bin defines its own _main symbol — an app extension must have no main() of its own (task 1524 issue 5); found:
+$(nm -m "$appex_bin" | grep -E '\bexternal _main$')"
+  fi
+
+  if ! nm -m "$appex_bin" 2>/dev/null | grep -q '(undefined) external _NSExtensionMain'; then
+    fail "$appex_bin does not import _NSExtensionMain from Foundation — expected an undefined external symbol (task 1524 issue 5)"
+  fi
+
+  local entryoff
+  entryoff="$(otool -l "$appex_bin" | awk '/cmd LC_MAIN/{f=1} f && /entryoff/{print $2; exit}')"
+  [[ -n "$entryoff" ]] || fail "$appex_bin has no LC_MAIN load command — cannot verify entry point"
+
+  local entry_hex
+  entry_hex="$(printf '0x%x\n' "$entryoff")"
+  # The indirect symbol table maps each imported-symbol stub's address to its
+  # name. LC_MAIN's entryoff (relative to the Mach-O image base, conventionally
+  # 0x100000000 for a non-PIE-disabled arm64/x86_64 executable slice) must land
+  # exactly on the _NSExtensionMain stub — i.e. entryoff's low bits must match
+  # that stub's address low bits (both offsets are within the same image).
+  local stub_addr
+  stub_addr="$(otool -Iv "$appex_bin" 2>/dev/null | awk '/_NSExtensionMain$/{print $1; exit}')"
+  [[ -n "$stub_addr" ]] || fail "$appex_bin: could not find an _NSExtensionMain stub in the indirect symbol table"
+  local stub_low="0x${stub_addr: -8}"
+  if [[ "$(printf '%d' "$stub_low")" -ne "$entryoff" ]]; then
+    fail "$appex_bin: LC_MAIN entryoff ($entry_hex) does not point at the _NSExtensionMain stub ($stub_addr) — entry point is not NSExtensionMain (task 1524 issue 5)"
+  fi
+  printf 'ok: %s entry point (entryoff %s) is the imported _NSExtensionMain stub (%s), no local _main\n' "$appex_bin" "$entry_hex" "$stub_addr"
+}
+
 note "validating macOS plist files"
 require_cmd plutil
 plutil -lint src-tauri/entitlements.plist
 plutil -lint BeebeebFileProvider/Info.plist
+
+note "checking File Provider extension has no custom entry point (task 1524 issue 5)"
+verify_fileprovider_no_custom_main_source
 
 note "validating Tauri JSON config"
 python3 - <<'PY'
@@ -108,6 +170,7 @@ if [[ "${1:-}" != "" ]]; then
       helper="$artifact/Contents/MacOS/BeebeebFileProviderCtl"
       [[ -d "$appex" ]] || fail "File Provider extension missing from app bundle: $appex"
       [[ -x "$helper" ]] || fail "File Provider helper missing from app bundle: $helper"
+      verify_fileprovider_entry_point_binary "$appex/Contents/MacOS/BeebeebFileProvider"
       verify_provision_profile "$artifact" "io.beebeeb.app" "R8352WDJJR.io.beebeeb.app.fileprovider"
       verify_provision_profile "$appex" "io.beebeeb.app.FileProvider" "R8352WDJJR.io.beebeeb.app.fileprovider"
       codesign --verify --strict --verbose=2 "$appex"
