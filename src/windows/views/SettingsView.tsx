@@ -1,12 +1,11 @@
 import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate } from '../../capabilities'
 import { CapabilityNotice } from '../../CapabilityNotice'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   accountRegion,
   accountNotificationPreferences,
   accountUpdateNotificationPreferences,
   appActivitySnapshot,
-  checkForDesktopUpdatesNow,
   command,
   commandUnavailableLabel,
   formatBytes,
@@ -35,8 +34,6 @@ import { usePlatform, usePlatformName, thisDeviceNoun, type PlatformName } from 
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
-  stateFromManualUpdateResult,
-  type ManualUpdateCheckState,
 } from '../updateCheckViewModel'
 import {
   ACCOUNT_NOTIFICATION_PREF_META,
@@ -58,6 +55,7 @@ import {
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
 import { setDesktopThemePreference } from '../theme'
+import { desktopUpdateCheck } from '../manualUpdateCheck'
 
 type ShellIntegrationState = FinderInstallState
 
@@ -992,7 +990,7 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
   )
 }
 
-function UpdatesPanel({
+export function UpdatesPanel({
   config,
   onConfigChange,
 }: {
@@ -1003,12 +1001,11 @@ function UpdatesPanel({
   const installSupported = canInstallUpdate(caps)
   const platform = usePlatformName()
   const [version, setVersion] = useState<string | null>(null)
-  const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
+  const updateCheckState = useSyncExternalStore(desktopUpdateCheck.subscribe, desktopUpdateCheck.getSnapshot, desktopUpdateCheck.getSnapshot)
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
   const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
   const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
-  const updateCheckRequestRef = useRef(0)
   const downgradeConfirmButtonRef = useRef<HTMLButtonElement | null>(null)
   const releaseChannel = config.release_channel ?? 'stable'
   const updateCheckView = buildUpdateCheckViewModel(updateCheckState, version, releaseChannel)
@@ -1030,8 +1027,7 @@ function UpdatesPanel({
 
   const handleReleaseChannelChange = (channel: ReleaseChannelValue) => {
     if (channel === releaseChannel) return
-    updateCheckRequestRef.current += 1
-    setUpdateCheckState({ kind: 'idle' })
+    desktopUpdateCheck.reset()
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
     setDowngradeConfirmOpen(false)
@@ -1039,27 +1035,13 @@ function UpdatesPanel({
     onConfigChange({ release_channel: channel })
   }
 
-  const handleCheckForUpdates = async () => {
-    const requestId = updateCheckRequestRef.current + 1
-    updateCheckRequestRef.current = requestId
-    setUpdateCheckState({ kind: 'checking' })
+  useEffect(() => {
+    if (updateCheckState.kind !== 'checking') return
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
     setDowngradeConfirmOpen(false)
     setReleaseNotesOpen(false)
-
-    const result = await checkForDesktopUpdatesNow()
-    if (updateCheckRequestRef.current !== requestId) return
-
-    if (result.ok) {
-      setUpdateCheckState(stateFromManualUpdateResult(result.value))
-    } else {
-      setUpdateCheckState({
-        kind: 'error',
-        reason: result.unsupported ? commandUnavailableLabel('check_for_updates_now') : result.reason,
-      })
-    }
-  }
+  }, [updateCheckState])
 
   const openDowngradeConfirmation = () => {
     if (!installSupported || updateCheckState.kind !== 'downgrade_available') return
@@ -1101,7 +1083,7 @@ function UpdatesPanel({
         <Chip tone={updateCheckView.tone}>{updateCheckView.chip}</Chip>
         <button
           type="button"
-          onClick={() => void handleCheckForUpdates()}
+          onClick={() => void desktopUpdateCheck.check()}
           disabled={updateCheckBusy || downgradeInstallBusy}
           aria-busy={updateCheckBusy}
           style={{
@@ -1126,7 +1108,7 @@ function UpdatesPanel({
           }}
         >
           <NavIcon name="download" size={12} color={T.ink} />
-          {updateCheckBusy ? 'Checking...' : 'Check for updates'}
+          {updateCheckBusy ? 'Checking...' : updateCheckError ? 'Try again' : 'Check for updates'}
         </button>
         {updateCheckState.kind === 'downgrade_available' && (
           <div style={{ gridColumn: '2 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, minWidth: 0 }}>

@@ -187,7 +187,7 @@ WebView shortcuts.
 | Action | Backend / destination | Native check |
 | --- | --- | --- |
 | Preferences; Settings (Ctrl+,) | main window `settings` | Correct page selected |
-| Check for updates (Ctrl+Shift+U) | `check_for_updates_now`, update event | Matching package/channel result |
+| Check for updates (Ctrl+Shift+U) | `menu:check-for-updates`, `consume_menu_update_check`, shared `check_for_updates_now` controller | Same checking/result/error state as Settings; error toast with retry, pending request survives cold window creation |
 | Pause/Resume syncing (Ctrl+Shift+P) | `toggle_sync_paused_from_menu` | Persisted pause and stopped/resumed work |
 | Sign out (Ctrl+Shift+L) | `clear_session_impl` | Lifecycle gate 1639 |
 | Quit (Ctrl+Q) | app.exit | Process exits |
@@ -235,12 +235,13 @@ placeholder default is unreachable for a validated NavId.
 
 ## Complete registered IPC cross-reference
 
-90 registered application commands at the U1 source revision. Every command is indexed below; plugin opener/event/window IPCs are covered by the surface checklist. `desktopApi.ts` entries are wrapper references, not independent views. Native/internal-only and compact-only entries are deliberately retained so their absence from Windows is visible.
+90 registered application commands at the U1 source revision; task 1665 adds `consume_menu_update_check` (91 total). Every command is indexed below; plugin opener/event/window IPCs are covered by the surface checklist. `desktopApi.ts` entries are wrapper references, not independent views. Native/internal-only and compact-only entries are deliberately retained so their absence from Windows is visible.
 
 | Registered command | Source references (relative to src/) | Windows reachability |
 | --- | --- | --- |
 | `app_version` | `App.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
-| `check_for_updates_now` | `windows/views/SettingsView.tsx`, `desktopApi.ts` | Wired (surface table above) |
+| `check_for_updates_now` | `windows/manualUpdateCheck.ts`, `windows/views/SettingsView.tsx`, `ManualUpdateFeedback.tsx`, `desktopApi.ts` | Shared manual-check state; Settings and native menu |
+| `consume_menu_update_check` | `ManualUpdateFeedback.tsx` | Drains the pending native request once, restricted to the app window |
 | `install_update` | `UpdateBanner.tsx` | Wired (surface table above) |
 | `install_channel_downgrade` | `desktopApi.ts` | Wired (surface table above) |
 | `toggle_autostart` | `pages/Account.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
