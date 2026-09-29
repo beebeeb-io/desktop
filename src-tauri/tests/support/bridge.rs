@@ -11,7 +11,7 @@ use beebeeb_core::{
     kdf::{MasterKey, derive_file_key},
 };
 use fixture::{Corpus, Fixture, hash, id};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 fn assert_clean(f: Fixture) {
@@ -47,6 +47,130 @@ fn plaintext(f: &Fixture, account: &str, n: usize) -> Vec<u8> {
         bytes.extend(decrypt_chunk_raw(&key, &chunk.body).unwrap());
     }
     bytes
+}
+
+fn metadata(f: &Fixture, account: &str, object_id: &str) -> Value {
+    let response = f
+        .request(account, "GET", &format!("/api/v1/files/{object_id}"), b"")
+        .unwrap();
+    assert_eq!(response.status, 200);
+    response.value()
+}
+
+fn assert_same_metadata(actual: &Value, expected: &Value) {
+    // Encrypted names use fresh nonces, so compare stable fields explicitly.
+    for field in [
+        "id",
+        "parent_id",
+        "size_bytes",
+        "mime_type",
+        "version_number",
+        "current_object_version_id",
+        "chunk_count",
+        "chunk_size_bytes",
+        "is_folder",
+        "is_uploading",
+        "is_trashed",
+        "updated_at",
+    ] {
+        assert!(actual.get(field).is_some(), "missing {field}");
+        assert!(expected.get(field).is_some(), "missing {field}");
+        assert_eq!(actual[field], expected[field], "{} field {field}", expected["id"]);
+    }
+}
+
+fn assert_corpus_endpoint_consistency(f: &Fixture, uploaded: bool, remote: bool) {
+    let mut objects = 0;
+    let mut downloads = 0;
+    let mut listed = 0;
+    for account in &f.corpus.accounts {
+        let response = f.request(account, "GET", "/api/v1/sync/snapshot", b"").unwrap();
+        assert_eq!(response.status, 200);
+        let snapshot = response.value();
+        let nodes = snapshot["nodes"].as_array().unwrap();
+        for (i, object) in f.corpus.objects.iter().enumerate().filter(|(_, o)| &o.owner == account) {
+            let row = metadata(f, account, &object.id);
+            let blob = object.versions.get(if remote && object.id == id(7) { 2 } else { 0 });
+            let version = blob.map(|b| b.number).unwrap_or(1);
+            let size = blob.map(|b| b.size).unwrap_or(0);
+            let uploading = object.id == id(10) && !uploaded;
+            assert_eq!(row["id"], object.id);
+            assert_eq!(row["parent_id"], json!(object.parent_id), "parent for {}", object.id);
+            assert_eq!(row["size_bytes"], size, "size for {}", object.id);
+            assert_eq!(row["mime_type"], object.mime_type);
+            assert_eq!(row["version_number"], version);
+            assert_eq!(
+                row["current_object_version_id"],
+                format!("{}-v{version}", object.id),
+                "version ID for {}",
+                object.id
+            );
+            assert_eq!(row["chunk_size_bytes"], f.corpus.chunk_size);
+            assert_eq!(
+                row["chunk_count"],
+                if object.kind == "folder" {
+                    0
+                } else {
+                    size.div_ceil(f.corpus.chunk_size).max(1)
+                }
+            );
+            assert_eq!(row["is_folder"], object.kind == "folder");
+            assert_eq!(row["is_uploading"], uploading);
+            assert_eq!(row["is_trashed"], false);
+            let matches: Vec<_> = nodes.iter().filter(|node| node["id"] == object.id).collect();
+            assert_eq!(matches.len(), usize::from(!uploading), "listing for {}", object.id);
+            if !uploading {
+                assert_same_metadata(matches[0], &row);
+                listed += 1;
+                if let Some(blob) = blob {
+                    let bytes = plaintext(f, account, i + 1);
+                    assert_eq!(bytes.len(), size, "download size for {}", object.id);
+                    assert_eq!(hash(&bytes), blob.sha256, "download hash for {}", object.id);
+                    downloads += 1;
+                }
+            }
+            objects += 1;
+        }
+        assert_eq!(
+            nodes.len(),
+            if account == "alice" {
+                12 + usize::from(uploaded)
+            } else {
+                1
+            }
+        );
+    }
+    let owner = metadata(f, "alice", &id(13));
+    assert_same_metadata(&metadata(f, "bob", &id(13)), &owner);
+    let response = f.request("bob", "GET", "/api/v1/shares/invites/incoming", b"").unwrap();
+    assert_eq!(response.status, 200);
+    let invites = response.value();
+    assert_eq!(invites["invites"].as_array().unwrap().len(), 1);
+    let invite = &invites["invites"][0];
+    assert_eq!(invite["file_id"], owner["id"]);
+    assert_eq!(invite["size_bytes"], owner["size_bytes"]);
+    assert_eq!(invite["mime_type"], owner["mime_type"]);
+    assert_eq!(hash(&plaintext(f, "bob", 13)), f.corpus.objects[12].versions[0].sha256);
+    assert_eq!(
+        (objects, listed, downloads),
+        (14, 13 + usize::from(uploaded), 9 + usize::from(uploaded))
+    );
+    println!("endpoint consistency: objects={objects}, listed={listed}, downloads={downloads}, shared=1");
+}
+
+#[test]
+fn corpus_endpoint_consistency_all_objects_and_remote_edit() {
+    let f = Fixture::setup().unwrap();
+    assert_corpus_endpoint_consistency(&f, false, false);
+    f.remote_edit();
+    assert_corpus_endpoint_consistency(&f, false, true);
+    let response = f.request("alice", "GET", "/api/v1/sync/ops?since=0", b"").unwrap();
+    assert_eq!(response.status, 200);
+    let ops = response.value();
+    assert_eq!(ops["ops"].as_array().unwrap().len(), 1);
+    assert_eq!(ops["ops"][0]["op_type"], "file_update");
+    assert_same_metadata(&ops["ops"][0]["payload"], &metadata(&f, "alice", &id(7)));
+    assert_clean(f);
 }
 #[test]
 fn corpus_setup_cleanup_twice() {
@@ -277,6 +401,7 @@ fn corpus_expiry_is_account_scoped() {
 #[test]
 fn corpus_interrupted_upload_retains_acknowledged_chunks_and_commits_once() {
     let f = Fixture::setup().unwrap();
+    assert_corpus_endpoint_consistency(&f, false, false);
     let init = f
         .request(
             "alice",
@@ -287,6 +412,7 @@ fn corpus_interrupted_upload_retains_acknowledged_chunks_and_commits_once() {
         .unwrap();
     assert_eq!(init.status, 201);
     assert_eq!(init.value()["chunk_count"], 3);
+    let init = init.value();
     let (_, master) = f.credentials("alice");
     let key = derive_file_key(&MasterKey::from_bytes(*master), id(10).as_bytes());
     let bytes = Corpus::bytes(&f.corpus.objects[9].versions[0]).unwrap();
@@ -304,9 +430,12 @@ fn corpus_interrupted_upload_retains_acknowledged_chunks_and_commits_once() {
                     .status,
                 409
             );
-            assert_eq!(f.request("alice", "PUT", &path, &wire).unwrap().status, 200);
+            let retry = f.request("alice", "PUT", &path, &wire).unwrap();
+            assert_eq!(retry.status, 200);
+            assert_eq!(retry.value()["size"], wire.len());
         } else {
             assert_eq!(first.status, 200);
+            assert_eq!(first.value()["size"], wire.len());
         }
     }
     for _ in 0..2 {
@@ -314,8 +443,41 @@ fn corpus_interrupted_upload_retains_acknowledged_chunks_and_commits_once() {
             .request("alice", "POST", "/api/v1/uploads/fixture-upload/complete", b"{}")
             .unwrap();
         assert_eq!(complete.status, 200);
-        assert_eq!(complete.value()["version_number"], 1);
+        let complete = complete.value();
+        let meta = metadata(&f, "alice", &id(10));
+        assert_eq!(complete["version_number"], 1);
+        assert_eq!(
+            init["object_version_id"], complete["current_object_version_id"],
+            "init/complete version ID"
+        );
+        assert_eq!(
+            complete["current_object_version_id"], meta["current_object_version_id"],
+            "complete/metadata version ID"
+        );
+        assert_eq!(init["file_id"], meta["id"]);
+        assert_eq!(complete["file_id"], meta["id"]);
+        for field in ["size_bytes", "version_number"] {
+            assert_eq!(complete[field], meta[field], "complete/metadata {field}");
+        }
+        for field in ["chunk_count", "chunk_size_bytes"] {
+            assert_eq!(init[field], meta[field], "init/metadata {field}");
+        }
+        assert_corpus_endpoint_consistency(&f, true, false);
     }
+    let retry = f
+        .request(
+            "alice",
+            "POST",
+            "/api/v1/uploads/init",
+            &serde_json::to_vec(&json!({"file_id":id(10),"file_size_bytes":20})).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(retry.status, 201);
+    assert_eq!(
+        retry.value(),
+        init,
+        "repeated init retains the committed identity and plan"
+    );
     assert_eq!(
         hash(&plaintext(&f, "alice", 10)),
         f.corpus.objects[9].versions[0].sha256
@@ -323,7 +485,7 @@ fn corpus_interrupted_upload_retains_acknowledged_chunks_and_commits_once() {
     let counts = f.counts();
     assert_eq!(
         (counts.upload_inits, counts.faults, counts.chunk_writes, counts.commits),
-        (1, 1, 3, 1)
+        (2, 1, 3, 1)
     );
     println!("upload={counts:?}");
     assert_clean(f);
@@ -340,7 +502,11 @@ fn corpus_size_mismatch_reports_expected_and_actual_bytes_and_hashes() {
         Corpus::bytes(&blob).unwrap_err().to_string(),
         format!(
             "fixture size mismatch: {}; expected {} bytes, SHA-256 {}; actual {} bytes, SHA-256 {}",
-            blob.source, blob.size, blob.sha256, bytes.len(), hash(&bytes)
+            blob.source,
+            blob.size,
+            blob.sha256,
+            bytes.len(),
+            hash(&bytes)
         )
     );
 }

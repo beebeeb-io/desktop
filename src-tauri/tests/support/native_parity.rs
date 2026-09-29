@@ -82,7 +82,11 @@ impl Corpus {
         ensure!(
             bytes.len() == blob.size,
             "fixture size mismatch: {}; expected {} bytes, SHA-256 {}; actual {} bytes, SHA-256 {}",
-            blob.source, blob.size, blob.sha256, bytes.len(), actual_hash
+            blob.source,
+            blob.size,
+            blob.sha256,
+            bytes.len(),
+            actual_hash
         );
         ensure!(actual_hash == blob.sha256, "fixture SHA-256 mismatch: {}", blob.source);
         Ok(bytes)
@@ -156,6 +160,29 @@ struct Stored {
     trashed: bool,
     uploading: bool,
 }
+impl Stored {
+    fn version(&self) -> Option<&Blob> {
+        self.object.versions.get(self.active)
+    }
+    fn version_number(&self) -> i64 {
+        self.version().map(|v| v.number).unwrap_or(1)
+    }
+    fn version_id(&self) -> String {
+        // The corpus includes competing local/remote blobs with the same number;
+        // the array index is not the server version number.
+        format!("{}-v{}", self.object.id, self.version_number())
+    }
+    fn size(&self) -> usize {
+        self.version().map(|v| v.size).unwrap_or(0)
+    }
+    fn chunk_count(&self, chunk_size: usize) -> usize {
+        if self.object.kind == "folder" {
+            0
+        } else {
+            self.size().div_ceil(chunk_size).max(1)
+        }
+    }
+}
 #[derive(Default, Clone, Debug, Serialize)]
 pub struct Counts {
     pub requests: usize,
@@ -168,6 +195,7 @@ pub struct Counts {
 }
 struct State {
     objects: Vec<Stored>,
+    chunk_size: usize,
     accounts: BTreeMap<String, Account>,
     ops: Vec<Value>,
     share_active: bool,
@@ -204,7 +232,6 @@ impl State {
     }
     fn row(&self, stored: &Stored) -> Value {
         let o = &stored.object;
-        let size = o.versions.get(stored.active).map(|v| v.size).unwrap_or(0);
         let name = encrypt_name(
             &MasterKey::from_bytes(*self.accounts[&o.owner].key),
             &o.id,
@@ -212,7 +239,7 @@ impl State {
             Some(&o.mime_type),
         )
         .unwrap();
-        json!({"id":o.id, "parent_id":o.parent_id, "name_encrypted":name, "is_folder":o.kind=="folder", "size_bytes":size, "mime_type":o.mime_type, "version_number":o.versions.get(stored.active).map(|v|v.number).unwrap_or(1), "current_object_version_id":format!("{}-v{}",o.id,stored.active+1), "chunk_count":if o.kind=="folder" {0} else {size.div_ceil(8).max(1)}, "chunk_size_bytes":8, "is_uploading":stored.uploading, "is_trashed":stored.trashed, "updated_at":"2026-09-29T12:00:00Z"})
+        json!({"id":o.id, "parent_id":o.parent_id, "name_encrypted":name, "is_folder":o.kind=="folder", "size_bytes":stored.size(), "mime_type":o.mime_type, "version_number":stored.version_number(), "current_object_version_id":stored.version_id(), "chunk_count":stored.chunk_count(self.chunk_size), "chunk_size_bytes":self.chunk_size, "is_uploading":stored.uploading, "is_trashed":stored.trashed, "updated_at":"2026-09-29T12:00:00Z"})
     }
     fn invite(&self) -> Value {
         let owner = MasterKey::from_bytes(*self.accounts["alice"].key);
@@ -224,7 +251,7 @@ impl State {
         let share_key = opaque::derive_share_key(&secret, id(13).as_bytes());
         let stored = &self.objects[12];
         let b64 = base64::engine::general_purpose::STANDARD;
-        json!({"id":"fixture-share", "file_id":id(13), "status":"approved", "is_folder_share":false, "sender_email":"alice@native-parity.invalid", "sender_public_key":b64.encode(public), "encrypted_file_key":b64.encode(wire(&FileKey::from_bytes(*share_key), self.key(&stored.object).as_bytes())), "file_name_encrypted":self.row(stored)["name_encrypted"], "size_bytes":stored.object.versions[0].size, "mime_type":"text/plain"})
+        json!({"id":"fixture-share", "file_id":stored.object.id, "status":"approved", "is_folder_share":false, "sender_email":"alice@native-parity.invalid", "sender_public_key":b64.encode(public), "encrypted_file_key":b64.encode(wire(&FileKey::from_bytes(*share_key), self.key(&stored.object).as_bytes())), "file_name_encrypted":self.row(stored)["name_encrypted"], "size_bytes":stored.size(), "mime_type":stored.object.mime_type})
     }
     fn dispatch(&mut self, method: &str, target: &str, bearer: &str, body: &[u8]) -> Result<Response> {
         self.counts.requests += 1;
@@ -284,12 +311,12 @@ impl State {
                         body: encrypted,
                     });
                 }
-                let bytes = Corpus::bytes(&stored.object.versions[stored.active])?;
+                let bytes = Corpus::bytes(stored.version().context("folder has no content")?)?;
                 let index: usize = parts[2].parse()?;
                 let Some(chunk) = (if bytes.is_empty() && index == 0 {
                     Some(&[][..])
                 } else {
-                    bytes.chunks(8).nth(index)
+                    bytes.chunks(self.chunk_size).nth(index)
                 }) else {
                     return Ok(Response::json(404, json!({"error":"chunk index"})));
                 };
@@ -320,23 +347,23 @@ impl State {
         if name == "alice" && method == "POST" && path == "/api/v1/uploads/init" {
             let request: Value = serde_json::from_slice(body)?;
             if request["file_id"] == id(7)
-                && request["base_version_number"].as_i64()
-                    != Some(self.objects[6].object.versions[self.objects[6].active].number)
+                && request["base_version_number"].as_i64() != Some(self.objects[6].version_number())
             {
                 return Ok(Response::json(
                     409,
-                    json!({"error":"version conflict", "current_version":self.objects[6].object.versions[self.objects[6].active].number}),
+                    json!({"error":"version conflict", "current_version":self.objects[6].version_number()}),
                 ));
             }
+            let stored = &self.objects[9];
             ensure!(
-                request["file_id"] == id(10) && request["file_size_bytes"] == 20,
+                request["file_id"] == stored.object.id && request["file_size_bytes"] == stored.size(),
                 "fixture only accepts the declared upload object"
             );
             self.counts.upload_inits += 1;
             self.upload.get_or_insert_with(BTreeMap::new);
             return Ok(Response::json(
                 201,
-                json!({"file_id":id(10),"tenant_id":"fixture", "object_version_id":"fixture-upload-v1", "upload_session_id":"fixture-upload", "chunk_size_bytes":8,"chunk_count":3,"storage_format_version":2,"storage_pool_id":"fixture","region":"local"}),
+                json!({"file_id":stored.object.id,"tenant_id":"fixture", "object_version_id":stored.version_id(), "upload_session_id":"fixture-upload", "chunk_size_bytes":self.chunk_size,"chunk_count":stored.chunk_count(self.chunk_size),"storage_format_version":2,"storage_pool_id":"fixture","region":"local"}),
             ));
         }
         if name == "alice" && path.starts_with("/api/v1/uploads/fixture-upload/") {
@@ -353,12 +380,16 @@ impl State {
                             json!({"error":"fixture interruption before acknowledgement"}),
                         ));
                     }
-                    ensure!(index < 3 && !self.upload_complete, "invalid upload chunk/state");
-                    let decoded = decrypt_chunk_raw(&self.key(&self.objects[9].object), body)
-                        .map_err(|_| anyhow::anyhow!("fixture upload authentication failed"))?;
-                    let expected = Corpus::bytes(&self.objects[9].object.versions[0])?;
+                    let stored = &self.objects[9];
                     ensure!(
-                        decoded == expected.chunks(8).nth(index).unwrap(),
+                        index < stored.chunk_count(self.chunk_size) && !self.upload_complete,
+                        "invalid upload chunk/state"
+                    );
+                    let decoded = decrypt_chunk_raw(&self.key(&stored.object), body)
+                        .map_err(|_| anyhow::anyhow!("fixture upload authentication failed"))?;
+                    let expected = Corpus::bytes(stored.version().context("upload has no content")?)?;
+                    ensure!(
+                        decoded == expected.chunks(self.chunk_size).nth(index).unwrap(),
                         "fixture uploaded plaintext mismatch"
                     );
                     let upload = self.upload.as_mut().unwrap();
@@ -373,7 +404,7 @@ impl State {
                 }
             }
             if method == "POST" && path == "/api/v1/uploads/fixture-upload/complete" {
-                if self.upload.as_ref().unwrap().len() != 3 {
+                if self.upload.as_ref().unwrap().len() != self.objects[9].chunk_count(self.chunk_size) {
                     return Ok(Response::json(409, json!({"error":"missing chunks"})));
                 }
                 if !self.upload_complete {
@@ -381,9 +412,10 @@ impl State {
                     self.upload_complete = true;
                     self.objects[9].uploading = false;
                 }
+                let stored = &self.objects[9];
                 return Ok(Response::json(
                     200,
-                    json!({"file_id":id(10),"version_number":1,"current_object_version_id":"fixture-upload-v1","size_bytes":20}),
+                    json!({"file_id":stored.object.id,"version_number":stored.version_number(),"current_object_version_id":stored.version_id(),"size_bytes":stored.size()}),
                 ));
             }
         }
@@ -426,6 +458,7 @@ impl Fixture {
             })
             .collect();
         let state = State {
+            chunk_size: corpus.chunk_size,
             objects: corpus
                 .objects
                 .iter()

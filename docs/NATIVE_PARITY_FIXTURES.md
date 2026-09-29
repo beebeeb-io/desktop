@@ -13,6 +13,22 @@ IDs, names, bytes, SHA-256 and versions are stable; synthetic keys, tokens and
 encryption nonces are generated per setup and never serialized or logged.
 Video poster retrieval does not certify video decoding or poster generation.
 
+Review-fix contract (Guus, 2026-09-30): each stored object's active manifest
+version owns its version ID (`<object-id>-v<version-number>`), size and chunk
+plan. Upload init/complete, metadata and snapshot listing use that same state;
+object 10 keeps its ID through completion and retries. Object 7's remote version
+is number 2 (the third blob includes a competing local version, not version 3).
+Shared invites use the same active size/MIME as metadata. Parent IDs come from
+the object. Plaintext hashes stay in the manifest oracle and are checked against
+decrypted downloads, not exposed as a new wire field. Chunk acknowledgements
+report encrypted wire size; object metadata reports plaintext size.
+
+Review-fix verification: first record the upload consistency regression red on
+`1d23a76`; compare all 14 objects against metadata/snapshot before and after
+completion and remote edit, including size/hash/parent/version and shared reads;
+mutate endpoint fields to prove the assertions fail. Run socket-free Rust corpus
+tests twice, Bun, tsc and lint. Preserve the byte-exact checkout contract below.
+
 Checkout contract (2026-09-30 Windows gate follow-up): root `.gitattributes`
 marks `fixtures/**` and `tests/fixtures/**` as `-text`. Fixture bytes must survive
 Git checkout unchanged, including with `core.autocrlf=true`; text fixtures remain
@@ -63,7 +79,7 @@ cargo test --locked --lib native_parity_tests::corpus -- --nocapture
 cargo test --locked --lib native_parity_tests::http_ -- --nocapture
 ```
 
-The first Rust filter executes 10 socket-free tests; the second executes 3
+The first Rust filter executes 11 socket-free tests; the second executes 3
 loopback integration tests. A socket bind failure is a failed/unavailable rung,
 never an ignored or successful case. Run both filters twice. Each cycle owns a
 new temporary directory, listener and in-memory account pair. `cleanup()`
