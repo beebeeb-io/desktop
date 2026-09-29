@@ -1803,6 +1803,35 @@ impl StateDb {
         Ok(deleted)
     }
 
+    // Windows account cleanup must not silently discard paused/exhausted writes.
+    // Portable so both Windows CI and Linux exercise the exact DB policy.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn windows_signout_preflight(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let pending: i64 = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))?;
+        let dirty: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE status IN ('uploading', 'conflict', 'error', 'trashing')",
+            [],
+            |r| r.get(0),
+        )?;
+        if pending != 0 || dirty != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn finish_windows_signout(&self) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let pending: i64 = tx.query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))?;
+        if pending != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM bandwidth_samples;")?;
+        tx.commit()
+    }
+
     /// Task 1538 findings 1+2: unconditional local-state wipe for sign-out /
     /// account switch. `operation_queue` and `files.cache_path` are both
     /// per-device (not per-account) state — see `state_paths::beebeeb_state_dir`,
@@ -2578,6 +2607,63 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_signout_refuses_paused_pending_bytes_without_mutation() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        db.0.lock().unwrap().execute_batch(
+            "INSERT INTO operation_queue (op_id,kind,payload_path,paused_reason,created_at,updated_at) VALUES ('a','upload_file','only-copy','review',1,1);").unwrap();
+        assert!(db.windows_signout_preflight().is_err());
+        assert!(db.finish_windows_signout().is_err());
+        let remaining: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM operation_queue WHERE payload_path='only-copy'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn windows_signout_clears_all_account_rows_before_relogin_twice() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        for account in ["a", "b"] {
+            db.0.lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO files(file_id,path,status) VALUES (?1,?1,'cloud_only')",
+                    [account],
+                )
+                .unwrap();
+            db.0.lock()
+                .unwrap()
+                .execute("INSERT INTO sync_state(key,value) VALUES ('cursor','12')", [])
+                .unwrap();
+            db.windows_signout_preflight().unwrap();
+            db.finish_windows_signout().unwrap();
+            assert_eq!(db.list_files().unwrap().len(), 0);
+            let cursors: i64 =
+                db.0.lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM sync_state", [], |r| r.get(0))
+                    .unwrap();
+            assert_eq!(cursors, 0);
+        }
+    }
+
+    #[test]
+    fn windows_signout_refuses_conflicted_content_even_without_queue() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute("INSERT INTO files(file_id,path,status) VALUES ('a','a','conflict')", [])
+            .unwrap();
+        assert!(db.windows_signout_preflight().is_err());
+        assert_eq!(db.list_files().unwrap().len(), 1);
+    }
+
     use super::*;
     use tempfile::tempdir;
 
