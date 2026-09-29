@@ -184,6 +184,21 @@ if [[ "${1:-}" != "" ]]; then
       elif ! grep -q 'Authority=Developer ID Application:' <<<"$codesign_details"; then
         printf 'Non-Developer ID app signature detected; skipped spctl execute assessment. Use Developer ID signing for release Gatekeeper verification.\n'
       else
+        # Task 1608: notarization needs hardened runtime on EVERY executable in
+        # the bundle, not just the containing app — Apple's notary service
+        # rejects a submission where any nested binary (the appex, its CTL
+        # helper) lacks the runtime flag, even if the app itself has it. Check
+        # this BEFORE the spctl execute assessment below: spctl legitimately
+        # rejects an as-yet-unnotarized build (`set -euo pipefail` would exit
+        # the script right there), so a check placed after it would never run
+        # on the normal pre-notarization preflight pass.
+        for bin in "$artifact" "$appex" "$helper"; do
+          flags="$(codesign -dvvv "$bin" 2>&1 | grep -m1 '^CodeDirectory ' || true)"
+          if [[ "$flags" != *"flags=0x10000(runtime)"* ]]; then
+            fail "$bin is Developer ID signed but missing the hardened runtime flag (need 'flags=0x10000(runtime)', got: $flags) — notarization will reject this bundle"
+          fi
+        done
+        printf 'ok: hardened runtime present on app, appex and CTL helper\n'
         spctl --assess --type execute -vv "$artifact"
       fi
       ;;

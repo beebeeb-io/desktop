@@ -291,6 +291,14 @@ jobs:
           mkdir -p release-assets
           cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-assets/
           cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg.sig release-assets/
+          # The updater artifact (createUpdaterArtifacts: true) is bundled
+          # alongside the .app, not the .dmg, and Tauri names it from
+          # productName alone — no version or arch suffix (confirmed by a
+          # real local build, task 1608, 2026-09-29) — unlike the
+          # dmg/msi/nsis installer bundles, which DO embed version+arch.
+          # Do not "fix" this filename to look more like the others.
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz.sig release-assets/
 
       - name: Stage release assets (Windows)
         if: runner.os == 'Windows'
@@ -465,14 +473,16 @@ jobs:
           # release. Missing macOS signatures omit the darwin entry instead of blocking
           # Windows/Linux manifest publishing.
           #
-          # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY — the bundle name
-          # below matches Tauri's real output for `--target aarch64-apple-darwin`
-          # (`<ProductName>_<version>_aarch64.app.tar.gz`), NOT the `_universal` name Tauri would
-          # produce for `--target universal-apple-darwin`. Only a darwin-aarch64 manifest entry
-          # is emitted (no darwin-x86_64) — an Intel Mac must not be offered an arm64-only
-          # binary it cannot run. Re-add darwin-x86_64 (and switch this bundle name back to
-          # `_universal`) only once a real universal build is verified (see
-          # scripts/build-fileprovider-extension.sh's arch-detection gap).
+          # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY. The bundle name
+          # below is Tauri's real, verified output (a real local `--target aarch64-apple-darwin`
+          # build, not a guess): the updater artifact is named from productName ALONE — no
+          # version or arch suffix, unlike the dmg/msi/nsis installer bundles below, which do
+          # embed version+arch. Only a darwin-aarch64 manifest entry is emitted (no
+          # darwin-x86_64) — an Intel Mac must not be offered an arm64-only binary it cannot
+          # run. Re-add darwin-x86_64 only once a real universal build is verified (see
+          # scripts/build-fileprovider-extension.sh's arch-detection gap) — and re-check the
+          # bundle filename again then, since `--target universal-apple-darwin` may name it
+          # differently.
           #
           # Keep the Windows updater targets split by installer type. The
           # Tauri updater first searches windows-x86_64-{nsis,msi} based on
@@ -480,7 +490,7 @@ jobs:
           # windows-x86_64. Fresh Windows installs are documented as NSIS
           # setup.exe installs, so the generic fallback intentionally points at
           # NSIS; MSI-installed clients still receive MSI through the typed key.
-          MACOS_BUNDLE="Beebeeb_${VER}_aarch64.app.tar.gz"
+          MACOS_BUNDLE="Beebeeb.app.tar.gz"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
