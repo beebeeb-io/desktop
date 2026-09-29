@@ -1,14 +1,28 @@
-import type { RegionInfo, SetPreferredRegionResponse } from '../desktopApi'
+import type { CommandResult, RegionInfo, SetPreferredRegionResponse, UserRegionResponse } from '../desktopApi'
 
-export const DATA_RESIDENCY_FALLBACK_REGIONS: RegionInfo[] = [
-  {
-    continent: 'europe',
-    display_name: 'Europe',
-    city: 'Falkenstein',
-    provider: '',
-    is_default: true,
-  },
-]
+export interface DataResidencyLoadState {
+  regions: RegionInfo[]
+  preferredRegion: string | null
+  error: string | null
+}
+
+/** No invented regions on errors or empty responses; Retry calls the API again. */
+export async function loadDataResidency(
+  fetchRegion: () => Promise<CommandResult<UserRegionResponse>>,
+): Promise<DataResidencyLoadState> {
+  try {
+    const result = await fetchRegion()
+    if (result.ok && result.value.regions.length > 0) {
+      return { regions: result.value.regions, preferredRegion: result.value.preferred_region, error: null }
+    }
+    if (result.ok) {
+      return { regions: [], preferredRegion: null, error: 'No storage regions are currently available. Please try again.' }
+    }
+  } catch {
+    // Keep unexpected invocation failures in the same recoverable error state.
+  }
+  return { regions: [], preferredRegion: null, error: 'Data residency is unavailable. Please try again.' }
+}
 
 export interface DataResidencyRegionItem {
   continent: string

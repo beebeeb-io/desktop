@@ -6,7 +6,7 @@
 //!
 //! The desktop UI ("all pages empty") was calling almost none of the
 //! server endpoints that already exist. These structs mirror the exact
-//! JSON shapes returned by `repos/server/beebeeb-api/src/routes/*` so the
+//! JSON shapes returned by the public API so the
 //! frontend can `invoke()` a Tauri command and get back a typed payload
 //! instead of an empty placeholder.
 //!
@@ -116,11 +116,9 @@ pub struct BillingUsage {
 
 // ── 2b. Data residency / region — GET /api/v1/me/region ───────────────────────
 //
-// Server: routes match the webapp `getUserRegion()` contract. Shapes mirror
-// `@beebeeb/shared` `AvailableRegion` + `UserRegionResponse` EXACTLY so the
-// desktop resolves the effective region's CITY the same way the webapp does.
-// Brand rule: surface the CITY only, NEVER the `provider` — the provider field
-// is captured here solely to match the wire shape, not to be displayed.
+// Public API wire keys are `available_regions` / `example_city`;
+// aliases retain the desktop IPC `regions` / `city` names. The server omits
+// provider metadata; ignore any legacy provider field rather than forwarding it.
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegionInfo {
@@ -128,9 +126,6 @@ pub struct RegionInfo {
     pub display_name: String,
     #[serde(alias = "example_city")]
     pub city: String,
-    /// Captured to match the server shape — NEVER shown to users (brand rule:
-    /// name the city, never the provider).
-    pub provider: String,
     pub is_default: bool,
 }
 
@@ -140,7 +135,7 @@ pub struct UserRegionResponse {
     /// region's continent.
     #[serde(default)]
     pub preferred_region: Option<String>,
-    #[serde(default, alias = "available_regions")]
+    #[serde(alias = "available_regions")]
     pub regions: Vec<RegionInfo>,
 }
 
@@ -854,7 +849,7 @@ mod tests {
                     "continent": "europe",
                     "display_name": "Europe",
                     "city": "Falkenstein",
-                    "provider": "Hetzner",
+                    "provider": "Never Display Storage Provider",
                     "is_default": true
                 }
             ]
@@ -877,7 +872,7 @@ mod tests {
                     "continent": "europe",
                     "display_name": "Europe",
                     "city": "Falkenstein",
-                    "provider": "Hetzner",
+                    "provider": "Never Display Storage Provider",
                     "is_default": true
                 }
             ]
@@ -885,6 +880,56 @@ mod tests {
         let r: UserRegionResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.preferred_region, None);
         assert_eq!(r.regions[0].continent, "europe");
+    }
+
+    // Public API response fixture without provider metadata.
+    #[test]
+    fn region_contract_decodes_captured_server_response_without_provider() {
+        let response: UserRegionResponse = serde_json::from_str(include_str!("../tests/fixtures/region-api.json"))
+            .expect("the real server response must decode without provider");
+        assert_eq!(response.preferred_region, None);
+        assert_eq!(response.regions.len(), 1);
+        let region = &response.regions[0];
+        assert_eq!(region.continent, "europe");
+        assert_eq!(region.display_name, "Europe");
+        assert_eq!(region.city, "Local");
+        assert!(region.is_default);
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "preferred_region": null,
+                "regions": [{"continent": "europe", "display_name": "Europe", "city": "Local", "is_default": true}]
+            })
+        );
+    }
+
+    #[test]
+    fn region_contract_ignores_legacy_provider_in_ipc() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/region-api.json")).unwrap();
+        json["available_regions"][0]["provider"] = serde_json::json!("Never Display Storage Provider");
+        let response: UserRegionResponse = serde_json::from_value(json).unwrap();
+        let ipc = serde_json::to_value(response).unwrap();
+        assert!(ipc["regions"][0].get("provider").is_none());
+    }
+
+    #[test]
+    fn region_contract_rejects_malformed_success_bodies() {
+        for json in [
+            r#"{}"#,
+            r#"{"error":"unavailable"}"#,
+            r#"{"preferred_region":null,"available_regions":null}"#,
+            r#"{"available_regions":[{"continent":"europe"}]}"#,
+            r#"{"available_regions":"europe"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<UserRegionResponse>(json).is_err(),
+                "accepted {json}"
+            );
+        }
+        let empty: UserRegionResponse =
+            serde_json::from_str(r#"{"preferred_region":null,"available_regions":[]}"#).unwrap();
+        assert!(empty.regions.is_empty());
     }
 
     #[test]
@@ -896,7 +941,7 @@ mod tests {
                     "continent": "europe",
                     "display_name": "Europe",
                     "example_city": "Falkenstein",
-                    "provider": "Hetzner",
+                    "provider": "Never Display Storage Provider",
                     "is_default": true
                 }
             ]

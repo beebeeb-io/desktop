@@ -50,7 +50,7 @@ import {
   normalizeThemePreference,
 } from '../advancedSettingsModel'
 import {
-  DATA_RESIDENCY_FALLBACK_REGIONS,
+  loadDataResidency,
   buildDataResidencyViewState,
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
@@ -654,7 +654,7 @@ function RegionSelectionCard({
 
 function DataResidencyPanel() {
   const { showToast } = useToast()
-  const [regions, setRegions] = useState<RegionInfo[]>(DATA_RESIDENCY_FALLBACK_REGIONS)
+  const [regions, setRegions] = useState<RegionInfo[]>([])
   const [preferredRegion, setPreferredRegion] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -665,16 +665,11 @@ function DataResidencyPanel() {
     setLoading(true)
     setLoadError(null)
     void (async () => {
-      const result = await accountRegion()
+      const result = await loadDataResidency(accountRegion)
       if (cancelled) return
-      if (result.ok) {
-        setRegions(result.value.regions.length ? result.value.regions : DATA_RESIDENCY_FALLBACK_REGIONS)
-        setPreferredRegion(result.value.preferred_region ?? null)
-      } else {
-        setRegions(DATA_RESIDENCY_FALLBACK_REGIONS)
-        setPreferredRegion(null)
-        setLoadError(result.unsupported ? commandUnavailableLabel('account_region') : result.reason)
-      }
+      setRegions(result.regions)
+      setPreferredRegion(result.preferredRegion)
+      setLoadError(result.error)
       setLoading(false)
     })()
     return () => { cancelled = true }
@@ -725,13 +720,32 @@ function DataResidencyPanel() {
     }
   }
 
-  const currentCity = regions.find(region => region.continent === view.effectiveRegion)?.city ?? regions[0]?.city ?? 'Falkenstein'
+  return <DataResidencyContent loading={loading} loadError={loadError} view={view} onRetry={load} onSelect={handleSelect} />
+}
+
+export function DataResidencyContent({ loading, loadError, view, onRetry, onSelect }: {
+  loading: boolean
+  loadError: string | null
+  view: ReturnType<typeof buildDataResidencyViewState>
+  onRetry: () => void
+  onSelect: (continent: string) => void
+}) {
+  const currentRegion = view.items.find(item => item.continent === view.effectiveRegion)
+  const error = loadError ?? (!currentRegion?.displayName.trim()
+    ? 'Your storage region could not be determined. Please try again.'
+    : null)
+  const subtitle = loading
+    ? 'Loading data residency…'
+    : error ? undefined
+    : currentRegion?.continent === 'europe'
+      ? 'Stored in the EU.'
+      : `Stored in ${currentRegion?.displayName}.`
 
   return (
     <SettingsSectionShell>
       <PageHeader
         title="Data residency"
-        subtitle="Choose where new uploads are stored. Existing files stay where they are."
+        subtitle={subtitle}
       />
 
       {loading ? (
@@ -741,19 +755,19 @@ function DataResidencyPanel() {
         </Card>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {loadError && (
+          {error && (
             <Card style={{ padding: 14, background: T.paper2, borderColor: 'oklch(0.88 0.05 25)' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                 <NavIcon name="external" size={14} color={RED} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Could not refresh region list</div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Could not load data residency</div>
                   <div style={{ fontSize: 11.5, lineHeight: 1.5, color: T.ink3, marginTop: 3, wordBreak: 'break-word' as const }}>
-                    {loadError}
+                    {error}
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={load}
+                  onClick={onRetry}
                   style={{
                     border: `1px solid ${T.line2}`,
                     borderRadius: 6,
@@ -771,23 +785,17 @@ function DataResidencyPanel() {
             </Card>
           )}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {!error && <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {view.items.map(item => (
               <RegionSelectionCard
                 key={item.continent}
                 item={item}
-                onSelect={(continent) => void handleSelect(continent)}
+                onSelect={(continent) => onSelect(continent)}
               />
             ))}
-          </div>
+          </div>}
 
-          {view.onlyOneRegion && (
-            <div style={{ fontSize: 11.5, color: T.ink4, lineHeight: 1.55 }}>
-              More regions are coming soon. Your files are stored in {currentCity}.
-            </div>
-          )}
-
-          <Card style={{ padding: 14, background: T.paper2 }}>
+          {!error && !view.onlyOneRegion && <Card style={{ padding: 14, background: T.paper2 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
               <NavIcon name="shield" size={14} color={T.amberDeep} />
               <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55 }}>
@@ -795,7 +803,7 @@ function DataResidencyPanel() {
                 Only new uploads use your preferred region.
               </div>
             </div>
-          </Card>
+          </Card>}
         </div>
       )}
     </SettingsSectionShell>

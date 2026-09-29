@@ -10,14 +10,12 @@ const regions: RegionInfo[] = [
     continent: 'europe',
     display_name: 'Europe',
     city: 'Falkenstein',
-    provider: 'Hetzner',
     is_default: true,
   },
   {
     continent: 'us',
     display_name: 'North America',
     city: 'Ashburn',
-    provider: 'Do Not Render',
     is_default: false,
   },
 ]
@@ -41,7 +39,7 @@ describe('dataResidencySettingsModel', () => {
         disabled: true,
       },
     ])
-    expect(JSON.stringify(view)).not.toContain('Hetzner')
+    expect(JSON.stringify(view)).not.toContain('provider')
   })
 
   test('optimistically selects a region and rolls back when saving fails', async () => {
