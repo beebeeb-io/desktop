@@ -87,7 +87,8 @@ pub const PROVIDER_VERSION: &str = "1.1.0";
 // Each connection carries a monotonically increasing context ID. Old OS
 // callbacks cannot borrow credentials from a later account, even if Windows
 // reuses a connection key.
-static BRIDGE: crate::callback_gate::CallbackGate<EngineBridge> = crate::callback_gate::CallbackGate::new();
+static BRIDGE: std::sync::LazyLock<crate::callback_gate::CallbackGate<EngineBridge>> =
+    std::sync::LazyLock::new(crate::callback_gate::CallbackGate::new);
 struct Connection {
     key: CF_CONNECTION_KEY,
     generation: u64,
@@ -183,11 +184,13 @@ pub(crate) fn notify_sender() -> Option<tokio::sync::mpsc::UnboundedSender<crate
 /// Publish only while the runner is live, serialized with connection teardown.
 pub fn set_bridge(bridge: Arc<EngineBridge>) {
     let connection = CONNECTION.lock().unwrap();
-    if bridge.is_stopping() {
+    if bridge.is_stopping() || ensure_reactivation_allowed().is_err() {
         return;
     }
     if let Some(connection) = connection.as_ref() {
-        BRIDGE.install(connection.generation, bridge);
+        if let Err(error) = BRIDGE.install(connection.generation, bridge) {
+            tracing::error!(%error, "callback reactivation refused");
+        }
     }
 }
 
@@ -219,11 +222,36 @@ pub(crate) async fn cancelled(lease: &crate::callback_gate::CallbackLease<Engine
 
 /// Stop admission, cancel downloads, drain transfers and release credentials.
 /// Preserve a failed disconnect's key so a retry cannot register over it.
+static REVOCATION_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn ensure_reactivation_allowed() -> Result<(), String> {
+    if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst)
+        || REVOCATION_PENDING.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(
+            "Vault lock did not finish. Retry locking; if it persists, restart Beebeeb before unlocking.".into(),
+        );
+    }
+    Ok(())
+}
+
 pub async fn revoke_callbacks() -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(|| {
+    REVOCATION_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Close admission synchronously, even if CONNECTION is held by a stalled
+    // native call. Keep that revoked slot until its actual leases have drained.
+    let revoked = BRIDGE.revoke();
+    let worker = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if let Some(revoked) = revoked {
+            revoked
+                .drain(std::time::Duration::from_secs(3))
+                .map_err(anyhow::Error::msg)?;
+        }
         let mut connection = CONNECTION.lock().unwrap();
+        // A stopping runner may have published after the first revoke.
         if let Some(revoked) = BRIDGE.revoke() {
-            revoked.drain();
+            revoked
+                .drain(std::time::Duration::from_secs(3))
+                .map_err(anyhow::Error::msg)?;
         }
         *NOTIFY_TX.write().unwrap() = None;
         if let Some(current) = connection.as_ref() {
@@ -231,10 +259,25 @@ pub async fn revoke_callbacks() -> anyhow::Result<()> {
         }
         *connection = None;
         *SYNC_ROOT.write().unwrap() = None;
-        tracing::info!("Cloud Files callbacks revoked and drained");
         Ok(())
-    })
-    .await?
+    });
+    // CfDisconnect/CfExecute cannot be force-aborted safely. They remain on
+    // isolated native/blocking workers. A deadline is a FAILED lock, and the
+    // process stays fenced if such a worker cannot confirm completion.
+    match tokio::time::timeout(std::time::Duration::from_secs(4), worker).await {
+        Ok(result) => {
+            result??;
+            REVOCATION_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!("Cloud Files callbacks revoked and drained");
+            Ok(())
+        }
+        Err(_) => {
+            refuse_unconfirmed_stop();
+            anyhow::bail!(
+                "Vault lock failed: a Windows Cloud Files operation is not responding. The vault is not locked. Restart Beebeeb before unlocking."
+            )
+        }
+    }
 }
 
 static STOP_UNCONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -690,9 +733,8 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
 ///
 /// Called on sign-out / reset so a logout does not leave a dead "Beebeeb"
 /// nav-pane entry, Status column, or overlays pointing at a folder the user is
-/// no longer signed into. Best-effort: a failure (including "not registered")
-/// is returned for the caller to log-and-continue and must never break the
-/// sign-out flow.
+/// no longer signed into. Sign-out propagates failures and verifies absence;
+/// an already-absent registration is an idempotent success.
 ///
 /// The Id is reconstructed from the sync-root path via the same stable
 /// [`shell_sync_root_id`] scheme used to register, so the caller only needs the
@@ -731,11 +773,14 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
         StorageProviderSyncRootManager::Unregister(&id_h)
             .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
     }
-    tracing::info!(
-        sync_root = %sync_root.display(),
-        shell_id = %id,
-        "Explorer shell sync root unregistered"
-    );
+    let remaining = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
+    for index in 0..remaining.Size()? {
+        anyhow::ensure!(
+            remaining.GetAt(index)?.Id()? != id_h,
+            "Explorer registration remains after unregister; sign-out did not finish"
+        );
+    }
+    tracing::info!(sync_root = %sync_root.display(), shell_id = %id, "Explorer shell sync root unregistered");
     Ok(())
 }
 
@@ -1012,7 +1057,13 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
 /// Connect once per runner generation. Existing placeholders may call us before
 /// the bridge is installed; those requests fail promptly until activation.
 pub fn connect_root(sync_root: &std::path::Path) {
+    if ensure_reactivation_allowed().is_err() {
+        return;
+    }
     let mut connection = CONNECTION.lock().unwrap();
+    if ensure_reactivation_allowed().is_err() {
+        return;
+    }
     if let Some(current) = connection.as_ref() {
         if current.root != sync_root {
             tracing::error!("old Cloud Files root still connected");

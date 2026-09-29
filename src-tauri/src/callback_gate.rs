@@ -3,9 +3,11 @@
 //! release its value before returning. Kept portable for Linux/Windows CI.
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+type Slot<T> = Arc<Mutex<Option<(Arc<T>, Arc<Generation>)>>>;
 
 pub struct CallbackGate<T> {
-    current: Mutex<Option<(Arc<T>, Arc<Generation>)>>,
+    current: Slot<T>,
 }
 struct Generation {
     id: u64,
@@ -21,19 +23,21 @@ pub struct CallbackLease<T> {
     value: Option<Arc<T>>,
     generation: Arc<Generation>,
 }
-pub struct Revoked<T>(Arc<T>, Arc<Generation>);
+pub struct Revoked<T>(Arc<T>, Arc<Generation>, Slot<T>);
 
 impl<T> CallbackGate<T> {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            current: Mutex::new(None),
+            current: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Activation is only legal after the previous generation has been drained.
-    pub fn install(&self, id: u64, value: Arc<T>) {
+    pub fn install(&self, id: u64, value: Arc<T>) -> Result<(), &'static str> {
         let mut slot = self.current.lock().unwrap();
-        assert!(slot.is_none(), "callback generation must be revoked before replacement");
+        if slot.is_some() {
+            return Err("previous generation has not drained");
+        }
         *slot = Some((
             value,
             Arc::new(Generation {
@@ -42,6 +46,7 @@ impl<T> CallbackGate<T> {
                 drained: Condvar::new(),
             }),
         ));
+        Ok(())
     }
 
     pub fn acquire(&self, id: Option<u64>) -> Option<CallbackLease<T>> {
@@ -62,20 +67,37 @@ impl<T> CallbackGate<T> {
     }
 
     pub fn revoke(&self) -> Option<Revoked<T>> {
-        let (value, generation) = self.current.lock().unwrap().take()?;
+        let slot = self.current.lock().unwrap();
+        let (value, generation) = slot.as_ref()?;
         generation.state.lock().unwrap().revoked = true;
-        Some(Revoked(value, generation))
+        Some(Revoked(value.clone(), generation.clone(), self.current.clone()))
     }
 }
 impl<T> Revoked<T> {
-    /// Run on a blocking worker. A timeout must never be reported as a lock.
-    pub fn drain(self) {
-        let mut state = self.1.state.lock().unwrap();
-        while state.active != 0 {
-            state = self.1.drained.wait(state).unwrap();
+    /// Failure retains the revoked slot, including its owner and active count.
+    /// A retry must drain this same generation before installation can succeed.
+    pub fn drain(self, timeout: Duration) -> Result<(), &'static str> {
+        let state = self.1.state.lock().unwrap();
+        let (state, _) = self
+            .1
+            .drained
+            .wait_timeout_while(state, timeout, |s| s.active != 0)
+            .unwrap();
+        if state.active != 0 {
+            return Err(
+                "Vault lock failed: work is still stopping. Retry locking; if it persists, restart Beebeeb. The vault is not locked.",
+            );
         }
         drop(state);
+        let mut slot = self.2.lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|(_, generation)| Arc::ptr_eq(generation, &self.1))
+        {
+            slot.take();
+        }
         drop(self.0);
+        Ok(())
     }
 }
 impl<T> CallbackLease<T> {
@@ -110,14 +132,14 @@ mod tests {
     #[test]
     fn revoke_denies_new_work_and_cancels_existing_work() {
         let gate = CallbackGate::new();
-        gate.install(10, Arc::new(42));
+        gate.install(10, Arc::new(42)).unwrap();
         let lease = gate.acquire(Some(10)).unwrap();
         assert!(!lease.is_revoked());
         let revoked = gate.revoke().unwrap();
         assert!(gate.acquire(None).is_none());
         assert!(lease.is_revoked());
         drop(lease);
-        revoked.drain();
+        revoked.drain(Duration::from_secs(2)).unwrap();
     }
 
     #[test]
@@ -125,12 +147,12 @@ mod tests {
         let gate = CallbackGate::new();
         let owner = Arc::new(42);
         let weak = Arc::downgrade(&owner);
-        gate.install(10, owner);
+        gate.install(10, owner).unwrap();
         let lease = gate.acquire(None).unwrap();
         let revoked = gate.revoke().unwrap();
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            revoked.drain();
+            revoked.drain(Duration::from_secs(2)).unwrap();
             tx.send(()).unwrap();
         });
         assert!(
@@ -147,11 +169,34 @@ mod tests {
     fn twice_relogin_rejects_old_connection_and_uses_current_account() {
         let gate = CallbackGate::new();
         for id in 1..=3 {
-            gate.install(id, Arc::new(id));
+            gate.install(id, Arc::new(id)).unwrap();
             assert!(gate.acquire(Some(id - 1)).is_none());
             assert_eq!(*gate.acquire(Some(id)).unwrap(), id);
-            gate.revoke().unwrap().drain();
+            gate.revoke().unwrap().drain(Duration::from_secs(2)).unwrap();
         }
         assert!(gate.revoke().is_none());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn stalled_native_lease_returns_failed_lock_and_retains_revocation_for_retry() {
+        let gate = CallbackGate::new();
+        gate.install(1, Arc::new(42)).unwrap();
+        let lease = gate.acquire(None).unwrap();
+        let start = std::time::Instant::now();
+        assert!(gate.revoke().unwrap().drain(Duration::from_millis(20)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(gate.acquire(None).is_none());
+        assert!(gate.install(2, Arc::new(43)).is_err(), "timeout must deny reactivation");
+        assert!(
+            gate.revoke().unwrap().drain(Duration::ZERO).is_err(),
+            "retry must retain outstanding lease"
+        );
+        drop(lease);
+        gate.revoke().unwrap().drain(Duration::ZERO).unwrap();
+        gate.install(2, Arc::new(43)).unwrap();
     }
 }

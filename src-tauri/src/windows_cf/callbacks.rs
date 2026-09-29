@@ -266,6 +266,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             transfer_key,
             request_key,
             &buf,
+            || bridge.is_revoked() || bridge.is_stopping(),
             required_offset,
             required_length,
         )
@@ -664,9 +665,15 @@ unsafe fn transfer_range(
     transfer_key: i64,
     request_key: i64,
     plaintext: &[u8],
+    cancelled: impl Fn() -> bool,
     required_offset: i64,
     required_length: i64,
 ) -> windows::core::Result<()> {
+    if cancelled() {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x800704C7u32 as i32,
+        )));
+    }
     let total = plaintext.len() as i64;
     // Clamp the requested range to what we actually have.
     let start = required_offset.clamp(0, total);
@@ -689,6 +696,14 @@ unsafe fn transfer_range(
 
     let mut off = start;
     while off < end {
+        // The OS callback worker owns the lease and plaintext during CfExecute.
+        // A stalled call cannot hold up the async lock response indefinitely;
+        // bounded drain reports failure and refuses reactivation.
+        if cancelled() {
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                0x800704C7u32 as i32,
+            )));
+        }
         let remaining = end - off;
         let len = remaining.min(TRANSFER_CHUNK);
         let buf_ptr = unsafe { plaintext.as_ptr().add(off as usize) } as *const core::ffi::c_void;
