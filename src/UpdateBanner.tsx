@@ -1,3 +1,4 @@
+import ManualUpdateFeedback from './ManualUpdateFeedback'
 import { useCapabilities, canInstallUpdate } from './capabilities'
 /**
  * UpdateBanner listens for the desktop updater event and surfaces it through
@@ -141,5 +142,5 @@ export default function UpdateBanner() {
     })
   }, [caps?.update_format, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
 
-  return null
+  return <ManualUpdateFeedback />
 }

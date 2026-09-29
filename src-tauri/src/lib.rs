@@ -1,6 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7250,6 +7250,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version,
             check_for_updates_now,
+            consume_menu_update_check,
             install_update,
             install_channel_downgrade,
             toggle_autostart,
@@ -7938,17 +7939,59 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+// A native click can create the app webview before React has subscribed. Keep
+// one pending request until that webview consumes it after registering its listener.
+static MENU_UPDATE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn update_check_window_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "main-app"
+    } else {
+        "settings"
+    }
+}
+
+fn request_menu_update_check(app: &tauri::AppHandle) {
+    MENU_UPDATE_CHECK_PENDING.store(true, Ordering::SeqCst);
+    show_main_app_window_with_nav(app, Some("settings"));
+    if let Some(window) = app.get_webview_window(update_check_window_label()) {
+        log_menu_result(
+            MENU_CHECK_UPDATES_ID,
+            window.emit("menu:check-for-updates", ()).map_err(|e| e.to_string()),
+        );
+    }
+}
+
+#[tauri::command]
+fn consume_menu_update_check(window: tauri::WebviewWindow) -> bool {
+    take_menu_update_check(&MENU_UPDATE_CHECK_PENDING, window.label())
+}
+
+fn take_menu_update_check(pending: &AtomicBool, label: &str) -> bool {
+    label == update_check_window_label() && pending.swap(false, Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod menu_update_check_tests {
+    use super::*;
+
+    #[test]
+    fn pending_check_survives_other_windows_and_is_consumed_once() {
+        let pending = AtomicBool::new(true);
+        assert!(!take_menu_update_check(&pending, "tray"));
+        assert!(!take_menu_update_check(&pending, "onboarding"));
+        assert!(take_menu_update_check(&pending, update_check_window_label()));
+        assert!(!take_menu_update_check(&pending, update_check_window_label()));
+        pending.store(true, Ordering::SeqCst);
+        assert!(take_menu_update_check(&pending, update_check_window_label()));
+    }
+}
+
 fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenuSpec) {
     match spec.action {
         DesktopMenuAction::OpenSettings => show_main_app_window_with_nav(app, Some("settings")),
         DesktopMenuAction::CheckForUpdates => {
-            show_main_app_window_with_nav(app, Some("settings"));
-            let app = app.clone();
-            spawn_menu_task(spec.id, async move {
-                let result = check_for_updates_now(app.clone()).await?;
-                let _ = app.emit("menu:update-check-finished", result);
-                Ok(())
-            });
+            request_menu_update_check(app);
         }
         DesktopMenuAction::ToggleSync => {
             let app = app.clone();
