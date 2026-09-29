@@ -77,6 +77,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Test count guard self-test
+        run: python scripts/assert-cargo-test-counts.py --self-test
+
       - name: Run Rust tests
         working-directory: src-tauri
         env:
@@ -86,12 +89,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
-          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
-          # A green run with zero executed tests is a red: require at least one
-          # `test result: ok. N passed` line with N > 0.
-          passed=$(grep -Eo 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/cargo-test.log" | awk '{s+=$4} END {print s+0}')
-          echo "Total Rust tests passed: $passed"
-          test "$passed" -gt 0
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/cargo-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
+          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+
+      - name: Upload Rust test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-test-linux
+          path: |
+            ${{ runner.temp }}/cargo-test.log
+            ${{ runner.temp }}/cargo-test.exit
 
   rust-check:
     name: Rust check (${{ matrix.name }})
@@ -101,18 +112,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows checks lib + bin only: the lib TEST target does not compile on
-          # Windows today (31 errors: unix-only tests in engine_bridge.rs's test
-          # module use std::os::unix, libc and crate::ipc_socket without
-          # #[cfg(unix)]). Tracked separately; switch Windows to --all-targets
-          # once those tests are gated.
           - name: Windows
             os: windows-latest
-            check-args: ""
-          # --all-targets also type-checks the #[cfg(test)] modules and tests/.
           - name: macOS
             os: macos-latest
-            check-args: --all-targets
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -127,9 +130,45 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Test count guard self-test
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/assert-cargo-test-counts.py --self-test
+
       - name: Cargo check
         working-directory: src-tauri
         shell: bash
+        run: |
+          check_exit=0
+          CARGO_TERM_COLOR=never cargo check --locked --all-targets > "$RUNNER_TEMP/cargo-check.log" 2>&1 || check_exit=$?
+          cat "$RUNNER_TEMP/cargo-check.log"
+          echo "$check_exit" > "$RUNNER_TEMP/cargo-check.exit"
+          exit "$check_exit"
+
+      - name: Run Windows Rust tests
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        shell: bash
         env:
-          CHECK_ARGS: ${{ matrix.check-args }}
-        run: cargo check --locked $CHECK_ARGS
+          # Windows config/cache use Known Folders in the disposable runner's
+          # profile; keep temporary test files in their own directory.
+          TEMP: ${{ runner.temp }}/beebeeb-tmp
+          TMP: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TEMP"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/cargo-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
+          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+
+      - name: Upload Rust evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/cargo-check.log
+            ${{ runner.temp }}/cargo-check.exit
+            ${{ runner.temp }}/cargo-test.log
+            ${{ runner.temp }}/cargo-test.exit
