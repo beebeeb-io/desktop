@@ -1,3 +1,4 @@
+import { useCapabilities, canInstallUpdate } from './capabilities'
 /**
  * UpdateBanner listens for the desktop updater event and surfaces it through
  * the shared toast system. The install command still gets a bounded timeout so
@@ -20,6 +21,8 @@ type InstallState = 'idle' | 'installing' | 'error'
 
 export default function UpdateBanner() {
   const { showToast } = useToast()
+  const caps = useCapabilities()
+  const installSupported = canInstallUpdate(caps)
   const [update, setUpdate] = useState<UpdatePayload | null>(null)
   const [installState, setInstallState] = useState<InstallState>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
@@ -41,6 +44,7 @@ export default function UpdateBanner() {
   }, [])
 
   const handleInstall = useCallback(async () => {
+    if (!installSupported) return
     setInstallState('installing')
     setInstallError(null)
 
@@ -68,7 +72,7 @@ export default function UpdateBanner() {
     } finally {
       clearTimeout(timeoutId)
     }
-  }, [])
+  }, [installSupported])
 
   const releaseNotesUrl = useMemo(() => {
     if (!update) return null
@@ -85,7 +89,7 @@ export default function UpdateBanner() {
       title: installFailed ? 'Update install failed' : `Version ${update.version} is available.`,
       message: (
         <>
-          <span style={{ color: T.ink2 }}>Restart to apply the update.</span>
+          <span style={{ color: T.ink2 }}>{installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
           {' '}
           <button
             type="button"
@@ -127,15 +131,15 @@ export default function UpdateBanner() {
           )}
         </>
       ),
-      action: {
+      action: installSupported ? {
         label: installState === 'installing' ? 'Installing...' : installFailed ? 'Try again' : 'Restart to update',
         onClick: handleInstall,
         disabled: installState === 'installing',
         ariaBusy: installState === 'installing',
-      },
+      } : { label: 'Downloads', onClick: () => { void openUrl('https://beebeeb.io/download') } },
       durationMs: null,
     })
-  }, [handleInstall, installError, installState, releaseNotesUrl, showToast, update])
+  }, [caps?.update_format, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
 
   return null
 }

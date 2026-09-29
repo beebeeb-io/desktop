@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Beebeeb desktop — Tauri shell. Frontend in production reuses the web client (repos/web).",
+  "description": "Beebeeb desktop — Tauri shell with a desktop-owned React frontend.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -1,3 +1,5 @@
+import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate } from '../../capabilities'
+import { CapabilityNotice } from '../../CapabilityNotice'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   accountRegion,
@@ -260,6 +262,13 @@ function SyncPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const caps = useCapabilities()
+  const windows = caps?.host_os === 'windows'
+  const rows = SYNC_ROWS.filter((row) => !windows || (
+    (row.label !== 'Sync on metered connections' || caps.metered_sync_control) &&
+    (row.label !== 'Show sync overlays in File Explorer' || caps.sync_overlay_control) &&
+    (row.label !== 'Files on Demand (online-only by default)' || caps.hydrate_all_control)
+  ))
   const [freeUpBusy, setFreeUpBusy] = useState(false)
   // Not an error surface: freeUpNote reports the RESULT of 'Free up space' on both success and
   // failure, in ink3, not as an error. It happens to carry result.reason on the failure branch.
@@ -326,12 +335,12 @@ function SyncPanel({
       </Card>
 
       <Card style={{ padding: 0, overflow: 'hidden' }}>
-        {SYNC_ROWS.map((row, i) => {
-          const isLast = i === SYNC_ROWS.length - 1
+        {rows.map((row, i) => {
+          const isLast = i === rows.length - 1
           let control: ReactNode = null
 
           if (row.locked) {
-            control = <Toggle on={true} onChange={() => undefined} label={row.label} />
+            control = windows ? <Chip>Always on</Chip> : <Toggle on={true} onChange={() => undefined} label={row.label} />
           } else if (row.label === 'Sync on metered connections') {
             control = <Toggle on={metered} onChange={(v) => onConfigChange({ metered: v })} label={row.label} />
           } else if (row.label === 'Files on Demand (online-only by default)') {
@@ -357,7 +366,7 @@ function SyncPanel({
                   {row.label}
                   {row.locked && <Chip>Locked by design</Chip>}
                 </div>
-                <div style={{ fontSize: 11.5, color: T.ink3, marginTop: 3, lineHeight: 1.4 }}>{row.hint}</div>
+                <div style={{ fontSize: 11.5, color: T.ink3, marginTop: 3, lineHeight: 1.4 }}>{windows && row.locked ? 'Files are encrypted before upload. Downloaded files can be opened on this PC.' : row.hint}</div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>{control}</div>
             </div>
@@ -365,6 +374,9 @@ function SyncPanel({
         })}
       </Card>
 
+      {windows && <CapabilityNotice style={{ marginTop: 24 }}>Files download when opened. Use Selective sync to make folders online-only.
+        Automatic metered-network control and overlay preferences are not available yet.
+        Pause syncing from the app menu when needed.</CapabilityNotice>}
       <Card style={{ marginTop: 24, padding: 18, display: 'flex', alignItems: 'center', gap: 14, background: T.paper2 }}>
         <div style={{ width: 32, height: 32, borderRadius: 8, background: T.paper, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <NavIcon name="cloud" size={14} color={T.amberDeep} />
@@ -982,6 +994,8 @@ function UpdatesPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const caps = useCapabilities()
+  const installSupported = canInstallUpdate(caps)
   const platform = usePlatformName()
   const [version, setVersion] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
@@ -1043,13 +1057,13 @@ function UpdatesPanel({
   }
 
   const openDowngradeConfirmation = () => {
-    if (updateCheckState.kind !== 'downgrade_available') return
+    if (!installSupported || updateCheckState.kind !== 'downgrade_available') return
     setReleaseNotesOpen(false)
     setDowngradeConfirmOpen(true)
   }
 
   const handleConfirmDowngrade = async () => {
-    if (updateCheckState.kind !== 'downgrade_available') return
+    if (!installSupported || updateCheckState.kind !== 'downgrade_available') return
     setDowngradeConfirmOpen(false)
 
     setDowngradeInstallState('installing')
@@ -1178,7 +1192,7 @@ function UpdatesPanel({
                 <NavIcon name="external" size={11} color={T.ink3} />
                 View on GitHub
               </button>
-              <button
+              {installSupported && <button
                 type="button"
                 onClick={openDowngradeConfirmation}
                 disabled={downgradeInstallBusy || updateCheckBusy}
@@ -1204,13 +1218,15 @@ function UpdatesPanel({
               >
                 <NavIcon name="download" size={11} color={T.ink} />
                 {downgradeInstallBusy ? 'Downgrading...' : `Downgrade to ${updateCheckState.version}`}
-              </button>
+              </button>}
             </div>
           </div>
         )}
       </Card>
 
-      {downgradeConfirmationView && (
+      {!installSupported && <p>In-app installation is unavailable for this package. {caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update.'} <button type="button" onClick={() => void openUrl('https://beebeeb.io/download')}>Downloads</button></p>}
+
+      {installSupported && downgradeConfirmationView && (
         <Modal
           open={downgradeConfirmOpen}
           onClose={() => setDowngradeConfirmOpen(false)}
@@ -1551,7 +1567,7 @@ function AppActivityPanel() {
   )
 }
 
-function AdvancedPanel({
+export function AdvancedPanel({
   storage,
   config,
   onConfigChange,
@@ -1560,6 +1576,8 @@ function AdvancedPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const caps = useCapabilities()
+  const cacheControl = caps?.host_os !== 'windows' || caps.cache_limit_control
   const platform = usePlatformName()
   const themeOptions = THEME_OPTIONS.map((option) =>
     option.value === 'system' ? { ...option, hint: systemThemeHint(platform) } : option,
@@ -1667,7 +1685,7 @@ function AdvancedPanel({
         })}
       </Card>
 
-      <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
+      {cacheControl ? <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '15px 18px', alignItems: 'center', borderBottom: `1px solid ${T.line}` }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Local cache limit</div>
@@ -1754,7 +1772,7 @@ function AdvancedPanel({
             {cacheView.warning}
           </div>
         )}
-      </Card>
+      </Card> : <CapabilityNotice>Automatic disk cache limits are not available on Windows yet. Use Free up space in Sync settings to reclaim downloaded files.</CapabilityNotice>}
 
       <AppActivityPanel />
     </SettingsSectionShell>
@@ -1773,8 +1791,9 @@ function SettingsNav({
   // `null` while the real host platform hasn't resolved yet — passed through
   // as-is so `availableSettingsSections` renders the neutral "Shell
   // integration" label instead of a guessed one that then flips (PR #34 review).
+  const caps = useCapabilities()
   const { name: platform, resolved } = usePlatform()
-  const sections = availableSettingsSections(loggedIn, resolved ? platform : null)
+  const sections = availableSettingsSections(loggedIn, resolved ? platform : null).map((section) => ({ ...section, items: section.items.filter((item) => supportsRoute(caps, item.id)) })).filter((section) => section.items.length > 0)
 
   return (
     <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px', overflow: 'auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1826,6 +1845,7 @@ function SettingsNav({
 }
 
 export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps) {
+  const caps = useCapabilities()
   const { name: platform, resolved: platformResolved } = usePlatform()
   const loggedIn = status?.logged_in ?? false
   const [activeNav, setActiveNav] = useState<SettingsNavId>(() => defaultSettingsPage(loggedIn))
@@ -1876,6 +1896,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
   }
 
   const renderPanel = () => {
+    if (!supportsRoute(caps, activeNav)) return <CapabilityAlternative />
     if (!loggedIn && !ALWAYS_ACCESSIBLE_SETTINGS.has(activeNav)) {
       return <SignedOutSettingsGate onOpenSignIn={onOpenSignIn} />
     }

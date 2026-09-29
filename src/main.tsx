@@ -34,6 +34,7 @@ import WindowsFirstRun from './WindowsFirstRun'
 import WindowsApp from './WindowsApp'
 import { initializeDesktopThemeFromConfig } from './windows/theme'
 import { ToastProvider } from './windows/ui'
+import { CapabilityProvider, CapabilityGate, useCapabilities } from './capabilities'
 import './design.css'
 
 const container = document.getElementById('root')
@@ -47,6 +48,11 @@ const platform = params.get('platform')
 
 void initializeDesktopThemeFromConfig()
 
+function HostOnboarding() {
+  const caps = useCapabilities()
+  return <CapabilityGate route="onboarding">{caps?.host_os === 'windows' ? <WindowsFirstRun /> : <Onboarding />}</CapabilityGate>
+}
+
 let component: ReactElement
 if (which === 'conflict') {
   component = <ConflictWindow />
@@ -56,9 +62,9 @@ if (which === 'conflict') {
   document.documentElement.classList.add('tray-window')
   component = <WindowsTray />
 } else if (which === 'onboarding' && platform === 'windows') {
-  component = <WindowsFirstRun />
+  component = <HostOnboarding />
 } else if (which === 'onboarding') {
-  component = <Onboarding />
+  component = <HostOnboarding />
 } else if (which === 'main-app' && platform === 'windows') {
   component = <WindowsApp />
 } else {
@@ -77,6 +83,6 @@ if (which === 'conflict') {
 
 createRoot(container).render(
   <StrictMode>
-    <ToastProvider>{component}</ToastProvider>
+    <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
   </StrictMode>,
 )

@@ -22,6 +22,7 @@
  *   NEW (WS1): set_sync_mode (arg: mode: 'everything' | 'smart' | 'custom' | 'online_only')
  */
 
+import { useCapabilities } from './capabilities'
 import {
   useCallback,
   useEffect,
@@ -66,7 +67,7 @@ const RECOVERY_WORD_COUNT = 12
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
   { id: 'signin', title: 'Sign in', detail: 'Authenticate your Beebeeb account.' },
   { id: 'unlock', title: 'Unlock vault', detail: 'Restore encryption keys on this PC.' },
-  { id: 'sync-mode', title: 'Sync mode', detail: 'Pick what lives on this PC.' },
+  { id: 'sync-mode', title: 'Files on demand', detail: 'Download files when you open them.' },
   { id: 'explorer', title: 'Explorer integration', detail: 'Add Beebeeb to File Explorer.' },
   { id: 'ready', title: 'Ready', detail: 'Open the control center.' },
 ]
@@ -828,7 +829,8 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   )
 }
 
-function SyncModeStep({ onDone }: { onDone: () => void }) {
+export function SyncModeStep({ onDone }: { onDone: () => void }) {
+  const caps = useCapabilities()
   const [selected, setSelected] = useState<SyncMode>('smart')
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
@@ -843,6 +845,15 @@ function SyncModeStep({ onDone }: { onDone: () => void }) {
     }
     showToast({ variant: 'error', title: 'Couldn’t set sync mode', message: result.reason })
   }
+
+  if (!caps?.sync_mode_selection) return (
+    <div>
+      <h1>Files download when you open them</h1>
+      <p>Your files appear in File Explorer. Open a file to download its contents.
+        Use Selective sync in Beebeeb to make folders online-only.</p>
+      <Btn variant="primary" onClick={onDone}>Continue →</Btn>
+    </div>
+  )
 
   return (
     <div>

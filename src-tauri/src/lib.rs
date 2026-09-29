@@ -23,6 +23,7 @@ mod browser_login;
 mod config;
 mod conflict;
 mod desktop_search;
+mod desktop_capabilities;
 mod engine_bridge;
 // Unix-domain-socket IPC (macOS File Provider extension + Linux FUSE). Unix
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
@@ -3646,6 +3647,24 @@ fn default_sync_root() -> String {
     config::default_sync_root_suggestion().to_string_lossy().into_owned()
 }
 
+/// Read-only support snapshot. Tauri's embedded bundle marker is also used by
+/// its updater; do not guess NSIS/MSI or AppImage from the host OS.
+#[tauri::command]
+fn desktop_capabilities(app: tauri::AppHandle) -> desktop_capabilities::DesktopCapabilities {
+    use desktop_capabilities::InstallFormat;
+    use tauri::utils::config::BundleType;
+    let format = match tauri::utils::platform::bundle_type() {
+        Some(BundleType::App) => InstallFormat::App,
+        Some(BundleType::Nsis) => InstallFormat::Nsis,
+        Some(BundleType::Msi) => InstallFormat::Msi,
+        Some(BundleType::AppImage) => InstallFormat::Appimage,
+        Some(BundleType::Deb) => InstallFormat::Deb,
+        Some(BundleType::Rpm) => InstallFormat::Rpm,
+        _ => InstallFormat::Unknown,
+    };
+    desktop_capabilities::snapshot(desktop_capabilities::host_os(), format, app.tray_by_id("tray").is_some())
+}
+
 #[tauri::command]
 fn desktop_platform() -> &'static str {
     #[cfg(target_os = "macos")]
@@ -7208,6 +7227,7 @@ pub fn run() {
             pick_sync_root,
             default_sync_root,
             desktop_platform,
+            desktop_capabilities,
             finder_location_state,
             install_finder_location,
             continue_without_finder_location,
