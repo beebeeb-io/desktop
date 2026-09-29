@@ -130,6 +130,12 @@ empty. CI uploads logs and exit codes as `rust-Windows`, `rust-macOS`, and
 
 ## Key files
 
+Task 1612's reusable test API and deterministic native-parity corpus are described
+in [docs/NATIVE_PARITY_FIXTURES.md](docs/NATIVE_PARITY_FIXTURES.md). The test-only
+`native_parity_tests::corpus` and `native_parity_tests::http_` filters respectively
+exercise the socket-free fixtures and real loopback bridge requests. Neither is
+proof of CFAPI/FUSE/File Provider execution; do not log fixture credentials.
+
 - `src-tauri/tauri.conf.json` — identifier `io.beebeeb.app`, 1200×800 default window.
 - `src-tauri/src/lib.rs` — `run()` builds the Tauri app and registers `#[tauri::command]` handlers. Add new commands here.
 - `src-tauri/capabilities/default.json` — permissions the frontend can invoke. Add explicit permissions before exposing new tauri APIs.

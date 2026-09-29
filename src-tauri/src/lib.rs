@@ -25,6 +25,9 @@ mod conflict;
 mod desktop_search;
 mod desktop_capabilities;
 mod engine_bridge;
+#[cfg(test)]
+#[path = "../tests/support/bridge.rs"]
+mod native_parity_tests;
 // Unix-domain-socket IPC (macOS File Provider extension + Linux FUSE). Unix
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
 // in-process (see `windows_cf`), so this module is `unix`-only.
