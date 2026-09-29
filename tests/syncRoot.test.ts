@@ -50,6 +50,9 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
         if (!backend) throw new Error('status unavailable')
         return backend
       }
+      if (name === 'pick_sync_root') return backend?.sync_root ?? null
+      if (name === 'desktop_platform') return 'windows'
+      if (name === 'finder_location_state') return { installed: true, path: suggestion }
       if (name === 'default_sync_root') return suggestion
       if (name === 'open_finder_location') return undefined
       if (name === 'windows_shell_integration_state') return { installed: true, path: suggestion }
@@ -93,7 +96,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
   }
   render()
   return {
-    calls, toasts, elements: () => elements(tree), content: () => content(tree),
+    calls, toasts, setBackend(next: SyncStatus | null) { backend = next }, elements: () => elements(tree), content: () => content(tree),
     async refresh(next = backend) { backend = next; props = { status: await loadSyncStatus() }; for (const fn of intervals) await fn(); render(); await flush() },
     setProps(next: any) { props = next; render() }, flush,
     close() { globalThis.window = previousWindow },
@@ -130,14 +133,67 @@ describe('runtime sync root (1646)', () => {
     } finally { h.close() }
   })
 
-  test('Files leaves root resolution to the backend when opening', async () => {
+  test('Files passes the current backend root when opening', async () => {
     const h = harness('WindowsApp.tsx', 'SyncFolderCard')
     try {
       await h.refresh()
       const button = h.elements().find(e => e.type === 'button')
       expect(button.props.disabled).toBe(false)
       await button.props.onClick(); await h.flush()
-      expect(h.calls.filter(c => c.name === 'open_finder_location')).toEqual([{ name: 'open_finder_location', args: {} }])
+      expect(h.calls.filter(c => c.name === 'open_finder_location')).toEqual([{ name: 'open_finder_location', args: { path: customRoot } }])
+    } finally { h.close() }
+  })
+
+  for (const [file, name, label] of [
+    ['WindowsApp.tsx', 'SyncFolderCard', 'Open in Explorer'],
+    ['WindowsTray.tsx', 'WindowsTray', 'Open folder'],
+    ['pages/SyncFolder.tsx', 'SyncFolder', 'Open in Finder'],
+  ]) {
+    for (const outcome of ['cleared', 'changed', 'unavailable'] as const) {
+      test(`${name}: root ${outcome} after last poll is resolved at click time`, async () => {
+        const h = harness(file, name)
+        try {
+          await h.refresh()
+          const action = () => h.elements().find(e => e.props.label === label ||
+            (e.type === 'button' && content(e).trim() === label))
+          expect(action().props.disabled).toBe(false)
+          const changed = 'E:\\New current root'
+          h.setBackend(outcome === 'unavailable' ? null : {
+            ...initialStatus, sync_root: outcome === 'cleared' ? null : changed,
+          })
+          const reads = h.calls.filter(c => c.name === 'sync_status').length
+          action().props.onClick()
+          await h.flush()
+          expect(h.calls.filter(c => c.name === 'sync_status')).toHaveLength(reads + 1)
+          const opens = h.calls.filter(c => c.name === 'open_finder_location')
+          if (outcome === 'changed') {
+            expect(opens).toEqual([{ name: 'open_finder_location', args: { path: changed } }])
+            expect(h.content()).toContain(changed)
+          } else {
+            expect(opens).toHaveLength(0)
+            expect(action().props.disabled).toBe(true)
+            expect(h.content()).toContain(outcome === 'cleared' ? 'Not configured on this PC yet' : 'Sync folder unavailable')
+            expect(h.content()).not.toContain(customRoot)
+          }
+          expect(h.calls.filter(c => c.name === 'default_sync_root')).toHaveLength(0)
+        } finally { h.close() }
+      })
+    }
+  }
+
+  test('compact settings recovers its root display after a failed click and successful folder selection', async () => {
+    const h = harness('pages/SyncFolder.tsx', 'SyncFolder')
+    try {
+      await h.refresh()
+      h.setBackend(null)
+      h.elements().find(e => e.type === 'button' && content(e).trim() === 'Open in Finder').props.onClick()
+      await h.flush()
+      expect(h.content()).toContain('Sync folder unavailable')
+      h.setBackend(initialStatus)
+      h.elements().find(e => e.type === 'button' && content(e).trim() === 'Choose location').props.onClick()
+      await h.flush()
+      expect(h.content()).toContain(customRoot)
+      expect(h.content()).not.toContain('Sync folder unavailable')
     } finally { h.close() }
   })
 
@@ -186,7 +242,7 @@ describe('runtime sync root (1646)', () => {
       const action = h.elements().find(e => e.props.label === 'Open folder')
       expect(action.props.disabled).toBe(false)
       await action.props.onClick(); await h.flush()
-      expect(h.calls.filter(c => c.name === 'open_finder_location')).toEqual([{ name: 'open_finder_location', args: {} }])
+      expect(h.calls.filter(c => c.name === 'open_finder_location')).toEqual([{ name: 'open_finder_location', args: { path: customRoot } }])
       await h.refresh({ ...initialStatus, sync_root: null })
       expect(h.content()).not.toContain(customRoot)
       expect(h.content()).toContain('Not configured on this PC yet')

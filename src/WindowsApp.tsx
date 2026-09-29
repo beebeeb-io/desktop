@@ -616,7 +616,9 @@ function StatusPill({ status }: { status: string }) {
 
 // ── Sub-card: Open-in-Explorer (kept from the previous FilesView) ─────────────
 
-function SyncFolderCard({ status }: { status: SyncStatus | null }) {
+function SyncFolderCard({ status: polledStatus }: { status: SyncStatus | null }) {
+  const [status, setStatus] = useState(polledStatus)
+  useEffect(() => setStatus(polledStatus), [polledStatus])
   const root = status?.sync_root ?? null
   const isMacos = usePlatformName() === 'macos'
   const [opening, setOpening] = useState(false)
@@ -624,7 +626,16 @@ function SyncFolderCard({ status }: { status: SyncStatus | null }) {
 
   const openInExplorer = async () => {
     setOpening(true)
-    const r = await command<void>('open_finder_location')
+    // The last poll may predate a root change or removal.
+    const current = isMacos ? null : await loadSyncStatus()
+    if (!isMacos) {
+      setStatus(current)
+      if (!current?.sync_root) {
+        setOpening(false)
+        return
+      }
+    }
+    const r = await command<void>('open_finder_location', isMacos ? undefined : { path: current!.sync_root })
     setOpening(false)
     if (!r.ok) {
       showToast({

@@ -19,7 +19,7 @@ const statusTimeout = 7000
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 let passed = 0
 try {
-  for (const scenario of ['loading', 'empty', 'populated', 'overview-error', 'unconfigured', 'settings', 'tray']) {
+  for (const scenario of ['loading', 'empty', 'populated', 'overview-error', 'unconfigured', 'settings', 'tray', 'compact-settings']) {
     const page = await browser.newPage({ viewport: scenario === 'tray' ? { width: 360, height: 520 } : { width: 1200, height: 900 } })
     const errors = []
     page.on('pageerror', error => errors.push(String(error)))
@@ -32,18 +32,27 @@ try {
       step(`${description} (within ${timeout}ms)`, () => locator.waitFor({ state: 'visible', timeout }))
     try {
       await page.route('http://fixture.local/**', route => route.fulfill({ contentType: 'text/html', body: '<div id="root"></div>' }))
-      await page.goto(`http://fixture.local/?surface=${scenario === 'tray' ? 'tray' : 'main'}`)
+      await page.goto(`http://fixture.local/?surface=${scenario === 'tray' ? 'tray' : scenario === 'compact-settings' ? 'compact-settings' : 'main'}`)
       await page.addStyleTag({ content: css })
       await page.evaluate(({ caps, root, defaultRoot, scenario }) => {
         window.calls = []
+        window.fixtureIntervals = []
+        const setInterval = window.setInterval.bind(window)
+        window.setInterval = (...args) => {
+          const id = setInterval(...args)
+          window.fixtureIntervals.push(id)
+          return id
+        }
         window.fixtureRoot = scenario === 'unconfigured' ? null : root
         window.__TAURI_INTERNALS__ = {
-          metadata: { currentWindow: { label: scenario === 'tray' ? 'tray' : 'main' }, currentWebview: { label: 'main' } },
+          metadata: { currentWindow: { label: scenario === 'tray' ? 'tray' : scenario === 'compact-settings' ? 'compact-settings' : 'main' }, currentWebview: { label: 'main' } },
           transformCallback: () => 1, unregisterCallback() {},
           invoke: async (name, args) => {
             window.calls.push({ name, args })
             if (name === 'desktop_capabilities') return caps
             if (name === 'sync_status') return { logged_in: true, engine: 'running', sync_root: window.fixtureRoot, syncing: 0, cloud_only: 0, conflicts: 0 }
+            if (name === 'desktop_platform') return 'windows'
+            if (name === 'finder_location_state') return { installed: true, path: defaultRoot }
             if (name === 'default_sync_root') return defaultRoot
             if (name === 'open_finder_location') return null
             if (name === 'get_known_folder_onboarding_seen') return true
@@ -67,7 +76,7 @@ try {
       if (scenario === 'settings') {
         await step('open Settings', () => page.getByRole('button', { name: 'Settings', exact: true }).click())
         await step('open Explorer integration', () => page.getByRole('button', { name: 'Explorer integration', exact: true }).click())
-      } else if (scenario !== 'tray') {
+      } else if (scenario !== 'tray' && scenario !== 'compact-settings') {
         const files = page.getByRole('button', { name: 'Files', exact: true })
         await waitVisible(files, 'bundle must mount the Files sidebar button')
         await step('navigate to Files through the sidebar', () => files.click())
@@ -79,19 +88,22 @@ try {
       if (scenario === 'overview-error') await waitVisible(page.getByText('fixture overview failure', { exact: true }), 'overview error must be visible')
       if (scenario === 'empty') await waitVisible(page.getByText('No files on this PC yet', { exact: true }), 'empty Files state must be visible')
       if (scenario !== 'settings') {
-        const button = page.getByRole('button', { name: scenario === 'tray' ? 'Open folder' : 'Open in Explorer', exact: true })
+        const button = page.getByRole('button', { name: scenario === 'tray' ? 'Open folder' : scenario === 'compact-settings' ? 'Open in Finder' : 'Open in Explorer', exact: true })
         assert.equal(await button.isDisabled(), scenario === 'unconfigured')
         if (scenario !== 'unconfigured') {
           await step('click the open-folder action', () => button.click())
           await step(`open-folder action must call open_finder_location (within ${waitTimeout}ms)`, () =>
             page.waitForFunction(() => window.calls.some(c => c.name === 'open_finder_location'), undefined, { timeout: waitTimeout }))
-          assert.deepEqual(await page.evaluate(() => window.calls.filter(c => c.name === 'open_finder_location').map(c => c.args)), [{}])
+          assert.deepEqual(await page.evaluate(() => window.calls.filter(c => c.name === 'open_finder_location').map(c => c.args)), [{ path: root }])
         } else {
+          // HTMLButtonElement.click attempts activation without Playwright waiting
+          // for a deliberately disabled control to become enabled.
+          await step('attempt to click the unconfigured control', () => button.evaluate(node => node.click()))
           assert.equal(await page.evaluate(() => window.calls.filter(c => c.name === 'open_finder_location').length), 0)
         }
       }
       await page.screenshot({ path: path.join(output, `${scenario}.png`), fullPage: true })
-      if (scenario !== 'unconfigured') {
+      if (scenario !== 'unconfigured' && scenario !== 'compact-settings') {
         const changed = 'E:\\Changed while open\\A long folder name\\Another long folder name\\資料\\Sync'
         await page.evaluate(value => { window.fixtureRoot = value }, changed)
         await waitVisible(page.getByText(changed, { exact: true }), `status poll must show updated sync root: ${changed}`, statusTimeout)
@@ -99,6 +111,21 @@ try {
         assert.equal(await page.getByText(root, { exact: true }).count(), 0)
         assert.equal(await page.getByText(changed, { exact: true }).getAttribute('title'), changed)
         await page.screenshot({ path: path.join(output, `${scenario}-changed.png`), fullPage: true })
+      }
+      if (scenario !== 'unconfigured' && scenario !== 'settings') {
+        const button = page.getByRole('button', { name: scenario === 'tray' ? 'Open folder' : scenario === 'compact-settings' ? 'Open in Finder' : 'Open in Explorer', exact: true })
+        assert.equal(await button.isDisabled(), false)
+        // Freeze polls, then clear ONLY backend state: the still-enabled UI is stale.
+        const opens = await page.evaluate(() => {
+          window.fixtureIntervals.forEach(id => window.clearInterval(id))
+          window.fixtureRoot = null
+          return window.calls.filter(c => c.name === 'open_finder_location').length
+        })
+        await step('click after the backend root is cleared between polls', () => button.click())
+        await waitVisible(page.getByText('Not configured on this PC yet', { exact: true }), 'click must render the unconfigured state')
+        assert.equal(await button.isDisabled(), true)
+        assert.equal(await page.evaluate(() => window.calls.filter(c => c.name === 'open_finder_location').length), opens)
+        await page.screenshot({ path: path.join(output, `${scenario}-cleared.png`), fullPage: true })
       }
       assert.equal(await page.evaluate(() => window.calls.filter(c => c.name === 'default_sync_root').length), 0)
       assert.deepEqual(errors, [])
@@ -110,6 +137,6 @@ try {
       throw new Error(`[${scenario}] fixture failed; screenshot: ${screenshot}; page errors: ${JSON.stringify(errors)}`, { cause })
     } finally { await page.close() }
   }
-  assert.equal(passed, 7)
+  assert.equal(passed, 8)
   console.log(`browser fixture cases: ${passed} passed; 0 failed; native cases: 0`)
 } finally { await browser.close() }

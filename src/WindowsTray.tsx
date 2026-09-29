@@ -39,7 +39,7 @@ import {
   type RecentFile,
   type SyncStatus,
 } from './desktopApi'
-import { T } from './windows/ui'
+import { T, useToast } from './windows/ui'
 
 // ── File-type classification (ported from repos/web file-icon.tsx getFileType,
 //    pure, no @beebeeb/shared import) ─────────────────────────────────────────
@@ -281,6 +281,8 @@ const WINDOWS_APP_NAV_STORAGE_KEY = 'bb.windowsApp.nav'
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function WindowsTray() {
+  const { showToast } = useToast()
+  const [opening, setOpening] = useState(false)
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [recent, setRecent] = useState<RecentFile[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -358,8 +360,17 @@ export default function WindowsTray() {
   }
 
   const openFolder = async () => {
-    await command<void>('open_finder_location')
-    void getCurrentWindow().hide()
+    setOpening(true)
+    const current = await loadSyncStatus()
+    setStatus(current)
+    if (!current?.sync_root) {
+      setOpening(false)
+      return
+    }
+    const result = await command<void>('open_finder_location', { path: current.sync_root })
+    setOpening(false)
+    if (result.ok) void getCurrentWindow().hide()
+    else showToast({ variant: 'error', title: 'Couldn’t open folder', message: result.reason })
   }
 
   const viewOnline = async () => {
@@ -664,7 +675,7 @@ export default function WindowsTray() {
           flexShrink: 0,
         }}
       >
-        <ActionButton icon="folder" label="Open folder" onClick={() => void openFolder()} disabled={!status?.sync_root} />
+        <ActionButton icon="folder" label="Open folder" onClick={() => void openFolder()} disabled={opening || !status?.sync_root} />
         <ActionButton icon="external" label="View online" onClick={() => void viewOnline()} borderLeft />
         <ActionButton icon="trash" label="Recycle bin" onClick={() => void openRecycleBin()} borderLeft />
       </div>
