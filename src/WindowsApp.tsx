@@ -616,22 +616,26 @@ function StatusPill({ status }: { status: string }) {
 
 // ── Sub-card: Open-in-Explorer (kept from the previous FilesView) ─────────────
 
-function SyncFolderCard() {
-  const [root, setRoot] = useState<string | null>(null)
+function SyncFolderCard({ status: polledStatus }: { status: SyncStatus | null }) {
+  const [status, setStatus] = useState(polledStatus)
+  useEffect(() => setStatus(polledStatus), [polledStatus])
+  const root = status?.sync_root ?? null
+  const isMacos = usePlatformName() === 'macos'
   const [opening, setOpening] = useState(false)
   const { showToast } = useToast()
 
-  useEffect(() => {
-    let cancelled = false
-    command<string | null>('default_sync_root').then((r) => {
-      if (!cancelled && r.ok) setRoot(r.value)
-    })
-    return () => { cancelled = true }
-  }, [])
-
   const openInExplorer = async () => {
     setOpening(true)
-    const r = await command<void>('open_finder_location', { path: root })
+    // The last poll may predate a root change or removal.
+    const current = isMacos ? null : await loadSyncStatus()
+    if (!isMacos) {
+      setStatus(current)
+      if (!current?.sync_root) {
+        setOpening(false)
+        return
+      }
+    }
+    const r = await command<void>('open_finder_location', isMacos ? undefined : { path: current!.sync_root })
     setOpening(false)
     if (!r.ok) {
       showToast({
@@ -650,12 +654,12 @@ function SyncFolderCard() {
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 2 }}>Beebeeb sync folder</div>
-          <div style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
-            {root ?? 'Not configured on this PC yet'}
+          <div title={root ?? undefined} style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+            {status == null ? 'Sync folder unavailable' : isMacos ? 'Beebeeb in Finder' : root ?? 'Not configured on this PC yet'}
           </div>
         </div>
-        <PrimaryBtn onClick={() => void openInExplorer()} disabled={opening || root == null}>
-          <NavIcon name="external" size={13} color={T.paper} /> {opening ? 'Opening…' : 'Open in Explorer'}
+        <PrimaryBtn onClick={() => void openInExplorer()} disabled={opening || status == null || (!isMacos && root == null)}>
+          <NavIcon name="external" size={13} color={T.paper} /> {opening ? 'Opening…' : isMacos ? 'Open in Finder' : 'Open in Explorer'}
         </PrimaryBtn>
       </div>
     </Card>
@@ -901,7 +905,6 @@ function FilesErrorState({ err, onRetry }: { err: { reason: string; unsupported:
   if (err.unsupported) {
     return (
       <>
-        <SyncFolderCard />
         <Card style={{ padding: 22 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ width: 36, height: 36, borderRadius: 9, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -920,7 +923,6 @@ function FilesErrorState({ err, onRetry }: { err: { reason: string; unsupported:
   }
   return (
     <>
-      <SyncFolderCard />
       <Card style={{ padding: 22 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ width: 36, height: 36, borderRadius: 9, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -944,7 +946,6 @@ function FilesErrorState({ err, onRetry }: { err: { reason: string; unsupported:
 function FilesEmptyState() {
   return (
     <>
-      <SyncFolderCard />
       <Card style={{ padding: 0 }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '48px 36px', gap: 10 }}>
           <NavIcon name="cloud" size={26} color={T.ink4} />
@@ -1228,7 +1229,7 @@ function ManageBackupCard() {
 
 // ── Root: FilesView ───────────────────────────────────────────────────────────
 
-function FilesView() {
+function FilesView({ status }: { status: SyncStatus | null }) {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<{ reason: string; unsupported: boolean } | null>(null)
   const [overview, setOverview] = useState<FileOverview | null>(null)
@@ -1264,13 +1265,14 @@ function FilesView() {
         subtitle="What’s synced to this PC — local vs online-only, anything pinned or in conflict, and your most recent changes. Explorer stays your file surface; this is the device view."
       />
 
+      <SyncFolderCard status={status} />
+
       {loading ? (
         <FilesLoadingState />
       ) : err ? (
         <FilesErrorState err={err} onRetry={retry} />
       ) : isEmpty ? (
         <>
-          <SyncFolderCard />
           {/* Manage backup is useful even before any files exist — it's how the
               user opts their Windows folders INTO the vault in the first place. */}
           <ManageBackupCard />
@@ -1278,7 +1280,6 @@ function FilesView() {
         </>
       ) : overview ? (
         <>
-          <SyncFolderCard />
           <ManageBackupCard />
           <FilesMetricStrip overview={overview} />
           <ByStatusBar overview={overview} />
@@ -1773,7 +1774,7 @@ export default function WindowsApp() {
       case 'home':
         return loggedIn ? <HomeView status={status} usage={usage} storage={storage} /> : <SignedOutGate onOpenSignIn={openSignIn} />
       case 'files':
-        return <FilesView />
+        return <FilesView status={status} />
       case 'trash':
         return <TrashView />
       case 'settings':

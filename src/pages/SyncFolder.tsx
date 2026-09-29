@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   command,
   commandUnavailableLabel,
+  loadSyncStatus,
   type DesktopPlatform,
   type FinderInstallState,
   type MacosIntegrationResetResult,
@@ -22,6 +23,7 @@ type ResetPhase = 'idle' | 'confirming' | 'busy'
 export default function SyncFolder() {
   const { showToast } = useToast()
   const [resetPhase, setResetPhase] = useState<ResetPhase>('idle')
+  const [rootUnavailable, setRootUnavailable] = useState(false)
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
   const [installState, setInstallState] = useState<FinderInstallState | null>(null)
   const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
@@ -54,7 +56,10 @@ export default function SyncFolder() {
     const result = await command<string | null>('pick_sync_root')
     setBusy(false)
     if (result.ok) {
-      if (result.value) setSyncRoot(result.value)
+      if (result.value) {
+        setSyncRoot(result.value)
+        setRootUnavailable(false)
+      }
       return
     }
     showToast({
@@ -80,7 +85,18 @@ export default function SyncFolder() {
   }
 
   const openFinder = async () => {
-    const result = await command<void>('open_finder_location', { path: platform === 'macos' ? null : syncRoot })
+    setBusy(true)
+    const current = platform === 'macos' ? null : await loadSyncStatus()
+    if (platform !== 'macos') {
+      setSyncRoot(current?.sync_root ?? null)
+      setRootUnavailable(current == null)
+      if (!current?.sync_root) {
+        setBusy(false)
+        return
+      }
+    }
+    const result = await command<void>('open_finder_location', { path: platform === 'macos' ? null : current!.sync_root })
+    setBusy(false)
     if (!result.ok) {
       showToast({
         variant: 'error',
@@ -152,7 +168,7 @@ export default function SyncFolder() {
           <div className="panel" style={{ background: 'var(--paper-2)' }}>
             <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
             <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
-              {installState?.path ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? 'No location selected')}
+              {isMacos ? installState?.path ?? 'Beebeeb in Finder' : rootUnavailable ? 'Sync folder unavailable' : syncRoot ?? 'Not configured on this PC yet'}
             </div>
           </div>
           <div className="button-row" style={{ marginTop: 14 }}>

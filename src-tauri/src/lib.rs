@@ -2463,6 +2463,51 @@ async fn reset_macos_integration(
     })
 }
 
+#[cfg(not(target_os = "macos"))]
+fn require_open_folder_root(path: Option<String>) -> Result<PathBuf, String> {
+    path.filter(|root| !root.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "Not configured on this PC yet".to_string())
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod open_folder_tests {
+    use super::*;
+
+    #[test]
+    fn open_folder_rejects_missing_root_without_suggestion() {
+        assert_eq!(
+            require_open_folder_root(None),
+            Err("Not configured on this PC yet".to_string())
+        );
+    }
+
+    #[test]
+    fn open_folder_rejects_empty_root() {
+        for root in ["", "   "] {
+            assert_eq!(
+                require_open_folder_root(Some(root.to_string())),
+                Err("Not configured on this PC yet".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn open_folder_preserves_explicit_root() {
+        let root = "D:\\Private files\\資料\\Sync";
+        assert_eq!(require_open_folder_root(Some(root.to_string())), Ok(PathBuf::from(root)));
+    }
+}
+
+// Native menu actions have no frontend status: resolve the configured root here.
+fn open_current_finder_location() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let path = None;
+    #[cfg(not(target_os = "macos"))]
+    let path = Some(get_sync_root()?.ok_or_else(|| "Not configured on this PC yet".to_string())?);
+    open_finder_location(path)
+}
+
 #[tauri::command]
 fn open_finder_location(path: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -2479,10 +2524,7 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let root = path
-            .map(PathBuf::from)
-            .or_else(|| DesktopConfig::load().ok().and_then(|c| c.sync_root))
-            .unwrap_or_else(config::default_sync_root_suggestion);
+        let root = require_open_folder_root(path)?;
         config::ensure_directory(&root)?;
 
         #[cfg(target_os = "windows")]
@@ -7920,7 +7962,7 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             });
         }
         DesktopMenuAction::Quit => app.exit(0),
-        DesktopMenuAction::OpenFolder => log_menu_result(spec.id, open_finder_location(None)),
+        DesktopMenuAction::OpenFolder => log_menu_result(spec.id, open_current_finder_location()),
         DesktopMenuAction::UploadFiles => {
             let app = app.clone();
             spawn_menu_task(spec.id, async move { upload_files_to_sync_root_impl(&app).map(|_| ()) });

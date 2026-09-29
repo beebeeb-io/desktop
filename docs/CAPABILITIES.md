@@ -74,6 +74,23 @@ Polish verification: red/green rendering fixtures, bun test, TypeScript and lint
 regenerate the NATIVE.md browser fixtures (including narrow/dark presentation and
 retry recovery), or record Chromium launch denial for the lead to rerun.
 
+## Configured sync-root presentation — 2026-09-29 (task 1646)
+
+Files, Settings → Explorer integration, and the Windows tray display
+`sync_status.sync_root`. The main window shares its existing status poll with
+Files and Settings; the tray uses its existing poll. `default_sync_root` remains
+an onboarding suggestion, never the current-root display. One folder card stays
+visible while Files loads, is empty, or has an overview error. Missing status is
+unavailable; a successful status with no root is not configured. Neither state
+invents a path or enables Open folder. Long paths retain their full title.
+Open-folder actions let the backend resolve the current configured root at click
+time, avoiding a stale path from an earlier poll. macOS File Provider location
+resolution stays unchanged: because Mac status deliberately returns a null root,
+the Files card names “Beebeeb in Finder” and retains its Open in Finder action
+when status is available; Rust resolves the visible File Provider location.
+Native verification must compare all three surfaces
+and Explorer against a non-default configured root, including after a root change.
+
 ## U2 Windows surface checklist
 
 Status is **source reachability**, not a native pass. **Wired** means the action
