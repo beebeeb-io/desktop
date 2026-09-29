@@ -2,6 +2,9 @@
 //! deleting any: an untracked, dirty, busy or inaccessible item refuses sign-out.
 //! Exclusive Win32 handles bind the identity/dirty check and deletion to the same
 //! file, so a save or path replacement cannot turn cleanup into data loss.
+#[path = "signout_cleanup.rs"]
+mod cleanup;
+
 use crate::state_db::StateDb;
 use std::collections::HashMap;
 use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
@@ -14,64 +17,61 @@ pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
         anyhow::anyhow!("Pending changes remain. Unlock, finish syncing and resolve failed changes before signing out.")
     })?;
     let rows = db.list_files()?;
-    let mut handles = Vec::new();
-    let mut directories = Vec::new();
-    if let Some(root) = root {
-        let known: HashMap<_, _> = rows
-            .iter()
-            .map(|r| (r.path.trim_start_matches('/').replace('/', "\\"), r))
-            .collect();
-        anyhow::ensure!(
-            root.is_dir(),
-            "Sync folder is unavailable; restore it before signing out"
-        );
-        prepare(root, root, &known, &mut handles, &mut directories)?;
-    } else if !rows.is_empty() {
-        anyhow::bail!("Cannot locate the sync folder. Restore its location before signing out.");
-    }
-
-    // Delete only files proven clean while their exclusive handle is held.
-    // No dehydrate/remove fallback: dirty bytes never qualify for this list.
-    for file in &handles {
-        let info = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
-        unsafe {
-            SetFileInformationByHandle(
-                HANDLE(file.as_raw_handle()),
-                FileDispositionInfo,
-                &info as *const _ as *const std::ffi::c_void,
-                std::mem::size_of_val(&info) as u32,
-            )?;
-        }
-    }
-    drop(handles);
-    // Never recursively remove directories: newly created children make this
-    // fail, leaving the account and DB available for recovery/retry.
-    for directory in directories.iter().rev() {
-        std::fs::remove_dir(directory)?;
-    }
-    if let Some(root) = root {
-        if root.exists() && std::fs::read_dir(root)?.next().is_some() {
-            anyhow::bail!("New files appeared in the sync folder. Sync or move them out before signing out.");
-        }
-    }
-    // Keep every DB reference until all plaintext cleanup succeeds.
-    for row in &rows {
-        let contract = db.get_file_contract_state(&row.file_id)?;
-        if let Some(path) = contract.as_ref().and_then(|state| state.cache_path.as_ref()) {
-            let path = Path::new(path);
-            anyhow::ensure!(
-                crate::is_disposable_cache_path(path),
-                "Cache cleanup refused an unexpected path"
-            );
-            match std::fs::remove_file(path) {
-                Ok(()) => (),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e.into()),
+    let cache_paths = rows
+        .iter()
+        .map(|row| {
+            db.get_file_contract_state(&row.file_id)
+                .map(|state| state.and_then(|state| state.cache_path))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    cleanup::purge(
+        cache_paths,
+        crate::is_disposable_cache_path,
+        || {
+            let mut handles = Vec::new();
+            let mut directories = Vec::new();
+            if let Some(root) = root {
+                let known: HashMap<_, _> = rows
+                    .iter()
+                    .map(|r| (r.path.trim_start_matches('/').replace('/', "\\"), r))
+                    .collect();
+                anyhow::ensure!(
+                    root.is_dir(),
+                    "Sync folder is unavailable; restore it before signing out"
+                );
+                prepare(root, root, &known, &mut handles, &mut directories)?;
+            } else if !rows.is_empty() {
+                anyhow::bail!("Cannot locate the sync folder. Restore its location before signing out.");
             }
-        }
-    }
-    db.finish_windows_signout()?;
-    Ok(())
+
+            // Delete only files proven clean while their exclusive handle is held.
+            // No dehydrate/remove fallback: dirty bytes never qualify for this list.
+            for file in &handles {
+                let info = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
+                unsafe {
+                    SetFileInformationByHandle(
+                        HANDLE(file.as_raw_handle()),
+                        FileDispositionInfo,
+                        &info as *const _ as *const std::ffi::c_void,
+                        std::mem::size_of_val(&info) as u32,
+                    )?;
+                }
+            }
+            drop(handles);
+            // Never recursively remove directories: newly created children make this
+            // fail, leaving the account and DB available for recovery/retry.
+            for directory in directories.iter().rev() {
+                std::fs::remove_dir(directory)?;
+            }
+            if let Some(root) = root {
+                if root.exists() && std::fs::read_dir(root)?.next().is_some() {
+                    anyhow::bail!("New files appeared in the sync folder. Sync or move them out before signing out.");
+                }
+            }
+            Ok(())
+        },
+        || Ok(db.finish_windows_signout()?),
+    )
 }
 
 fn prepare(
