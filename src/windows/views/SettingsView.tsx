@@ -868,7 +868,7 @@ function shellIntegrationCommandsFor(platform: PlatformName): { state: string; i
   return null
 }
 
-function ExplorerIntegrationPanel() {
+function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
   // Gate everything below on `resolved`: `platform` starts `null` and only
   // becomes a real value once `desktop_platform` answers. Deriving `commands`
   // from `resolved ? platform : null` means `commands` itself is the single
@@ -977,6 +977,11 @@ function ExplorerIntegrationPanel() {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{fileSurfaceName} location</div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{statusText}</div>
+          {platform === 'windows' && (
+            <div title={status?.sync_root ?? undefined} style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3, marginTop: 3, overflowWrap: 'anywhere' }}>
+              {status == null ? 'Sync folder unavailable' : status.sync_root ?? 'Not configured on this PC yet'}
+            </div>
+          )}
         </div>
         {commands && !checking && !active && (
           <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? actionVerbBusy : actionVerb}</PrimaryBtn>
@@ -1923,7 +1928,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       case 'launch':
         return <LaunchPanel />
       case 'explorer-integration':
-        return <ExplorerIntegrationPanel />
+        return <ExplorerIntegrationPanel status={status} />
       case 'updates':
         return <UpdatesPanel config={config} onConfigChange={(patch) => void handleConfigChange(patch)} />
       case 'advanced':

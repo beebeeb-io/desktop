@@ -493,6 +493,10 @@ export default function WindowsTray() {
         <span style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2 }}>{statusLine}</span>
       </div>
 
+      <div title={status?.sync_root ?? undefined} style={{ padding: '6px 14px', fontSize: 11, fontFamily: T.fontMono, color: T.ink3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 }}>
+        {status == null ? 'Sync folder unavailable' : status.sync_root ?? 'Not configured on this PC yet'}
+      </div>
+
       {/* Recent files list */}
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
         {!loaded ? null : signedOut || recent.length === 0 ? (
@@ -660,7 +664,7 @@ export default function WindowsTray() {
           flexShrink: 0,
         }}
       >
-        <ActionButton icon="folder" label="Open folder" onClick={() => void openFolder()} />
+        <ActionButton icon="folder" label="Open folder" onClick={() => void openFolder()} disabled={!status?.sync_root} />
         <ActionButton icon="external" label="View online" onClick={() => void viewOnline()} borderLeft />
         <ActionButton icon="trash" label="Recycle bin" onClick={() => void openRecycleBin()} borderLeft />
       </div>
@@ -673,15 +677,18 @@ function ActionButton({
   label,
   onClick,
   borderLeft,
+  disabled = false,
 }: {
   icon: string
   label: string
   onClick: () => void
   borderLeft?: boolean
+  disabled?: boolean
 }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -696,7 +703,8 @@ function ActionButton({
         background: 'transparent',
         border: 'none',
         borderLeft: borderLeft ? `1px solid ${T.line}` : 'none',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         lineHeight: 1,
       }}
       onMouseEnter={(e) => {
