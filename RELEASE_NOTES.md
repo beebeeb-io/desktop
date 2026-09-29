@@ -4,8 +4,9 @@ Beebeeb Desktop is now available on macOS. Apple Silicon only for this release �
 support is a separate follow-up, not silently dropped. The app is Developer ID signed and
 notarized by Apple, and installs the same "Beebeeb Drive" Finder location that has been running
 on real hardware for weeks: a native File Provider extension, not a synced folder copy. Windows
-and Linux are unchanged in this release; nothing in their installers or update path was rebuilt,
-only re-tagged under the same version so all three platforms share one manifest.
+and Linux carry no source changes in this release — they are rebuilt from the same code as 0.8.4
+so every platform ships under one shared version number and one manifest, not because the launch
+needed anything from them.
 
 ### What's New
 
@@ -48,9 +49,11 @@ only re-tagged under the same version so all three platforms share one manifest.
 - Notarized: `xcrun notarytool submit --wait` → `Accepted`; `xcrun stapler staple` + `validate` on
   both the `.app` and the `.dmg`; `spctl -a -vv` (app) and `spctl -a -vv -t install` (dmg) →
   accepted, source=Notarized Developer ID.
-- Release workflow: Windows + Linux built and tested by `.github/workflows/release.yml`'s own
-  gate on `ubuntu-latest`/`windows-latest` (unchanged from 0.8.4 — no source changes to either
-  platform in this release, only the shared version tag).
+- Release workflow: the shared `bun test` + `cargo test --locked` gate (the counts above) runs
+  once on `ubuntu-latest` before any platform builds; Windows and Linux are then rebuilt by
+  `.github/workflows/release.yml`'s `tauri-action` step on `windows-latest`/`ubuntu-latest` from
+  that same gated, unchanged source (no test suite re-runs per platform — the gate is what's
+  tested, the platform matrix is what's built).
 - Not verified in this release: a real universal (Intel + Apple Silicon) macOS build — Apple
   Silicon only ships today; Intel Mac users should wait for a follow-up release.
 
