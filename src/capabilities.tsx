@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { command, openUrl } from './desktopApi'
+import { CapabilityNotice } from './CapabilityNotice'
 
 /** Wire shape serialized by desktop_capabilities.rs; fixtures are checked by both suites. */
 export interface DesktopCapabilities {
@@ -35,9 +36,22 @@ export function canInstallUpdate(caps: DesktopCapabilities | null): boolean {
 }
 
 export function CapabilityAlternative({ children }: { children?: ReactNode }) {
-  return <div role="status" style={{ padding: 24 }}>
-    <p>{children ?? 'This feature is not available on this device. You can manage your files in the web app.'}</p>
-    <button type="button" onClick={() => void openUrl('https://app.beebeeb.io')}>Open web app</button>
+  return <div style={{ padding: 24 }}>
+    <CapabilityNotice title="This feature is not available on this device." actions={
+      <button className="button amber" type="button" onClick={() => void openUrl('https://app.beebeeb.io')}>Open web app</button>
+    }>{children ?? 'You can manage your files in the web app.'}</CapabilityNotice>
+  </div>
+}
+
+export function CapabilityResolutionError({ onRetry }: { onRetry: () => void }) {
+  // Load-blocking failure: keep the explanation and recovery actions inline (1248/1255).
+  return <div style={{ padding: 24 }}>
+    <CapabilityNotice role="alert" title="Device support could not be checked." actions={<>
+      <button className="button amber" type="button" onClick={onRetry}>Retry</button>
+      <button className="button" type="button" onClick={() => void openUrl('https://app.beebeeb.io')}>Open web app</button>
+    </>}>
+      Try again to check which features are available on this device. You can also manage your files in the web app.
+    </CapabilityNotice>
   </div>
 }
 
@@ -63,9 +77,6 @@ export function CapabilityProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; clearTimeout(timeout) }
   }, [attempt])
   if (caps) return <CapabilityContext.Provider value={caps}>{children}</CapabilityContext.Provider>
-  if (!failed) return <p role="status">Checking device support…</p>
-  return <CapabilityAlternative>
-    Device support could not be checked.{' '}
-    <button type="button" onClick={() => { setFailed(false); setAttempt((value) => value + 1) }}>Retry</button>
-  </CapabilityAlternative>
+  if (!failed) return <div style={{ padding: 24 }}><CapabilityNotice>Checking device support…</CapabilityNotice></div>
+  return <CapabilityResolutionError onRetry={() => { setFailed(false); setAttempt((value) => value + 1) }} />
 }

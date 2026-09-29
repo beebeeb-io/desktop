@@ -58,6 +58,22 @@ installer format offers the download page instead of in-app install/downgrade.
 This is an additive internal IPC contract, with no credentials, crypto, storage
 schema, dependency, installer identity, or File Provider changes.
 
+## Capability presentation ruling — 2026-09-29 polish
+
+Guus: “style it with the existing design tokens/components used on the same
+page (an info/notice row inside the card system, muted body text size, consistent
+spacing), and reuse that component for every alternative-text instance across
+shells”. Sync, cache-limit and unsupported-route explanations share a neutral
+Card notice with Inter body copy and existing paper/line/ink tokens. No new colours.
+Capability resolution failure uses that same card-based error/empty-state pattern
+with a heading, explanation and separate Retry / Open web app actions. Desktop
+has no BBButton export: use its existing `.button` / `.button.amber` equivalents.
+Per 1248/1255, this is a load-blocking inline error, not a transient action toast.
+
+Polish verification: red/green rendering fixtures, bun test, TypeScript and lint;
+regenerate the NATIVE.md browser fixtures (including narrow/dark presentation and
+retry recovery), or record Chromium launch denial for the lead to rerun.
+
 ## U2 Windows surface checklist
 
 Status is **source reachability**, not a native pass. **Wired** means the action

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { CapabilityContext, CapabilityGate, CapabilityProvider, canInstallUpdate, supportsRoute, type DesktopCapabilities } from '../src/capabilities'
+import { CapabilityContext, CapabilityGate, CapabilityProvider, CapabilityResolutionError, canInstallUpdate, supportsRoute, type DesktopCapabilities } from '../src/capabilities'
 import fixtures from './fixtures/desktop-capabilities.json'
 import SettingsView, { AdvancedPanel } from '../src/windows/views/SettingsView'
 import { SyncModeStep } from '../src/WindowsFirstRun'
@@ -24,6 +24,7 @@ test('real Windows settings omit four unsupported preference actions and the no-
   expect(html).toContain('Always on')
   expect(html).toContain('Free up space')
   expect(html).toContain('Pause syncing from the app menu')
+  expect(html).toMatch(/class="capability-notice"[^>]*>[\s\S]*?Files download when opened/)
 })
 
 test('Mac settings preserve their existing controls and Finder routing', () => {
@@ -52,6 +53,8 @@ test('unsupported direct routes never mount a child and provide an honest web al
       const html = renderToStaticMarkup(<CapabilityContext.Provider value={cases[name]}><CapabilityGate route={route}><Child /></CapabilityGate></CapabilityContext.Provider>)
       expect(html).toContain('Open web app')
       expect(html).not.toContain('Native action')
+      expect(html).toContain('class="capability-notice"')
+      expect(html).toContain('class="button amber"')
     }
   }
   expect(mounted).toBe(0)
@@ -63,6 +66,17 @@ test('unresolved host never mounts children, regardless of layout selection', ()
   const html = renderToStaticMarkup(<CapabilityProvider><Child /></CapabilityProvider>)
   expect(html).toContain('Checking device support')
   expect(mounted).toBe(0)
+})
+
+test('capability load failure keeps a styled inline explanation and two separate recovery actions', () => {
+  const html = renderToStaticMarkup(<CapabilityResolutionError onRetry={() => {}} />)
+  expect(html).toContain('role="alert"')
+  expect(html).toContain('Device support could not be checked.</h2>')
+  expect(html).toContain('color:var(--ink-3)')
+  expect(html).toContain('font-size:12px')
+  expect(html).toMatch(/<button class="button amber" type="button">Retry<\/button>/)
+  expect(html).toMatch(/<button class="button" type="button">Open web app<\/button>/)
+  expect(html).not.toMatch(/<p[^>]*>[^<]*<button/)
 })
 
 test('seven Rust wire fixtures distinguish install support and implemented preferences', () => {
@@ -91,6 +105,9 @@ test('Windows hides the database-only disk cap while Mac retains its selector', 
     </ToastProvider></CapabilityContext.Provider>)
     expect(html.includes('aria-label="Local cache limit"')).toBe(host === 'macos')
     expect(html).toContain('aria-label="Theme"')
-    if (host === 'windows-nsis') expect(html).toContain('Use Free up space')
+    if (host === 'windows-nsis') {
+      expect(html).toContain('Use Free up space')
+      expect(html).toContain('class="capability-notice"')
+    }
   }
 })

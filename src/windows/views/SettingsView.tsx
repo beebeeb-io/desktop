@@ -1,4 +1,5 @@
 import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate } from '../../capabilities'
+import { CapabilityNotice } from '../../CapabilityNotice'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   accountRegion,
@@ -373,9 +374,9 @@ function SyncPanel({
         })}
       </Card>
 
-      {windows && <p>Files download when opened. Use Selective sync to make folders online-only.
+      {windows && <CapabilityNotice style={{ marginTop: 24 }}>Files download when opened. Use Selective sync to make folders online-only.
         Automatic metered-network control and overlay preferences are not available yet.
-        Pause syncing from the app menu when needed.</p>}
+        Pause syncing from the app menu when needed.</CapabilityNotice>}
       <Card style={{ marginTop: 24, padding: 18, display: 'flex', alignItems: 'center', gap: 14, background: T.paper2 }}>
         <div style={{ width: 32, height: 32, borderRadius: 8, background: T.paper, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <NavIcon name="cloud" size={14} color={T.amberDeep} />
@@ -1771,7 +1772,7 @@ export function AdvancedPanel({
             {cacheView.warning}
           </div>
         )}
-      </Card> : <p>Automatic disk cache limits are not available on Windows yet. Use Free up space in Sync settings to reclaim downloaded files.</p>}
+      </Card> : <CapabilityNotice>Automatic disk cache limits are not available on Windows yet. Use Free up space in Sync settings to reclaim downloaded files.</CapabilityNotice>}
 
       <AppActivityPanel />
     </SettingsSectionShell>
