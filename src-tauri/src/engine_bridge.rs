@@ -9833,6 +9833,7 @@ mod tests {
     /// the destination guard fires BEFORE any HTTP call and the server therefore
     /// sees zero requests — can never hang. It also reports how many requests it
     /// actually served, which is what proves `do_hydrate` never ran on rejection.
+    #[cfg(unix)]
     struct IpcHydrationMock {
         base_url: String,
         requests: Arc<std::sync::atomic::AtomicUsize>,
@@ -9840,6 +9841,7 @@ mod tests {
         handle: thread::JoinHandle<()>,
     }
 
+    #[cfg(unix)]
     impl IpcHydrationMock {
         fn start(file_key: beebeeb_core::kdf::FileKey, chunks: Vec<Vec<u8>>) -> Self {
             use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -9908,6 +9910,7 @@ mod tests {
     /// Drive one real `HydrateFile` request over a real Unix socket against a
     /// real `serve_ipc_at` server, returning the daemon's response. This is the
     /// actual IPC entry point an attacker would use — not an internal function.
+    #[cfg(unix)]
     fn ipc_hydrate_roundtrip(
         db: Arc<StateDb>,
         bridge: Arc<EngineBridge>,
@@ -9966,6 +9969,7 @@ mod tests {
     /// the daemon returns `Error`, the target file is NOT created, and the
     /// hydration backend is never even contacted (0 requests), proving the
     /// destination guard short-circuits before any decrypt/download happens.
+    #[cfg(unix)]
     #[test]
     fn ipc_rejects_hydrate_write_outside_allowed_roots() {
         let dir = tempfile::tempdir().unwrap();
@@ -10020,6 +10024,7 @@ mod tests {
     /// server, given a `dest_path` genuinely under an allowed root (the temp
     /// dir, always an allowed root in the handler), decrypts the real content
     /// and writes it to disk, returning `Ok`.
+    #[cfg(unix)]
     #[test]
     fn ipc_allows_hydrate_write_under_allowed_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -10066,6 +10071,7 @@ mod tests {
     }
 
     /// Item 5: `serve_ipc_at` hardens the bound socket file to owner-only 0o600.
+    #[cfg(unix)]
     #[test]
     fn ipc_socket_file_is_chmod_0600_after_bind() {
         use std::os::unix::fs::PermissionsExt;
@@ -10102,6 +10108,7 @@ mod tests {
     /// Task 1247 P0 follow-up (TOCTOU symlink race): the write primitive itself
     /// must refuse a symlink destination (O_NOFOLLOW) and create real files
     /// owner-only (0o600). This unit test pins both directly on the primitive.
+    #[cfg(unix)]
     #[test]
     fn write_hydrated_plaintext_refuses_symlink_and_sets_0600() {
         use std::os::unix::fs::PermissionsExt;
@@ -10148,6 +10155,7 @@ mod tests {
     ///
     /// Load-bearing: with the old leaf-only open, the write would follow the
     /// symlinked parent and create the file at the real inside-root dir.
+    #[cfg(unix)]
     #[test]
     fn write_hydrated_plaintext_refuses_symlinked_parent_dir() {
         let root = tempfile::tempdir().unwrap();
@@ -10190,6 +10198,7 @@ mod tests {
     ///
     /// Load-bearing: without the fchmod (relying on the open-time mode) the
     /// pre-existing 0o644 file keeps 0o644 after the write.
+    #[cfg(unix)]
     #[test]
     fn write_hydrated_plaintext_forces_0600_on_preexisting_file() {
         use std::os::unix::fs::PermissionsExt;
@@ -10228,6 +10237,8 @@ mod tests {
     /// Load-bearing: `root/legit` exists, so if the non-normal-component
     /// rejection were removed, the descent would resolve `legit/..` back to
     /// `root` and create `root/evil`. The check must stop it first.
+    // Exercises the Unix openat descent; the non-Unix writer has no descent.
+    #[cfg(unix)]
     #[test]
     fn write_hydrated_plaintext_rejects_dotdot_components() {
         let root = tempfile::tempdir().unwrap();
@@ -10258,6 +10269,7 @@ mod tests {
     /// at. Load-bearing: re-resolving the leaf by the current path string instead
     /// of the held fd makes it land in the swapped-in directory (see the mutation
     /// note in the task file — the red/green swaps the leaf step to a path write).
+    #[cfg(unix)]
     #[test]
     fn create_leaf_relative_is_anchored_to_original_dir_fd_across_rename_swap() {
         use std::io::{Read, Write};
@@ -10324,6 +10336,7 @@ mod tests {
     /// only the O_NOFOLLOW write stops the decrypted plaintext from being written
     /// through the symlink to a target outside the allowed root. Load-bearing:
     /// with a plain `fs::write` the outside target WOULD be created.
+    #[cfg(unix)]
     #[test]
     fn hydrate_file_fails_closed_on_symlink_destination_toctou() {
         let dir = tempfile::tempdir().unwrap(); // the allowed root

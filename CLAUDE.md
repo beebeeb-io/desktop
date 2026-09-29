@@ -104,6 +104,16 @@ To develop against the real web client instead of the placeholder:
 
 `cargo check` from `src-tauri/` validates the Rust side without the frontend.
 
+`Desktop CI` (`.github/workflows/ci.yml`) keeps the stable `Rust check (Windows)`
+job name, but now runs both `cargo check --locked --all-targets` and
+`cargo test --locked`. macOS retains its all-target check; Linux runs tests.
+`python scripts/assert-cargo-test-counts.py --self-test` proves the count guard
+rejects empty runs. To validate saved output, pass its path and
+`--cargo-exit-code <actual exit code>`: each library/integration binary must
+execute tests; only the entry-point `src/main.rs` harness and doctests may be
+empty. CI uploads logs and exit codes as `rust-Windows`, `rust-macOS`, and
+`rust-test-linux`. A Windows cross-check on Linux is not a native test pass.
+
 ## Key files
 
 - `src-tauri/tauri.conf.json` — identifier `io.beebeeb.app`, 1200×800 default window.
