@@ -2,11 +2,13 @@
 
 Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus the Rust sync engine from `core`. One codebase, three OS targets (macOS, Windows, Linux).
 
-## Release status — Windows + Linux released, macOS not yet
+## Release status — Windows, Linux and macOS (Apple Silicon) released
 
-**`desktop-v0.1.0` is published** (Windows + Linux):
-https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.1.0 — signed MSI + NSIS installer
-for Windows, AppImage/.deb/.rpm for Linux, each with a minisign `.sig` for the auto-updater.
+**`desktop-v0.8.5`** (or later — check
+https://github.com/beebeeb-io/desktop/releases/latest) **is published** for all three
+platforms: signed MSI + NSIS installer for Windows, AppImage/.deb/.rpm for Linux, and a
+Developer ID signed + notarized `.dmg` for macOS (Apple Silicon only — Intel is not built),
+each with a minisign `.sig` for the auto-updater.
 
 Windows updater manifests must preserve installer type. Fresh Windows installs are documented as
 NSIS `setup.exe` installs, so publish `windows-x86_64-nsis` and the generic `windows-x86_64`
@@ -14,14 +16,17 @@ fallback to the NSIS asset, and publish `windows-x86_64-msi` to the MSI asset fo
 clients. Sending an NSIS-installed client to an MSI update creates a second Windows Installed Apps
 entry instead of updating the existing NSIS entry.
 
-`release.yml` builds Windows and Linux only. **macOS is deliberately disabled** in the build
-matrix (commented out, not deleted) — two separate gaps block it:
-- `scripts/build-fileprovider-extension.sh`'s arch-detection doesn't support
-  `TAURI_ENV_ARCH=universal` (a real universal build needs building the File Provider extension
-  for both arches and `lipo`-combining them).
-- No Developer ID / notary credentials are wired into CI yet (task 0342).
-
-Re-enable by uncommenting the macOS entry in `release.yml`'s build matrix once both are resolved.
+`release.yml`'s build matrix still runs Windows and Linux only — **macOS builds locally, not in
+CI** (commented out, not deleted). This is a deliberate route (task 1608), not a blocker: Developer
+ID signing needs the private key in the `Developer ID Application: Devidee B.V. (R8352WDJJR)`
+keychain identity, and that key is never exported to a CI secret. The remaining CI gap
+(`scripts/build-fileprovider-extension.sh`'s arch-detection doesn't support
+`TAURI_ENV_ARCH=universal`, needed for a real Intel+Apple Silicon universal build) only matters
+once Intel support is undertaken. See `docs/RELEASING.md` → "macOS: local build, then backfill the
+manifest" for the exact procedure — build locally, notarize, upload assets to the same GitHub
+release the Windows/Linux build already created, run `.github/workflows/sign-macos-updater-artifact.yml`
+for the one step that needs CI's `TAURI_SIGNING_PRIVATE_KEY` secret, then re-run `release.yml` with
+`publish_existing=true` to backfill the manifest's `darwin-aarch64` entry.
 
 **Not yet verified:** a real install + close-to-tray smoke test on physical Windows hardware
 (only build/sign/publish has been confirmed, from CI + local Linux verification — see below).
@@ -107,9 +112,11 @@ To develop against the real web client instead of the placeholder:
 
 ## Current macOS integration state
 
-**Read `docs/MACOS_BRINGUP_BRIEF.md` first** — a full, ordered bring-up plan (credentials needed,
-what's already proven working on real hardware, what NOT to do) written 2026-07-30 for whichever
-session next has a Mac available. Don't rediscover this from scratch.
+**`docs/MACOS_BRINGUP_BRIEF.md`** is the historical bring-up plan written 2026-07-30, before any
+credentials existed — every blocker it lists (Developer ID cert, provisioning profiles, the macOS
+peer-credential IPC check) is now resolved; task 1608 (2026-09-29) shipped the first public macOS
+release on top of it. Still worth reading for the Finder/File Provider deep-dive and the "what NOT
+to do" list (still true); for the actual release procedure use `docs/RELEASING.md` instead.
 
 macOS is the first desktop product target. Keep cross-platform logic in Rust
 where possible: auth/session handling, crypto, sync, queueing, conflict/version
