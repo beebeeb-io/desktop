@@ -84,15 +84,17 @@ pub const PROVIDER_ID: &str = "Beebeeb";
 /// installs registered at 1.0.0 must re-register to apply the new modifier.
 pub const PROVIDER_VERSION: &str = "1.1.0";
 
-/// Live handle to the engine bridge, set once at runner startup and
-/// read by the Cloud Files fetch callback. We can't capture the
-/// bridge into the `extern "system"` function pointer Windows expects,
-/// so a OnceLock is the simplest hop.
-///
-/// Set from `runner::run` immediately after building the bridge,
-/// before placeholders are created (so a callback never fires before
-/// the bridge exists).
-static BRIDGE: OnceLock<Arc<EngineBridge>> = OnceLock::new();
+// Each connection carries a monotonically increasing context ID. Old OS
+// callbacks cannot borrow credentials from a later account, even if Windows
+// reuses a connection key.
+static BRIDGE: crate::callback_gate::CallbackGate<EngineBridge> = crate::callback_gate::CallbackGate::new();
+struct Connection {
+    key: CF_CONNECTION_KEY,
+    generation: u64,
+    root: std::path::PathBuf,
+}
+static CONNECTION: std::sync::Mutex<Option<Connection>> = std::sync::Mutex::new(None);
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Live handle to the tokio runtime that owns the daemon.
 ///
@@ -117,14 +119,14 @@ static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 /// `populate_placeholders` mints. Stashed here from [`connect_root`] (which
 /// already owns the path); set-once for the process lifetime (a re-login reuses
 /// the same root).
-static SYNC_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+static SYNC_ROOT: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 
 /// Internal accessor for the callback module: the connected sync-root path, or
 /// `None` if [`connect_root`] hasn't run yet. Used to reconstruct an on-disk
 /// placeholder path from a state-DB relative path when the callback's
 /// `NormalizedPath` is unavailable.
 pub(crate) fn sync_root() -> Option<std::path::PathBuf> {
-    SYNC_ROOT.get().cloned()
+    SYNC_ROOT.read().ok().and_then(|root| root.clone())
 }
 
 /// Stable provider GUID for the Beebeeb sync root.
@@ -141,13 +143,6 @@ pub(crate) fn sync_root() -> Option<std::path::PathBuf> {
 /// form above.
 pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
 
-/// Set once the first time we successfully `CfConnectSyncRoot`. Used to
-/// make callback registration idempotent across engine respawns (re-login,
-/// sync-root change) — Windows rejects a second connect on a root that's
-/// already connected by this process, so we connect exactly once per
-/// process lifetime.
-static CONNECTED: OnceLock<()> = OnceLock::new();
-
 /// Sender into the upload driver's debounce loop (`crate::watcher`). The
 /// `extern "system"` NOTIFY callbacks can't capture state, so they reach the
 /// live channel through this slot. Overwritten by [`set_notify_sender`] from
@@ -162,9 +157,6 @@ static CONNECTED: OnceLock<()> = OnceLock::new();
 /// the first logout→login. So we store the sender in a `RwLock<Option<…>>` and
 /// OVERWRITE it on every (re)spawn, always pointing at the live debounce loop.
 ///
-/// (This differs from the `BRIDGE`/`RUNTIME` `OnceLock`s, which are genuinely
-/// set-once: a respawn reuses the same runtime + rebuilds the bridge value, and
-/// neither has a receiver end that gets torn down. A channel does.)
 static NOTIFY_TX: RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>>> =
     RwLock::new(None);
 
@@ -188,19 +180,107 @@ pub(crate) fn notify_sender() -> Option<tokio::sync::mpsc::UnboundedSender<crate
     NOTIFY_TX.read().ok().and_then(|slot| slot.clone())
 }
 
-/// Stash the engine bridge so [`callbacks::fetch_data_callback`] can
-/// reach it when Windows demands hydration. Idempotent — once set the
-/// pointer doesn't change for the lifetime of the process; on
-/// re-login the runner respawns inside the same process and reuses the
-/// existing OnceLock value (the master key + token are session-scoped
-/// and live inside the bridge's `ApiClient`, not here).
+/// Publish only while the runner is live, serialized with connection teardown.
 pub fn set_bridge(bridge: Arc<EngineBridge>) {
-    let _ = BRIDGE.set(bridge);
+    let connection = CONNECTION.lock().unwrap();
+    if bridge.is_stopping() {
+        return;
+    }
+    if let Some(connection) = connection.as_ref() {
+        BRIDGE.install(connection.generation, bridge);
+    }
 }
 
-/// Internal accessor for the callback module.
-pub(crate) fn bridge() -> Option<Arc<EngineBridge>> {
-    BRIDGE.get().cloned()
+pub(crate) fn bridge() -> Option<crate::callback_gate::CallbackLease<EngineBridge>> {
+    let lease = BRIDGE.acquire(None)?;
+    if lease.is_stopping() {
+        return None;
+    }
+    Some(lease)
+}
+
+pub(crate) fn callback_bridge(
+    context: *mut std::ffi::c_void,
+) -> Option<crate::callback_gate::CallbackLease<EngineBridge>> {
+    let lease = BRIDGE.acquire(Some(context as usize as u64))?;
+    if lease.is_stopping() {
+        return None;
+    }
+    Some(lease)
+}
+
+/// Cancellation is polled independently of the HTTP request: dropping its
+/// future releases the download/key owner even when the server never replies.
+pub(crate) async fn cancelled(lease: &crate::callback_gate::CallbackLease<EngineBridge>) {
+    while !lease.is_revoked() && !lease.is_stopping() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Stop admission, cancel downloads, drain transfers and release credentials.
+/// Preserve a failed disconnect's key so a retry cannot register over it.
+pub async fn revoke_callbacks() -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(|| {
+        let mut connection = CONNECTION.lock().unwrap();
+        if let Some(revoked) = BRIDGE.revoke() {
+            revoked.drain();
+        }
+        *NOTIFY_TX.write().unwrap() = None;
+        if let Some(current) = connection.as_ref() {
+            unsafe { CfDisconnectSyncRoot(current.key) }?;
+        }
+        *connection = None;
+        *SYNC_ROOT.write().unwrap() = None;
+        tracing::info!("Cloud Files callbacks revoked and drained");
+        Ok(())
+    })
+    .await?
+}
+
+static STOP_UNCONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn refuse_unconfirmed_stop() {
+    STOP_UNCONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+static CREDENTIAL_OWNERS: std::sync::Mutex<Vec<std::sync::Weak<()>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn track_credentials(api: &Arc<crate::api_client::ApiClient>) {
+    CREDENTIAL_OWNERS.lock().unwrap().push(api.credential_lifetime());
+}
+
+/// Includes watcher scans/heartbeat workers that may be outside the runner's
+/// task. An unconfirmed owner is retained as a weak reference for the next retry.
+pub async fn wait_for_credential_release() -> Result<(), String> {
+    if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(
+            "Sync shutdown could not be confirmed. Restart Beebeeb before locking or switching accounts.".into(),
+        );
+    }
+    for _ in 0..1000 {
+        {
+            let mut owners = CREDENTIAL_OWNERS.lock().unwrap();
+            owners.retain(|owner| owner.strong_count() != 0);
+            if owners.is_empty() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err("Sync workers are still stopping. Retry locking/signing out before switching accounts.".into())
+}
+
+pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    if let Err(error) = unsafe { CfUnregisterSyncRoot(PCWSTR(wide.as_ptr())) } {
+        use windows::Win32::Foundation::{ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_NOT_A_CLOUD_FILE};
+        if error.code() != HRESULT::from_win32(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+            && error.code() != HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0)
+        {
+            return Err(error.into());
+        }
+    }
+    Ok(())
 }
 
 /// Internal accessor for the daemon's tokio runtime handle, used by the
@@ -639,8 +719,18 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
     // Inverse of `register_thumbnail_provider_for_sync_root`.
     thumbnail_provider::unregister_thumbnail_provider(&id);
 
-    StorageProviderSyncRootManager::Unregister(&id_h)
-        .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
+    let roots = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
+    let mut registered = false;
+    for index in 0..roots.Size()? {
+        if roots.GetAt(index)?.Id()? == id_h {
+            registered = true;
+            break;
+        }
+    }
+    if registered {
+        StorageProviderSyncRootManager::Unregister(&id_h)
+            .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
+    }
     tracing::info!(
         sync_root = %sync_root.display(),
         shell_id = %id,
@@ -690,6 +780,9 @@ static THUMBNAIL_PROVIDER_THREAD: OnceLock<()> = OnceLock::new();
 /// the flyout, and hydration are unaffected.
 pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
     if THUMBNAIL_PROVIDER_THREAD.get().is_some() {
+        if let Err(error) = thumbnail_provider::rebind(&shell_sync_root_id(sync_root)) {
+            tracing::warn!(%error, "shell binding refresh failed");
+        }
         return;
     }
     let shell_id = shell_sync_root_id(sync_root);
@@ -789,6 +882,9 @@ pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
 /// Status column, the nav-pane entry and hydration are unaffected.
 pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
     if STATUS_UI_THREAD.get().is_some() {
+        if let Err(error) = status_ui::rebind(&shell_sync_root_id(sync_root)) {
+            tracing::warn!(%error, "shell binding refresh failed");
+        }
         return;
     }
     let shell_id = shell_sync_root_id(sync_root);
@@ -862,7 +958,7 @@ pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
 /// delivery. [LEAD native build: confirm the three NOTIFY callbacks actually
 /// fire on a real CfConnectSyncRoot'd root — the bindings + table shape are
 /// verified against windows-0.58, but only a native run proves delivery.]
-fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyhow::Result<CF_CONNECTION_KEY> {
     let path_wide: Vec<u16> = sync_root_path
         .to_string_lossy()
         .encode_utf16()
@@ -901,57 +997,28 @@ fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
 
     // SAFETY: `path_wide` and `table` are kept alive on this stack frame for
     // the duration of the call. The callback function pointers have static
-    // lifetime. We ignore the returned connection key: hydration only needs
-    // the connection key passed back inside `CF_CALLBACK_INFO`, and we keep
-    // the root connected for the whole process lifetime.
+    // lifetime. Retain the key for authoritative teardown.
     unsafe {
         CfConnectSyncRoot(
             PCWSTR(path_wide.as_ptr()),
             table.as_ptr(),
-            None,
+            Some(generation as usize as *const std::ffi::c_void),
             CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO,
         )
-        .map_err(|e| anyhow::anyhow!("CfConnectSyncRoot failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("CfConnectSyncRoot failed: {e}"))
     }
-    Ok(())
 }
 
-/// **Phase 1 of activation — run EARLY in `runner::run`, BEFORE the engine
-/// writes anything into the sync root** (the `.beebeeb-sync.lock` file and the
-/// `.beebeeb/state.db` database both live inside the root).
-///
-/// This is the fix for the bootstrap-ordering deadlock: `CfRegisterSyncRoot`
-/// alone puts the folder under Cloud Files control but leaves it
-/// *disconnected*, and a registered-but-disconnected root rejects **all**
-/// writes with `0x801F0005 ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING`. If the
-/// engine tries to acquire the lock or open the state DB before the provider
-/// connects, those writes fail and `run()` bails out — so the connect step
-/// below never runs and the root is permanently non-functional. By connecting
-/// here, before the first write, the root is live and writable when the lock
-/// and DB are created.
-///
-/// Steps (no DB / bridge required — connecting only needs the registered root):
-///
-/// 1. Stash the current tokio runtime handle so the Cloud Files fetch callback
-///    (which fires on an OS filter-driver thread with no runtime attached) can
-///    `block_on` the async hydration. `run` calls this on a tokio worker, so
-///    `Handle::current()` is valid here. Idempotent.
-/// 2. Register the sync root with Windows ([`register_sync_root`]).
-///    Re-registering the same path is a no-op at the OS layer (and
-///    `install_windows_shell_integration` already registered it during
-///    onboarding — this makes the engine path self-contained for re-logins).
-/// 3. Connect the in-process fetch callback table via `CfConnectSyncRoot`,
-///    exactly once per process (guarded by the `CONNECTED` OnceLock — Windows
-///    rejects a second connect on an already-connected root).
-///
-/// The fetch callback reaches the bridge through the `BRIDGE` OnceLock, which
-/// is set later in [`seed_placeholders`]. That ordering is safe: no
-/// placeholders exist yet (they are minted in `seed_placeholders`), so Windows
-/// has nothing to fetch and the callback cannot fire before the bridge is set.
-///
-/// All failures are logged rather than propagated: a Cloud Files hiccup must
-/// not take down the sync loop, which still works headlessly.
+/// Connect once per runner generation. Existing placeholders may call us before
+/// the bridge is installed; those requests fail promptly until activation.
 pub fn connect_root(sync_root: &std::path::Path) {
+    let mut connection = CONNECTION.lock().unwrap();
+    if let Some(current) = connection.as_ref() {
+        if current.root != sync_root {
+            tracing::error!("old Cloud Files root still connected");
+        }
+        return;
+    }
     // Stash the current tokio runtime handle so the Cloud Files fetch
     // callback (which fires on an OS filter-driver thread with no runtime
     // attached) can `block_on` the async hydration. This runs on a tokio
@@ -961,7 +1028,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // Stash the sync-root path so the fetch callback can reconstruct an on-disk
     // placeholder path from a state-DB relative path when `CF_CALLBACK_INFO`'s
     // `NormalizedPath` is unavailable (task 0783 resolve-or-error fallback).
-    let _ = SYNC_ROOT.set(sync_root.to_path_buf());
+    *SYNC_ROOT.write().unwrap() = Some(sync_root.to_path_buf());
 
     if let Err(e) = register_sync_root(sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
@@ -997,20 +1064,17 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // Idempotent across re-logins; failures are logged inside the thread.
     register_thumbnail_provider_for_sync_root(sync_root);
 
-    // Connect the in-process fetch callback exactly once per process. Without
-    // this, Windows shows placeholders but never asks us to hydrate them — and,
-    // critically, the root stays DISCONNECTED and rejects the engine's lock +
-    // state.db writes with ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
-    if CONNECTED.get().is_none() {
-        match connect_callbacks(sync_root) {
-            Ok(()) => {
-                let _ = CONNECTED.set(());
-                tracing::info!("Cloud Files callbacks connected");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled");
-            }
+    let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    match connect_callbacks(sync_root, generation) {
+        Ok(key) => {
+            *connection = Some(Connection {
+                key,
+                generation,
+                root: sync_root.to_path_buf(),
+            });
+            tracing::info!(generation, "Cloud Files callbacks connected");
         }
+        Err(e) => tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled"),
     }
 }
 

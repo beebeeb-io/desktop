@@ -682,7 +682,27 @@ impl EngineRunner {
         // observes the stop request immediately, without waiting for the
         // tick loop to next reach its `tokio::select!` boundary.
         self.stopping.store(true, Ordering::SeqCst);
-        stop_task_and_confirm(self.cancel.take(), self.task.take(), GRACEFUL_ABORT_TIMEOUT, FORCE_ABORT_TIMEOUT).await
+        #[cfg(target_os = "windows")]
+        let callbacks_stopped = crate::windows_cf::revoke_callbacks().await.is_ok();
+        let stopped = stop_task_and_confirm(
+            self.cancel.take(),
+            self.task.take(),
+            GRACEFUL_ABORT_TIMEOUT,
+            FORCE_ABORT_TIMEOUT,
+        )
+        .await;
+        #[cfg(target_os = "windows")]
+        {
+            // Do not lose an unconfirmed task behind an empty engine slot and
+            // let a second lock attempt claim success. Such a task can still
+            // hold startup credentials before an ApiClient exists.
+            if !stopped {
+                crate::windows_cf::refuse_unconfirmed_stop();
+            }
+            return crate::windows_cf::revoke_callbacks().await.is_ok() && stopped && callbacks_stopped;
+        }
+        #[cfg(not(target_os = "windows"))]
+        stopped
     }
 }
 
@@ -746,6 +766,15 @@ async fn stop_task_and_confirm(
     confirmed
 }
 
+#[cfg(target_os = "windows")]
+struct AbortWorkerOnDrop(tokio::task::AbortHandle);
+#[cfg(target_os = "windows")]
+impl Drop for AbortWorkerOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl Drop for EngineRunner {
     fn drop(&mut self) {
         if let Some(tx) = self.cancel.take() {
@@ -794,6 +823,11 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     #[cfg(not(unix))]
     let _ = &ipc_bind_error;
 
+    #[cfg(target_os = "windows")]
+    if let Err(error) = crate::windows_cf::wait_for_credential_release().await {
+        emit_status(&app, "error", Some(&sync_root), Some(&error));
+        return;
+    }
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.
@@ -852,6 +886,8 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     }
 
     let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
+    #[cfg(target_os = "windows")]
+    crate::windows_cf::track_credentials(&api);
     // Shares `stopping` with `EngineRunner::abort` (task 1538 Codex P1) so
     // this bridge — and every clone of it handed to the IPC socket server
     // (below) and the Windows upload watcher — observes a stop request the
@@ -893,6 +929,13 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
             }
             None => None,
         };
+
+    // Windows forced runner abort must also abort the separately spawned
+    // heartbeat future; dropping a JoinHandle alone would detach its API owner.
+    #[cfg(target_os = "windows")]
+    let _heartbeat_abort = heartbeat
+        .as_ref()
+        .map(|(_, task, _)| AbortWorkerOnDrop(task.abort_handle()));
 
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions

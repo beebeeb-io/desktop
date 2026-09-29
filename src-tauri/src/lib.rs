@@ -20,6 +20,8 @@ mod account;
 mod account_dto;
 mod api_client;
 mod browser_login;
+#[cfg(any(target_os = "windows", test))]
+mod callback_gate;
 mod config;
 mod conflict;
 mod desktop_search;
@@ -64,6 +66,8 @@ mod watcher;
 // so this `mod` declaration plus the conditional are belt-and-braces.
 #[cfg(target_os = "windows")]
 mod windows_cf;
+#[cfg(target_os = "windows")]
+static SESSION_TRANSITION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 use config::{DesktopConfig, ReleaseChannel};
 // `platform_keychain_store_for(id)` resolves to the macOS Keychain store on
 // macOS and the Windows Credential Manager store on Windows (Linux keeps the
@@ -440,6 +444,8 @@ fn clear_keychain_session(account_id: &str) -> Result<(), String> {
 /// `NotFound`) is logged at `warn!` instead — it is unexpected but must still
 /// not block startup, since onboarding can recover.
 async fn restore_session_on_startup(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let state = app.state::<AppState>();
     // `synthesize_single_account` runs in `setup()` before this task is
     // spawned, so the active account always resolves; bail defensively if not.
@@ -638,6 +644,13 @@ struct LoginOutcome {
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
 async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<LoginOutcome, String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+        return Err("Sign out of the current account before signing in again.".into());
+    }
+
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -794,6 +807,8 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
 /// `{ user_id, session_token }`. The TOTP code is never logged.
 #[tauri::command]
 async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let base_url = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -884,6 +899,8 @@ async fn desktop_unlock_with_recovery_phrase(
     state: State<'_, AppState>,
     recovery_phrase: String,
 ) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let acct = state.active_account()?;
     let existing = acct
         .session
@@ -1104,6 +1121,13 @@ pub(crate) async fn apply_session(
     master_key: [u8; 32],
     email: Option<String>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+        return Err("Sign out of the current account before signing in again.".into());
+    }
+
     let account_id = state.active_account()?.id.as_str().to_string();
     persist_session_to_keychain(&account_id, &token, master_key, email.as_deref())?;
     let token_clone = token.clone();
@@ -1132,6 +1156,8 @@ pub(crate) async fn apply_session(
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
 async fn clear_session_impl(state: &AppState) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let acct = state.active_account()?;
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
@@ -1148,7 +1174,6 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         let stopped = prev.abort().await;
-        drop(engine_slot);
         if !stopped {
             tracing::error!(
                 "sign-out refused: could not confirm the sync engine stopped; \
@@ -1161,25 +1186,52 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
             );
         }
         tracing::info!("engine aborted on logout");
-    } else {
-        drop(engine_slot);
     }
 
-    // Windows: remove the Explorer SHELL registration (nav-pane entry, Status
-    // column, overlays) on sign-out so a logged-out machine doesn't show a dead
-    // "Beebeeb" sidebar entry pointing at a folder the user is no longer signed
-    // into. The Win32 Cloud Files registration + placeholders are left in place
-    // (they re-converge on the next login via connect_root); this strips only the
-    // shell chrome. Best-effort and engine-independent: the Id is reconstructed
-    // from the persisted sync-root path, so this works after the engine is
-    // aborted above. A failure (incl. "not registered") is logged, not surfaced —
-    // logout must always appear to succeed.
+    #[cfg(not(target_os = "windows"))]
+    drop(engine_slot);
+
     #[cfg(target_os = "windows")]
     {
-        if let Some(root) = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
-            if let Err(error) = windows_cf::unregister_shell_sync_root(&root) {
-                tracing::warn!(error = %error, "Explorer shell sync-root unregister on logout failed (best-effort)");
+        windows_cf::revoke_callbacks()
+            .await
+            .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+        windows_cf::wait_for_credential_release().await?;
+        let root = DesktopConfig::load()?.sync_root;
+        let db = state_db_from_app_local_state_dir()?;
+        if let Some(db) = db {
+            windows_cf::signout::purge(&db, root.as_deref()).map_err(|e| format!("Sign-out paused: {e}"))?;
+        } else if let Some(root) = root.as_ref() {
+            if std::fs::read_dir(root)
+                .map_err(|e| format!("Cannot inspect sync folder: {e}"))?
+                .next()
+                .is_some()
+            {
+                return Err("Cannot verify sync-folder ownership without its database. Restore the local state before signing out.".into());
             }
+        }
+        if let Some(root) = root {
+            windows_cf::unregister_shell_sync_root(&root)
+                .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
+            windows_cf::unregister_sync_root(&root).map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
+        }
+        // Local teardown is authoritative even offline; server revocation is
+        // best effort and bounded. Never log the bearer token.
+        let token = acct
+            .session
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().map(|s| zeroize::Zeroizing::new(s.token.clone())))
+            .or_else(|| load_session_token_from_keychain(acct.id.as_str()).ok().flatten().map(zeroize::Zeroizing::new));
+        if let Some(token) = token {
+            let client = reqwest::Client::builder()
+                .default_headers(api_client::provenance_headers())
+                .build().map_err(|e| format!("Could not initialize logout request: {e}"))?;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                revoke_desktop_session(&client, &runner::api_base_url(), &token),
+            )
+            .await;
         }
     }
 
@@ -1205,7 +1257,9 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     // `DesktopConfig` best-effort, separately — it is used ONLY to resolve
     // Windows placeholder paths below, never to gate whether the purge runs
     // at all.
+    #[cfg(not(target_os = "windows"))]
     let cfg_sync_root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    #[cfg(not(target_os = "windows"))]
     match state_db_from_app_local_state_dir() {
         Ok(Some(db)) => match purge_local_state_files(&db, cfg_sync_root.as_deref()) {
             Ok(summary) => {
@@ -1293,6 +1347,8 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
 /// and upload commands stay unavailable because there is no in-memory key.
 #[tauri::command]
 async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let acct = state.active_account()?;
     let existing = acct
         .session
@@ -1325,6 +1381,8 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 /// recovery phrase.
 #[tauri::command]
 async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let acct = state.active_account()?;
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
@@ -1336,12 +1394,24 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         // worth a loud warning rather than a silent "we waited 3s and moved
         // on".
         if !prev.abort().await {
+            #[cfg(target_os = "windows")]
+            return Err("Could not finish stopping sync. Retry locking before leaving Beebeeb.".into());
+            #[cfg(not(target_os = "windows"))]
             tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
         } else {
             tracing::info!("engine aborted on vault lock");
         }
     }
+    #[cfg(not(target_os = "windows"))]
     drop(engine_slot);
+
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::revoke_callbacks()
+            .await
+            .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+        windows_cf::wait_for_credential_release().await?;
+    }
 
     match acct.session.lock() {
         Ok(mut guard) => {
@@ -1658,7 +1728,9 @@ fn purge_local_state_files(
                 let resolved = resolve_purge_placeholder_paths(&purge.local_placeholder_paths, root);
                 #[cfg(target_os = "windows")]
                 {
-                    purge_windows_placeholders(&resolved)
+                    // Windows production cleanup runs before metadata removal.
+                    let _ = resolved;
+                    0
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -1694,7 +1766,7 @@ fn purge_local_state_files(
 ///
 /// Pure and platform-independent on purpose: the actual
 /// `CfDehydratePlaceholder` FFI call that ACTS on this list is Windows-only
-/// ([`purge_windows_placeholders`] below); this is only the "which files,
+/// (`windows_cf::signout::purge`); this is only the "which files,
 /// which paths" decision, so it is unit-testable on any host. A candidate is
 /// silently dropped (not an error — sign-out must still succeed) when it
 /// doesn't resolve to a real file under an allowed root: an
@@ -1716,66 +1788,6 @@ fn resolve_purge_placeholder_paths(candidates: &[(String, String)], sync_root: &
             Some((file_id.clone(), canonical))
         })
         .collect()
-}
-
-/// Dehydrate (or, failing that, remove outright) every Windows Cloud Files
-/// placeholder [`resolve_purge_placeholder_paths`] resolved — task 1538
-/// Codex P1, PR #49 state_db.rs:1785 thread. Mirrors
-/// [`free_up_space_windows`]'s `dehydrate_placeholder` call, with two
-/// deliberate differences from that eviction sweep:
-///
-/// - No pin-state skip: sign-out must sweep pinned files too — the account
-///   is leaving the device, so "keep offline" no longer means anything. The
-///   OS-level pin is cleared first (`CfDehydratePlaceholder` fails with
-///   `ERROR_CLOUD_FILE_PINNED` on a still-pinned placeholder).
-/// - A failed dehydrate removes the placeholder FILE instead of leaving the
-///   row `local` for "the next sweep" to retry: `purge_all_local_state` has
-///   already flipped every one of these rows to `cloud_only` unconditionally
-///   (task 1538 finding 2), so there IS no next sweep that would find it —
-///   leaving the dehydrate half-done would orphan plaintext exactly like the
-///   bug this function fixes. A stale Explorer entry self-heals on the next
-///   `windows_cf::seed_placeholders`/reconcile pass after a later sign-in.
-///
-/// Returns the number of placeholders successfully cleared (dehydrated OR
-/// removed) for the caller's log line.
-#[cfg(target_os = "windows")]
-fn purge_windows_placeholders(candidates: &[(String, PathBuf)]) -> usize {
-    let mut cleared = 0usize;
-    for (file_id, path) in candidates {
-        if let Err(error) = crate::windows_cf::placeholders::set_pin_state(path, false, false) {
-            tracing::warn!(
-                file_id = %file_id,
-                error = %error,
-                "sign-out purge: OS unpin before dehydrate failed; attempting dehydrate anyway"
-            );
-        }
-        match crate::windows_cf::placeholders::dehydrate_placeholder(path) {
-            Ok(_freed) => {
-                cleared += 1;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    file_id = %file_id,
-                    error = %error,
-                    "sign-out purge: CfDehydratePlaceholder failed; removing the placeholder file instead"
-                );
-                match std::fs::remove_file(path) {
-                    Ok(()) => cleared += 1,
-                    Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {
-                        cleared += 1;
-                    }
-                    Err(remove_error) => {
-                        tracing::warn!(
-                            file_id = %file_id,
-                            error = %remove_error,
-                            "sign-out purge: could not remove placeholder file after a failed dehydrate"
-                        );
-                    }
-                }
-            }
-        }
-    }
-    cleared
 }
 
 #[cfg(unix)]
@@ -7916,7 +7928,13 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             let app = app.clone();
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
-                clear_session_impl(&state).await
+                let result = clear_session_impl(&state).await;
+                #[cfg(target_os = "windows")]
+                if let Err(error) = &result {
+                    app.dialog().message(error).title("Sign-out paused")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+                }
+                result
             });
         }
         DesktopMenuAction::Quit => app.exit(0),

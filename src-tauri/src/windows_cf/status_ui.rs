@@ -65,8 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Com::{
-    CLSCTX_LOCAL_SERVER, CoRegisterClassObject, CoRevokeClassObject, IClassFactory,
-    IClassFactory_Impl, REGCLS_MULTIPLEUSE,
+    CLSCTX_LOCAL_SERVER, CoRegisterClassObject, IClassFactory, IClassFactory_Impl, REGCLS_MULTIPLEUSE,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
@@ -434,7 +433,7 @@ impl IClassFactory_Impl for StatusUiClassFactory_Impl {
 }
 
 /// COM registration cookie from `CoRegisterClassObject`, kept so
-/// [`unregister_status_ui_source`] can `CoRevokeClassObject` it. Set once per
+/// the original STA apartment owns it until process exit. Set once per
 /// process; a re-login reuses the existing registration.
 static CLASS_OBJECT_COOKIE: OnceLock<u32> = OnceLock::new();
 
@@ -454,6 +453,11 @@ static CLASS_OBJECT_COOKIE: OnceLock<u32> = OnceLock::new();
 /// `com_initialized_sta` MUST be true: `CoRegisterClassObject` requires the
 /// calling thread to have initialized COM. The caller
 /// ([`super::register_status_ui_for_sync_root`]) handles that.
+pub fn rebind(shell_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(CLASS_OBJECT_COOKIE.get().is_some(), "COM factory is not ready");
+    register_status_ui_source(shell_id)
+}
+
 pub fn register_status_ui_source(shell_id: &str) -> anyhow::Result<()> {
     // 1. Register the class object so this running exe is the local server for
     //    the CLSID. Once per process (Windows rejects a duplicate).
@@ -510,16 +514,13 @@ pub fn register_status_ui_source(shell_id: &str) -> anyhow::Result<()> {
 
 /// Remove the status-UI registration (inverse of [`register_status_ui_source`]).
 ///
-/// Revokes the COM class object (if registered this process) and deletes the
+/// Keeps the credential-free COM class object and deletes the
 /// CLSID + the sync-root binding value. Best-effort: every step is independent
 /// and a failure is logged, never propagated past the caller's log-and-continue.
 pub fn unregister_status_ui_source(shell_id: &str) {
-    if let Some(&cookie) = CLASS_OBJECT_COOKIE.get() {
-        // SAFETY: `cookie` is the value returned by our own CoRegisterClassObject.
-        if let Err(e) = unsafe { CoRevokeClassObject(cookie) } {
-            tracing::warn!(error = %e, "CoRevokeClassObject(status-ui factory) failed");
-        }
-    }
+    // The credential-free class factory stays registered on its original STA.
+    // Callback leases deny all account access while locked/signed out. Re-login
+    // restores the registry binding without reusing a revoked COM cookie.
 
     // Remove the binding under the sync-root key (leave the rest of the key,
     // which `unregister_shell_sync_root` owns).
