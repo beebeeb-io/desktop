@@ -1,0 +1,118 @@
+//! Real Windows filesystem/CFAPI and SQLite tests; no provider registration or account.
+use super::*;
+use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState};
+
+struct Fixture {
+    db: StateDb,
+    root: std::path::PathBuf,
+    temp: tempfile::TempDir,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let db = StateDb::open(temp.path().join("state.db")).unwrap();
+        Self { db, root, temp }
+    }
+
+    fn track(&self, path: &str, kind: ItemKind, status: FileStatus) {
+        self.db.upsert_file(&FileEntry {
+            file_id: path.into(), path: path.into(), status, size_bytes: 0,
+            modified_at: 0, content_hash: None, remote_updated_at: 1,
+            parent_id: None, item_kind: kind.clone(),
+        }).unwrap();
+        // upsert_file deliberately does not write item_kind; the engine uses
+        // the contract setter too when a local CreateFolder has completed.
+        self.db.set_file_contract_state(&FileContractState {
+            file_id: path.into(), namespace: Namespace::MyFiles, parent_id: None,
+            shared_root_id: None, share_id: None, owner_email: None, permission_bits: 1,
+            item_kind: kind, content_type: None, current_version: 1,
+            current_object_version_id: None, local_base_version: 1, local_hash: None,
+            cache_path: None, cache_bytes: 0, pin_state: PinState::Inherit,
+            inherited_pin_state: PinState::Unpinned, last_sync_at: 1,
+        }).unwrap();
+    }
+
+    fn folder(&self, path: &str) {
+        std::fs::create_dir(self.root.join(path)).unwrap();
+        self.track(path, ItemKind::Folder, FileStatus::Local);
+    }
+}
+
+#[test]
+fn synced_plain_directories_sign_out_and_clear_rows() {
+    let f = Fixture::new();
+    f.folder("local");
+    f.folder("local/nested");
+    assert_eq!(f.db.list_files().unwrap().len(), 2);
+    let result = purge(&f.db, Some(&f.root));
+    assert!(result.is_ok(), "synced plain directories must sign out: {result:?}");
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+#[test]
+fn plain_directory_unsynced_child_preserves_bytes_and_rows() {
+    let f = Fixture::new();
+    f.folder("local");
+    let child = f.root.join("local/unsynced.txt");
+    std::fs::write(&child, b"unsynced bytes").unwrap();
+    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    assert!(error.to_string().contains("Unsynced files remain"), "must inspect children: {error:?}");
+    assert_eq!(std::fs::read(child).unwrap(), b"unsynced bytes");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+#[test]
+fn tracked_plain_file_still_requires_cloud_identity() {
+    let f = Fixture::new();
+    f.folder("local");
+    let child = f.root.join("local/tracked.txt");
+    std::fs::write(&child, b"potentially unsynced bytes").unwrap();
+    f.track("local/tracked.txt", ItemKind::File, FileStatus::Local);
+    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert_eq!(std::fs::read(child).unwrap(), b"potentially unsynced bytes");
+    assert_eq!(f.db.list_files().unwrap().len(), 2);
+}
+
+#[test]
+fn unsynced_plain_directory_preserves_rows() {
+    let f = Fixture::new();
+    f.folder("local");
+    f.track("local", ItemKind::Folder, FileStatus::Uploading);
+    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    assert!(error.to_string().contains("Pending changes remain"));
+    assert!(f.root.join("local").is_dir());
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+#[test]
+fn directory_at_file_row_is_not_accepted_as_synced_folder() {
+    let f = Fixture::new();
+    f.folder("local");
+    f.track("local", ItemKind::File, FileStatus::Local);
+    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert!(f.root.join("local").is_dir());
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+#[test]
+fn directory_junction_is_not_traversed_or_removed() {
+    let f = Fixture::new();
+    let outside = f.temp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), b"outside bytes").unwrap();
+    let link = f.root.join("link");
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output().unwrap();
+    assert!(output.status.success(), "junction fixture failed: {output:?}");
+    f.track("link", ItemKind::Folder, FileStatus::Local);
+    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    assert!(!error.to_string().contains("Unsynced files remain"), "junction was traversed: {error:?}");
+    assert!(link.exists());
+    assert_eq!(std::fs::read(outside.join("precious.txt")).unwrap(), b"outside bytes");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+    std::fs::remove_dir(link).unwrap();
+}
