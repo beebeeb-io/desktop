@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const ONBOARDING_SRC = readFileSync(join(import.meta.dir, '..', 'src', 'Onboarding.tsx'), 'utf8')
+const ONBOARDING_SRC = readFileSync(join(import.meta.dir, '..', 'src', 'Onboarding.tsx'), 'utf8').replace(/\r\n/g, '\n')
 
 describe('macOS onboarding residency copy', () => {
   test('sidebar footer names Falkenstein, not a vague "EU servers"', () => {

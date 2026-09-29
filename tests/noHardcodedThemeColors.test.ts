@@ -137,7 +137,7 @@ describe('no hard-coded, non-theme-aware colors in src/', () => {
   test('no color/background/border/outline/box-shadow/fill/stroke is a literal hex, rgb()/hsl(), or white/black', () => {
     const violations: string[] = []
     for (const file of files) {
-      const lines = readFileSync(file, 'utf8').split('\n')
+      const lines = readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split('\n')
       lines.forEach((line, index) => {
         if (isCommentLine(line)) return
         for (const snippet of findColorViolations(line)) {
