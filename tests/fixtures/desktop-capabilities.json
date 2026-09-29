@@ -1,0 +1,72 @@
+{
+  "macos": {
+    "host_os": "macos",
+    "filesystem_integration": "file_provider",
+    "on_demand": true,
+    "native_credentials": true,
+    "tray": "available",
+    "sharing": "recipient_read_only",
+    "install_format": "app",
+    "update_format": "app_bundle"
+  },
+  "windows-nsis": {
+    "host_os": "windows",
+    "filesystem_integration": "cloud_files",
+    "on_demand": true,
+    "native_credentials": true,
+    "tray": "available",
+    "sharing": "recipient_read_only",
+    "install_format": "nsis",
+    "update_format": "nsis"
+  },
+  "windows-msi": {
+    "host_os": "windows",
+    "filesystem_integration": "cloud_files",
+    "on_demand": true,
+    "native_credentials": true,
+    "tray": "available",
+    "sharing": "recipient_read_only",
+    "install_format": "msi",
+    "update_format": "msi"
+  },
+  "linux-appimage": {
+    "host_os": "linux",
+    "filesystem_integration": "none",
+    "on_demand": false,
+    "native_credentials": false,
+    "tray": "unknown",
+    "sharing": "web_only",
+    "install_format": "appimage",
+    "update_format": "appimage"
+  },
+  "linux-deb": {
+    "host_os": "linux",
+    "filesystem_integration": "none",
+    "on_demand": false,
+    "native_credentials": false,
+    "tray": "unknown",
+    "sharing": "web_only",
+    "install_format": "deb",
+    "update_format": "package_manager"
+  },
+  "linux-rpm": {
+    "host_os": "linux",
+    "filesystem_integration": "none",
+    "on_demand": false,
+    "native_credentials": false,
+    "tray": "unknown",
+    "sharing": "web_only",
+    "install_format": "rpm",
+    "update_format": "package_manager"
+  },
+  "unknown": {
+    "host_os": "unknown",
+    "filesystem_integration": "none",
+    "on_demand": false,
+    "native_credentials": false,
+    "tray": "unknown",
+    "sharing": "web_only",
+    "install_format": "unknown",
+    "update_format": "manual"
+  }
+}

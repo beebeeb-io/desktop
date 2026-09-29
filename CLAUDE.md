@@ -1,3 +1,16 @@
+> **Correction — 2026-09-29, task 1611:** The historical architecture/build
+> descriptions below are retained for provenance, not current instructions.
+> Shipping entrypoints are desktop-owned `src/main.tsx` and `src-tauri/src/lib.rs`;
+> `runner.rs`, `engine_bridge.rs`, and `state_db.rs` own scheduling and sync.
+> `repos/web` is not this frontend; core provides shared primitives.
+> Run `bun run tauri:dev` / `bun run tauri:build` from the desktop root.
+> macOS uses the active `macos/FileProviderExtension` (not FinderSync), Windows
+> uses `src-tauri/src/windows_cf` (CFAPI), and Linux FUSE is an unmounted prototype.
+> The legacy native-shell build recipes and Linux online-only claims below are
+> historical. Spec 030 is historical and never authorizes raw keys in config.
+> Credentials belong in the OS store; Linux currently fails closed.
+> See [the current capability contract](docs/CAPABILITIES.md) for shell reachability and limitations.
+
 # beebeeb-io/desktop
 
 Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus the Rust sync engine from `core`. One codebase, three OS targets (macOS, Windows, Linux).
