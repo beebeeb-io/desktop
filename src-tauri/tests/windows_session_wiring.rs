@@ -68,6 +68,9 @@ fn cloud_files_unregister_precedes_shell_unregister_and_propagates_failure() {
 }
 #[test]
 fn admission_guard_selftest_detects_a_bypassed_command() {
-    let source = SOURCE.replacen("session_command!(async", "unprotected!(async", 1);
-    assert_eq!(unleased_credential_commands(&source), vec!["desktop_storage_summary"]);
+    for ending in ["\n", "\r\n"] {
+        let source = SOURCE.replace("\r\n", "\n").replace('\n', ending);
+        let source = source.replacen("session_command!(async", "unprotected!(async", 1);
+        assert_eq!(unleased_credential_commands(&source), vec!["desktop_storage_summary"], "line ending: {ending:?}");
+    }
 }

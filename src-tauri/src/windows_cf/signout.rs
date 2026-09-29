@@ -128,3 +128,7 @@ fn prepare(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "signout_tests.rs"]
+mod tests;
