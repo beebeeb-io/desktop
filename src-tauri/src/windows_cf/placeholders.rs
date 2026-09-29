@@ -419,14 +419,20 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
         .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
 
         // NONE: become a placeholder, keep bytes on disk, do NOT claim in-sync.
-        let result = CfConvertToPlaceholder(
+        let result = if is_cloud_placeholder(path) {
+            CfUpdatePlaceholder(handle, None, Some(identity.as_ptr() as *const core::ffi::c_void),
+                identity.len() as u32, None, CF_UPDATE_FLAG_NONE, None, None)
+        } else {
+            CfConvertToPlaceholder(
             handle,
             Some(identity.as_ptr() as *const core::ffi::c_void),
             identity.len() as u32,
             CF_CONVERT_FLAG_NONE,
             None,
             None,
-        );
+        )
+
+        };
 
         CfCloseHandle(handle);
 
@@ -465,55 +471,111 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
 /// returned on a SUCCESSFUL dehydrate — a failed dehydrate reclaims nothing,
 /// so the caller must not flip the DB row to cloud_only for it.
 ///
-/// `Ok(0)` (no error) is returned when the file is already dehydrated /
-/// partial — there is nothing to reclaim and the end state already holds.
+/// Dirty, queued, partially resident and non-cloud files return errors: callers
+/// must not confuse a refusal with successful zero-byte reclamation.
 ///
 /// SAFETY: opens a CF handle via `CfOpenFileWithOplock` and always closes it
 /// via `CfCloseHandle` before returning.
-pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
-    // Logical size = bytes currently materialised on disk for a fully-hydrated
-    // placeholder. Read it before we dehydrate so we can report what we freed.
-    let size_before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-    let path_wide: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
-    // every exit path.
+/// Hold a referenced exclusive oplock from content comparison through the CF
+/// mutation. CFAPI cannot acknowledge a competing writer's oplock break until
+/// the reference is released; never bless bytes based on a pre-open path hash.
+fn with_confirmed_content<T>(path: &std::path::Path, action: impl FnOnce(windows::Win32::Foundation::HANDLE, u64) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let bridge = super::bridge().ok_or_else(|| anyhow::anyhow!("provider unavailable"))?;
+    let root = super::sync_root().ok_or_else(|| anyhow::anyhow!("sync root unavailable"))?;
+    // App cleanup supplies canonical (verbatim-prefix) Windows paths, while
+    // callbacks/root config may use drive-letter paths. Normalize both before
+    // deriving the DB key and reject junction escapes at the same boundary.
+    let rel = crate::engine_bridge::relative_db_path(&root.canonicalize()?, &path.canonicalize()?)
+        .ok_or_else(|| anyhow::anyhow!("path outside sync root"))?;
+    let entry = bridge.db().get_file_by_path(&rel)?
+        .ok_or_else(|| anyhow::anyhow!("untracked content is not reclaimable"))?;
+    if !resident_for_edit(path)? { anyhow::bail!("content is not fully resident"); }
+    let wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
-
-        // length = -1 → dehydrate from `startingoffset` to EOF. NONE flags =
-        // synchronous foreground dehydration (we want the bytes gone now so
-        // the freed figure is accurate when we return).
-        let result = CfDehydratePlaceholder(handle, 0, -1, CF_DEHYDRATE_FLAG_NONE, None);
-
-        CfCloseHandle(handle);
-
-        if let Err(e) = result {
-            // 0x80070179 = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_NOT_IN_SYNC):
-            // the placeholder isn't in-sync (e.g. locally-modified) so it can't
-            // be safely dehydrated — skip it, reclaim nothing, don't error the
-            // whole sweep. Anything else is a real failure for THIS file.
-            const NOT_IN_SYNC: windows::core::HRESULT = windows::core::HRESULT(0x80070179u32 as i32);
-            // 0x80070178 = ERROR_NOT_A_CLOUD_FILE — already a plain file or
-            // already dehydrated; nothing to reclaim.
-            const NOT_A_CLOUD_FILE: windows::core::HRESULT = windows::core::HRESULT(0x80070178u32 as i32);
-            if e.code() == NOT_IN_SYNC || e.code() == NOT_A_CLOUD_FILE {
-                return Ok(0);
-            }
-            return Err(anyhow::anyhow!("CfDehydratePlaceholder: {e}"));
+        let handle = CfOpenFileWithOplock(PCWSTR(wide.as_ptr()), CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS)?;
+        struct Guard(windows::Win32::Foundation::HANDLE, bool);
+        impl Drop for Guard {
+            fn drop(&mut self) { unsafe {
+                if self.1 { CfReleaseProtectedHandle(self.0); }
+                CfCloseHandle(self.0);
+            }}
         }
+        let mut guard = Guard(handle, false);
+        if !CfReferenceProtectedHandle(handle).as_bool() { anyhow::bail!("content changed before exclusive access"); }
+        guard.1 = true;
+        let raw = CfGetWin32HandleFromProtectedHandle(handle);
+        let (digest, size) = hash_native_handle(raw)?;
+        if !crate::windows_edits::content_is_confirmed(bridge.db(), &entry.file_id, &digest)? {
+            let _ = CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None);
+            anyhow::bail!("dirty or queued content retained");
+        }
+        action(handle, size)
     }
+}
 
-    Ok(size_before)
+/// CF handles are asynchronous: use explicit offsets and wait for each read,
+/// with the protected-handle reference held by the caller throughout.
+unsafe fn hash_native_handle(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<(String, u64)> {
+    use sha2::{Digest, Sha256};
+    use windows::Win32::Foundation::{ERROR_HANDLE_EOF, ERROR_IO_PENDING};
+    use windows::Win32::Storage::FileSystem::ReadFile;
+    use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    let mut hash = Sha256::new();
+    let mut offset = 0u64;
+    let mut buffer = zeroize::Zeroizing::new([0u8; 65536]);
+    loop {
+        let mut ov = OVERLAPPED::default();
+        ov.Anonymous.Anonymous.Offset = offset as u32;
+        ov.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
+        let mut count = 0;
+        let result = unsafe { ReadFile(handle, Some(&mut *buffer), None, Some(&mut ov)) };
+        if let Err(error) = result {
+            if error.code() == windows::core::HRESULT::from_win32(ERROR_HANDLE_EOF.0) { break; }
+            if error.code() != windows::core::HRESULT::from_win32(ERROR_IO_PENDING.0) { return Err(error.into()); }
+        }
+        if let Err(error) = unsafe { GetOverlappedResult(handle, &ov, &mut count, true) } {
+            if error.code() == windows::core::HRESULT::from_win32(ERROR_HANDLE_EOF.0) { break; }
+            return Err(error.into());
+        }
+        if count == 0 { break; }
+        hash.update(&buffer[..count as usize]);
+        offset += count as u64;
+    }
+    Ok((format!("{:x}", hash.finalize()), offset))
+}
+
+pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
+    with_confirmed_content(path, |handle, size| {
+        unsafe { CfDehydratePlaceholder(handle, 0, -1, CF_DEHYDRATE_FLAG_NONE, None)?; }
+        Ok(size)
+    })
+}
+
+pub(crate) fn stamp_confirmed_content(path: &std::path::Path) -> anyhow::Result<()> {
+    with_confirmed_content(path, |handle, _| {
+        unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)?; }
+        Ok(())
+    })
+}
+
+pub(crate) fn mark_dirty(path: &std::path::Path) -> anyhow::Result<()> {
+    if !is_cloud_placeholder(path) { return Ok(()); }
+    let wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let handle = CfOpenFileWithOplock(PCWSTR(wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE)?;
+        let result = CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None);
+        CfCloseHandle(handle);
+        result?;
+    }
+    Ok(())
+}
+
+/// Never hydrate a cloud-only file merely to discover whether a close was a
+/// user write. Resident atomic replacements are plain files and qualify too.
+pub(crate) fn resident_for_edit(path: &std::path::Path) -> anyhow::Result<bool> {
+    use std::os::windows::fs::MetadataExt;
+    let attrs = std::fs::metadata(path)?.file_attributes();
+    Ok(attrs & (0x1000 | 0x40000 | 0x400000) == 0)
 }
 
 /// Proactively **hydrate** the Cloud Files placeholder at `path`: force Windows

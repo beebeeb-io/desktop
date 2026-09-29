@@ -424,7 +424,7 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
                 Primary: CF_POPULATION_POLICY_ALWAYS_FULL,
                 Modifier: CF_POPULATION_POLICY_MODIFIER_NONE,
             },
-            InSync: CF_INSYNC_POLICY_NONE,
+            InSync: CF_INSYNC_POLICY_TRACK_FILE_LAST_WRITE_TIME,
             HardLink: CF_HARDLINK_POLICY_NONE,
             PlaceholderManagement: CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
         };
@@ -660,11 +660,9 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
     // Explorer never asks the provider to enumerate.
     info.SetPopulationPolicy(StorageProviderPopulationPolicy::AlwaysFull)
         .map_err(|e| anyhow::anyhow!("SetPopulationPolicy failed: {e}"))?;
-    // InSync `Default`: consistent with the per-file in-sync state we stamp
-    // ourselves (create_placeholder MARK_IN_SYNC; mark_in_sync→CfSetInSyncState).
-    // We manage in-sync explicitly, so the shell needs no extra attribute-based
-    // in-sync inference.
-    info.SetInSyncPolicy(StorageProviderInSyncPolicy::Default)
+    // Clear IN_SYNC on a user last-write before debounce/queue work can run.
+    // Only the content-confirmed stamp may restore it after upload.
+    info.SetInSyncPolicy(StorageProviderInSyncPolicy::FileLastWriteTime)
         .map_err(|e| anyhow::anyhow!("SetInSyncPolicy failed: {e}"))?;
     info.SetHardlinkPolicy(StorageProviderHardlinkPolicy::None)
         .map_err(|e| anyhow::anyhow!("SetHardlinkPolicy failed: {e}"))?;
@@ -1024,6 +1022,10 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
             Callback: Some(callbacks::notify_file_close_completion_callback),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_DEHYDRATE,
+            Callback: Some(callbacks::notify_dehydrate_callback),
         },
         // Delete trigger: a local delete completed.
         CF_CALLBACK_REGISTRATION {
@@ -1391,46 +1393,10 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             continue;
         }
 
-        // Build the NUL-terminated UTF-16 path string that `CfOpenFileWithOplock`
-        // expects — identical to `db_placeholder_path` in callbacks.rs.
-        let path_wide: Vec<u16> = local_path
-            .to_string_lossy()
-            .encode_utf16()
-            .chain(std::iter::once(0u16))
-            .collect();
-
-        // Mirror the `mark_in_sync` pattern from callbacks.rs exactly:
-        //   CfOpenFileWithOplock → CfSetInSyncState(IN_SYNC) → CfCloseHandle.
-        // Handle is ALWAYS closed before the next iteration — via the Ok and
-        // Err branches — so there is no handle leak on error.
-        //
-        // SAFETY: `path_wide` is a NUL-terminated wide string kept alive for
-        // the duration of the unsafe block. The CF handle returned by
-        // CfOpenFileWithOplock is closed by CfCloseHandle before return.
-        // CfSetInSyncState on an already-in-sync placeholder is a no-op.
-        let handle = match unsafe {
-            CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE)
-        } {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::debug!(error = %e, "stamp_local_files_in_sync: CfOpenFileWithOplock failed");
-                errors += 1;
-                continue;
-            }
-        };
-
-        if let Err(e) = unsafe {
-            CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)
-        } {
-            tracing::debug!(error = %e, "stamp_local_files_in_sync: CfSetInSyncState failed");
-            errors += 1;
-        } else {
-            stamped += 1;
+        match placeholders::stamp_confirmed_content(&local_path) {
+            Ok(()) => stamped += 1,
+            Err(_) => errors += 1, // dirty/queued/open/unknown: leave NOT_IN_SYNC
         }
-
-        // Close the handle on ALL paths (including the CfSetInSyncState error
-        // branch above — the handle is still open and must be released).
-        unsafe { CfCloseHandle(handle) };
     }
 
     if stamped > 0 || errors > 0 {

@@ -292,7 +292,9 @@ pub unsafe extern "system" fn fetch_data_callback(
             let whole_file = required_offset == 0 && required_length >= file_size;
             if whole_file {
                 if let Some(path) = normalized_path(info) {
-                    unsafe { mark_in_sync(&path) };
+                    // A read/hydration must never clear a concurrent user edit.
+                    let path = std::path::PathBuf::from(String::from_utf16_lossy(&path[..path.len().saturating_sub(1)]));
+                    let _ = super::placeholders::stamp_confirmed_content(&path);
                 }
             }
         }
@@ -529,23 +531,60 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         return;
     };
 
-    // The close-completion params arm carries a `Flags` field; a DELETED close
-    // is not a write we should upload. Defensive null-check on params.
-    if !callback_parameters.is_null() {
-        let params = unsafe { &*callback_parameters };
-        let close = unsafe { params.Anonymous.CloseCompletion };
-        if (close.Flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED)
+    let process = if info.ProcessInfo.is_null() { None }
+        else { Some(unsafe { (*info.ProcessInfo).ProcessId }) };
+    let deleted = !callback_parameters.is_null() && unsafe {
+        ((*callback_parameters).Anonymous.CloseCompletion.Flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED)
             != CF_CALLBACK_CLOSE_COMPLETION_FLAG_NONE
-        {
-            // Deleted on close — leave it to the delete-completion callback.
-            return;
-        }
+    };
+    if !crate::windows_edits::should_inspect_close(deleted, process, std::process::id()) {
+        return;
     }
 
     let Some(path) = notify_full_path(info) else {
         return;
     };
     push_notify_event(crate::watcher::NotifyEvent::CloseCompletion(path));
+}
+
+/// Shell/storage-sense dehydration is gated even when it does not go through
+/// our app command. The kernel's NOT_IN_SYNC bit (cleared synchronously by the
+/// last-write policy) protects pre-queue writes; this adds the durable queue and
+/// known-baseline checks. Do not open the file inside a blocked CF operation.
+pub unsafe extern "system" fn notify_dehydrate_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    _callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() { return; }
+    let info = unsafe { &*callback_info };
+    let allowed = (|| -> anyhow::Result<bool> {
+        let Some(bridge) = super::callback_bridge(info.CallbackContext) else { return Ok(false); };
+        let Some(path) = notify_full_path(info) else { return Ok(false); };
+        let Some(root) = super::sync_root() else { return Ok(false); };
+        let Some(rel) = crate::engine_bridge::relative_db_path(&root, &path) else { return Ok(false); };
+        let Some(entry) = bridge.db().get_file_by_path(&rel)? else { return Ok(false); };
+        let Some(contract) = bridge.db().get_file_contract_state(&entry.file_id)? else { return Ok(false); };
+        let Some(hash) = contract.local_hash else { return Ok(false); };
+        crate::windows_edits::content_is_confirmed(bridge.db(), &entry.file_id, &hash)
+    })().unwrap_or(false);
+    let operation = CF_OPERATION_INFO {
+        StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+        Type: CF_OPERATION_TYPE_ACK_DEHYDRATE,
+        ConnectionKey: info.ConnectionKey, TransferKey: info.TransferKey,
+        RequestKey: info.RequestKey, ..Default::default()
+    };
+    let mut params = CF_OPERATION_PARAMETERS {
+        ParamSize: (std::mem::offset_of!(CF_OPERATION_PARAMETERS, Anonymous)
+            + std::mem::size_of::<CF_OPERATION_PARAMETERS_0_1>()) as u32,
+        Anonymous: CF_OPERATION_PARAMETERS_0 { AckDehydrate: CF_OPERATION_PARAMETERS_0_1 {
+            Flags: CF_OPERATION_ACK_DEHYDRATE_FLAG_NONE,
+            CompletionStatus: if allowed { STATUS_SUCCESS } else { STATUS_UNSUCCESSFUL },
+            FileIdentity: std::ptr::null(), FileIdentityLength: 0,
+        }},
+    };
+    if let Err(error) = unsafe { CfExecute(&operation, &mut params) } {
+        tracing::warn!(%error, "dehydration acknowledgement failed");
+    }
 }
 
 /// `NOTIFY_DELETE_COMPLETION` — fires after a local delete completes. Pushes a
@@ -809,42 +848,6 @@ unsafe fn transfer_one(
         tracing::debug!(bytes = length, "Cloud Files plaintext transfer attempt");
     }
     unsafe { CfExecute(&op_info, &mut op_params) }
-}
-
-/// Mark the file at `path` IN_SYNC so Explorer flips the overlay from
-/// the downloading spinner to the synced check after a successful
-/// hydration. Best-effort: opens a Cloud Files handle via
-/// `CfOpenFileWithOplock`, calls `CfSetInSyncState`, logs and swallows
-/// any error. Does NOT attempt to manage the full upload-side overlay
-/// state machine — that lives in the sync runtime (runner.rs /
-/// engine_bridge), out of this module's scope. See REPORT.
-///
-/// We use the Cloud Files–native `CfOpenFileWithOplock` rather than
-/// `CreateFileW`: the latter is gated behind the `Win32_Security`
-/// feature (for `SECURITY_ATTRIBUTES`) which this crate doesn't enable,
-/// and the CF API is the documented way to obtain a handle for
-/// `CfSetInSyncState`.
-///
-/// SAFETY: `path` is a NUL-terminated wide string; the opened CF handle
-/// is closed via `CfCloseHandle` before return.
-unsafe fn mark_in_sync(path: &[u16]) {
-    use windows::core::PCWSTR;
-
-    let handle = match unsafe { CfOpenFileWithOplock(PCWSTR(path.as_ptr()), CF_OPEN_FILE_FLAG_NONE) } {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::debug!(error = %e, "CfSetInSyncState: CfOpenFileWithOplock failed (overlay not updated)");
-            return;
-        }
-    };
-
-    if let Err(e) =
-        unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) }
-    {
-        tracing::debug!(error = %e, "CfSetInSyncState failed (overlay not updated)");
-    }
-
-    unsafe { CfCloseHandle(handle) };
 }
 
 /// Mark the file at `path` NOT in-sync so Explorer shows a non-synced (pending/

@@ -437,6 +437,14 @@ impl EngineBridge {
             if self.is_stopping() {
                 break;
             }
+            let windows_edit = operation_metadata(&op).ok()
+                .is_some_and(|m| m["windows_edit"].as_bool() == Some(true));
+            // An offline/paused predecessor must finish before its successor's
+            // base version becomes valid, regardless of due-time ordering.
+            if windows_edit && self.db.list_review_operations()?.iter().any(|prior|
+                prior.file_id == op.file_id && prior.op_id != op.op_id
+                && prior.kind == OperationKind::UploadVersion && prior.base_version < op.base_version
+            ) { continue; }
             let result = self.execute_operation(&op, sync_root, now).await;
             match result {
                 Ok(()) => {
@@ -447,6 +455,12 @@ impl EngineBridge {
                     outcome.completed_op_ids.push(op.op_id);
                 }
                 Err(error) => {
+                    if windows_edit && error.downcast_ref::<reqwest::Error>()
+                        .and_then(|e| e.status()).is_some_and(|status| status.as_u16() == 409) {
+                        self.preserve_windows_edit_conflict(&op, sync_root, now)?;
+                        outcome.paused_op_ids.push(op.op_id);
+                        continue;
+                    }
                     let class = classify_operation_error(&error.to_string());
                     if let Some(reason) = class.pause_reason() {
                         self.db
@@ -471,6 +485,29 @@ impl EngineBridge {
         }
 
         Ok(outcome)
+    }
+
+    /// Retain the durable payload AND a visible, non-overwriting conflict copy.
+    /// A terminal queue entry blocks dependent versions until the user resolves
+    /// the conflict; no stale bytes are retried over the remote winner.
+    pub(crate) fn preserve_windows_edit_conflict(&self, op: &PendingOperation, root: &Path, now: i64) -> anyhow::Result<()> {
+        let entry = self.db.get_file(op.file_id.as_deref().unwrap_or_default())?
+            .ok_or_else(|| anyhow::anyhow!("conflicting file missing"))?;
+        let original = local_file_path_under_sync_root(root, &entry.path)?;
+        let stem = original.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = original.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let copy = original.with_file_name(format!("{stem} (conflict {}){ext}", op.op_id));
+        let payload = Path::new(op.payload_path.as_deref().ok_or_else(|| anyhow::anyhow!("conflict payload missing"))?);
+        if !copy.exists() {
+            crate::windows_edits::publish_conflict_copy(payload, &copy)?;
+        }
+        if crate::windows_edits::hash_file(&copy)? != crate::windows_edits::hash_file(payload)? {
+            anyhow::bail!("conflict copy differs; staged payload retained");
+        }
+        self.db.set_status(&entry.file_id, FileStatus::Conflict)?;
+        self.db.record_operation_attempt(&op.op_id, op.max_attempts, now,
+            Some("version conflict: local bytes retained in conflict copy and durable queue"))?;
+        Ok(())
     }
 
     async fn execute_operation(&self, op: &PendingOperation, sync_root: &Path, now: i64) -> anyhow::Result<()> {
@@ -879,6 +916,15 @@ impl EngineBridge {
                 "upload-time thumbnail generation/upload skipped"
             );
         }
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(Some(mut contract)) = self.db.get_file_contract_state(&server_file_id) {
+                if let Ok(hash) = crate::windows_edits::hash_file(payload_path) {
+                    contract.local_hash = Some(hash);
+                    let _ = self.db.set_file_contract_state(&contract);
+                }
+            }
+        }
         if let Err(e) = std::fs::remove_file(payload_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(path = %payload_path.display(), error = %e, "failed to remove staged upload payload");
@@ -966,22 +1012,11 @@ impl EngineBridge {
         Ok(())
     }
 
-    /// Convert a freshly-uploaded NEW local file (still a plain file on disk)
-    /// into an in-sync Cloud Files placeholder. Windows-only, best-effort.
-    /// Only runs for `create_file` operations that carry a `target_path` — the
-    /// happy path of task 0780. Modify-as-new-version is a deferred follow-up
-    /// and is intentionally not converted here.
+    /// Give a completed create or atomic replacement its stable CF identity.
+    /// Keep it unsynced until the queue is removed and the guarded stamp verifies
+    /// that the live bytes still equal the uploaded payload.
     #[cfg(target_os = "windows")]
     fn finalize_local_upload_placeholder(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path) {
-        let Some(metadata) = op.metadata_json.as_deref() else {
-            return;
-        };
-        let is_create = serde_json::from_str::<serde_json::Value>(metadata)
-            .map(|m| m["operation"].as_str() == Some("create_file"))
-            .unwrap_or(false);
-        if !is_create {
-            return;
-        }
         let Some(target_path) = op.target_path.as_deref() else {
             return;
         };
@@ -996,7 +1031,12 @@ impl EngineBridge {
             // later tick from the server row instead.
             return;
         }
-        if let Err(e) = crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&on_disk, server_file_id) {
+        let expected = self.db.get_file_contract_state(server_file_id).ok().flatten()
+            .and_then(|c| c.local_hash);
+        if crate::windows_edits::hash_file(&on_disk).ok().as_ref() != expected.as_ref() || expected.is_none() {
+            return;
+        }
+        if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&on_disk, server_file_id) {
             // Zero-knowledge: log the file_id only, never the path/filename.
             tracing::warn!(file_id = %server_file_id, error = %e, "could not convert uploaded file to in-sync placeholder");
         }
@@ -1067,6 +1107,11 @@ impl EngineBridge {
             .as_i64()
             .unwrap_or(contract.current_version.saturating_add(1));
         contract.local_base_version = contract.current_version;
+        if let Ok(metadata) = operation_metadata(op) {
+            if let Some(hash) = metadata["windows_content_hash"].as_str() {
+                contract.local_hash = Some(hash.to_owned());
+            }
+        }
         contract.current_object_version_id = completed["current_object_version_id"]
             .as_str()
             .map(str::to_string)
@@ -1429,6 +1474,78 @@ impl EngineBridge {
                 )
             }
         }
+    }
+
+    /// Windows-only caller: classify resident content, never a close notification
+    /// alone (read and hydration closes are indistinguishable in CFAPI).
+    /// Some = tracked; None = leave new-file handling to the create classifier.
+    pub(crate) fn queue_windows_tracked_edit(&self, root: &Path, path: &Path) -> anyhow::Result<Option<bool>> {
+        static QUEUE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = QUEUE_LOCK.lock().map_err(|_| anyhow::anyhow!("Windows edit lock poisoned"))?;
+        if self.is_stopping() || path_is_engine_internal(root, path) { return Ok(Some(false)); }
+        let Some(rel) = relative_db_path(root, path) else { return Ok(Some(false)); };
+        let Some(entry) = self.db.get_file_by_path(&rel)? else { return Ok(None); };
+        if entry.is_dir() || !path.is_file() { return Ok(Some(false)); }
+        if std::fs::symlink_metadata(path)?.file_type().is_symlink()
+            || !path.canonicalize()?.starts_with(root.canonicalize()?) {
+            return Ok(Some(false));
+        }
+        #[cfg(target_os = "windows")]
+        if !crate::windows_cf::placeholders::resident_for_edit(path)? { return Ok(Some(false)); }
+        self.ensure_item_allows_shared_write(&entry.file_id, "modify")?;
+        let digest = crate::windows_edits::hash_file(path)?;
+        let pending = self.db.list_review_operations()?.into_iter().filter(|op|
+            op.file_id.as_deref() == Some(&entry.file_id) && op.kind == OperationKind::UploadVersion
+        ).collect::<Vec<_>>();
+        if pending.iter().any(|op| operation_metadata(op).ok().is_some_and(|m| is_create_file_operation(&m))) {
+            return Ok(Some(false)); // server identity is assigned on create completion
+        }
+        // Read the confirmed baseline after the queue snapshot: completion
+        // updates the baseline before removing its op, so either view yields
+        // the next base even when upload completion races this scan.
+        let contract = self.db.get_file_contract_state(&entry.file_id)?
+            .ok_or_else(|| anyhow::anyhow!("tracked edit has no contract"))?;
+        let latest = pending.iter().max_by_key(|op| op.base_version.unwrap_or(0));
+        let previous_hash = latest.and_then(|op| operation_metadata(op).ok())
+            .and_then(|m| m["windows_content_hash"].as_str().map(str::to_owned))
+            .or_else(|| contract.local_hash.clone());
+        if previous_hash.as_deref() == Some(&digest) { return Ok(Some(false)); }
+        // Unknown legacy baseline is preserved as an edit, never blessed clean.
+        let base = latest.and_then(|op| op.base_version).map(|v| v + 1)
+            .unwrap_or(contract.local_base_version.max(1));
+        #[cfg(target_os = "windows")]
+        crate::windows_cf::placeholders::mark_dirty(path)?;
+        let staging = root.join(".beebeeb").join("windows-writes");
+        let staged = stage_finder_payload_with_root(&path.to_string_lossy(), staging.clone())?;
+        let staged_file = std::fs::OpenOptions::new().read(true).write(true).open(&staged)?;
+        staged_file.sync_all()?;
+        #[cfg(unix)]
+        std::fs::File::open(&staging)?.sync_all()?;
+        // If a writer raced the copy, keep the source dirty and retry; don't
+        // enqueue a torn snapshot or claim its bytes as a confirmed baseline.
+        if crate::windows_edits::hash_file(Path::new(&staged))? != digest
+            || crate::windows_edits::hash_file(path)? != digest {
+            std::fs::remove_file(&staged)?;
+            anyhow::bail!("file changed while staging Windows edit");
+        }
+        let filename = path.file_name().and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid Windows edit name"))?;
+        let encrypted = encrypted_metadata_for_name(self.api.master_key(), &entry.file_id,
+            filename, contract.content_type.as_deref())?;
+        let mut metadata = serde_json::json!({
+            "operation": "upload_version", "windows_edit": true,
+            "windows_content_hash": digest, "name_encrypted": encrypted,
+            "content_type": contract.content_type,
+            "size_bytes": staged_file.metadata()?.len(),
+        });
+        apply_shared_context(&mut metadata, Some(&contract).filter(|c| c.is_shared()));
+        self.enqueue_finder_operation(OperationKind::UploadVersion, Some(entry.file_id.clone()),
+            contract.parent_id, Some(rel), metadata, Some(staged), Some(base),
+            if latest.is_none() { contract.current_object_version_id } else { None })?;
+        // Queue insertion is the durable authority. Even if this status write
+        // fails, every reclaim path checks the queue too.
+        self.db.set_status(&entry.file_id, FileStatus::Uploading)?;
+        Ok(Some(true))
     }
 
     pub fn queue_finder_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
@@ -1975,11 +2092,32 @@ impl EngineBridge {
     }
 
     pub fn enforce_smart_cache(&self, policy: CachePolicy) -> anyhow::Result<CacheCleanupOutcome> {
+        #[cfg(target_os = "windows")]
+        {
+            // CF bytes live in the placeholder. Never evict their DB authority
+            // independently of a successful, content-checked native dehydrate.
+            let mut evicted = Vec::new();
+            if let Some(root) = crate::windows_cf::sync_root() {
+                let mut total = self.db.unpinned_cache_bytes()?;
+                for (id, rel, bytes) in self.db.unpinned_local_files_for_dehydration()? {
+                    if total <= policy.max_unpinned_cache_bytes.max(0) { break; }
+                    let path = local_file_path_under_sync_root(&root, &rel)?;
+                    if crate::windows_cf::placeholders::dehydrate_placeholder(&path).is_ok() {
+                        self.db.mark_cloud_only_after_dehydrate(std::slice::from_ref(&id), now_secs())?;
+                        total = total.saturating_sub(bytes);
+                        evicted.push(id);
+                    }
+                }
+            }
+            return Ok(CacheCleanupOutcome { evicted_file_ids: evicted });
+        }
+        #[cfg(not(target_os = "windows"))]
         let evicted = self
             .db
             .evict_unpinned_cache_until_under(policy.max_unpinned_cache_bytes, now_secs())?;
         #[cfg(target_os = "linux")]
         self.remove_linux_freedesktop_thumbnails_for_file_ids(&evicted);
+        #[cfg(not(target_os = "windows"))]
         Ok(CacheCleanupOutcome {
             evicted_file_ids: evicted,
         })
@@ -2153,7 +2291,7 @@ impl EngineBridge {
             base_version,
             base_object_version_id,
             attempts: 0,
-            max_attempts: 25,
+            max_attempts: if metadata["windows_edit"].as_bool() == Some(true) { i64::MAX } else { 25 },
             next_retry_at: now,
             last_error: Some("queued from Finder; upload worker not yet attached".to_string()),
             backup_source_key,
@@ -2406,6 +2544,11 @@ impl EngineBridge {
                 // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
                 // file. Byte count is still recorded for smart-cache accounting.
                 self.db.mark_cached(file_id, "", buf.len() as i64, now_secs())?;
+                if let Some(mut contract) = self.db.get_file_contract_state(file_id)? {
+                    contract.local_hash = Some(crate::windows_edits::hash_bytes(&buf));
+                    contract.local_base_version = contract.current_version;
+                    self.db.set_file_contract_state(&contract)?;
+                }
                 let _ = self.enforce_configured_cache_limit();
                 Ok(buf)
             }
@@ -6685,7 +6828,12 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(evicted.evicted_file_ids, vec!["unpinned".to_string()]);
+        // Without a connected CF root, Windows must retain cache authority:
+        // native dehydration cannot be confirmed by this portable DB fixture.
+        #[cfg(target_os = "windows")]
+        assert!(crate::windows_cf::sync_root().is_none());
+        let expected = if cfg!(target_os = "windows") { Vec::new() } else { vec!["unpinned".to_string()] };
+        assert_eq!(evicted.evicted_file_ids, expected);
         assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
     }
 
@@ -6704,12 +6852,15 @@ mod tests {
 
         let evicted = bridge.enforce_local_cache_limit(Some(1_000)).unwrap();
 
-        assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()]);
+        #[cfg(target_os = "windows")]
+        assert!(crate::windows_cf::sync_root().is_none());
+        let expected = if cfg!(target_os = "windows") { Vec::new() } else { vec!["old".to_string()] };
+        assert_eq!(evicted.evicted_file_ids, expected);
         assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
         assert_eq!(bridge.db.get_file("new").unwrap().unwrap().status, FileStatus::Local);
         assert_eq!(
             bridge.db.get_file("old").unwrap().unwrap().status,
-            FileStatus::CloudOnly
+            if cfg!(target_os = "windows") { FileStatus::Local } else { FileStatus::CloudOnly }
         );
     }
 

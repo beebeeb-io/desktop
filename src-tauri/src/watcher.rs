@@ -1,100 +1,22 @@
-//! Sync-root upload driver — the UPLOAD trigger for Windows (task 0780).
+//! Windows sync-root upload driver: CF notifications plus an enumeration fallback.
 //!
-//! ## Why this exists
+//! CF callbacks reliably report existing-placeholder closes and namespace changes;
+//! the native audit found that new plain-file creates need the periodic scan.
+//! Both paths inspect tracked resident content before invoking the new-file
+//! classifier. A confirmed server hash or latest staged hash suppresses read /
+//! hydration feedback. Every distinct settled edit is durably staged as a version.
 //!
-//! Before this module, Windows sync was DOWNLOAD-ONLY. The encrypted upload
-//! pipeline already existed — [`crate::engine_bridge::EngineBridge::queue_finder_create`]
-//! enqueues a `create_file` operation that the transfer loop encrypts (via
-//! `beebeeb-core`) and uploads — but on Windows NOTHING ever called it. On
-//! macOS/Linux the OS extension fires `QueueFinderCreate` over the Unix socket
-//! ([`crate::ipc_socket`]); the Windows Cloud Files root needs an in-process
-//! trigger.
+//! Close, delete and rename events settle for 400ms: editors may briefly remove
+//! the destination or rename it to a backup while replacing its bytes. A tracked
+//! path occupied again after settling keeps its original server identity.
 //!
-//! ## Why a `notify`/ReadDirectoryChanges watcher does NOT work here — and why
-//! the CF NOTIFY callbacks alone do NOT cover CREATE
+//! The scan skips engine internals, symlinks, disabled backups and unsupported
+//! entries. Previously queued tracked paths remain eligible for later saves.
+//! Native last-write in-sync tracking protects edits before the debounce fires;
+//! reclamation independently verifies queue state and confirmed bytes.
 //!
-//! The first cut of this module watched the sync root with the cross-platform
-//! `notify` crate (ReadDirectoryChanges on Windows). That watcher does **not
-//! fire** on a folder that has been handed to the Cloud Files filter via
-//! `CfConnectSyncRoot`: the CF filter sits between the filesystem and the
-//! ReadDirectoryChanges machinery, so user writes into a connected sync root
-//! never surface as `notify` events.
-//!
-//! The Cloud Files–native `CF_CALLBACK_TYPE_NOTIFY_*` callbacks (registered in
-//! [`crate::windows_cf`]) DO fire on a connected root — but, as task 0780 E2E
-//! proved, only for I/O on EXISTING CF placeholders. They do **not** fire for a
-//! brand-new plain file a foreign process drops into the sync root: across six
-//! native writes, zero `NOTIFY_FILE_CLOSE_COMPLETION` callbacks were observed
-//! and nothing uploaded. The delete/rename NOTIFY callbacks DO fire (those act
-//! on existing synced placeholders) — they stay and work; the gap is purely the
-//! CREATE trigger for new local files.
-//!
-//! A OneDrive-class provider therefore has to run its OWN local change detector
-//! for creates. This module provides two halves:
-//!
-//! 1. **Debounce + dispatch of CF NOTIFY events** — the CF callbacks push events
-//!    into a channel; [`debounce_loop`] debounces close-completion bursts and
-//!    dispatches deletes/renames immediately, classifying each through the one
-//!    shared [`EngineBridge::classify_local_path`]. This half catches MODIFIES of
-//!    existing placeholders and is the path delete/rename ride on. It does NOT
-//!    catch new plain files (the callbacks never fire for them).
-//! 2. **Periodic enumeration scan** ([`scan_loop`]) — the actual CREATE trigger.
-//!    Every [`SCAN_INTERVAL`] it recursively walks the sync root (reading the
-//!    disk directly always works — it does not depend on any filter callback),
-//!    runs the SAME [`EngineBridge::classify_local_path`] on every regular file,
-//!    and for each survivor (a genuinely-new plain file) converts it to an
-//!    unsynced placeholder and queues the encrypted upload — the exact pipeline
-//!    the (non-firing) NOTIFY create callback would have used.
-//!
-//! Both halves funnel through [`dispatch_local_create`], so the feedback filters
-//! and the convert→queue sequence live in one place. The transfer loop then
-//! encrypts + uploads; on success a new local file becomes an in-sync
-//! placeholder (see
-//! [`crate::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]).
-//!
-//! ## Lifecycle
-//!
-//! [`spawn`] is called from [`crate::runner::run`] right after the engine
-//! bridge is built (and, on Windows, after the Cloud Files root is connected),
-//! and returns a [`WatcherHandle`]. It registers an [`mpsc`] sender into the
-//! [`crate::windows_cf`] callback layer (via [`crate::windows_cf::set_notify_sender`])
-//! and spawns TWO background tasks: the debounce loop (CF NOTIFY dispatch) and
-//! the enumeration scan loop (the CREATE trigger). Dropping the handle (on engine
-//! shutdown / logout) signals BOTH tasks to exit; the callbacks then find no live
-//! receiver and drop events harmlessly, and the scan loop stops walking the root.
-//!
-//! ## Feedback-loop avoidance (CRITICAL)
-//!
-//! The engine writes into the sync root constantly: it mints placeholders, it
-//! hydrates bytes into them, it writes `.beebeeb/state.db` and the
-//! `.beebeeb-sync.lock`. Every one of those can fire a NOTIFY callback AND every
-//! one is seen by the periodic scan's `read_dir` walk. If we fed those back into
-//! `queue_finder_create`, every download would immediately re-upload — an
-//! infinite loop. ALL of that filtering lives in the one shared
-//! [`EngineBridge::classify_local_path`] (engine-internal paths, Cloud Files
-//! reparse-point placeholders, and the authoritative "already a known server
-//! file" DB guard), so the CF-callback path AND the enumeration scan share ONE
-//! correct, parent-aware gate. See that method's docs.
-//!
-//! The scan adds no new feedback risk precisely because it reuses that gate:
-//!
-//! - A **downloaded / hydrated** file is a reparse-point placeholder (filter 2)
-//!   AND has a server DB row (filter 3) → filtered out → never re-uploaded.
-//! - A file **mid-upload** has an `Uploading` DB row written synchronously by
-//!   `queue_finder_create` BEFORE it returns (filter 3) → filtered out on the
-//!   very next scan. It is also a placeholder by then (we convert it pre-queue)
-//!   → filter 2 catches it too.
-//! - The scan additionally tracks an in-flight set of paths it has dispatched
-//!   this engine lifetime, so even within the single tick between dispatch and
-//!   the DB row landing it is never queued twice.
-//!
-//! ## Platform note
-//!
-//! This module is compiled on every platform (so the `mpsc` plumbing is
-//! type-checked cross-platform), but [`crate::runner::run`] only *spawns* it on
-//! Windows — macOS (File Provider) and Linux (FUSE) already drive uploads
-//! through `ipc_socket`. The `allow(dead_code)` below suppresses the
-//! never-called warnings on those non-Windows builds.
+//! This module compiles everywhere for portable tests but is spawned only on
+//! Windows. macOS File Provider and Linux IPC continue to drive their own writes.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use std::collections::HashMap;
@@ -306,6 +228,8 @@ async fn debounce_loop(
     // path → last time we saw a close-completion for it. We flush a path only
     // once its last event is older than DEBOUNCE (it has stopped changing).
     let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+    let mut pending_deletes: HashMap<PathBuf, Instant> = HashMap::new();
+    let mut pending_renames: HashMap<PathBuf, (PathBuf, Instant)> = HashMap::new();
     let mut tick = tokio::time::interval(DEBOUNCE_TICK);
 
     loop {
@@ -334,7 +258,7 @@ async fn debounce_loop(
                         if take_engine_delete_suppressed(&path) {
                             tracing::debug!("upload driver: dropping engine-originated delete (remote-deletion reconcile)");
                         } else {
-                            handle_delete(&bridge, &sync_root, &path).await;
+                            pending_deletes.insert(path, Instant::now());
                         }
                     }
                     Some(NotifyEvent::Rename { source, target }) => {
@@ -342,7 +266,7 @@ async fn debounce_loop(
                         // OLD path; the NEW path's close (if any) will arrive on
                         // its own event.
                         pending.remove(&source);
-                        handle_rename(&bridge, &sync_root, &source, &target).await;
+                        pending_renames.insert(source, (target, Instant::now()));
                     }
                     // Sender dropped (handle gone) — exit.
                     None => break,
@@ -353,6 +277,18 @@ async fn debounce_loop(
                 // delete whose NOTIFY never arrived can't shadow a later user delete.
                 prune_stale_engine_suppressions();
                 let now = Instant::now();
+                let deletes: Vec<_> = pending_deletes.iter().filter(|(_, t)| now.duration_since(**t) >= DEBOUNCE)
+                    .map(|(p, _)| p.clone()).collect();
+                for path in deletes {
+                    pending_deletes.remove(&path);
+                    handle_delete(&bridge, &sync_root, &path).await;
+                }
+                let renames: Vec<_> = pending_renames.iter().filter(|(_, (_, t))| now.duration_since(*t) >= DEBOUNCE)
+                    .map(|(p, (target, _))| (p.clone(), target.clone())).collect();
+                for (source, target) in renames {
+                    pending_renames.remove(&source);
+                    handle_rename(&bridge, &sync_root, &source, &target).await;
+                }
                 let ready: Vec<PathBuf> = pending
                     .iter()
                     .filter(|(_, seen)| now.duration_since(**seen) >= DEBOUNCE)
@@ -514,7 +450,9 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             // Skip the redundant classify/convert. classify_local_path would also
             // reject it once the row lands, but this avoids the work + repeated
             // CfConvertToPlaceholder churn in the meantime.
-            if in_flight.contains(file_path) {
+            if in_flight.contains(file_path) && bridge.db().get_file_by_path(
+                &crate::engine_bridge::relative_db_path(sync_root, file_path).unwrap_or_default()
+            ).ok().flatten().is_none() {
                 tracing::debug!(
                     path = %file_path.display(),
                     "enumeration scan: skipped in-flight file"
@@ -709,6 +647,14 @@ fn dispatch_local_create(
     path: &std::path::Path,
     source: &'static str,
 ) -> bool {
+    match bridge.queue_windows_tracked_edit(sync_root, path) {
+        Ok(Some(queued)) => return queued,
+        Ok(None) => {},
+        Err(error) => {
+            tracing::warn!(%error, "tracked Windows edit retained for retry");
+            return false;
+        }
+    }
     let Some(target) = bridge.classify_local_path(sync_root, path) else {
         return false;
     };
@@ -766,6 +712,12 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
+    // Atomic replace can deliver DELETE for the old placeholder after the new
+    // bytes already occupy its name. Keep the destination's stable identity.
+    if path.is_file() {
+        handle_settled_path(bridge, sync_root, path).await;
+        return;
+    }
     match bridge.db().get_file_by_path(&rel) {
         Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
             Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
@@ -812,6 +764,12 @@ async fn handle_rename(
         return;
     }
 
+    if let Some(target_rel) = crate::engine_bridge::relative_db_path(sync_root, target) {
+        if bridge.db().get_file_by_path(&target_rel).ok().flatten().is_some() {
+            handle_settled_path(bridge, sync_root, target).await;
+            return;
+        }
+    }
     let Some(source_rel) = crate::engine_bridge::relative_db_path(sync_root, source) else {
         return;
     };
@@ -829,6 +787,13 @@ async fn handle_rename(
             return;
         }
     };
+
+    // Editors can rename the old destination to a backup, then put new bytes
+    // at the original name. After settling, that is a content save, not a move.
+    if source.is_file() {
+        handle_settled_path(bridge, sync_root, source).await;
+        return;
+    }
 
     let Some(new_name) = target.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
         return;
@@ -878,6 +843,166 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::sync::Arc;
+
+    // Task 1640: these tests also run, unchanged, against origin/main.
+    fn tracked_edit_fixture(root: &Path, db: &StateDb) -> PathBuf {
+        use crate::state_db::{FileEntry, ItemKind};
+        use sha2::{Digest, Sha256};
+        let path = root.join("tracked.txt");
+        fs::write(&path, b"server bytes").unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "tracked-id".into(), path: "tracked.txt".into(),
+            status: FileStatus::Local, size_bytes: 12, modified_at: 1,
+            content_hash: None, remote_updated_at: 1, parent_id: None,
+            item_kind: ItemKind::File,
+        }).unwrap();
+        let mut contract = db.get_file_contract_state("tracked-id").unwrap().unwrap();
+        contract.current_version = 7;
+        contract.local_base_version = 7;
+        contract.local_hash = Some(format!("{:x}", Sha256::digest(b"server bytes")));
+        db.set_file_contract_state(&contract).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn regression_1640_tracked_edit_is_durable_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let db_path = temp.path().join("state.db");
+        let (db, bridge) = test_bridge(&db_path);
+        let path = tracked_edit_fixture(&root, &db);
+        fs::write(&path, b"edited bytes").unwrap(); // same size, no size-only heuristic
+        handle_settled_path(&bridge, &root, &path).await;
+        let queued = db.list_review_operations().unwrap();
+        assert_eq!(queued.len(), 1, "tracked edit must queue exactly one version");
+        assert_eq!(queued[0].kind, OperationKind::UploadVersion);
+        assert_eq!(queued[0].file_id.as_deref(), Some("tracked-id"));
+        assert_eq!(queued[0].base_version, Some(7));
+        assert_eq!(fs::read(queued[0].payload_path.as_ref().unwrap()).unwrap(), b"edited bytes");
+        handle_settled_path(&bridge, &root, &path).await;
+        assert_eq!(db.list_review_operations().unwrap().len(), 1, "duplicate close must not upload twice");
+        drop(bridge); drop(db);
+        let reopened = StateDb::open(&db_path).unwrap();
+        let resumed = reopened.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(fs::read(resumed[0].payload_path.as_ref().unwrap()).unwrap(), b"edited bytes");
+    }
+
+    #[tokio::test]
+    async fn regression_1640_atomic_replace_preserves_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root"); fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let path = tracked_edit_fixture(&root, &db);
+        let source = root.join("save.tmp");
+        fs::write(&source, b"atomic edit").unwrap();
+        fs::rename(&source, &path).unwrap();
+        handle_rename(&bridge, &root, &source, &path).await;
+        let ops = db.list_review_operations().unwrap();
+        assert_eq!(ops.len(), 1, "atomic replacement must queue a version");
+        assert_eq!(ops[0].file_id.as_deref(), Some("tracked-id"));
+        assert_eq!(ops[0].base_version, Some(7));
+        assert_eq!(fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), b"atomic edit");
+    }
+
+    #[test]
+    fn regression_1640_dehydrate_never_selects_queued_bytes() {
+        use crate::state_db::PendingOperation;
+        let temp = tempfile::tempdir().unwrap();
+        let (db, _) = test_bridge(&temp.path().join("state.db"));
+        tracked_edit_fixture(temp.path(), &db);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "offline-edit".into(), kind: OperationKind::UploadVersion,
+            file_id: Some("tracked-id".into()), parent_id: None,
+            target_path: Some("tracked.txt".into()), metadata_json: None,
+            payload_path: Some("durable-payload".into()), base_version: Some(7),
+            base_object_version_id: None, attempts: 1, max_attempts: 25,
+            next_retry_at: i64::MAX, last_error: Some("offline".into()),
+            backup_source_key: None, created_at: 1, updated_at: 1,
+        }).unwrap();
+        // A stale Local row must never override the durable queue's dirty state.
+        assert_eq!(db.unpinned_local_files_for_dehydration().unwrap().len(), 0,
+            "dehydrate must exclude queued bytes even when status is Local");
+        assert_eq!(db.mark_cloud_only_after_dehydrate(&["tracked-id".into()], 2).unwrap(), 0);
+        assert_eq!(db.get_file("tracked-id").unwrap().unwrap().status, FileStatus::Local);
+        db.mark_cached("tracked-id", "cached-payload", 12, 1).unwrap();
+        assert_eq!(db.disposable_unpinned_cache_paths().unwrap().len(), 0);
+        assert_eq!(db.evict_unpinned_cache_until_under(0, 2).unwrap().len(), 0);
+        assert_eq!(db.get_file("tracked-id").unwrap().unwrap().status, FileStatus::Local);
+    }
+
+    #[tokio::test]
+    async fn regression_1640_read_close_and_hydration_do_not_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let path = tracked_edit_fixture(temp.path(), &db);
+        handle_settled_path(&bridge, temp.path(), &path).await;
+        handle_settled_path(&bridge, temp.path(), &path).await;
+        assert_eq!(db.list_review_operations().unwrap().len(), 0);
+        assert!(crate::windows_edits::content_is_confirmed(&db, "tracked-id",
+            &crate::windows_edits::hash_file(&path).unwrap()).unwrap());
+        fs::write(&path, b"user writes!").unwrap();
+        // Immediate free-up-space, before any debounce or queue work.
+        assert!(!crate::windows_edits::content_is_confirmed(&db, "tracked-id",
+            &crate::windows_edits::hash_file(&path).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn regression_1640_scan_preserves_every_settled_save_and_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root"); fs::create_dir(&root).unwrap();
+        let db_path = temp.path().join("state.db");
+        let (db, bridge) = test_bridge(&db_path);
+        let path = tracked_edit_fixture(&root, &db);
+        let mut flight = HashSet::new();
+        fs::write(&path, b"first edit").unwrap();
+        run_one_scan(&bridge, &root, &mut flight);
+        fs::write(&path, b"second edit").unwrap();
+        run_one_scan(&bridge, &root, &mut flight);
+        run_one_scan(&bridge, &root, &mut flight);
+        let mut ops = db.list_review_operations().unwrap();
+        ops.sort_by_key(|op| op.base_version);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops.iter().map(|op| op.base_version).collect::<Vec<_>>(), vec![Some(7), Some(8)]);
+        assert_eq!(fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), b"first edit");
+        assert_eq!(fs::read(ops[1].payload_path.as_ref().unwrap()).unwrap(), b"second edit");
+        bridge.preserve_windows_edit_conflict(&ops[0], &root, 10).unwrap();
+        bridge.preserve_windows_edit_conflict(&ops[0], &root, 10).unwrap();
+        let copies = fs::read_dir(&root).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("(conflict ")).collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(fs::read(copies[0].path()).unwrap(), b"first edit");
+        assert_eq!(fs::read(&path).unwrap(), b"second edit");
+        assert_eq!(db.get_file("tracked-id").unwrap().unwrap().status, FileStatus::Conflict);
+        assert_eq!(db.list_review_operations().unwrap().len(), 2);
+        drop(bridge); drop(db);
+        let reopened = StateDb::open(&db_path).unwrap();
+        assert_eq!(reopened.list_review_operations().unwrap().len(), 2);
+        assert_eq!(reopened.unpinned_local_files_for_dehydration().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn regression_1640_atomic_delete_gap_is_not_server_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root"); fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let path = tracked_edit_fixture(&root, &db);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(debounce_loop(Arc::new(bridge), root.clone(), rx, stopped, tx.clone()));
+        fs::remove_file(&path).unwrap();
+        tx.send(NotifyEvent::Delete(path.clone())).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        fs::write(&path, b"atomic replacement after delete").unwrap();
+        tx.send(NotifyEvent::CloseCompletion(path)).unwrap();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        stop.send(()).unwrap(); task.await.unwrap();
+        let ops = db.list_review_operations().unwrap();
+        assert_eq!(ops.len(), 1, "settled save must not also queue server trash");
+        assert_eq!(ops[0].kind, OperationKind::UploadVersion);
+        assert_eq!(ops[0].file_id.as_deref(), Some("tracked-id"));
+    }
 
     #[test]
     fn engine_delete_suppression_is_consumed_once() {

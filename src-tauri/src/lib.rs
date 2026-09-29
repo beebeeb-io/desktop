@@ -61,6 +61,7 @@ mod state_paths;
 // over the Unix socket instead. Compiled everywhere (cheap, cross-platform via
 // `notify`) but the runner only spawns it on Windows (see `runner::run`).
 mod watcher;
+mod windows_edits;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.

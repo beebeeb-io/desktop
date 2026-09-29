@@ -2310,6 +2310,7 @@ impl StateDb {
                 WHERE cache_bytes > 0
                   AND cache_path IS NOT NULL
                   AND status = 'local'
+                  AND NOT EXISTS (SELECT 1 FROM operation_queue q WHERE q.file_id = files.file_id AND q.kind IN ('upload_version', 'upload_file'))
                   AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
                 ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
                 ",
@@ -2348,12 +2349,20 @@ impl StateDb {
             WHERE cache_bytes > 0
               AND cache_path IS NOT NULL
               AND status = 'local'
+                  AND NOT EXISTS (SELECT 1 FROM operation_queue q WHERE q.file_id = files.file_id AND q.kind IN ('upload_version', 'upload_file'))
               AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
             ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
             ",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
+    }
+
+    /// Queue state is authoritative even if a completion/reconcile left Local.
+    pub fn has_pending_content(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1
+            AND kind IN ('upload_version', 'upload_file'))", [file_id], |r| r.get(0))
     }
 
     /// Unpinned, locally-present files eligible for Windows Cloud Files
@@ -2375,6 +2384,7 @@ impl StateDb {
             SELECT file_id, path, size_bytes
             FROM files
             WHERE status = 'local'
+              AND NOT EXISTS (SELECT 1 FROM operation_queue q WHERE q.file_id = files.file_id AND q.kind IN ('upload_version', 'upload_file'))
               AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
             ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
             ",
@@ -2412,6 +2422,7 @@ impl StateDb {
                      modified_at = ?2
                  WHERE file_id = ?1
                    AND status = 'local'
+                  AND NOT EXISTS (SELECT 1 FROM operation_queue q WHERE q.file_id = files.file_id AND q.kind IN ('upload_version', 'upload_file'))
                    AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))",
                 params![file_id, now],
             )?;
