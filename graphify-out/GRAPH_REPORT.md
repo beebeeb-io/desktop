@@ -1,12 +1,12 @@
 # Graph Report - desktop-1639  (2026-09-30)
 
 ## Corpus Check
-- 164 files · ~378,578 words
+- 165 files · ~379,246 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2567 nodes · 5396 edges · 34 communities detected
-- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 918 edges (avg confidence: 0.8)
+- 2582 nodes · 5443 edges · 34 communities detected
+- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 929 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -32,7 +32,7 @@
 - [[_COMMUNITY_Community 19|Community 19]]
 - [[_COMMUNITY_Community 20|Community 20]]
 - [[_COMMUNITY_Community 21|Community 21]]
-- [[_COMMUNITY_Community 33|Community 33]]
+- [[_COMMUNITY_Community 22|Community 22]]
 - [[_COMMUNITY_Community 39|Community 39]]
 - [[_COMMUNITY_Community 47|Community 47]]
 - [[_COMMUNITY_Community 48|Community 48]]
@@ -59,25 +59,25 @@
 
 ## Surprising Connections (you probably didn't know these)
 - `self_test()` --calls--> `Fixture`  [INFERRED]
-  scripts/assert-cargo-test-counts.py → src-tauri/tests/windows_signout_cleanup.rs
+  scripts/assert-cargo-test-counts.py → src-tauri/src/windows_cf/signout_tests.rs
+- `linux_thumbnail_source_path_for_entry()` --calls--> `load()`  [INFERRED]
+  src-tauri/src/engine_bridge.rs → src/windows/views/ActivityView.tsx
+- `linux_thumbnail_source_path_for_entry()` --calls--> `load()`  [INFERRED]
+  src-tauri/src/engine_bridge.rs → src/pages/SelectiveSync.tsx
 - `clear_session()` --calls--> `load()`  [INFERRED]
   src-tauri/src/lib.rs → src/windows/views/ActivityView.tsx
-- `main()` --calls--> `run()`  [INFERRED]
-  windows/src/main.rs → src-tauri/src/runner.rs
-- `handle_connection()` --calls--> `load()`  [INFERRED]
-  src-tauri/src/ipc_socket.rs → src/windows/views/ActivityView.tsx
-- `handle_connection()` --calls--> `load()`  [INFERRED]
-  src-tauri/src/ipc_socket.rs → src/pages/SelectiveSync.tsx
+- `desktop_search_files()` --calls--> `load()`  [INFERRED]
+  src-tauri/src/lib.rs → src/windows/views/ActivityView.tsx
 
 ## Communities
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (298): load(), provenance_headers(), ensure_directory(), linux_thumbnail_source_path_for_entry(), legacy_platform_keychain_store(), migrate_legacy_keychain_to_account(), platform_keychain_store_for(), about_metadata() (+290 more)
+Nodes (298): DomainControlTool, load(), provenance_headers(), ensure_directory(), legacy_platform_keychain_store(), migrate_legacy_keychain_to_account(), platform_keychain_store_for(), about_metadata() (+290 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.02
-Nodes (212): is_text_file(), apply_shared_context(), apply_shared_metadata_file_row(), apply_snapshot(), apply_sync_op(), assert_rename_then_update_in_one_tick_applies_update(), audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner(), audit_1244_auto_resolve_keep_both_preserves_local_copy_when_remote_hydrate_fails() (+204 more)
+Nodes (226): is_conflict(), is_text_file(), apply_shared_context(), apply_shared_metadata_file_row(), apply_snapshot(), apply_sync_op(), assert_rename_then_update_in_one_tick_applies_update(), audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner() (+218 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.02
@@ -85,39 +85,39 @@ Nodes (140): diagnostics(), lock(), refresh(), runAction(), toggleStartAtLogin()
 
 ### Community 3 - "Community 3"
 Cohesion: 0.02
-Nodes (94): local_index_builds_from_state_db_leaf_file_names_and_skips_folders(), local_query_uses_core_tokenization_and_returns_ranked_results(), seed_file(), apply_metadata_file_row(), ipc_socket_file_is_chmod_0600_after_bind(), record_moved_to_trash_activity_writes_deletion_event(), resolve_relative_path(), test_metadata_file_row_classifies_folder_rows() (+86 more)
+Nodes (91): apply_metadata_file_row(), record_moved_to_trash_activity_writes_deletion_event(), resolve_relative_path(), shared_metadata_uses_placeholder_for_authenticated_traversal_name(), test_metadata_file_row_classifies_folder_rows(), test_metadata_file_row_composes_nested_path_under_parent(), test_metadata_file_row_decrypts_encrypted_name_into_path(), test_metadata_file_row_falls_back_when_name_undecryptable() (+83 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.02
-Nodes (127): engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), bind_ipc_listener(), capabilities_for_status(), file_entry_payload(), file_entry_payload_for_db(), file_entry_payload_without_contract(), file_status_string() (+119 more)
+Cohesion: 0.03
+Nodes (47): AndroidKeyboard(), IOSKeyboard(), account_email_absent_returns_none(), account_email_round_trips(), AuthSecretStore, AuthStoreError, AuthVault, AuthVault<S> (+39 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.02
-Nodes (96): AccountConfig, AccountId, AccountRuntime, active_account_after_synthesis_is_default_shape(), active_account_empty_registry_errs(), fixed_id(), synthesize_is_idempotent(), synthesize_single_account() (+88 more)
+Nodes (91): AccountConfig, AccountId, AccountRuntime, active_account_after_synthesis_is_default_shape(), active_account_empty_registry_errs(), fixed_id(), synthesize_is_idempotent(), synthesize_single_account() (+83 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.03
-Nodes (110): check(), main(), self_test(), account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity (+102 more)
+Nodes (42): api_client_list_files_sends_provenance_headers_on_the_wire(), api_client_zeroizes_master_key_on_drop(), ApiClient, CreatedSession, DesktopUploadInitRequest, DesktopUploadInitResponse, header_secs(), header_secs_parses_numeric_and_rejects_dates() (+34 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.03
-Nodes (42): api_client_list_files_sends_provenance_headers_on_the_wire(), api_client_zeroizes_master_key_on_drop(), ApiClient, CreatedSession, DesktopUploadInitRequest, DesktopUploadInitResponse, header_secs(), header_secs_parses_numeric_and_rejects_dates() (+34 more)
+Nodes (99): account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity, AccountActivityEvent, AccountActivitySummary, AccountProfile (+91 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.04
-Nodes (41): AndroidKeyboard(), IOSKeyboard(), account_email_absent_returns_none(), account_email_round_trips(), AuthSecretStore, AuthStoreError, AuthVault, AuthVault<S> (+33 more)
+Cohesion: 0.03
+Nodes (87): engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), build_macos_file_provider_bridge(), main(), db_placeholder_path(), decide_size_action(), fail_transfer(), fetch_data_callback() (+79 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.04
 Nodes (34): FileProviderEnumerator, FileProviderExtension, BeebeebItemKind, file, folder, namespace, BeebeebNamespace, conflicts (+26 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.11
-Nodes (23): api_client_search_shard_urls_match_web_paths(), build_local_index(), compare_records_for_query(), DesktopSearchIndexState, DesktopSearchResponse, DesktopSearchResult, FixtureSearchStore, FixtureState (+15 more)
+Cohesion: 0.06
+Nodes (55): bind_ipc_listener(), capabilities_for_status(), file_entry_payload(), file_entry_payload_for_db(), file_entry_payload_without_contract(), file_status_string(), filename_from_path(), FileProviderItemPayload (+47 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.12
-Nodes (29): is_ignored_finder_name(), path_is_engine_internal(), relative_db_path(), assert_uploading_row(), debounce_loop(), dispatch_local_create(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths() (+21 more)
+Cohesion: 0.1
+Nodes (27): api_client_search_shard_urls_match_web_paths(), build_local_index(), compare_records_for_query(), DesktopSearchIndexState, DesktopSearchResponse, DesktopSearchResult, FixtureSearchStore, FixtureState (+19 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.13
@@ -140,28 +140,28 @@ Cohesion: 0.19
 Nodes (12): CallbackGate, CallbackGate<T>, CallbackLease, CallbackLease<T>, drain_waits_for_transfer_and_releases_credentials(), Generation, LeaseState, revoke_denies_new_work_and_cancels_existing_work() (+4 more)
 
 ### Community 17 - "Community 17"
+Cohesion: 0.17
+Nodes (21): assert_uploading_row(), debounce_loop(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths(), engine_delete_suppression_is_consumed_once(), engine_delete_suppression_prunes_stale_entries(), NotifyEvent, prune_stale_engine_suppressions() (+13 more)
+
+### Community 18 - "Community 18"
 Cohesion: 0.18
 Nodes (15): remove_linux_freedesktop_thumbnails_for_evicted_files(), encode_freedesktop_png(), file_uri(), fixture_png(), FreedesktopThumbnailSize, md5_hex(), png_output_is_rgba_resized_and_embeds_uri_and_mtime_text_chunks(), remove_freedesktop_thumbnails() (+7 more)
 
-### Community 18 - "Community 18"
-Cohesion: 0.16
-Nodes (11): auto_resolution_deadline(), ConflictRecord, is_conflict(), Resolution, test_conflict_detected_when_both_sides_changed(), test_no_conflict_when_both_sides_landed_on_same_hash(), test_no_conflict_when_only_local_changed(), test_no_conflict_when_only_remote_changed() (+3 more)
-
 ### Community 19 - "Community 19"
-Cohesion: 0.22
-Nodes (7): Contract, Fixture, purge(), StateDb, windows_signout_hydrated_sentinel_is_not_external_cache(), windows_signout_rejects_external_cache_before_deleting_placeholders(), windows_signout_retries_after_partial_cleanup_with_hydrated_sentinel()
+Cohesion: 0.17
+Nodes (10): check(), main(), self_test(), Contract, Fixture, purge(), StateDb, windows_signout_hydrated_sentinel_is_not_external_cache() (+2 more)
 
 ### Community 20 - "Community 20"
+Cohesion: 0.17
+Nodes (10): auto_resolution_deadline(), ConflictRecord, Resolution, test_conflict_detected_when_both_sides_changed(), test_no_conflict_when_both_sides_landed_on_same_hash(), test_no_conflict_when_only_local_changed(), test_no_conflict_when_only_remote_changed(), v() (+2 more)
+
+### Community 21 - "Community 21"
 Cohesion: 0.34
 Nodes (13): commandForTauriCli(), decodeMinisignBase64Line(), decodeTauriBase64Text(), fail(), generateKeypair(), main(), parseTauriPubkey(), parseTauriSignature() (+5 more)
 
-### Community 21 - "Community 21"
+### Community 22 - "Community 22"
 Cohesion: 0.15
 Nodes (11): Availability, capability_wire_fixtures_cover_hosts_and_packages(), DesktopCapabilities, FilesystemIntegration, host_os(), HostOs, InstallFormat, SharingLevel (+3 more)
-
-### Community 33 - "Community 33"
-Cohesion: 0.33
-Nodes (3): DomainControlTool, file_provider_installed(), install_file_provider_domain()
 
 ### Community 39 - "Community 39"
 Cohesion: 0.39
@@ -226,11 +226,11 @@ Nodes (1): StatusUiSourceFactory_Impl
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `load()` connect `Community 0` to `Community 1`, `Community 2`, `Community 11`, `Community 4`?**
-  _High betweenness centrality (0.128) - this node is a cross-community bridge._
+- **Why does `load()` connect `Community 0` to `Community 1`, `Community 2`, `Community 10`, `Community 11`, `Community 17`?**
+  _High betweenness centrality (0.140) - this node is a cross-community bridge._
 - **Why does `commandUnavailableLabel()` connect `Community 2` to `Community 0`, `Community 9`?**
-  _High betweenness centrality (0.120) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 0` to `Community 1`, `Community 5`, `Community 6`, `Community 8`, `Community 9`, `Community 12`?**
+  _High betweenness centrality (0.134) - this node is a cross-community bridge._
+- **Why does `run()` connect `Community 0` to `Community 1`, `Community 4`, `Community 5`, `Community 7`, `Community 9`, `Community 12`?**
   _High betweenness centrality (0.063) - this node is a cross-community bridge._
 - **Are the 69 inferred relationships involving `load()` (e.g. with `commandUnavailableLabel()` and `.do_upload_version()`) actually correct?**
   _`load()` has 69 INFERRED edges - model-reasoned connections that need verification._
