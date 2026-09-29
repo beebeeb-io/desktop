@@ -329,6 +329,22 @@ fn corpus_interrupted_upload_retains_acknowledged_chunks_and_commits_once() {
     assert_clean(f);
 }
 #[test]
+fn corpus_size_mismatch_reports_expected_and_actual_bytes_and_hashes() {
+    let corpus = Corpus::load().unwrap();
+    let mut blob = corpus.objects[3].versions[0].clone();
+    let bytes = Corpus::bytes(&blob).unwrap();
+    // Model a manifest/checkout disagreement without mutating shared fixture files.
+    blob.size += 1;
+    blob.sha256 = "0".repeat(64);
+    assert_eq!(
+        Corpus::bytes(&blob).unwrap_err().to_string(),
+        format!(
+            "fixture size mismatch: {}; expected {} bytes, SHA-256 {}; actual {} bytes, SHA-256 {}",
+            blob.source, blob.size, blob.sha256, bytes.len(), hash(&bytes)
+        )
+    );
+}
+#[test]
 fn corpus_oracle_rejects_wrong_hash_and_missing_scenario() {
     let mut corpus = Corpus::load().unwrap();
     corpus.objects[3].versions[0].sha256 = "0".repeat(64);

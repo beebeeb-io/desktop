@@ -1,0 +1,4 @@
+# Fixture bytes are test oracles: never rewrite line endings on add or checkout.
+# Use -text (rather than binary) so textual fixtures retain readable diffs.
+fixtures/** -text
+tests/fixtures/** -text

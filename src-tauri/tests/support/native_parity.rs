@@ -78,8 +78,13 @@ impl Corpus {
             "unsafe fixture source"
         );
         let bytes = std::fs::read(Self::root().join(&blob.source))?;
-        ensure!(bytes.len() == blob.size, "fixture size mismatch: {}", blob.source);
-        ensure!(hash(&bytes) == blob.sha256, "fixture SHA-256 mismatch: {}", blob.source);
+        let actual_hash = hash(&bytes);
+        ensure!(
+            bytes.len() == blob.size,
+            "fixture size mismatch: {}; expected {} bytes, SHA-256 {}; actual {} bytes, SHA-256 {}",
+            blob.source, blob.size, blob.sha256, bytes.len(), actual_hash
+        );
+        ensure!(actual_hash == blob.sha256, "fixture SHA-256 mismatch: {}", blob.source);
         Ok(bytes)
     }
     pub fn validate(&self) -> Result<()> {

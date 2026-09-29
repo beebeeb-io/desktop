@@ -13,6 +13,14 @@ IDs, names, bytes, SHA-256 and versions are stable; synthetic keys, tokens and
 encryption nonces are generated per setup and never serialized or logged.
 Video poster retrieval does not certify video decoding or poster generation.
 
+Checkout contract (2026-09-30 Windows gate follow-up): root `.gitattributes`
+marks `fixtures/**` and `tests/fixtures/**` as `-text`. Fixture bytes must survive
+Git checkout unchanged, including with `core.autocrlf=true`; text fixtures remain
+readable in diffs. The corpus loader reports expected and actual byte counts and
+SHA-256 hashes on a size mismatch. Repository audit found no other checked-in
+hash/golden corpus; the capability JSON and render harness live in the second
+protected directory. Native Windows verification still requires the native gate.
+
 The API binds IPv4 loopback on a random port only. Native Rust harnesses own the
 fixture in-process, obtain credentials in memory and pass them directly to the
 test bridge. No credentials in argv, environment, manifest or desktop.toml.
@@ -55,7 +63,7 @@ cargo test --locked --lib native_parity_tests::corpus -- --nocapture
 cargo test --locked --lib native_parity_tests::http_ -- --nocapture
 ```
 
-The first Rust filter executes 9 socket-free tests; the second executes 3
+The first Rust filter executes 10 socket-free tests; the second executes 3
 loopback integration tests. A socket bind failure is a failed/unavailable rung,
 never an ignored or successful case. Run both filters twice. Each cycle owns a
 new temporary directory, listener and in-memory account pair. `cleanup()`
