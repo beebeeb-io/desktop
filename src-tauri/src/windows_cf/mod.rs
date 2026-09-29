@@ -50,9 +50,11 @@
 
 pub mod callbacks;
 pub mod placeholders;
+pub mod signout;
 pub mod status_ui;
 pub mod thumbnail_provider;
 
+use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -224,7 +226,7 @@ pub(crate) async fn cancelled(lease: &crate::callback_gate::CallbackLease<Engine
 /// Preserve a failed disconnect's key so a retry cannot register over it.
 static REVOCATION_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn ensure_reactivation_allowed() -> Result<(), String> {
+pub fn ensure_reactivation_allowed() -> std::result::Result<(), String> {
     if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst)
         || REVOCATION_PENDING.load(std::sync::atomic::Ordering::SeqCst)
     {
@@ -294,7 +296,7 @@ pub fn track_credentials(api: &Arc<crate::api_client::ApiClient>) {
 
 /// Includes watcher scans/heartbeat workers that may be outside the runner's
 /// task. An unconfirmed owner is retained as a weak reference for the next retry.
-pub async fn wait_for_credential_release() -> Result<(), String> {
+pub async fn wait_for_credential_release() -> std::result::Result<(), String> {
     if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(
             "Sync shutdown could not be confirmed. Restart Beebeeb before locking or switching accounts.".into(),
