@@ -730,11 +730,22 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
   onRetry: () => void
   onSelect: (continent: string) => void
 }) {
+  const currentRegion = view.items.find(item => item.continent === view.effectiveRegion)
+  const error = loadError ?? (!currentRegion?.displayName.trim()
+    ? 'Your storage region could not be determined. Please try again.'
+    : null)
+  const subtitle = loading
+    ? 'Loading data residency…'
+    : error ? undefined
+    : currentRegion?.continent === 'europe'
+      ? 'Stored in the EU.'
+      : `Stored in ${currentRegion?.displayName}.`
+
   return (
     <SettingsSectionShell>
       <PageHeader
         title="Data residency"
-        subtitle="Stored in the EU."
+        subtitle={subtitle}
       />
 
       {loading ? (
@@ -744,14 +755,14 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
         </Card>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {loadError && (
+          {error && (
             <Card style={{ padding: 14, background: T.paper2, borderColor: 'oklch(0.88 0.05 25)' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                 <NavIcon name="external" size={14} color={RED} />
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Could not load data residency</div>
                   <div style={{ fontSize: 11.5, lineHeight: 1.5, color: T.ink3, marginTop: 3, wordBreak: 'break-word' as const }}>
-                    {loadError}
+                    {error}
                   </div>
                 </div>
                 <button
@@ -774,7 +785,7 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
             </Card>
           )}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {!error && <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {view.items.map(item => (
               <RegionSelectionCard
                 key={item.continent}
@@ -782,9 +793,9 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
                 onSelect={(continent) => onSelect(continent)}
               />
             ))}
-          </div>
+          </div>}
 
-          {!loadError && !view.onlyOneRegion && <Card style={{ padding: 14, background: T.paper2 }}>
+          {!error && !view.onlyOneRegion && <Card style={{ padding: 14, background: T.paper2 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
               <NavIcon name="shield" size={14} color={T.amberDeep} />
               <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55 }}>
