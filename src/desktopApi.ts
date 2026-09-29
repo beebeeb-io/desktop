@@ -763,16 +763,13 @@ export interface ConfirmActionResult {
 }
 
 // ── Data residency / region — GET /api/v1/me/region ──────────────────────────
-// Mirrors the webapp `@beebeeb/shared` shapes so the desktop resolves the
-// effective region's CITY the same way the webapp does. Brand rule: surface the
-// CITY only, NEVER the `provider` (the field exists only to match the wire shape).
+// The Rust DTO maps server `available_regions` / `example_city` to IPC
+// `regions` / `city`. Provider metadata is ignored and never sent to the UI.
 
 export interface RegionInfo {
   continent: string
   display_name: string
   city: string
-  /** Present to match the server shape — NEVER render this (brand rule). */
-  provider: string
   is_default: boolean
 }
 
