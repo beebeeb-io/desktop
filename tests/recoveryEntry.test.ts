@@ -42,6 +42,7 @@ function setup(file: string) {
   const refs: any[] = []
   let cursor = 0
   let focus = -1
+  const inputs: Array<{ value: string; selectionStart: number; selectionEnd: number; focus(): void; setSelectionRange(start: number, end: number): void }> = []
   let done = 0
   let rejection = ''
   const unlocks: string[] = []
@@ -75,7 +76,18 @@ function setup(file: string) {
   function render() {
     cursor = 0
     tree = Step({ onDone: () => done++ })
-    fields().forEach((field, index) => field.props.ref({ focus: () => { focus = index } }))
+    fields().forEach((field, index) => {
+      const input = inputs[index] ??= {
+        value: '', selectionStart: 0, selectionEnd: 0,
+        focus() { focus = index },
+        setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end },
+      }
+      if (input.value !== field.props.value) {
+        input.value = field.props.value
+        input.setSelectionRange(input.value.length, input.value.length)
+      }
+      field.props.ref(input)
+    })
   }
   function flush() {
     while (updates.length) updates.shift()!()
@@ -94,6 +106,23 @@ function setup(file: string) {
     focus = index
     let prevented = false
     fields()[index].props.onKeyDown({ key, preventDefault() { prevented = true } })
+    // Model the native default AFTER keydown, on the newly focused input.
+    // This is deliberately explicit: this harness is not a browser/DOM engine.
+    if (!prevented) {
+      const input = inputs[focus]
+      let { selectionStart: start, selectionEnd: end } = input
+      if (key === 'Backspace' || key === 'Delete') {
+        if (start === end) {
+          if (key === 'Backspace') start = Math.max(0, start - 1)
+          else end = Math.min(input.value.length, end + 1)
+        }
+        if (start !== end) change(focus, input.value.slice(0, start) + input.value.slice(end))
+        input.setSelectionRange(start, start)
+      } else if (key === 'ArrowLeft') {
+        const caret = start === end ? Math.max(0, start - 1) : start
+        input.setSelectionRange(caret, caret)
+      } else if (key === 'Home') input.setSelectionRange(0, 0)
+    }
     flush()
     return prevented
   }
@@ -106,6 +135,8 @@ function setup(file: string) {
   render()
   return {
     fields, change, key, paste, flush,
+    select(index: number, start: number, end = start) { inputs[index].setSelectionRange(start, end) },
+    selection: (index: number) => [inputs[index].selectionStart, inputs[index].selectionEnd],
     values: () => fields().map((el) => el.props.value),
     focus: () => focus, done: () => done, unlocks,
     content: () => text(tree),
@@ -189,6 +220,66 @@ for (const file of ['WindowsFirstRun.tsx', 'Onboarding.tsx']) {
       ui.key(11, 'Enter')
       expect(ui.focus()).toBe(11)
     })
+    test('native sequence: empty word 4 Backspace preserves word 3; second press deletes normally', () => {
+      const ui = setup(file)
+      for (const [index, word] of ['abandon', 'ability', 'above'].entries()) {
+        for (let length = 1; length <= word.length; length++) ui.change(index, word.slice(0, length))
+      }
+      const before = ui.values()
+      const prevented = ui.key(3, 'Backspace')
+      expect(ui.values()).toEqual(before)
+      expect(ui.focus()).toBe(2)
+      expect(ui.selection(2)).toEqual([5, 5])
+      expect(prevented).toBe(true)
+      expect(ui.key(2, 'Backspace')).toBe(false)
+      expect(ui.values().slice(0, 4)).toEqual(['abandon', 'ability', 'abov', ''])
+      expect(ui.focus()).toBe(2)
+      expect(ui.selection(2)).toEqual([4, 4])
+    })
+    test('backward focus collapses a retained selection at the previous word end', () => {
+      const ui = setup(file)
+      ui.change(2, 'above')
+      ui.select(2, 1, 4)
+      ui.key(3, 'Backspace')
+      expect(ui.selection(2)).toEqual([5, 5])
+      expect(ui.values()[2]).toBe('above')
+      ui.key(2, 'Backspace')
+      expect(ui.values()[2]).toBe('abov')
+    })
+    test('Backspace at the first field and across an empty previous field stays bounded', () => {
+      const ui = setup(file)
+      expect(ui.key(0, 'Backspace')).toBe(false)
+      expect(ui.focus()).toBe(0)
+      expect(ui.values()).toEqual(Array(12).fill(''))
+      expect(ui.key(3, 'Backspace')).toBe(true)
+      expect(ui.focus()).toBe(2)
+      expect(ui.selection(2)).toEqual([0, 0])
+      expect(ui.values()).toEqual(Array(12).fill(''))
+      ui.change(0, 'above')
+      ui.select(0, 0)
+      expect(ui.key(0, 'Backspace')).toBe(false)
+      expect(ui.values()[0]).toBe('above')
+    })
+    for (const key of ['Delete', 'ArrowLeft', 'Home']) {
+      test(`${key} stays in the current field at empty/start/end edges and preserves native editing`, () => {
+        const ui = setup(file)
+        ui.change(2, 'above')
+        const before = ui.values()
+        expect(ui.key(3, key)).toBe(false)
+        expect(ui.focus()).toBe(3)
+        expect(ui.values()).toEqual(before)
+        ui.select(2, 5)
+        expect(ui.key(2, key)).toBe(false)
+        expect(ui.focus()).toBe(2)
+        expect(ui.values()).toEqual(before)
+        expect(ui.selection(2)).toEqual(key === 'Home' ? [0, 0] : key === 'ArrowLeft' ? [4, 4] : [5, 5])
+        ui.select(2, 0)
+        expect(ui.key(2, key)).toBe(false)
+        expect(ui.focus()).toBe(2)
+        expect(ui.values()[2]).toBe(key === 'Delete' ? 'bove' : 'above')
+        expect(ui.selection(2)).toEqual([0, 0])
+      })
+    }
     test('incomplete phrase does not invoke unlock', async () => {
       const ui = setup(file)
       ui.paste(0, 'abandon')

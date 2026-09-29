@@ -808,7 +808,13 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
                 }}
                 onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
                   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); refs.current[Math.min(idx + 1, RECOVERY_WORD_COUNT - 1)]?.focus(); return }
-                  if (e.key === 'Backspace' && !word && idx > 0) refs.current[idx - 1]?.focus()
+                  if (e.key === 'Backspace' && !word && idx > 0) {
+                    // Cancel deletion before focus moves: WebView2 applies it to the new input.
+                    e.preventDefault()
+                    const previous = refs.current[idx - 1]
+                    previous?.focus()
+                    previous?.setSelectionRange(previous.value.length, previous.value.length)
+                  }
                 }}
                 onPaste={(e) => { e.preventDefault(); applyWords(idx, e.clipboardData.getData('text').split(/\s+/)) }}
               />

@@ -385,7 +385,11 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
       return
     }
     if (event.key === 'Backspace' && !recoveryWords[index] && index > 0) {
-      wordRefs.current[index - 1]?.focus()
+      // Cancel deletion before focus moves: WebView2 applies it to the new input.
+      event.preventDefault()
+      const previous = wordRefs.current[index - 1]
+      previous?.focus()
+      previous?.setSelectionRange(previous.value.length, previous.value.length)
     }
   }
 
