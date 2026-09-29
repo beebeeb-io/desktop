@@ -4,7 +4,8 @@
 > `runner.rs`, `engine_bridge.rs`, and `state_db.rs` own scheduling and sync.
 > `repos/web` is not this frontend; core provides shared primitives.
 > Run `bun run tauri:dev` / `bun run tauri:build` from the desktop root.
-> macOS uses the active `macos/FileProviderExtension` (not FinderSync), Windows
+> macOS uses the active ~~`macos/FileProviderExtension`~~ `BeebeebFileProvider/`
+> (path corrected on resume, 2026-09-29; built by `scripts/build-fileprovider-extension.sh`), Windows
 > uses `src-tauri/src/windows_cf` (CFAPI), and Linux FUSE is an unmounted prototype.
 > The legacy native-shell build recipes and Linux online-only claims below are
 > historical. Spec 030 is historical and never authorizes raw keys in config.

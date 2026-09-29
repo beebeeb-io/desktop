@@ -9,9 +9,11 @@
  * actually Windows. QA can (and does) force `platform=windows` on macOS
  * hardware to preview the Windows shell, so any component that shell renders
  * must ask the Rust side what the real host OS is (via the existing
- * `desktop_platform` command) rather than trusting the routing query param.
+ * `desktop_capabilities` snapshot) rather than trusting the routing query param.
+ * `desktop_platform` remains a fallback for standalone callers outside the provider.
  */
 import { useEffect, useState } from 'react'
+import { useCapabilities } from './capabilities'
 import { command, type DesktopPlatform } from './desktopApi'
 
 export type PlatformName = 'macos' | 'windows' | 'linux'
@@ -67,9 +69,11 @@ export interface PlatformResolution {
  * or rendering an OS-specific label) before it is safe to do so.
  */
 export function usePlatform(): PlatformResolution {
+  const caps = useCapabilities()
   const [name, setName] = useState<PlatformName | null>(() => cachedPlatform)
 
   useEffect(() => {
+    if (caps) return
     if (cachedPlatform !== null) {
       setName(cachedPlatform)
       return
@@ -81,8 +85,10 @@ export function usePlatform(): PlatformResolution {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [caps])
 
+  const host = caps?.host_os
+  if (host) return { name: host === 'unknown' ? null : host, resolved: host !== 'unknown' }
   return { name, resolved: name !== null }
 }
 

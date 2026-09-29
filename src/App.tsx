@@ -1,3 +1,4 @@
+import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabilities'
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, loadSyncStatus, type DesktopPlatform, type SyncStatus } from './desktopApi'
@@ -27,6 +28,7 @@ function initialPage(): Page {
 }
 
 export default function App() {
+  const caps = useCapabilities()
   const [page, setPage] = useState<Page>(() => initialPage())
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [version, setVersion] = useState<string | null>(null)
@@ -92,6 +94,7 @@ export default function App() {
   }, [])
 
   const renderPage = () => {
+    if (!supportsRoute(caps, page)) return <CapabilityAlternative />
     switch (page) {
       case 'status':
         return <Status onNavigate={setPage} />
@@ -140,7 +143,7 @@ export default function App() {
           <DesktopVersionHistoryTrigger onOpen={() => setVersionHistoryOpen(true)} />
 
           <div className="nav-group">
-            {COMPACT_NAV_ITEMS.map((item) => (
+            {COMPACT_NAV_ITEMS.filter((item) => supportsRoute(caps, item.id)).map((item) => (
               <button
                 key={item.id}
                 className={`nav-button ${page === item.id ? 'active' : ''}`}

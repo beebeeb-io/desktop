@@ -6,18 +6,10 @@
  * the onboarding "Open control center" button both route here, and it's the
  * window shown automatically on launch once the PC is configured.
  *
- * This is the SHELL: a left sidebar (brand mark + nav groups + a live storage
- * widget) and a content area with a state-based router. It hosts the data-backed views that
- * later packages will fill — TODAY most views are honest placeholders / skeleton
- * slots. What IS finished here: the window, nav + active states, routing,
- * responsive content area, the auth gate, loading/skeleton scaffolding, and the
- * live storage widget (wired to account_usage with a desktop_storage_summary
- * fallback).
- *
- * Data wrappers for the 15 account/billing/devices/activity IPCs live in
- * desktopApi.ts (accountProfile, accountUsage, …). The placeholder views below
- * call almost none of them yet — that's the next packages' job. Each slot is
- * marked with a `DATA SLOT:` note naming the wrapper(s) it should consume.
+ * Correction (2026-09-29, task 1611): the earlier header described these
+ * views as placeholders. All eleven validated nav IDs now have concrete
+ * views. See docs/CAPABILITIES.md for per-action backend reachability and
+ * native verification gaps; source wiring is not a native pass.
  *
  * Design tokens + idioms are shared through `src/windows/ui.tsx`. Brand: amber
  * for encryption state + the active nav icon accent only; Inter for humans,
@@ -55,6 +47,7 @@ import {
   type StatusBucket,
   type RecentFile,
 } from './desktopApi'
+import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabilities'
 import UpdateBanner from './UpdateBanner'
 import AuthExpiredBanner from './AuthExpiredBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
@@ -1175,7 +1168,7 @@ function ManageBackupCard() {
         </div>
       ) : (
         <div>
-          {folders.map((f, i) => {
+          {folders.filter((f) => f.source_path != null).map((f, i) => {
             const isPending = pending.has(f.key)
             const status = backupStatus(f, isPending)
             const statusColor =
@@ -1629,6 +1622,7 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
 // ── Root component ──────────────────────────────────────────────────────────
 
 export default function WindowsApp() {
+  const caps = useCapabilities()
   const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
   const [searchOpen, setSearchOpen] = useState(false)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
@@ -1767,10 +1761,11 @@ export default function WindowsApp() {
 
   const filteredSections = NAV_SECTIONS.map((section) => ({
     ...section,
-    items: section.items.filter((item) => loggedIn || ALWAYS_ACCESSIBLE.has(item.id)),
+    items: section.items.filter((item) => supportsRoute(caps, item.id) && (loggedIn || ALWAYS_ACCESSIBLE.has(item.id))),
   })).filter((section) => section.items.length > 0)
 
   const renderContent = () => {
+    if (!supportsRoute(caps, activeNav)) return <CapabilityAlternative />
     if (!loggedIn && !ALWAYS_ACCESSIBLE.has(activeNav)) {
       return <SignedOutGate onOpenSignIn={openSignIn} />
     }
