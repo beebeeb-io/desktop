@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 function readSrc(relPath: string): string {
-  return readFileSync(join(import.meta.dir, '..', 'src', relPath), 'utf8')
+  return readFileSync(join(import.meta.dir, '..', 'src', relPath), 'utf8').replace(/\r\n/g, '\n')
 }
 
 describe('macOS Account page plan UI', () => {

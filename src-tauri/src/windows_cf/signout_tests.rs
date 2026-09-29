@@ -18,21 +18,43 @@ impl Fixture {
     }
 
     fn track(&self, path: &str, kind: ItemKind, status: FileStatus) {
-        self.db.upsert_file(&FileEntry {
-            file_id: path.into(), path: path.into(), status, size_bytes: 0,
-            modified_at: 0, content_hash: None, remote_updated_at: 1,
-            parent_id: None, item_kind: kind.clone(),
-        }).unwrap();
+        self.db
+            .upsert_file(&FileEntry {
+                file_id: path.into(),
+                path: path.into(),
+                status,
+                size_bytes: 0,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: kind.clone(),
+            })
+            .unwrap();
         // upsert_file deliberately does not write item_kind; the engine uses
         // the contract setter too when a local CreateFolder has completed.
-        self.db.set_file_contract_state(&FileContractState {
-            file_id: path.into(), namespace: Namespace::MyFiles, parent_id: None,
-            shared_root_id: None, share_id: None, owner_email: None, permission_bits: 1,
-            item_kind: kind, content_type: None, current_version: 1,
-            current_object_version_id: None, local_base_version: 1, local_hash: None,
-            cache_path: None, cache_bytes: 0, pin_state: PinState::Inherit,
-            inherited_pin_state: PinState::Unpinned, last_sync_at: 1,
-        }).unwrap();
+        self.db
+            .set_file_contract_state(&FileContractState {
+                file_id: path.into(),
+                namespace: Namespace::MyFiles,
+                parent_id: None,
+                shared_root_id: None,
+                share_id: None,
+                owner_email: None,
+                permission_bits: 1,
+                item_kind: kind,
+                content_type: None,
+                current_version: 1,
+                current_object_version_id: None,
+                local_base_version: 1,
+                local_hash: None,
+                cache_path: None,
+                cache_bytes: 0,
+                pin_state: PinState::Inherit,
+                inherited_pin_state: PinState::Unpinned,
+                last_sync_at: 1,
+            })
+            .unwrap();
     }
 
     fn folder(&self, path: &str) {
@@ -60,7 +82,10 @@ fn plain_directory_unsynced_child_preserves_bytes_and_rows() {
     let child = f.root.join("local/unsynced.txt");
     std::fs::write(&child, b"unsynced bytes").unwrap();
     let error = purge(&f.db, Some(&f.root)).unwrap_err();
-    assert!(error.to_string().contains("Unsynced files remain"), "must inspect children: {error:?}");
+    assert!(
+        error.to_string().contains("Unsynced files remain"),
+        "must inspect children: {error:?}"
+    );
     assert_eq!(std::fs::read(child).unwrap(), b"unsynced bytes");
     assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
@@ -106,13 +131,61 @@ fn directory_junction_is_not_traversed_or_removed() {
     std::fs::write(outside.join("precious.txt"), b"outside bytes").unwrap();
     let link = f.root.join("link");
     let output = std::process::Command::new("cmd.exe")
-        .args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output().unwrap();
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&outside)
+        .output()
+        .unwrap();
     assert!(output.status.success(), "junction fixture failed: {output:?}");
     f.track("link", ItemKind::Folder, FileStatus::Local);
     let error = purge(&f.db, Some(&f.root)).unwrap_err();
-    assert!(!error.to_string().contains("Unsynced files remain"), "junction was traversed: {error:?}");
+    assert!(
+        !error.to_string().contains("Unsynced files remain"),
+        "junction was traversed: {error:?}"
+    );
     assert!(link.exists());
     assert_eq!(std::fs::read(outside.join("precious.txt")).unwrap(), b"outside bytes");
     assert_eq!(f.db.list_files().unwrap().len(), 1);
     std::fs::remove_dir(link).unwrap();
+}
+
+#[test]
+fn prepared_directory_cannot_be_replaced_during_cleanup() {
+    let f = Fixture::new();
+    f.folder("local");
+    let rows = f.db.list_files().unwrap();
+    let known = rows.iter().map(|r| (r.path.clone(), r)).collect();
+    let (mut files, mut directories) = (Vec::new(), Vec::new());
+    prepare(&f.root, &f.root, &known, &mut files, &mut directories).unwrap();
+    assert_eq!(files.len(), 0);
+    assert_eq!(directories.len(), 1);
+    assert!(
+        std::fs::rename(f.root.join("local"), f.root.join("replaced")).is_err(),
+        "prepared directory must remain bound to the validated path"
+    );
+    drop(directories);
+    purge(&f.db, Some(&f.root)).unwrap();
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+#[test]
+fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
+    let f = Fixture::new();
+    f.folder("local");
+    let rows = f.db.list_files().unwrap();
+    let known = rows.iter().map(|r| (r.path.clone(), r)).collect();
+    let (mut files, mut directories) = (Vec::new(), Vec::new());
+    prepare(&f.root, &f.root, &known, &mut files, &mut directories).unwrap();
+    assert_eq!(directories.len(), 1);
+    let child = f.root.join("local/late.txt");
+    std::fs::write(&child, b"new unsynced bytes").unwrap();
+    assert!(
+        mark_for_deletion(&directories[0]).is_err(),
+        "nonempty directory must survive"
+    );
+    drop(directories);
+    assert_eq!(std::fs::read(&child).unwrap(), b"new unsynced bytes");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert_eq!(std::fs::read(child).unwrap(), b"new unsynced bytes");
 }

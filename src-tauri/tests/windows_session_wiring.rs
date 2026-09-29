@@ -1,15 +1,18 @@
 //! Wiring guards complement the behavioral session/gate tests: a new command
 //! or engine entrypoint must not silently bypass the Windows admission boundary.
-const SOURCE: &str = include_str!("../src/lib.rs");
+static SOURCE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| include_str!("../src/lib.rs").replace("\r\n", "\n"));
 fn body<'a>(source: &'a str, name: &str) -> &'a str {
     let start = source.find(&format!("fn {name}(")).unwrap();
     let start = start + source[start..].find('{').unwrap();
     &source[start..start + source[start..].find("\n}").unwrap()]
 }
-fn unleased_credential_commands(source: &str) -> Vec<&str> {
-    source
-        .split("#[tauri::command]\nasync fn ")
-        .skip(1)
+fn unleased_credential_commands(source: &str) -> Vec<String> {
+    let source = source.replace("\r\n", "\n");
+    let commands: Vec<_> = source.split("#[tauri::command]\nasync fn ").skip(1).collect();
+    assert!(!commands.is_empty(), "admission guard must scan commands");
+    commands
+        .into_iter()
         .filter_map(|section| {
             let name = section.split('(').next().unwrap();
             let body = &section[..section.find("\n}").unwrap()];
@@ -17,7 +20,7 @@ fn unleased_credential_commands(source: &str) -> Vec<&str> {
                 || body.contains(".token.clone()")
                 || body.contains("s.master_key");
             (credentials && !body.contains("session_command!(") && !body.contains("SESSION_TRANSITION.lock().await"))
-                .then_some(name)
+                .then(|| name.to_owned())
         })
         .collect()
 }
@@ -25,12 +28,12 @@ fn unleased_credential_commands(source: &str) -> Vec<&str> {
 fn every_credential_command_has_admission_before_credential_reads() {
     assert_eq!(SOURCE.matches("session_command!(async").count(), 31);
     assert!(
-        unleased_credential_commands(SOURCE).is_empty(),
+        unleased_credential_commands(&SOURCE).is_empty(),
         "unleased commands: {:?}",
-        unleased_credential_commands(SOURCE)
+        unleased_credential_commands(&SOURCE)
     );
     for name in ["lock_vault", "clear_session_impl"] {
-        let code = body(SOURCE, name);
+        let code = body(&SOURCE, name);
         assert!(code.find("close_session_commands().await?").unwrap() < code.find("acct.engine.lock().await").unwrap());
     }
 }
@@ -43,7 +46,7 @@ fn every_engine_start_requires_transition_and_generation_validation() {
         "start_engine_for_pending_finder_install",
         "pick_sync_root",
     ] {
-        let code = body(SOURCE, name);
+        let code = body(&SOURCE, name);
         assert!(
             code.contains("SESSION_COMMANDS.validate_start(generation)?"),
             "{name} bypasses generation validation"
@@ -58,7 +61,7 @@ fn every_engine_start_requires_transition_and_generation_validation() {
 }
 #[test]
 fn cloud_files_unregister_precedes_shell_unregister_and_propagates_failure() {
-    let code = body(SOURCE, "clear_session_impl");
+    let code = body(&SOURCE, "clear_session_impl");
     assert!(
         code.find("windows_cf::unregister_sync_root(&root)").unwrap()
             < code.find("windows_cf::unregister_shell_sync_root(&root)").unwrap()
@@ -71,6 +74,10 @@ fn admission_guard_selftest_detects_a_bypassed_command() {
     for ending in ["\n", "\r\n"] {
         let source = SOURCE.replace("\r\n", "\n").replace('\n', ending);
         let source = source.replacen("session_command!(async", "unprotected!(async", 1);
-        assert_eq!(unleased_credential_commands(&source), vec!["desktop_storage_summary"], "line ending: {ending:?}");
+        assert_eq!(
+            unleased_credential_commands(&source),
+            vec!["desktop_storage_summary"],
+            "line ending: {ending:?}"
+        );
     }
 }
