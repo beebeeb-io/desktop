@@ -12,6 +12,18 @@ HELPER_OUT="src-tauri/target/fileprovider/BeebeebFileProviderCtl"
 TARGET_TRIPLE="${BEEBEEB_FILE_PROVIDER_TARGET:-}"
 SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
 EXTENSION_PROVISION_PROFILE="${MACOS_FILE_PROVIDER_PROVISION_PROFILE:-src-tauri/target/profiles/BeebeebFileProvider.provisionprofile}"
+# Task 1608: a notarized Developer ID release needs every nested executable —
+# not just the containing app (which Tauri's own bundler already handles) —
+# signed with hardened runtime AND a secure (network) timestamp; Apple's
+# notarization service rejects a submission over "The signature does not
+# include a secure timestamp" or a missing hardened-runtime flag on ANY
+# binary inside the bundle, including this appex and its CTL helper. Gate
+# this behind an explicit env var rather than turning it on whenever
+# SIGNING_IDENTITY is set: the existing local dev-signing recipe (task 1521,
+# 1524) already passes a real (non-ad-hoc) Apple Development identity here,
+# and that flow doesn't notarize, doesn't need hardened runtime, and a
+# network timestamp would slow it down / fail offline for no benefit.
+MACOS_HARDENED_RUNTIME="${BEEBEEB_MACOS_HARDENED_RUNTIME:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -138,7 +150,11 @@ if [[ -f "$EXTENSION_PROVISION_PROFILE" ]]; then
 fi
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then
-  codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT_DIR"
+  if [[ -n "$MACOS_HARDENED_RUNTIME" ]]; then
+    codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS" "$OUT_DIR"
+  else
+    codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT_DIR"
+  fi
 else
   codesign --force --sign - --entitlements "$ENTITLEMENTS" "$OUT_DIR"
 fi
@@ -154,7 +170,11 @@ xcrun swiftc \
   -o "$HELPER_OUT"
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then
-  codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$HELPER_OUT"
+  if [[ -n "$MACOS_HARDENED_RUNTIME" ]]; then
+    codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp "$HELPER_OUT"
+  else
+    codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$HELPER_OUT"
+  fi
 else
   codesign --force --sign - "$HELPER_OUT"
 fi

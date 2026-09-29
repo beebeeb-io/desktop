@@ -162,15 +162,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS is disabled for now: the File Provider extension doesn't support universal
-          # builds yet (arch-detection gap in scripts/build-fileprovider-extension.sh) and
-          # Developer ID/notary credentials aren't wired into CI (see task 0342). Re-add once
-          # both are sorted — the macOS-only steps below are already gated on `runner.os` and
-          # need no other change.
+          # macOS is disabled in CI for now: Developer ID/notary credentials aren't wired into
+          # CI as secrets (doing so would need Guus to export the Developer ID private key from
+          # his keychain as a .p12 — deliberately not done; see task 1608's route decision).
+          # macOS releases are instead built + Developer ID signed + notarized LOCALLY on a Mac
+          # holding the keychain identity, then the resulting assets are uploaded to the same
+          # GitHub release by hand and this workflow is re-run with publish_existing=true to
+          # backfill the manifest's darwin-aarch64 entry (see "Generate desktop channel
+          # manifest" below). Task 1608 (2026-09-29) launched macOS Apple Silicon (arm64) only —
+          # the File Provider extension isn't built/tested for x86_64 or as a universal binary,
+          # so target/rust-targets below are single-arch on purpose, not `universal-apple-darwin`.
+          # Re-add once real CI signing credentials exist for this identity.
           # - name: macOS
           #   os: macos-latest
-          #   target: universal-apple-darwin
-          #   rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          #   target: aarch64-apple-darwin
+          #   rust-targets: aarch64-apple-darwin
           - name: Windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -283,8 +289,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-assets/
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg.sig release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg.sig release-assets/
+          # The updater artifact (createUpdaterArtifacts: true) is bundled
+          # alongside the .app, not the .dmg, and Tauri names it from
+          # productName alone — no version or arch suffix (confirmed by a
+          # real local build, task 1608, 2026-09-29) — unlike the
+          # dmg/msi/nsis installer bundles, which DO embed version+arch.
+          # Do not "fix" this filename to look more like the others.
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz.sig release-assets/
 
       - name: Stage release assets (Windows)
         if: runner.os == 'Windows'
@@ -453,10 +467,22 @@ jobs:
           # The Tauri updater verifies update bundles against the embedded pubkey
           # in tauri.conf.json using the .sig files produced at build time.
           # Windows and Linux must fail closed if their signatures are absent.
-          # macOS is still disabled in the release matrix, so its updater bundle
-          # filename is a best-effort carry-forward until macOS release output is
-          # verified. Missing macOS signatures omit darwin entries instead of
-          # blocking Windows/Linux manifest publishing.
+          # macOS is still disabled in the release matrix (built + signed locally instead, see
+          # the matrix comment above) so its updater bundle filename is a best-effort
+          # carry-forward until the macOS assets for this VER are actually uploaded to the
+          # release. Missing macOS signatures omit the darwin entry instead of blocking
+          # Windows/Linux manifest publishing.
+          #
+          # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY. The bundle name
+          # below is Tauri's real, verified output (a real local `--target aarch64-apple-darwin`
+          # build, not a guess): the updater artifact is named from productName ALONE — no
+          # version or arch suffix, unlike the dmg/msi/nsis installer bundles below, which do
+          # embed version+arch. Only a darwin-aarch64 manifest entry is emitted (no
+          # darwin-x86_64) — an Intel Mac must not be offered an arm64-only binary it cannot
+          # run. Re-add darwin-x86_64 only once a real universal build is verified (see
+          # scripts/build-fileprovider-extension.sh's arch-detection gap) — and re-check the
+          # bundle filename again then, since `--target universal-apple-darwin` may name it
+          # differently.
           #
           # Keep the Windows updater targets split by installer type. The
           # Tauri updater first searches windows-x86_64-{nsis,msi} based on
@@ -464,7 +490,7 @@ jobs:
           # windows-x86_64. Fresh Windows installs are documented as NSIS
           # setup.exe installs, so the generic fallback intentionally points at
           # NSIS; MSI-installed clients still receive MSI through the typed key.
-          MACOS_BUNDLE="Beebeeb_${VER}_universal.app.tar.gz"
+          MACOS_BUNDLE="Beebeeb.app.tar.gz"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
@@ -530,10 +556,6 @@ jobs:
                   else
                     {
                       "darwin-aarch64": {
-                        url: ($base_url + "/" + $macos_bundle),
-                        signature: $sig_macos
-                      },
-                      "darwin-x86_64": {
                         url: ($base_url + "/" + $macos_bundle),
                         signature: $sig_macos
                       }
