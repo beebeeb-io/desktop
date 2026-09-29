@@ -118,7 +118,11 @@ fn directory_at_file_row_is_not_accepted_as_synced_folder() {
     let f = Fixture::new();
     f.folder("local");
     f.track("local", ItemKind::File, FileStatus::Local);
-    assert!(purge(&f.db, Some(&f.root)).is_err());
+    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    assert!(
+        error.to_string().contains("Item type changed"),
+        "must reject the DB/disk kind mismatch before traversal: {error:?}"
+    );
     assert!(f.root.join("local").is_dir());
     assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
