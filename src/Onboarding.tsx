@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import OnboardingErrorBoundary from './OnboardingErrorBoundary'
 import {
   command,
   commandUnavailableLabel,
@@ -33,6 +34,10 @@ const STEPS: Array<{ id: Step; title: string; detail: string }> = [
 ]
 
 export default function Onboarding() {
+  return <OnboardingErrorBoundary><OnboardingView /></OnboardingErrorBoundary>
+}
+
+function OnboardingView() {
   const [step, setStep] = useState<Step>('signin')
 
   useEffect(() => {
@@ -347,6 +352,8 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   const applyWords = (startIndex: number, rawWords: string[]) => {
     const cleanWords = rawWords.map((word) => word.trim()).filter(Boolean)
     if (cleanWords.length === 0) return
+    // Match the “paste all 12 words into any box” promise.
+    if (cleanWords.length === RECOVERY_WORD_COUNT) startIndex = 0
 
     setResult(null)
     setRecoveryWords((current) => {
