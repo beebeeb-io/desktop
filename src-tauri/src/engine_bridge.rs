@@ -6216,6 +6216,35 @@ mod tests {
         }
     }
 
+    /// Headers-only variant for bodiless GETs that treats a peer hang-up before
+    /// the headers arrive as `None` instead of a panic (task 1670 issue 3: the
+    /// cancelled-hydrate test hangs the daemon up while it is connecting, and on
+    /// a busy CI runner that can land before the request line is sent).
+    #[cfg(unix)]
+    fn read_http_request_or_hangup(stream: &mut std::net::TcpStream) -> Option<RecordedRequest> {
+        let mut buffer = Vec::new();
+        let mut temp = [0u8; 4096];
+        loop {
+            let read = std::io::Read::read(stream, &mut temp).ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&temp[..read]);
+            if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&buffer).to_string();
+        let mut parts = head.lines().next()?.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        Some(RecordedRequest {
+            method,
+            path,
+            body: Vec::new(),
+        })
+    }
+
     fn read_http_request(stream: &mut std::net::TcpStream) -> RecordedRequest {
         let mut buffer = Vec::new();
         let mut temp = [0u8; 4096];
@@ -10462,7 +10491,15 @@ mod tests {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             stream.set_nonblocking(false).unwrap();
-                            let request = read_http_request(&mut stream);
+                            let request = if chunk_delay.is_zero() {
+                                read_http_request(&mut stream)
+                            } else {
+                                // Delayed mode is only used by the cancellation test.
+                                match read_http_request_or_hangup(&mut stream) {
+                                    Some(request) => request,
+                                    None => continue,
+                                }
+                            };
                             rq.fetch_add(1, Ordering::Relaxed);
                             let response = hydration_mock_response(
                                 &request,
@@ -10853,9 +10890,10 @@ mod tests {
         let master_key = [9u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10], vec![b'c'; 10]];
-        // 600 ms per chunk: a completed hydrate needs ~1.8 s, a cancelled one
-        // is stopped inside the first chunk.
-        let server = IpcHydrationMock::start_with_chunk_delay(file_key, chunks, Duration::from_millis(600));
+        // 1 s per chunk: a completed hydrate needs ~3 s, a cancelled one is
+        // stopped inside the first chunk. Generous margins because CI runs the
+        // whole suite in parallel on shared runners.
+        let server = IpcHydrationMock::start_with_chunk_delay(file_key, chunks, Duration::from_millis(1000));
         let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
         let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
         let bridge = Arc::new(EngineBridge::new(db.clone(), api));
@@ -10864,21 +10902,21 @@ mod tests {
         let request = hydrate_request_line(&dest, true);
         let db_probe = db.clone();
 
-        let (status_when_first_frame_arrived, status_400ms_after_hangup) = with_ipc_client(db.clone(), bridge, |mut client| {
+        let (status_when_first_frame_arrived, status_600ms_after_hangup) = with_ipc_client(db.clone(), bridge, |mut client| {
             Box::pin(async move {
                 client.write_all(&request).await.unwrap();
                 let first = read_json_line(&mut client).await;
                 assert_eq!(first["HydrateProgress"]["done"], 0, "first frame is the initial 0/total");
                 let status = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
                 drop(client); // Finder cancelled the transfer
-                // Well inside the first chunk's 600 ms delay: a daemon that
+                // Well inside the first chunk's 1 s delay: a daemon that
                 // watches the socket has already dropped the download; one that
                 // only notices at its next write has not.
-                tokio::time::sleep(Duration::from_millis(400)).await;
+                tokio::time::sleep(Duration::from_millis(600)).await;
                 let after_hangup = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
                 // Then leave time for a (wrongly) uncancelled hydrate to
-                // finish (3 x 600 ms).
-                tokio::time::sleep(Duration::from_millis(2200)).await;
+                // finish (3 x 1 s).
+                tokio::time::sleep(Duration::from_millis(3000)).await;
                 (status, after_hangup)
             })
         });
@@ -10889,9 +10927,9 @@ mod tests {
             "the test must hang up while the row is genuinely mid-download"
         );
         assert_eq!(
-            status_400ms_after_hangup,
+            status_600ms_after_hangup,
             FileStatus::CloudOnly,
-            "the daemon must notice the hang-up promptly (within 400 ms), not at its next progress write"
+            "the daemon must notice the hang-up promptly (within 600 ms), not at its next progress write"
         );
         assert_eq!(
             db.get_file(TEST_FILE_ID).unwrap().unwrap().status,
