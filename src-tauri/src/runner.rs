@@ -136,6 +136,28 @@ const LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR: i128 = 10;
 #[cfg(target_os = "windows")]
 const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 
+/// Task 1670 round 3 (lead review of round 2): cadence for the macOS
+/// hydrate-cache TTL sweep. With `TICK_INTERVAL` at 30s, every 2 ticks is
+/// ~60s — same "every Nth tick of the daemon's one already-running loop"
+/// idiom as `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS` above, reusing the existing
+/// runtime rather than spawning a second timer task.
+///
+/// Why a periodic sweep exists at all: round 3 made `FileProviderExtension
+/// .fetchContents` (Swift) stop deleting its staged file on the success
+/// path and relied on this sweep to bound its lifetime instead — but round 4
+/// (Codex P1 on PR #75) found that was still handing OUR staging URL to the
+/// system and cleaning it up on a timer, which can race a busy/suspended
+/// `fileproviderd`. `fetchContents` now copies into the SYSTEM's own
+/// `NSFileProviderManager.temporaryDirectoryURL()` and deletes OUR copy
+/// immediately after that copy succeeds, so this sweep — applying
+/// `crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL` (see its doc comment for the
+/// current 2-minute value and why) — is a **crash backstop**, not the
+/// primary bound: on the no-crash path, nothing is ever left here long
+/// enough for the sweep to matter. It still runs unconditionally, catching
+/// staging orphaned by a crash between decrypt and that copy.
+#[cfg(target_os = "macos")]
+const MACOS_HYDRATE_SWEEP_EVERY_N_TICKS: u64 = 2;
+
 /// API base URL the engine talks to.
 ///
 /// Returns the value of the `BB_API_BASE` environment variable when it is set
@@ -937,6 +959,18 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
         .as_ref()
         .map(|(_, task, _)| AbortWorkerOnDrop(task.abort_handle()));
 
+    // Task 1670 round 2: purge the macOS hydrate-cache staging dir on every
+    // (re)start of this runner — this IS "daemon startup" in this
+    // single-process architecture (there is no separate boot phase distinct
+    // from the vault-unlock that calls `run`). Bounds any staged plaintext
+    // that survived a crash between a previous session's write and its
+    // per-request cleanup, or a force-quit mid-fetch, to at most one restart.
+    // Runs BEFORE the IPC server below starts accepting HydrateFile requests
+    // so a fresh session never inherits a stale entry. `purge_macos_hydrate_cache`
+    // is a no-op on non-macOS (called unconditionally, like its other two call
+    // sites in `lib.rs`, so this file doesn't need its own cfg gate).
+    crate::purge_macos_hydrate_cache("daemon-startup");
+
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
     // (macOS File Provider, Linux FUSE) can query status and trigger
@@ -1026,11 +1060,52 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     #[cfg(target_os = "windows")]
     let mut tick_count: u64 = 0;
 
+    // Task 1670 round 3: separate counter (not `tick_count` above, which is
+    // Windows-only and used for a different-purpose slow cadence) for the
+    // macOS hydrate-cache TTL sweep — see `MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`
+    // for why this exists.
+    #[cfg(target_os = "macos")]
+    let mut hydrate_sweep_tick_count: u64 = 0;
+
     loop {
         tokio::select! {
             biased;
             _ = &mut cancel => break,
             _ = tick.tick() => {
+                // Task 1670 round 3: run BEFORE the `sync_paused` check below
+                // — bounding staged plaintext lifetime is a security property
+                // independent of whether the user paused file sync, and
+                // Finder can still hydrate files (via the always-running IPC
+                // server) while sync is paused.
+                #[cfg(target_os = "macos")]
+                {
+                    if hydrate_sweep_tick_count.is_multiple_of(MACOS_HYDRATE_SWEEP_EVERY_N_TICKS) {
+                        let dir = crate::ipc_socket::macos_hydrate_cache_dir();
+                        match crate::ipc_socket::macos_sweep_stale_hydrate_cache_entries(
+                            &dir,
+                            crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL,
+                            std::time::SystemTime::now(),
+                        ) {
+                            Ok(removed) if removed > 0 => {
+                                tracing::debug!(
+                                    removed,
+                                    dir = %dir.display(),
+                                    "periodic macOS hydrate-cache TTL sweep"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    dir = %dir.display(),
+                                    "periodic macOS hydrate-cache TTL sweep failed (best-effort)"
+                                );
+                            }
+                        }
+                    }
+                    hydrate_sweep_tick_count = hydrate_sweep_tick_count.wrapping_add(1);
+                }
+
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.

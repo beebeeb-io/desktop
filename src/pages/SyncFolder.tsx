@@ -8,6 +8,7 @@ import {
   type MacosIntegrationResetResult,
   type SyncStatus,
 } from '../desktopApi'
+import { finderLocationButtonPlan } from '../finderInstallCard'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -138,6 +139,11 @@ export default function SyncFolder() {
   const installed = installState?.installed ?? false
   const finderLastError = installState?.last_error?.trim()
   const isMacos = platform === 'macos'
+  // Task 1670: on macOS the pane must be truthful about install state — only
+  // one of "Install in Finder" / "Open in Finder" at a time. Windows/Linux
+  // (Cloud Files shell integration) keep the existing always-both behavior;
+  // that surface is out of scope here (see task 1670's Notes).
+  const buttonPlan = isMacos ? finderLocationButtonPlan(installed) : { showInstall: true, showOpen: true }
 
   return (
     <section className="page">
@@ -177,12 +183,20 @@ export default function SyncFolder() {
                 Choose location
               </button>
             )}
-            <button className="button amber" onClick={() => void installFinder()} disabled={busy}>
-              Install in Finder
-            </button>
-            <button className="button" onClick={() => void openFinder()} disabled={(!isMacos && !syncRoot) || busy}>
-              Open in Finder
-            </button>
+            {buttonPlan.showInstall && (
+              <button className="button amber" onClick={() => void installFinder()} disabled={busy}>
+                Install in Finder
+              </button>
+            )}
+            {buttonPlan.showOpen && (
+              <button
+                className={isMacos ? 'button amber' : 'button'}
+                onClick={() => void openFinder()}
+                disabled={(!isMacos && !syncRoot) || busy}
+              >
+                Open in Finder
+              </button>
+            )}
           </div>
         </div>
 

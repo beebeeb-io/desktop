@@ -53,3 +53,22 @@ export function classifyFinderInstallResult(result: CommandResult<FinderInstallS
 export function shouldRetryAfterUserEnabledPoll(poll: CommandResult<boolean | null>): boolean {
   return poll.ok && poll.value === true
 }
+
+/**
+ * Task 1670 — which of the "Install in Finder" / "Open in Finder" buttons the
+ * Settings > Finder location pane (`src/pages/SyncFolder.tsx`) should show,
+ * given the current `installed` flag from `finder_location_state`. Extracted
+ * so the truthfulness rule is unit-testable without mounting the page.
+ *
+ * Symptom (Guus, 2026-09-30, real Mac): the pane showed the green "Installed"
+ * pill, the amber "Install in Finder" button, AND "Open in Finder" all at the
+ * same time. Root cause was in the VIEW, not the state: `finder_location_state`
+ * (src-tauri/src/lib.rs) already returns the correct `installed` boolean —
+ * `SyncFolder.tsx`'s button row simply rendered both buttons unconditionally,
+ * never consulting it. This function is the single place that decision now
+ * lives: installed -> only "Open in Finder", shown as the primary action;
+ * not installed -> only "Install in Finder".
+ */
+export function finderLocationButtonPlan(installed: boolean): { showInstall: boolean; showOpen: boolean } {
+  return installed ? { showInstall: false, showOpen: true } : { showInstall: true, showOpen: false }
+}

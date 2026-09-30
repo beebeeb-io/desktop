@@ -21,7 +21,7 @@
  * one, including the user_disabled case).
  */
 import { describe, expect, test } from 'bun:test'
-import { classifyFinderInstallResult, shouldRetryAfterUserEnabledPoll } from '../src/finderInstallCard'
+import { classifyFinderInstallResult, finderLocationButtonPlan, shouldRetryAfterUserEnabledPoll } from '../src/finderInstallCard'
 import type { CommandResult, FinderInstallState } from '../src/desktopApi'
 
 function installState(overrides: Partial<FinderInstallState> = {}): FinderInstallState {
@@ -108,5 +108,18 @@ describe('finderInstallCard.shouldRetryAfterUserEnabledPoll', () => {
 
   test('a failed poll must never be read as "the user fixed it"', () => {
     expect(shouldRetryAfterUserEnabledPoll({ ok: false, reason: 'lookup failed', unsupported: false })).toBe(false)
+  })
+})
+
+describe('finderInstallCard.finderLocationButtonPlan (task 1670)', () => {
+  test('installed -> only "Open in Finder", as the primary action; no "Install" button', () => {
+    // The exact bug from Guus's screenshot: the pill said "Installed" but the
+    // pane also showed the amber "Install in Finder" button. This is the one
+    // assertion that guards against it ever coming back.
+    expect(finderLocationButtonPlan(true)).toEqual({ showInstall: false, showOpen: true })
+  })
+
+  test('not installed -> only "Install in Finder"', () => {
+    expect(finderLocationButtonPlan(false)).toEqual({ showInstall: true, showOpen: false })
   })
 })

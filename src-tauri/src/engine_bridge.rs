@@ -2343,9 +2343,18 @@ impl EngineBridge {
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
                 // Make the destination directory if needed.
-                if let Some(parent) = dest_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
+                if let Some(parent) = dest_path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    buf.zeroize();
+                    // Task 1670 round 2: this used to `?` straight out of the
+                    // match arm below, which skipped the `Err(e) =>` arm's
+                    // `FileStatus::Error` flip entirely — a directory-create
+                    // failure left the row stuck on `Downloading` forever.
+                    // Route it through the same status flip as every other
+                    // failure in this function.
+                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()));
                 }
                 // Write via an O_NOFOLLOW handle (task 1247): the containment
                 // guard at the top of this fn is a check-then-use, and there is
@@ -2356,18 +2365,45 @@ impl EngineBridge {
                 // and overwrite the real target with decrypted plaintext.
                 // `write_hydrated_plaintext` fails closed if the final component
                 // is (or race-becomes) a symlink, closing the race atomically at
-                // open() time rather than re-checking-then-hoping.
-                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf)
-                    .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                // open() time rather than re-checking-then-hoping. Since task
+                // 1670 round 2 it also stages the write under a temp name and
+                // publishes with one atomic rename, so a failure anywhere in
+                // that sequence is guaranteed to leave NOTHING new at
+                // `dest_path` — there is no separate "delete the half-written
+                // file" step needed here because the primitive itself never
+                // makes one externally visible.
+                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf);
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
-                write_result?;
+                if let Err(e) = write_result {
+                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                }
 
                 self.db.set_status(file_id, FileStatus::Local)?;
-                let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
-                self.db
-                    .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+
+                // Task 1670 round 4 (Codex P2 on PR #75, review thread on
+                // `runner.rs:1044`): see [`record_hydration_cache_state`]'s
+                // doc comment for the full "why" — in short, a macOS Finder
+                // `fetchContents` hydration writes here as a HANDOFF, not a
+                // durable local cache copy, and registering it via
+                // `mark_cached` anyway left a phantom cache-usage entry in
+                // `desktop_storage_summary` / smart-cache eviction after the
+                // system (not us) took over the materialized content.
+                #[cfg(target_os = "macos")]
+                record_hydration_cache_state(
+                    &self.db,
+                    file_id,
+                    dest_path,
+                    &crate::ipc_socket::macos_hydrate_cache_dir(),
+                )?;
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+                    self.db
+                        .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+                }
                 #[cfg(target_os = "linux")]
                 self.write_linux_freedesktop_thumbnails(file_id, dest_path).await;
                 let _ = self.enforce_configured_cache_limit();
@@ -3789,7 +3825,7 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
 ///
 /// Returns true if ANY root passes; false if none do. An empty `allowed_roots`
 /// slice returns false (fail-closed), never vacuously true.
-fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
+pub(crate) fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
     for &root in allowed_roots {
         let ok = if dest_path.exists() {
             crate::is_contained(root, dest_path)
@@ -3812,6 +3848,77 @@ fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
         }
     }
     false
+}
+
+/// Task 1670 round 4 (Codex P2 on PR #75, review thread on `runner.rs:1044`):
+/// `true` when `dest_path` is a macOS Finder `fetchContents` HANDOFF staging
+/// file — i.e. it lives inside `hydrate_dir`, never a durable local cache
+/// copy. `hydrate_dir` is a parameter (never
+/// `crate::ipc_socket::macos_hydrate_cache_dir()` read inline) so this is
+/// unit-testable with a throwaway directory, never the real, singleton
+/// App-Group container a live Beebeeb.app/Finder extension share on this
+/// same machine (`macos_hydrate_cache_dir`'s own doc comment covers why that
+/// directory must never be written to by a test process here — round 2's
+/// `disposable_cache_roots_includes_the_macos_hydrate_cache_dir` test follows
+/// the identical "real path, read-only, no write into it" precedent).
+///
+/// See [`record_hydration_cache_state`] for the full "why this matters"
+/// writeup: registering this file's path via `mark_cached` would point
+/// `files.cache_path`/`cache_bytes` at a file the SYSTEM (via
+/// `FileProviderExtension.copyToSystemTemporaryDirectory(stagedAt:)`), not
+/// this daemon, now owns and that our own copy stops existing moments after
+/// this check runs — `desktop_storage_summary` and smart-cache eviction both
+/// sum/act on any row with a non-null `cache_path` and no existence check.
+#[cfg(target_os = "macos")]
+fn is_macos_finder_handoff_staging_path(dest_path: &Path, hydrate_dir: &Path) -> bool {
+    crate::is_contained(hydrate_dir, dest_path)
+}
+
+/// Task 1670 round 4 (Codex P2 on PR #75, review thread on `runner.rs:1044`):
+/// register `dest_path` as this file's durable cache entry (`mark_cached`,
+/// same as before this round) — UNLESS it is a macOS Finder `fetchContents`
+/// HANDOFF staging file (i.e. [`is_macos_finder_handoff_staging_path`] against
+/// `macos_hydrate_dir`), in which case this deliberately does nothing.
+///
+/// **Why:** `FileProviderExtension.fetchContents` (round 4,
+/// `BeebeebFileProvider/FileProviderExtension.swift`) copies a staged file
+/// like this one into the SYSTEM's own
+/// `NSFileProviderManager.temporaryDirectoryURL()` and deletes OUR copy at
+/// `dest_path` immediately after — so `dest_path` can already be gone by the
+/// time anything reads `files.cache_path` again. Registering it anyway
+/// pointed `desktop_storage_summary` (`cache_bytes_by_effective_pin`,
+/// `state_db.rs`) and smart-cache eviction
+/// (`evict_unpinned_cache_until_under`, `enforce_configured_cache_limit`) at
+/// a file that stops existing almost immediately — both sum/act on ANY row
+/// with `cache_path IS NOT NULL AND cache_bytes > 0` with no existence
+/// check — so every Finder peek left a phantom cache-usage entry, and a
+/// target for a pointless eviction of a file that was never really
+/// "cached" at all. [`Self::hydrate_file`]'s `set_status(..., Local)` call
+/// (just before this one runs) still flips Finder's own downloaded badge
+/// (`FileProviderItem.isDownloaded` reads `status == "local"`,
+/// `BeebeebFileProvider/FileProviderItem.swift`) — that is the one real UI
+/// signal a momentary Finder peek should produce; it should not also claim
+/// a durable cache footprint the system, not us, now owns.
+///
+/// `macos_hydrate_dir` is a parameter — production passes the REAL
+/// `crate::ipc_socket::macos_hydrate_cache_dir()` (see the call site in
+/// [`Self::hydrate_file`]); tests pass a throwaway tempdir, so this whole
+/// decision is exercised end to end without ever touching the real,
+/// singleton App-Group directory a live Beebeeb.app/Finder extension share
+/// on this same machine.
+#[cfg(target_os = "macos")]
+fn record_hydration_cache_state(
+    db: &StateDb,
+    file_id: &str,
+    dest_path: &Path,
+    macos_hydrate_dir: &Path,
+) -> anyhow::Result<()> {
+    if is_macos_finder_handoff_staging_path(dest_path, macos_hydrate_dir) {
+        return Ok(());
+    }
+    let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+    db.mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+    Ok(())
 }
 
 /// Task 1247: write hydrated plaintext to `dest_path`, enforcing that it lands
@@ -3844,6 +3951,31 @@ fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
 /// Non-unix keeps `std::fs::write` (`openat`/`fchmod`/`O_NOFOLLOW` are Unix-only,
 /// and the Windows Cloud Files path never writes plaintext to disk via this fn —
 /// it uses `hydrate_file_to_memory`).
+///
+/// **Task 1670 round 2 addition:** the plaintext is staged under a per-call,
+/// randomly-suffixed temp name in the SAME directory, then published onto the
+/// real `leaf` name with one atomic `renameat` — anchored to the SAME
+/// already-validated `dir_fd` for the temp create, the write, AND the rename,
+/// never re-resolving by path (this keeps the anchored-descent invariant
+/// `create_leaf_relative_is_anchored_to_original_dir_fd_across_rename_swap`
+/// pins). Two consequences:
+/// - Any reader racing this write (another same-UID process, or the macOS
+///   hydrate-cache TTL sweep running concurrently in a different IPC
+///   connection) can never observe a file at `dest_path` that exists but is
+///   only partially written — it either isn't there yet, or it's complete.
+/// - On ANY failure after the temp file is created, that temp file is removed
+///   before the error is returned, so nothing new is ever left behind at
+///   `dest_path` — there is no separate "clean up the half-written file" step
+///   for a caller to remember.
+///
+/// The leaf-is-currently-a-symlink refusal is preserved with the EXACT same
+/// observable behavior as before (a probe `open(O_NOFOLLOW)`, not
+/// `fstat`/`lstat`, so a symlink leaf still fails closed with `ELOOP`) even
+/// though the final publish step is now a `renameat`, which — unlike
+/// `open`+`O_TRUNC` — does not dereference a symlink destination at all and so
+/// could never be tricked into writing THROUGH one to an outside target on its
+/// own. Keeping the probe is about not silently replacing a foreign symlink
+/// with a real file, not about a plaintext-leak risk `renameat` doesn't have.
 ///
 /// Known residual (documented follow-up, not closed here): a same-filesystem
 /// HARD link to a file outside all allowed roots bypasses containment (the walk
@@ -3892,16 +4024,70 @@ fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8
         dir_fd = open_dir_relative_no_follow(dir_fd.as_raw_fd(), comp)?;
     }
 
-    // Create/open the leaf relative to the anchored parent fd, refusing a symlink
-    // at the leaf itself, then force owner-only perms on the fd unconditionally
-    // (before any plaintext is written).
-    let file_fd = create_leaf_relative(dir_fd.as_raw_fd(), leaf)?;
-    if unsafe { libc::fchmod(file_fd.as_raw_fd(), 0o600 as libc::mode_t) } != 0 {
-        return Err(std::io::Error::last_os_error());
+    // Refuse (without creating or writing anything) if the leaf currently
+    // exists as a symlink — same ELOOP-producing O_NOFOLLOW semantics the
+    // previous direct-open implementation used, reproduced here via a
+    // read-only probe open so the observable failure mode for
+    // `write_hydrated_plaintext_refuses_symlink_and_sets_0600` is unchanged.
+    // ENOENT (no existing leaf — the common, fresh-hydrate case) is fine; the
+    // rename below creates it. Any other pre-existing entry (a regular file)
+    // is also fine — it gets atomically replaced below, same as before.
+    let leaf_c = path_to_cstring(leaf)?;
+    // SAFETY: `dir_fd` is a live, already-validated directory fd; `leaf_c` is
+    // NUL-terminated. We only inspect the syscall's return value / errno.
+    let probe = unsafe { libc::openat(dir_fd.as_raw_fd(), leaf_c.as_ptr(), libc::O_NOFOLLOW | libc::O_RDONLY | libc::O_CLOEXEC) };
+    if probe < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOENT) {
+            return Err(err);
+        }
+    } else {
+        // SAFETY: `probe` is a valid fd just returned by the openat above.
+        unsafe { libc::close(probe) };
     }
 
-    let mut file = std::fs::File::from(file_fd);
-    file.write_all(buf)
+    // Stage under a per-call, randomly-suffixed temp name in the same
+    // directory (task 1670 round 2 — see the fn doc comment).
+    let temp_leaf_name = format!(".{}.{}.part", leaf.to_string_lossy(), uuid::Uuid::new_v4());
+    let temp_leaf = std::ffi::OsStr::new(&temp_leaf_name);
+    let temp_leaf_c = path_to_cstring(temp_leaf)?;
+    let remove_temp = || {
+        // SAFETY: `dir_fd` is still live (we only ever drop it by falling out
+        // of this function); `temp_leaf_c` is NUL-terminated and owned for the
+        // duration of this closure's use. Best-effort — errors are ignored,
+        // matching every other cleanup-on-failure path in this module.
+        let _ = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), temp_leaf_c.as_ptr(), 0) };
+    };
+
+    // Create/open the temp leaf relative to the anchored parent fd, refusing a
+    // symlink at the leaf itself (it never pre-exists — the name is fresh —
+    // but O_NOFOLLOW costs nothing and matches the invariant every other leaf
+    // open in this function keeps), then force owner-only perms on the fd
+    // unconditionally (before any plaintext is written).
+    let file_fd = create_leaf_relative(dir_fd.as_raw_fd(), temp_leaf)?;
+    if unsafe { libc::fchmod(file_fd.as_raw_fd(), 0o600 as libc::mode_t) } != 0 {
+        let err = std::io::Error::last_os_error();
+        remove_temp();
+        return Err(err);
+    }
+
+    if let Err(e) = std::fs::File::from(file_fd).write_all(buf) {
+        remove_temp();
+        return Err(e);
+    }
+
+    // Atomically publish: same `dir_fd` for both sides, so this is anchored to
+    // the already-validated directory inode, not a fresh path resolution.
+    // SAFETY: both name arguments are NUL-terminated `CString`s alive for this
+    // call; `dir_fd` is a live, already-validated directory fd.
+    let rc = unsafe { libc::renameat(dir_fd.as_raw_fd(), temp_leaf_c.as_ptr(), dir_fd.as_raw_fd(), leaf_c.as_ptr()) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        remove_temp();
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -10031,6 +10217,113 @@ mod tests {
         );
     }
 
+    /// Task 1670 round 4 (Codex P2 on PR #75): the pure predicate
+    /// `hydrate_file` uses to decide whether a just-written destination is a
+    /// macOS Finder handoff staging file (never registered as durable cache)
+    /// versus a real cache copy (registered, as always). Uses a throwaway
+    /// tempdir as the "hydrate dir" — never the real, singleton App-Group
+    /// container a live Beebeeb.app/Finder extension share on this same
+    /// machine.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn is_macos_finder_handoff_staging_path_detects_dest_under_hydrate_dir() {
+        let hydrate_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let staged = hydrate_dir.path().join("file-id.abcd1234");
+        std::fs::write(&staged, b"decrypted plaintext").unwrap();
+        assert!(
+            is_macos_finder_handoff_staging_path(&staged, hydrate_dir.path()),
+            "a destination inside the hydrate dir must be recognized as Finder handoff staging"
+        );
+
+        let cached = elsewhere.path().join("file-id");
+        std::fs::write(&cached, b"a real cached copy").unwrap();
+        assert!(
+            !is_macos_finder_handoff_staging_path(&cached, hydrate_dir.path()),
+            "a destination outside the hydrate dir must NOT be treated as Finder handoff staging"
+        );
+    }
+
+    /// Task 1670 round 4: exercises the REAL [`record_hydration_cache_state`]
+    /// — the exact function [`EngineBridge::hydrate_file`] calls — end to
+    /// end against a real `StateDb`: a macOS-hydrate-dir-shaped destination
+    /// gets NO `cache_path`/`cache_bytes` after "hydration" (a plain on-disk
+    /// write here, no network involved — the decrypt/download path is
+    /// already covered by the pre-existing hydration tests, this one is
+    /// purely about the cache-registration DECISION), so the storage summary
+    /// (`cache_bytes_by_effective_pin`, `state_db.rs`) does not count it.
+    /// `macos_hydrate_dir` is a throwaway tempdir passed in directly (the
+    /// same injection seam production uses to pass the REAL
+    /// `macos_hydrate_cache_dir()` — see that function's call site in
+    /// `hydrate_file`) — this test never touches the real, singleton
+    /// App-Group container.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn record_hydration_cache_state_skips_mark_cached_under_the_hydrate_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/finder-peek.bin", None, FileStatus::CloudOnly, 0);
+
+        let hydrate_dir = tempfile::tempdir().unwrap();
+        let finder_dest = hydrate_dir.path().join("finder-peek.abcd1234");
+        std::fs::write(&finder_dest, b"decrypted plaintext for a Finder peek").unwrap();
+
+        record_hydration_cache_state(&bridge.db, TEST_FILE_ID, &finder_dest, hydrate_dir.path()).unwrap();
+
+        let row = bridge
+            .db
+            .get_file_contract_state(TEST_FILE_ID)
+            .unwrap()
+            .expect("row must still exist");
+        assert_eq!(
+            row.cache_path, None,
+            "a macOS Finder handoff staging destination must NOT be registered as cache_path"
+        );
+        assert_eq!(
+            bridge.db.cache_bytes_by_effective_pin(false).unwrap(),
+            0,
+            "the storage summary must not count a Finder handoff staging file as cache usage"
+        );
+    }
+
+    /// Task 1670 round 4: the same function, but `dest_path` is OUTSIDE the
+    /// hydrate dir — `mark_cached` must still run exactly as before this
+    /// round, and the file must still be counted in the storage summary.
+    /// Regression guard for the ordinary (non-macOS-Finder) hydration path,
+    /// which this round must not have touched.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn record_hydration_cache_state_marks_cached_outside_the_hydrate_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/ordinary.bin", None, FileStatus::CloudOnly, 0);
+
+        let hydrate_dir = tempfile::tempdir().unwrap();
+        let ordinary_root = tempfile::tempdir().unwrap();
+        let ordinary_dest = ordinary_root.path().join("ordinary.bin");
+        let plaintext = b"an ordinary cached copy, not a Finder handoff";
+        std::fs::write(&ordinary_dest, plaintext).unwrap();
+
+        record_hydration_cache_state(&bridge.db, TEST_FILE_ID, &ordinary_dest, hydrate_dir.path()).unwrap();
+
+        let row = bridge
+            .db
+            .get_file_contract_state(TEST_FILE_ID)
+            .unwrap()
+            .expect("row must still exist");
+        assert_eq!(
+            row.cache_path.as_deref(),
+            Some(ordinary_dest.to_string_lossy().as_ref()),
+            "an ordinary (non-hydrate-dir) destination must still be registered as cache_path"
+        );
+        assert_eq!(
+            bridge.db.cache_bytes_by_effective_pin(false).unwrap(),
+            plaintext.len() as i64,
+            "an ordinary cached file must still be counted in the storage summary"
+        );
+    }
+
     /// Self-terminating HTTP mock for the IPC end-to-end hydration tests. Unlike
     /// `HydrationMockServer` (blocking accept, fixed request count), this one is
     /// non-blocking with a stop flag + deadline, so the malicious test — where
@@ -10441,6 +10734,37 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "fchmod must force owner-only perms even on a pre-existing file, got {mode:o}"
+        );
+    }
+
+    /// Task 1670 round 2: the temp-then-rename publish step must clean up its
+    /// own temp file when the final `renameat` fails, so a failed hydration
+    /// never leaves a stray `.part` file behind in the hydrate-cache (or any
+    /// other) directory. Forced deterministically (no quota tricks, no
+    /// threads): pre-create the destination as a DIRECTORY, so the write to
+    /// the temp file succeeds but `renameat(file -> existing dir)` always
+    /// fails (EISDIR/ENOTDIR) — exactly the failure shape this cleanup exists
+    /// for.
+    #[cfg(unix)]
+    #[test]
+    fn write_hydrated_plaintext_removes_temp_file_when_final_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = write_hydrated_plaintext(&dest, &[dir.path()], b"plaintext-payload");
+        assert!(result.is_err(), "a rename onto an existing directory must fail");
+
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            leftover,
+            vec![std::ffi::OsString::from("out.bin")],
+            "the temp file must be removed after a failed rename, leaving only the \
+             pre-existing dest untouched, got {leftover:?}"
         );
     }
 

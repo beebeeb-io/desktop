@@ -177,6 +177,330 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
     macos_ipc_socket_path_in(&macos_real_home_dir())
 }
 
+/// Task 1670: subdirectory (of the same shared App Group container as
+/// `ipc.sock` above) that stages a freshly-hydrated file's decrypted plaintext
+/// before the File Provider extension hands its URL to Finder.
+///
+/// Deliberately a DIFFERENT name than the socket file, in the SAME directory —
+/// nothing about that collides with `MACOS_IPC_SOCKET_FILENAME`.
+#[cfg(target_os = "macos")]
+const MACOS_HYDRATE_CACHE_DIRNAME: &str = "hydrate-cache";
+
+/// Root cause of task 1670 issue 2 ("Couldn't communicate with a helper
+/// application" opening any file from Finder): BOTH the daemon
+/// (`io.beebeeb.app`) and the File Provider extension
+/// (`io.beebeeb.app.FileProvider`) are sandboxed (`com.apple.security.app-
+/// sandbox`, both entitlements files), and macOS gives every sandboxed
+/// process its OWN per-bundle-ID temp directory — `std::env::temp_dir()` here
+/// and `FileManager.default.temporaryDirectory` in `XPCBridge.swift` resolve
+/// to two DIFFERENT real directories on disk, one per container. The
+/// extension built its `fetchContents` destination from ITS OWN temp dir, so
+/// it could never be `is_contained` in this process's `temp_root` — every real
+/// hydration was rejected with "hydrate destination is not within an allowed
+/// root" (confirmed via the unified log, task 1670's evidence capture: 5
+/// occurrences in a 2h window, each immediately followed by the File Provider
+/// host logging `[CRIT] Provider returned error 0 from domain
+/// BeebeebFileProvider.BeebeebIPCError which is unsupported` — which is what
+/// Finder surfaces as the generic "Couldn't communicate with a helper
+/// application", masking this real cause).
+///
+/// The shared App Group container is the one directory both sandboxes are
+/// ACTUALLY entitled to and already use for the IPC socket itself
+/// (`ipc_socket_path`, proven working since task 1524) — this mirrors that
+/// exact pattern for hydration staging instead of inventing a new mechanism.
+/// `XPCBridge.hydrateDestinationURL(for:)` is the Swift-side mirror; keep the
+/// directory name in sync with `MACOS_HYDRATE_CACHE_DIRNAME` there.
+#[cfg(target_os = "macos")]
+fn macos_hydrate_cache_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir
+        .join("Library")
+        .join("Group Containers")
+        .join(MACOS_APP_GROUP_ID)
+        .join(MACOS_HYDRATE_CACHE_DIRNAME)
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
+    macos_hydrate_cache_dir_in(&macos_real_home_dir())
+}
+
+/// Task 1670 round 3 (lead review of round 2): Apple's own `fetchContents`
+/// docs say only "After you call the completion handler, the system takes
+/// complete control over the local copy" and that the system "can clone it"
+/// — never that the clone happens SYNCHRONOUSLY, inside the
+/// `completionHandler` call itself. Round 2 deleted the staged file
+/// unconditionally right after a successful `completionHandler`, which is
+/// only safe if that clone is synchronous; since the docs don't say either
+/// way, round 3 made `FileProviderExtension.fetchContents` (Swift) stop
+/// deleting on the success path, and made THIS TTL/sweep the primary bound
+/// on plaintext lifetime instead of a crash-only backstop.
+///
+/// **Round 4 (Codex P1 on PR #75, review thread PRRT_kwDOSLX6Xs6ncqQ7): round
+/// 3's fix was still not enough** — it handed OUR staging URL straight to
+/// `completionHandler` and relied on THIS TTL to eventually delete it, and
+/// Codex's review made the sharper point: once `completionHandler` is
+/// called, "the File Provider contract transfers control of that local copy
+/// to the system; there is no documented maximum delay before the system
+/// finishes consuming it" — deleting that SAME handed-off URL later, on ANY
+/// timer, can still race a busy or suspended `fileproviderd`. So
+/// `fetchContents` no longer hands this staging URL to the system AT ALL: it
+/// copies the file into `NSFileProviderManager(for:).temporaryDirectoryURL()`
+/// (a directory this daemon never touches) and deletes OUR copy immediately
+/// after that copy succeeds — see `FileProviderExtension
+/// .copyToSystemTemporaryDirectory(stagedAt:)`'s doc comment for the full
+/// mechanism.
+///
+/// That makes this TTL/sweep a **crash backstop, not the primary
+/// mechanism**: with round 4's fix, the ONLY thing that can be left behind
+/// in this directory past the per-request delete is staging orphaned by a
+/// crash between the decrypt and the copy-then-delete (a force-quit
+/// mid-fetch, the extension being killed) — never a file the system is
+/// still relying on, because we now never hand a file in THIS directory to
+/// the system in the first place.
+///
+/// **Round 5 (Codex P1 on PR #75, review thread PRRT_kwDOSLX6Xs6ndhN1):
+/// round 4's "never a file the system is still relying on" claim had a real
+/// gap.** This TTL/sweep is purely mtime-based and has no cross-process
+/// signal for "the extension is still mid-copy" — Codex's finding: if the
+/// extension is suspended by the system between `ipc.hydrateFile` finishing
+/// and `copyToSystemTemporaryDirectory` actually running `copyItem`, or if
+/// `copyItem` itself takes longer than this TTL for a very large file, the
+/// sweep can delete a file the extension is STILL actively copying,
+/// reopening this task's original bug. Fixed on the Swift side —
+/// `copyToSystemTemporaryDirectory` (`FileProviderExtension.swift`) now
+/// touches the source file's mtime immediately before starting the copy, so
+/// a slow `copyItem` (Codex's second trigger, now fully covered regardless
+/// of file size) always gets the FULL TTL below as headroom. That does NOT
+/// theoretically close the first trigger (suspension landing in the much
+/// narrower window before that touch runs) — see that function's doc
+/// comment for the honest accounting of what remains open and why closing
+/// it fully would need a lease/heartbeat protocol, out of scope here.
+///
+/// Raised from 2 to **10 minutes** this round as a second, independent
+/// mitigation for that residual window: still a crash-only backstop
+/// (sign-out/lock/daemon-startup purge is the real bound on ordinary
+/// plaintext exposure, unchanged since round 2), but with an order of
+/// magnitude more headroom against any realistic suspension duration this
+/// Mac might impose on a File Provider extension process, at negligible
+/// security cost — this directory is owner-only (`0700`) and backup-excluded
+/// regardless of TTL.
+///
+/// Swept periodically (`MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`, `runner.rs`,
+/// every 60s on the daemon's existing tick loop — not a new timer/thread)
+/// AND opportunistically on every real hydration (the `HydrateFile` handler
+/// below, catches anything the next periodic tick hasn't reached yet in a
+/// hydration-heavy session).
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_HYDRATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Task 1670 round 2: reject a raw File Provider item identifier BEFORE it is
+/// used as a path component — either here or in its Swift mirror,
+/// `XPCBridge.sanitizedHydrateFilename(for:)`
+/// (`BeebeebFileProvider/XPCBridge.swift`, doc comment there cross-references
+/// this function; this repo's File Provider extension target has no XCTest
+/// target, so THIS copy — not the Swift one — carries the tested contract:
+/// keep both in sync).
+///
+/// In normal operation `identifier` is always one of OUR OWN generated file
+/// ids (a UUID) — never attacker input in the traditional sense — but
+/// `fetchContents` receives it from the File Provider framework as an opaque
+/// string and both `XPCBridge.hydrateDestinationURL(for:)` (Swift) and the
+/// `HydrateFile` IPC handler below (Rust) treat it as (part of) a path
+/// component. Defense in depth: refuse anything that could turn a hydrate
+/// destination into a path outside the hydrate-cache directory — a literal
+/// `/` or `\` (also covers a leading-`/` absolute path, called out separately
+/// in the task brief), an embedded `..` traversal segment, an empty string,
+/// or an embedded NUL.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_validate_hydrate_item_identifier(identifier: &str) -> Result<(), &'static str> {
+    if identifier.is_empty() {
+        return Err("hydrate item identifier must not be empty");
+    }
+    if identifier.contains('/') || identifier.contains('\\') {
+        return Err("hydrate item identifier must not contain a path separator");
+    }
+    if identifier.contains("..") {
+        return Err("hydrate item identifier must not contain '..'");
+    }
+    if identifier.contains('\0') {
+        return Err("hydrate item identifier must not contain a NUL byte");
+    }
+    Ok(())
+}
+
+/// Create (if needed) and harden the macOS hydrate-cache directory: owner-only
+/// `0o700` (task 1670 round 2 — it only ever holds decrypted plaintext) and
+/// excluded from Time Machine / iCloud backups (see
+/// [`macos_exclude_from_backups`]). Idempotent: safe to call on every
+/// hydration, not just the first.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    // Belt-and-braces: `DirBuilder::mode` is subject to `mkdir`'s normal
+    // umask handling like any other creation call, and a directory left over
+    // from an older build (before this fix) may already exist with looser
+    // permissions. Force it down explicitly rather than trusting creation
+    // alone.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    if let Err(e) = macos_exclude_from_backups(dir) {
+        tracing::warn!(error = %e, dir = %dir.display(), "could not exclude macOS hydrate-cache dir from backups");
+    }
+    Ok(())
+}
+
+/// Exclude the macOS hydrate-cache directory from Time Machine / iCloud
+/// backups. It only ever holds short-lived DECRYPTED plaintext staged for a
+/// live Finder open, and a stale local backup silently retaining a copy would
+/// defeat the whole point of purging it on sign-out/lock/TTL (task 1670 round
+/// 2).
+///
+/// Sets the extended attribute `com.apple.metadata:com_apple_backup_excludeItem`
+/// = `com.apple.backupd` directly — the same xattr Foundation's
+/// `URLResourceKey.isExcludedFromBackupKey` (formerly
+/// `NSURLIsExcludedFromBackupKey`) sets under the hood — rather than going
+/// through an ObjC/Foundation call, so this is callable, and testable via
+/// `cargo test`, from the plain Rust daemon with no FFI round-trip.
+/// `XPCBridge`'s directory-creation call (`hydrateDestinationURL(for:)`) sets
+/// the SAME exclusion via the Foundation resource-key API as a second,
+/// redundant guarantee for whichever process creates the directory first.
+/// Recursive by macOS's own backup semantics — an excluded directory's entire
+/// contents are skipped — so this only needs to run once, on the directory
+/// itself, not per hydrated file.
+#[cfg(target_os = "macos")]
+fn macos_exclude_from_backups(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_c = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem")
+        .expect("static attribute name has no interior NUL");
+    let value = b"com.apple.backupd";
+    // SAFETY: `path_c`/`attr_name` are NUL-terminated and live for the call;
+    // `value` is a plain byte slice we own and pass with its exact length.
+    let rc = unsafe {
+        libc::setxattr(
+            path_c.as_ptr(),
+            attr_name.as_ptr(),
+            value.as_ptr() as *const libc::c_void,
+            value.len(),
+            0,
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Delete every entry directly inside `dir` (files and any stray
+/// subdirectories), leaving `dir` itself in place. Used for the sign-out /
+/// lock / daemon-startup hydrate-cache purge (task 1670 round 2): this
+/// directory only ever holds short-lived staged plaintext, so wiping it on
+/// every account-security-boundary event bounds how long a decrypted copy
+/// can survive on disk even across a crash that skipped normal per-request
+/// cleanup.
+///
+/// Best-effort per entry: one un-removable entry (a permissions race, or held
+/// open by another process) is logged by the caller and does not stop the
+/// rest from being purged. A missing `dir` (nothing hydrated yet this run) is
+/// not an error — returns `Ok(0)`.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_purge_hydrate_cache_dir(dir: &std::path::Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "hydrate-cache purge: could not remove entry"),
+        }
+    }
+    Ok(removed)
+}
+
+/// Task 1670 round 3: `true` for a hydrate-cache entry that
+/// `write_hydrated_plaintext` (`engine_bridge.rs`) is still (or was, if it
+/// crashed) mid-writing — its per-call temp name, `.{leaf}.{uuid}.part`
+/// (dot-prefixed, `.part`-suffixed), created BEFORE any bytes are written and
+/// published to the real, final leaf name only by one atomic `renameat` at
+/// the very end. Used by [`macos_sweep_stale_hydrate_cache_entries`] to skip
+/// these outright rather than age-checking them: this function's caller only
+/// ever needs to look at the mtime of a FINAL (already-renamed) name.
+#[cfg(target_os = "macos")]
+fn macos_is_hydrate_cache_temp_name(name: &std::ffi::OsStr) -> bool {
+    match name.to_str() {
+        Some(s) => s.starts_with('.') && s.ends_with(".part"),
+        None => false,
+    }
+}
+
+/// Remove hydrate-cache entries whose mtime is at least `ttl` old, relative
+/// to `now`. `now`/`ttl` are parameters (never `SystemTime::now()` read
+/// inline) so this is deterministic and testable without a real clock or
+/// real sleeps.
+///
+/// Task 1670 round 3: never touches an entry that is still being written.
+/// Skips anything matching [`macos_is_hydrate_cache_temp_name`] before even
+/// reading its mtime — not "old temp files are probably safe to age-check
+/// too", an outright skip, so a sweep landing between a temp file's creation
+/// and its publishing `renameat` (`write_hydrated_plaintext`,
+/// `engine_bridge.rs`) can never remove or race a partially-written file.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
+    dir: &std::path::Path,
+    ttl: std::time::Duration,
+    now: std::time::SystemTime,
+) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .map(macos_is_hydrate_cache_temp_name)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok());
+        let Some(age) = age else { continue };
+        if age < ttl {
+            continue;
+        }
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "hydrate-cache TTL sweep: could not remove stale entry")
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// Task 1524 follow-up: resolve the real user home directory from the OS
 /// password database (`getpwuid_r(getuid())` → `pw_dir`), never from `$HOME`.
 ///
@@ -479,6 +803,18 @@ async fn handle_connection(
                 items: list_file_provider_items(&db, &container_id),
             },
             IpcRequest::HydrateFile { file_id, dest_path } => {
+                // Task 1670 round 2: `file_id` here is the raw File Provider
+                // item identifier straight off the wire — reject it before it
+                // is trusted for anything else in this arm. See
+                // `macos_validate_hydrate_item_identifier`'s doc comment.
+                #[cfg(target_os = "macos")]
+                let identifier_check = macos_validate_hydrate_item_identifier(&file_id);
+                #[cfg(not(target_os = "macos"))]
+                let identifier_check: Result<(), &'static str> = Ok(());
+
+                if let Err(msg) = identifier_check {
+                    IpcResponse::Error { message: msg.to_string() }
+                } else {
                 // `dest_path` arrives straight off the wire (untrusted). Bound
                 // it to the caller's legitimate destinations before handing it
                 // to `hydrate_file`, which decrypts vault plaintext to disk
@@ -488,16 +824,50 @@ async fn handle_connection(
                 // no sync root is configured yet, only the temp dir is.
                 // Resolve sync_root the same way the SetRecursivePin handler
                 // below already does.
+                //
+                // Task 1670: on macOS, `temp_root` above is THIS (sandboxed)
+                // process's own private container temp dir — the File Provider
+                // extension is a DIFFERENT sandboxed process with its own
+                // separate container temp dir, so a real destination it builds
+                // can never be inside `temp_root` (see `macos_hydrate_cache_dir`'s
+                // doc comment for the full root-cause). Add the shared App
+                // Group hydrate-cache directory as a third allowed root, and
+                // make sure it exists (owner-only, backup-excluded — round 2)
+                // before the containment check runs. Round 4: the Swift side
+                // copies its staging file into the SYSTEM's own temp
+                // directory and deletes THIS copy immediately after (see
+                // `MACOS_HYDRATE_CACHE_TTL`'s doc comment), so this and the
+                // periodic sweep in `runner.rs` are now a crash backstop —
+                // they only ever find staging orphaned by a crash between
+                // decrypt and that copy, not a file the system still holds.
                 let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
                 let temp_root = std::env::temp_dir();
                 let dest = std::path::Path::new(&dest_path);
-                let result = match &sync_root {
-                    Some(root) => bridge.hydrate_file(&file_id, dest, &[root.as_path(), temp_root.as_path()]).await,
-                    None => bridge.hydrate_file(&file_id, dest, &[temp_root.as_path()]).await,
+                #[cfg(target_os = "macos")]
+                let macos_hydrate_dir = {
+                    let dir = macos_hydrate_cache_dir();
+                    if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
+                        tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
+                    }
+                    if let Err(e) =
+                        macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now())
+                    {
+                        tracing::warn!(error = %e, dir = %dir.display(), "hydrate-cache TTL sweep failed (best-effort)");
+                    }
+                    dir
                 };
+                let mut allowed_roots: Vec<&std::path::Path> = Vec::new();
+                if let Some(root) = &sync_root {
+                    allowed_roots.push(root.as_path());
+                }
+                allowed_roots.push(temp_root.as_path());
+                #[cfg(target_os = "macos")]
+                allowed_roots.push(macos_hydrate_dir.as_path());
+                let result = bridge.hydrate_file(&file_id, dest, &allowed_roots).await;
                 match result {
                     Ok(_) => IpcResponse::Ok,
                     Err(e) => IpcResponse::Error { message: e.to_string() },
+                }
                 }
             }
             IpcRequest::QueueFinderCreate {
@@ -1006,6 +1376,254 @@ mod tests {
             "path must fit sockaddr_un.sun_path (104 bytes incl. NUL); \
              got a {byte_len}-byte path for a 20-char username: {path:?}"
         );
+    }
+
+    // ── Task 1670: macOS hydrate-cache dir (fetchContents helper error) ────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_hydrate_cache_dir_is_inside_group_container_not_tmp() {
+        // Regression pin for the actual bug: a hydration destination built
+        // from THIS process's own `std::env::temp_dir()` can never match one
+        // the File Provider extension builds from ITS OWN (different)
+        // sandboxed temp dir — see `macos_hydrate_cache_dir`'s doc comment.
+        // The shared App Group container is the one directory both sides can
+        // actually agree on.
+        let home = std::path::Path::new("/Users/guuslangelaar");
+        let path = macos_hydrate_cache_dir_in(home);
+
+        assert!(
+            path.starts_with(home.join("Library").join("Group Containers")),
+            "must live inside the shared App Group container, got {path:?}"
+        );
+        assert!(
+            path.to_str().unwrap().contains(MACOS_APP_GROUP_ID),
+            "must be namespaced under the app's own App Group id, got {path:?}"
+        );
+        assert!(
+            !path.starts_with(std::env::temp_dir()),
+            "must not be this process's own private sandboxed temp dir \
+             (that is exactly the bug), got {path:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_hydrate_cache_dir_does_not_collide_with_ipc_socket_path() {
+        // Both live under the same App Group container by design (task
+        // 1670's doc comment); they must still be distinct paths, or a
+        // hydrated file could shadow (or be shadowed by) the IPC socket.
+        let home = std::path::Path::new("/Users/guuslangelaar");
+        let socket = macos_ipc_socket_path_in(home);
+        let hydrate_dir = macos_hydrate_cache_dir_in(home);
+
+        assert_ne!(socket, hydrate_dir, "must not reuse the socket's own path");
+        assert!(
+            !hydrate_dir.starts_with(&socket) && !socket.starts_with(&hydrate_dir),
+            "must not nest one inside the other: socket={socket:?} hydrate_dir={hydrate_dir:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_hydrate_cache_dir_is_a_real_allowed_root_for_hydration() {
+        // End-to-end proof (within what a sandbox-free `cargo test` process
+        // can exercise) that a destination built the way
+        // `XPCBridge.hydrateDestinationURL(for:)` builds it — a file directly
+        // inside the hydrate-cache dir — passes the SAME containment check
+        // `hydrate_dest_is_allowed` (engine_bridge.rs) runs against the
+        // `allowed_roots` this handler now includes it in.
+        let dir = std::env::temp_dir().join(format!("bb-hydrate-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("some-file-id");
+
+        assert!(
+            crate::engine_bridge::hydrate_dest_is_allowed(&dest, &[dir.as_path()]),
+            "a destination directly inside the hydrate-cache dir must be an allowed hydration target"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Task 1670 round 2: identifier validation, dir hardening, purge/TTL ──
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_validate_hydrate_item_identifier_accepts_a_real_uuid() {
+        assert!(macos_validate_hydrate_item_identifier("3f9a2b7e-1234-4c1a-8f9a-abcdef012345").is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_validate_hydrate_item_identifier_rejects_hostile_identifiers() {
+        for hostile in [
+            "",
+            "..",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "a/b",
+            "a\\b",
+            "foo..bar",
+            "trailing/",
+        ] {
+            assert!(
+                macos_validate_hydrate_item_identifier(hostile).is_err(),
+                "must reject hostile identifier {hostile:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_ensure_hydrate_cache_dir_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempdir().unwrap();
+        let dir = parent.path().join("hydrate-cache");
+        // Precondition: the dir does not exist yet, AND (defense-in-depth
+        // case) an existing dir with looser perms must still be forced down.
+        macos_ensure_hydrate_cache_dir(&dir).expect("must create the dir");
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "hydrate-cache dir must be owner-only, got {mode:o}");
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        macos_ensure_hydrate_cache_dir(&dir).expect("must be idempotent on an existing dir");
+        let mode_after = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode_after, 0o700,
+            "a pre-existing dir with looser perms must be forced back to 0o700, got {mode_after:o}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_exclude_from_backups_sets_the_time_machine_xattr() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        macos_exclude_from_backups(dir.path()).expect("setxattr must succeed on a writable dir");
+
+        let attr_name =
+            std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
+        let path_c = std::ffi::CString::new(dir.path().as_os_str().as_bytes()).unwrap();
+        let mut buf = vec![0u8; 64];
+        let n = unsafe {
+            libc::getxattr(
+                path_c.as_ptr(),
+                attr_name.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                0,
+            )
+        };
+        assert!(n > 0, "the backup-exclude xattr must be readable back after setting it, got {n}");
+        assert_eq!(&buf[..n as usize], b"com.apple.backupd");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_purge_hydrate_cache_dir_removes_all_entries_but_keeps_the_dir() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("staged-a.bin"), b"plaintext-a").unwrap();
+        std::fs::write(dir.path().join("staged-b.bin"), b"plaintext-b").unwrap();
+        std::fs::create_dir(dir.path().join("stray-subdir")).unwrap();
+        std::fs::write(dir.path().join("stray-subdir").join("c.bin"), b"c").unwrap();
+
+        let removed = macos_purge_hydrate_cache_dir(dir.path()).expect("purge must succeed");
+
+        assert_eq!(removed, 3, "must report one removal per top-level entry (2 files + 1 dir)");
+        assert!(dir.path().exists(), "the hydrate-cache dir itself must remain");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "every entry inside the dir must be gone"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_purge_hydrate_cache_dir_missing_dir_is_not_an_error() {
+        let parent = tempdir().unwrap();
+        let missing = parent.path().join("never-created");
+        assert_eq!(macos_purge_hydrate_cache_dir(&missing).unwrap(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_sweep_stale_hydrate_cache_entries_removes_old_keeps_fresh() {
+        let dir = tempdir().unwrap();
+        let stale = dir.path().join("stale.bin");
+        let fresh = dir.path().join("fresh.bin");
+        std::fs::write(&stale, b"old-plaintext").unwrap();
+        std::fs::write(&fresh, b"new-plaintext").unwrap();
+
+        let now = std::time::SystemTime::now();
+        let ttl = std::time::Duration::from_secs(600);
+        // Backdate only `stale`'s mtime past the TTL; `fresh` keeps its
+        // just-written (now-ish) mtime.
+        let old_mtime = now - std::time::Duration::from_secs(700);
+        std::fs::File::open(&stale).unwrap().set_modified(old_mtime).unwrap();
+
+        let removed = macos_sweep_stale_hydrate_cache_entries(dir.path(), ttl, now).expect("sweep must succeed");
+
+        assert_eq!(removed, 1, "exactly the stale entry must be swept");
+        assert!(!stale.exists(), "the stale entry must be removed");
+        assert!(fresh.exists(), "the fresh entry must survive the sweep");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_sweep_stale_hydrate_cache_entries_skips_in_progress_temp_files() {
+        // Task 1670 round 3: `write_hydrated_plaintext` (`engine_bridge.rs`)
+        // stages a hydration under a temp name shaped exactly like this
+        // (`.{leaf}.{uuid}.part`) BEFORE it writes a single byte, then
+        // publishes it with one atomic `renameat`. Give the temp-shaped entry
+        // an mtime far past the TTL — if the sweep age-checked it like any
+        // other file, this would (wrongly) remove it out from under a write
+        // that could still be in flight. A real, already-published (non-temp)
+        // stale entry alongside it proves the sweep is still doing real work,
+        // not just skipping everything.
+        let dir = tempdir().unwrap();
+        let in_progress = dir.path().join(".real-file.9f8e7d6c-1234-4abc-9def-0123456789ab.part");
+        let stale_final = dir.path().join("real-file");
+        std::fs::write(&in_progress, b"partial-write-in-flight").unwrap();
+        std::fs::write(&stale_final, b"already-published-plaintext").unwrap();
+
+        let now = std::time::SystemTime::now();
+        let ttl = std::time::Duration::from_secs(600);
+        let old_mtime = now - std::time::Duration::from_secs(700);
+        std::fs::File::open(&in_progress).unwrap().set_modified(old_mtime).unwrap();
+        std::fs::File::open(&stale_final).unwrap().set_modified(old_mtime).unwrap();
+
+        let removed = macos_sweep_stale_hydrate_cache_entries(dir.path(), ttl, now).expect("sweep must succeed");
+
+        assert_eq!(removed, 1, "only the final (non-temp) stale entry must be swept");
+        assert!(
+            in_progress.exists(),
+            "an in-progress temp-named entry must never be removed by the sweep, however old its mtime"
+        );
+        assert!(!stale_final.exists(), "the stale, already-published entry must still be removed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_is_hydrate_cache_temp_name_matches_write_hydrated_plaintexts_shape() {
+        assert!(macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            ".some-file-id.3f9a2b7e-1234-4c1a-8f9a-abcdef012345.part"
+        )));
+        // A final, already-published name must never be mistaken for a temp
+        // name — this is exactly what `macos_sweep_stale_hydrate_cache_entries`
+        // relies on to still age-check real entries.
+        assert!(!macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            "some-file-id.3f9a2b7e"
+        )));
+        assert!(!macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            ".dotfile-without-the-part-suffix"
+        )));
+        assert!(!macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            "no-leading-dot.uuid.part"
+        )));
     }
 
     /// Serializes every test that mutates the process-wide `$HOME` env var,
