@@ -96,11 +96,20 @@ impl Admission {
 #[derive(Default)]
 struct Budget {
     reserved: u64,
+    emergency_required: u64,
     // A bounded-capacity storage model, never physical NTFS qualification.
     capacity_ceiling: Option<u64>,
 }
 impl Budget {
     fn space_admitted(&self, root: &Path, pending: u64, terminal: bool) -> Result<()> {
+        let required = if terminal {
+            64 * MIB
+        } else {
+            required_emergency(root, None)?
+        };
+        self.space_admitted_required(root, pending, terminal, required)
+    }
+    fn space_admitted_required(&self, root: &Path, pending: u64, terminal: bool, required: u64) -> Result<()> {
         let reserve = root.join("reserve");
         ensure!(reserve.exists(), "missing physical emergency reserve");
         let length = file_len(&reserve);
@@ -126,7 +135,7 @@ impl Budget {
             );
         } else {
             ensure!(
-                length >= required_emergency(root, None)?,
+                length >= required,
                 "emergency reserve must be refilled before admission"
             );
             ensure!(free()? >= pending, "measured filesystem space exhausted");

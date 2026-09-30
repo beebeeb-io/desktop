@@ -422,8 +422,8 @@ fn slice1_r2_reserve_grows_for_all_participating_databases() {
     for _ in 0..5 {
         let s = Store::new(&h).unwrap();
         let o = owner(&s, "Snapshot");
-        s.allocate(o, "Capture", "Full", 1, 0, &mut Fault::default()).unwrap();
-        stores.push(s);
+        let artifact = s.allocate(o, "Capture", "Full", 1, 0, &mut Fault::default()).unwrap();
+        stores.push((s, artifact));
     }
     let reserve = h.path().join("reserve");
     assert_eq!(
@@ -435,6 +435,20 @@ fn slice1_r2_reserve_grows_for_all_participating_databases() {
     let mut physical = Reserve::existing(h.path()).unwrap();
     physical.release_terminal().unwrap();
     assert_eq!(file_len(&reserve), 6 * 64 * MIB - 16 * MIB);
+    let first_path = stores[0].0.path.clone();
+    let first_artifact = stores[0].1.clone();
+    assert!(
+        stores[0].0.chunk(&first_artifact, 0, b"x").is_err(),
+        "chunk spent released terminal reserve"
+    );
+    for _restart in 0..2 {
+        h.volume.lock().unwrap().emergency_required = 0;
+        let mut restored = Store::reopen(&h, &first_path).unwrap();
+        assert!(
+            restored.chunk(&first_artifact, 0, b"x").is_err(),
+            "reopen lost the participating reserve requirement"
+        );
+    }
     physical.refill().unwrap();
     assert_eq!(
         file_len(&reserve),
@@ -442,4 +456,5 @@ fn slice1_r2_reserve_grows_for_all_participating_databases() {
         "refill must restore every participating database's terminal budget"
     );
     assert!(allocated_len(&reserve).unwrap() >= 6 * 64 * MIB);
+    stores[0].0.chunk(&first_artifact, 0, b"x").unwrap();
 }

@@ -58,6 +58,14 @@ impl Store {
         let db = schema_open(path)?;
         let quota = db.query_row("SELECT quota_bytes FROM v2_store WHERE singleton=1", [], |r| r.get(0))?;
         // Recovered ownership is data only. No submission or destructive grant is reconstructed.
+        let root = path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .context("volume root")?;
+        let mut admission = h.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        admission.emergency_required = required_emergency(root, None)?;
+        drop(admission);
         Ok(Self {
             db,
             path: path.to_owned(),
@@ -216,6 +224,13 @@ impl Store {
     pub(super) fn reconstruct_reservations(&self) -> Result<()> {
         let mut global = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         global.reserved = self.budget_from_disk()?.0;
+        let root = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .context("volume root")?;
+        global.emergency_required = required_emergency(root, None)?;
         Ok(())
     }
     pub(super) fn allocate(
@@ -275,6 +290,7 @@ impl Store {
             .and_then(Path::parent)
             .context("volume root")?;
         grow_emergency(root, Some(&self.path))?;
+        global.emergency_required = required_emergency(root, Some(&self.path))?;
         let (reserved, excess) = self.budget_from_disk()?;
         global.reserved = reserved;
         let active: u64 = self.db.query_row(
@@ -378,14 +394,9 @@ impl Store {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .context("volume root")?;
-        let (reserved, excess) = self.budget_from_disk()?;
-        admission.space_admitted(
-            root,
-            (reserved + excess)
-                .saturating_sub(managed_allocated(root)?)
-                .max(DIRTY_LIMIT),
-            false,
-        )?;
+        // B0 admitted the complete artifact/volume reservation. This bounded
+        // transaction spends it, remeasuring next-write space and the full reserve.
+        admission.space_admitted_required(root, DIRTY_LIMIT, false, admission.emergency_required.max(256 * MIB))?;
         let phase: String = self.db.query_row(
             "SELECT phase FROM v2_artifacts WHERE artifact_id=?1",
             [a.id.as_slice()],
@@ -1125,13 +1136,19 @@ impl Reserve {
         Ok(released)
     }
     pub(super) fn refill(&mut self) -> Result<()> {
+        let required = required_emergency(self.path.parent().context("reserve parent")?, None)?;
         let mut f = fs::OpenOptions::new().append(true).open(&self.path)?;
         let bytes = vec![0xA5; CHUNK];
-        while self.remaining < 256 * MIB {
+        while self.remaining < required {
             f.write_all(&bytes)?;
             self.remaining += CHUNK as u64;
         }
         f.sync_all()?;
+        drop(f);
+        ensure!(
+            file_len(&self.path) >= required && allocated_len(&self.path)? >= required,
+            "reserve refill was not physically allocated"
+        );
         Ok(())
     }
 }

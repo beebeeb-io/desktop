@@ -174,7 +174,7 @@ pub(super) struct ReadCapability {
 }
 impl Ledger {
     pub(super) fn open(h: &Harness) -> Result<Self> {
-        let _admission = h.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        let mut admission = h.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         let path = h.path().join("installation.db");
         let db = open_db(&path, include_str!("ledger.sql"))?;
         let keys = h.path().join("keyslots");
@@ -184,6 +184,7 @@ impl Ledger {
         if file_len(&h.path().join("reserve")) >= 256 * MIB {
             grow_emergency(h.path(), None)?;
         }
+        admission.emergency_required = required_emergency(h.path(), None)?;
         db.execute(
             "INSERT OR IGNORE INTO installation_format VALUES(1,1,?1,NULL)",
             [id().as_slice()],
