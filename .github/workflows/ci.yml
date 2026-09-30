@@ -196,6 +196,16 @@ jobs:
       - name: Framing test count guard self-test
         run: bash scripts/test-ipc-framing.sh --self-test
 
+      # XPCBridge.swift is not compiled into the swiftc test harness, so the
+      # Swift tests cannot see a call site reverted to the default 30 s IPC
+      # timeout. This source-level check does (and its self-test proves it can
+      # go red).
+      - name: IPC timeout call-site guard self-test
+        run: python3 scripts/check-ipc-timeouts.py --self-test
+
+      - name: IPC timeout call-site guard
+        run: python3 scripts/check-ipc-timeouts.py
+
       - name: IPC framing tests (swiftc, pure Foundation)
         env:
           IPC_FRAMING_TEST_OUT: ${{ runner.temp }}/ipc-framing-tests

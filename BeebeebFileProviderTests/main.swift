@@ -212,6 +212,10 @@ check("frames straddling read boundaries survive the incremental delimiter scan"
     try expect(frames == ["{\"key_long_enough\":1}", "{}", "{\"c\":3}"], "got \(frames)")
 }
 
+// This proves only the IPCFraming helper. XPCBridge.swift is not compiled into
+// this harness, so whether the QueueFinderCreate/Modify and HydrateFile call
+// sites actually pass these timeouts is guarded at source level by
+// scripts/check-ipc-timeouts.py (CI: "IPC timeout call-site guard").
 check("write-queue calls with contents get the long staged-copy timeout, others stay short") {
     try expect(IPCFraming.writeQueueTimeoutSeconds(hasContents: true) == IPCFraming.stagedCopyTimeoutSeconds,
                "with contents: \(IPCFraming.writeQueueTimeoutSeconds(hasContents: true))s")

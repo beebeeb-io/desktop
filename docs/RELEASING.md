@@ -111,15 +111,14 @@ happens on a Mac that holds the `Developer ID Application: Devidee B.V. (R8352WD
 identity, never via an exported `.p12` CI secret. The sequence for a macOS release, once Windows
 and Linux have already been built and the GitHub release created by the normal workflow run:
 
-1. **Set the app version first** (task 1670 issue 3: this step was missing, and a local bundle built without it is versioned `0.1.0`, the placeholder in `src-tauri/tauri.conf.json`, because Tauri names the bundle and reports `CFBundleShortVersionString` from that file's own `version`). It mirrors the `Set app version for this release` step in `.github/workflows/release.yml` (the `jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json` line, ~L238). Run it in the release worktree, on plain semver only, and never commit the result:
+1. **Set the app version first** (task 1670 issue 3: this step was missing, and a local bundle built without it is versioned `0.1.0`, the placeholder in `src-tauri/tauri.conf.json`, because Tauri names the bundle and reports `CFBundleShortVersionString` from that file's own `version`). It mirrors the `Set app version for this release` step in `.github/workflows/release.yml` (the `jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json` line, ~L238). Run it in the release worktree, on plain semver only, and never commit the result. Edit `VERSION` to the release version (plain semver, no `-alpha`/`-beta` suffix) and paste the block into your interactive shell. It carries no comments on purpose: macOS's default interactive zsh has `interactive_comments` off, so a trailing `# ...` on the `VERSION=` line is parsed as a command and `VERSION` is never set. It uses if/else, not `|| exit 1`, because `exit` in a pasted block would close your terminal. It works in both zsh and bash. Afterwards `jq -r .version` must print `VERSION`, not `0.1.0`; a bad `VERSION` prints the "plain semver only" line and changes nothing.
 
    ```sh
-   VERSION=0.8.7   # plain semver, no -alpha/-beta suffix
-   # if/else, not `|| exit 1`: pasted into an interactive shell, `exit` would close your terminal.
+   VERSION=0.8.7
    if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
      jq --arg version "$VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp \
        && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
-     jq -r .version src-tauri/tauri.conf.json   # must print $VERSION, not 0.1.0
+     jq -r .version src-tauri/tauri.conf.json
    else
      echo "plain semver only: got '$VERSION'" >&2
    fi

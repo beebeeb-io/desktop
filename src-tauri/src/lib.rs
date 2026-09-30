@@ -63,8 +63,9 @@ mod staged_payload;
 mod state_paths;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
-// `QueueFinderCreate`; the macOS File Provider and Linux FUSE paths drive that
-// over the Unix socket instead. Compiled everywhere (cheap, cross-platform via
+// `QueueFinderCreate`; the macOS File Provider extension drives that over the
+// Unix socket instead, and the Linux FUSE prototype does not use the socket at
+// all (it calls the in-process `EngineBridge` directly). Compiled everywhere (cheap, cross-platform via
 // `notify`) but the runner only spawns it on Windows (see `runner::run`).
 mod watcher;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
