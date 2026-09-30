@@ -249,3 +249,72 @@ fn round5_signout_preserves_abandoned_legacy_upload_only_copy() {
     assert_eq!(std::fs::read(recovered).unwrap(), b"unsynced version");
     assert!(f.db.get_upload_resume("abandoned-keep-mine").unwrap().is_none());
 }
+
+// Registered roots are confined to a fresh temporary directory and revoked on drop.
+struct RegisteredRoot(Fixture);
+impl RegisteredRoot {
+    fn new() -> Self {
+        let f = Fixture::new();
+        crate::windows_cf::register_sync_root(&f.root).unwrap();
+        Self(f)
+    }
+}
+impl Drop for RegisteredRoot {
+    fn drop(&mut self) {
+        crate::windows_cf::unregister_sync_root(&self.0.root).unwrap();
+    }
+}
+
+#[test]
+fn round6_uploaded_local_identity_matches_server_and_signs_out() {
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    let path = f.root.join("server-id");
+    std::fs::write(&path, b"completed uploaded bytes").unwrap();
+    crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "temporary-local-id").unwrap();
+    f.track("server-id", ItemKind::File, FileStatus::Local);
+    crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&path, "server-id").unwrap();
+    let result = purge(&f.db, Some(&f.root));
+    assert!(result.is_ok(), "completed local upload must sign out: {result:?}");
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+#[test]
+fn round6_foreign_and_dirty_placeholders_keep_bytes() {
+    for foreign in [true, false] {
+        let registered = RegisteredRoot::new();
+        let f = &registered.0;
+        let path = f.root.join("server-id");
+        std::fs::write(&path, b"must preserve bytes").unwrap();
+        let identity = if foreign { "foreign-id" } else { "server-id" };
+        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, identity).unwrap();
+        f.track("server-id", ItemKind::File, FileStatus::Local);
+        let error = purge(&f.db, Some(&f.root)).unwrap_err().to_string();
+        assert!(error.contains(if foreign { "identity changed" } else { "Unsynced changes" }), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"must preserve bytes");
+        assert_eq!(f.db.list_files().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn round6_unregister_removes_empty_owned_hkcu_key() {
+    use windows::Win32::System::Registry::*;
+    use windows::Win32::Foundation::{ERROR_SUCCESS, ERROR_FILE_NOT_FOUND};
+    use windows::core::HSTRING;
+    let f = Fixture::new();
+    let id = crate::windows_cf::shell_sync_root_id(&f.root);
+    let key = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"));
+    unsafe {
+        let mut handle = HKEY::default();
+        assert_eq!(RegCreateKeyExW(HKEY_CURRENT_USER, &key, 0, None, REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut handle, None), ERROR_SUCCESS);
+        RegCloseKey(handle).unwrap();
+        let result = crate::windows_cf::unregister_shell_sync_root(&f.root);
+        let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
+        if remaining == ERROR_SUCCESS { RegCloseKey(handle).unwrap(); }
+        // Test cleanup even when the baseline leaves the key behind.
+        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
+        assert!(result.is_ok(), "unregister: {result:?}");
+        assert_eq!(remaining, ERROR_FILE_NOT_FOUND, "owned HKCU key must be absent");
+    }
+}
