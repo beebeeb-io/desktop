@@ -1,87 +1,80 @@
-# Beebeeb Desktop 0.8.6 — Finder: truthful state, and opening a file that isn't downloaded yet
+# Beebeeb Desktop 0.8.7 — Finder: opening a file works, and the support bundle no longer names your files
 
-This is an alpha build, macOS only. It exists so the Finder fix below can be tested by hand
-before it goes anywhere near the stable channel — it is not a general feature release, and
-Windows/Linux carry no new work of their own in it.
+This is an alpha build. The Mac build is Apple Silicon only (Intel is not built). It follows up
+0.8.6, where opening a not-yet-downloaded file from Finder stopped failing with the "helper
+application" error but then failed with "daemon response was not valid json" after a long wait and
+with no progress shown. That is fixed here at the cause, together with a privacy fix to the support
+bundle and two smaller fixes. Windows and Linux carry the same merged source as everything else on
+`main`, but nothing in this release was written for them.
 
 ### What's New
 
-Nothing user-facing beyond the fixes below. This release exists to get the Finder fix in front of
-a real Mac.
+- **[macOS] Real download progress in Finder:** when you open a file that is not on this Mac yet,
+  Finder now shows a progress bar that advances as the file is downloaded and decrypted, and the
+  download can be cancelled from Finder. Before, Finder showed nothing until the whole download had
+  finished.
+- **[macOS] Long downloads no longer time out:** a large file may keep downloading as long as it
+  keeps making progress. The limit is 10 minutes without any progress, not 10 minutes in total.
+  Quick requests (listing a folder) still give up after 30 seconds.
+- **The support bundle says exactly what it keeps and removes (task 1685):** the Account page copy
+  now states what the export contains, including the one residual described below. The button also
+  now saves the bundle and reveals it; before, it showed a toast saying the file had been written
+  without writing one. <!-- lead: confirm merged before cut -->
 
 ### Bug Fixes / Hardening
 
-- **[macOS] Finder location pane no longer shows contradictory install state (task 1670):** the
-  Settings → Finder location card could show the green "Installed" pill, the amber "Install in
-  Finder" button, and "Open in Finder" all at once. The underlying state was already correct —
-  the button row just rendered unconditionally. A single `finderLocationButtonPlan(installed)`
-  helper now decides the one truthful button to show.
-- **[macOS] Opening a not-yet-downloaded file from Finder no longer fails with "Couldn't
-  communicate with a helper application" (task 1670):** the File Provider extension and the
-  daemon run in separate sandboxes, each with its own private temp directory, so the extension's
-  hydration destination was never inside a root the daemon was allowed to write to — every
-  hydration was silently rejected. Fixed end to end: the daemon decrypts into the shared App
-  Group staging directory both sandboxes are actually entitled to; the extension then copies that
-  plaintext into the system-managed `NSFileProviderManager.temporaryDirectoryURL()` and deletes
-  our staging copy immediately, handing the system copy's URL to Finder — from that point its
-  lifetime belongs to the OS, not to a timer. The daemon's own staging directory is additionally
-  swept on a 10-minute TTL as a crash backstop, and purged outright on sign-out, lock, and daemon
-  startup. A failure now surfaces as a specific `NSFileProviderError`, not the generic
-  helper-application dialog that was masking the real cause.
-- **[Windows] Lock/sign-out now revokes in-flight CFAPI callbacks and hydration (task 1639,
-  P0):** a lock or sign-out could leave the Windows sync engine mid-hydration with credentials
-  and callbacks that outlived the session, including upload-identity finalization, stale
-  auth-attempt cancellation, and registry/vault teardown races.
-- **[Windows] Recovery-word entry no longer blanks the onboarding WebView (task 1644, P1):**
-  Backspace moving focus to the previous field, and a deferred Windows state update landing
-  mid-entry, could both wipe recovery-phrase input the user had already typed. Full-phrase paste
-  into any field is now honored, and setup render failures show a retry state instead of a blank
-  screen.
-- **[Windows] The configured sync root is now shown consistently across Files, Settings, and the
-  tray (task 1646):** these surfaces could each resolve a different path; they now share the same
-  backend-resolved root, and "Open folder" works from all of them. macOS Finder behavior is
-  unchanged.
-- **Native "Check for updates" now reports its result (task 1665):** the menu action previously
-  gave no feedback either way. It now routes through the Settings controller and surfaces success
-  or failure with the existing retry toast.
-- **Data residency copy no longer depends on provider metadata (task 1664) and now says "Stored
-  in the EU" per the brand rule (task 1663):** location copy is derived from the effective
-  continent/region instead of a value that could be absent, and macOS/desktop copy was aligned
-  with the "Europe" / "the EU" wording used everywhere else.
-- **IPC socket is owner-only from the first moment it can be connected to (task 1637):** the
-  socket is now bound inside a private sibling directory and published atomically at 0600,
-  instead of being creatable-then-chmod'd, closing a narrow window where another local process
-  could have raced a connection before permissions were tightened.
-- **Deterministic native-parity test fixtures (task 1612):** a reusable, socket-free fixture
-  corpus for exercising sync/engine behavior without a live server, used by several of the fixes
-  above. No user-facing change.
+- **[macOS] Opening a file from Finder no longer fails with "daemon response was not valid json"
+  (task 1670, issue 3):** the daemon's success reply was the bare JSON string `"Ok"`, and the
+  Finder extension only accepts a JSON object, so every successful download was reported as a
+  failure once it finished. Messages are now one JSON object per line in both directions, the
+  extension reads and writes in full (a reply over 64 KiB used to be cut short), and a reply that
+  cannot be parsed is reported with a fixed message instead of raw bytes. The old extension with
+  the new daemon, and the new extension with the old daemon, both keep working. The daemon side
+  was proven failing and then passing by tests; the Swift side is exercised only by the macOS CI
+  job and by the hand test this alpha exists for.
+- **[P0] The support bundle no longer contains file names or folder paths (task 1685):** the
+  diagnostics export promised "no plaintext names", but the last error message it carried could
+  include the path of the file that failed, so a bundle sent to support could disclose file and
+  folder names. Names and paths known to the state database are replaced first, every remaining
+  path becomes `[path]`, and every other word that is not a standard error word or a number
+  becomes `[name]`. Credential tokens are still removed. The residual, stated in the app: a name
+  the state database does not know can survive if it is a common word or digits, and UUIDs and the
+  server address are kept. <!-- lead: confirm merged before cut -->
+- **A slow Finder copy can no longer be uploaded twice (task 1684):** if copying a large file into
+  Finder took longer than the extension was willing to wait, Finder retried and the daemon queued a
+  second upload of the same file. The extension now sends a key derived from the file's name,
+  parent, size and modification time with each write, and the daemon returns the first result for a
+  repeat instead of queueing again. It does not cover a retry after the daemon restarts, and
+  whether Finder's real retry presents the same size and modification time is not yet confirmed on
+  a device; if it does not, the behaviour is the old one (one extra upload), not worse.
+  <!-- lead: confirm merged before cut -->
+- **Error toasts are readable, and an error is shown once (task 1683, slice 5):** in the dark
+  theme the error toast title had a contrast ratio of 1.10:1 against its background; all four toast
+  types now take their colours from the theme and meet 4.5:1 for text and 3:1 for icons in both
+  themes. A failed "Install in Finder" used to show the same message twice, as a toast and as a
+  banner that outlived it; it is now one inline error. <!-- lead: confirm merged before cut -->
 
 ### Verification
 
-- Gate run by the lead on `99856b2` plus PR #75 (task 1670, merge `01e3c4f`): `bun test` 359
-  pass, 0 fail; `cargo test --locked` (src-tauri, all binaries) 466 passed (`beebeeb_desktop_lib`)
-  + 0 (`beebeeb_desktop` main) + 20 (`keychain.rs`) + 8 (`windows_session_wiring.rs`) + 3
-  (`windows_signout_cleanup.rs`), 0 failed. Independently re-run for this release in a fresh
-  worktree at the same commit: identical counts.
-- `scripts/build-fileprovider-extension.sh` — the File Provider extension and its
-  `BeebeebFileProviderCtl` helper build and codesign cleanly (`codesign --verify` satisfies its
-  Designated Requirement on both).
-- Desktop CI (`.github/workflows/ci.yml`): 4/4 green on the release PR.
-- **Not verified: opening a file from Finder on a real Mac against a live File Provider domain.**
-  This alpha exists so that can be tested before anything reaches the stable channel. The task
-  1670 notes explain why it couldn't be reached in the development sandbox: this same Mac already
-  runs Guus's real Beebeeb.app 0.8.5, the IPC socket path and File Provider domain ID are
-  hardcoded singletons under the shared App Group container, and macOS sandbox home resolution
-  ignores `$HOME`, so a second, isolated daemon instance risked hijacking the real one's IPC
-  channel rather than testing in isolation.
-- Not verified: Windows/Linux real-hardware smoke tests for this release specifically (0.8.5's
-  hardware-smoke gap is unchanged; these platforms carry the same merged source as everything
-  else on `main` since 0.8.5 but are not the reason for this release).
+- <!-- lead: fill in on the release commit --> Test gate on the release commit: `bun test`
+  pass / 0 fail, `cargo test --locked` (src-tauri) per-binary `test result: ok. N passed`,
+  `bunx tsc --noEmit` exit 0.
+- Desktop CI on the release commit, including the macOS job "File Provider Swift (macOS)", which
+  compiles the Finder extension and runs the framing tests with a counted result.
+- The macOS build is notarized and stapled by `scripts/release-macos-local.sh`, which refuses to
+  upload anything unless `spctl` reports `source=Notarized Developer ID` for both the app and the
+  dmg.
+- **Not verified: opening a not-yet-downloaded file from Finder on a real Mac against a live File
+  Provider domain, with the progress bar and the cancel button.** This alpha exists so that can be
+  done by hand before anything reaches the stable channel.
+- Not verified: that Finder's real retry of a slow copy presents the same size and modification
+  time (task 1684), and that a cancel from Finder ends the download on the daemon side on a device.
+- Not verified: Windows and Linux real-hardware smoke tests for this release.
 
 ### Install / Update
 
-Alpha channel only — this build does not touch the stable manifest, and existing installs on the
-stable channel will not see it. Download the `.dmg` from the `desktop-v0.8.6` GitHub release and
-open it by hand; a Developer ID signed, notarized build installs Gatekeeper-clean the same way
-0.8.5 did. There is no in-app update path onto the alpha channel yet — this is a manual install
-for testing, not a rollout.
+Alpha channel only: this build does not touch the stable manifest, and installs on the stable
+channel will not see it. Download the `.dmg` from the `desktop-v0.8.7` GitHub release and open it by
+hand; a Developer ID signed, notarized build installs without a Gatekeeper prompt the same way
+0.8.5 and 0.8.6 did. There is no in-app update path onto the alpha channel yet, so this is a manual
+install for testing, not a rollout.
