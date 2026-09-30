@@ -434,7 +434,10 @@ impl EngineBridge {
         for scheduled in operations {
             // Resolution may have retired/rebased a chain since this batch was
             // selected. Never execute a stale queued snapshot after resolution.
-            let Some(op) = self.db.list_review_operations()?.into_iter().find(|op| op.op_id == scheduled.op_id) else { continue; };
+            let op = if operation_metadata(&scheduled).ok().is_some_and(|m| m["windows_edit"].as_bool() == Some(true)) {
+                let Some(current) = self.db.list_review_operations()?.into_iter().find(|op| op.op_id == scheduled.op_id) else { continue; };
+                current
+            } else { scheduled };
             // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
             // the queue the instant a caller asks this engine to stop,
             // rather than finishing every due operation first. `abort()`'s
@@ -514,7 +517,11 @@ impl EngineBridge {
         let base = self.download_base_version(file_id, spec.base_version).await?;
         let bytes = spec.assemble(base, &patch)?;
         let full_path = source.with_file_name(format!("{}.assembled", uuid::Uuid::new_v4()));
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&full_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&full_path)?;
         std::io::Write::write_all(&mut file, &bytes)?;
         file.sync_all()?;
         #[cfg(unix)]
@@ -3037,6 +3044,15 @@ impl EngineBridge {
     }
 
     async fn preserve_resolution_chain(&self, file_id: &str, root: &Path) -> anyhow::Result<Vec<PendingOperation>> {
+        // Include a settled save that arrived after the last watcher scan. In
+        // particular, never read a dirty partial source through implicit recall.
+        if self.db.list_review_operations()?.iter().any(|op| op.file_id.as_deref() == Some(file_id)
+            && operation_metadata(op).ok().is_some_and(|m| m["windows_edit"].as_bool() == Some(true))) {
+            if let Some(entry) = self.db.get_file(file_id)? {
+                let path = local_file_path_under_sync_root(root, &entry.path)?;
+                if path.exists() { self.queue_windows_tracked_edit(root, &path)?; }
+            }
+        }
         let queued: Vec<_> = self.db.list_review_operations()?.into_iter().filter(|op|
             op.file_id.as_deref() == Some(file_id) && operation_metadata(op).ok()
                 .is_some_and(|m| m["windows_edit"].as_bool() == Some(true))
@@ -3098,6 +3114,9 @@ impl EngineBridge {
             encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
+        #[cfg(target_os = "windows")]
+        anyhow::ensure!(crate::windows_cf::placeholders::resident_for_edit(&local_path)?,
+            "File changed during resolution; finish the save and retry. Queued snapshots are retained.");
         let staged_path = stage_finder_payload(&local_path.to_string_lossy())?;
         let staged_size = std::fs::metadata(&staged_path).map(|m| m.len()).unwrap_or(0);
 
@@ -3145,7 +3164,7 @@ impl EngineBridge {
                     );
                 }
             }
-            return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+            return Err(e.context("Keep Mine upload failed"));
         }
 
         self.retire_resolution_chain(file_id, &chain)?;
@@ -8392,9 +8411,9 @@ mod tests {
         let err = bridge
             .resolve_keep_mine("server-file-1", &sync_root)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("500 Internal Server Error"));
+            .unwrap_err();
+        assert_eq!(err.downcast_ref::<reqwest::Error>().expect("typed upload HTTP error").status(),
+            Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
 
         let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Conflict);
@@ -10403,13 +10422,26 @@ mod tests {
             let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
             let server = tokio::spawn(crate::ipc_socket::serve_ipc_at(sp.clone(), db, bridge, cancel_rx));
 
-            // Wait for the socket file to appear (i.e. bind + chmod done).
+            // Wait for bind; a served request below proves initialization finished.
             let mut attempt = 0;
             while !sp.exists() && attempt < 300 {
                 attempt += 1;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             assert!(sp.exists(), "the IPC socket file must be created by serve_ipc_at");
+            // Existence proves bind only. Await one served request to establish
+            // that the listener completed chmod and entered its accept loop.
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut client = tokio::net::UnixStream::connect(&sp).await.unwrap();
+            let request = serde_json::to_vec(&crate::ipc_socket::IpcRequest::GetFileStatus {
+                file_id: "permission-probe".into(),
+            }).unwrap();
+            client.write_all(&request).await.unwrap();
+            let mut response = [0u8; 1024];
+            let count = tokio::time::timeout(Duration::from_secs(3), client.read(&mut response)).await.unwrap().unwrap();
+            assert!(count > 0, "readiness probe must receive a response");
+            let _: crate::ipc_socket::IpcResponse = serde_json::from_slice(&response[..count]).unwrap();
+            drop(client);
 
             let mode = std::fs::metadata(&sp).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "the socket file must be chmod 0o600, got {mode:o}");

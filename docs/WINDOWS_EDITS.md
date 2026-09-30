@@ -44,8 +44,9 @@ reclamation must be gated on the real PC. Portable tests and adapter compilation
 are supporting evidence, not native passes. Full-file hashing is bounded in
 memory (64 KiB buffer) but costs I/O proportional to resident file size; the epic's
 large-tree performance rung remains necessary. Remote subtree deletion belongs
-to serialized task 1641; immutable download versions and ambiguous completion
-recovery remain the subsequent epic work.
+to serialized task 1641; ambiguous completion recovery remains subsequent epic
+work. Partial reconstruction uses immutable object versions when the base is
+no longer current; unavailable historical bases retain the pending snapshot.
 
 ## Round 3 correction (2026-09-30, Guus task 1640 ruling)
 
@@ -64,3 +65,8 @@ recovery remain the subsequent epic work.
   directory handles and only deletes these two directories after proving their
   contents empty. Pending operations, orphan payloads, unknown children and
   reparse points must refuse sign-out without deleting payloads.
+
+Round 3 native unit fixtures use Windows file handles, range writes, append,
+SQLite restart and real local HTTP, with injected CFAPI modified-range metadata.
+They do not register sync roots. Real CFAPI callback behavior and complete
+edit/upload/sign-out on a registered root remain the independently owned QA rung.
