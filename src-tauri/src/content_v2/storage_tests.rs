@@ -1252,3 +1252,37 @@ fn slice1_g2_disposition_gc_cuts_reclaim_after_terminal_commit() {
     }
     println!("gc_disposition_cutpoints=8 recovery_opens=16");
 }
+
+#[test]
+fn slice1_g4_owner_admission_waits_for_account_bootstrap() {
+    let h = Harness::new().unwrap();
+    let s = Store::new(&h).unwrap();
+    let body = owner_body(&s, "RecoveryCase");
+    let construction = h.volume.lock().unwrap();
+    let partial = h.path().join("accounts").join(hex(&id())).join("state-v2.db");
+    fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    fs::File::create(&partial).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            entered_tx.send(()).unwrap();
+            done_tx.send(s.owner(id(), "RecoveryCase", &body)).unwrap();
+        });
+        entered_rx.recv().unwrap();
+        assert!(
+            matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "owner admission must wait while another account schema is being established"
+        );
+        fs::remove_file(&partial).unwrap(); // finish this fixture's paused empty-file bootstrap
+        drop(schema_open(&partial).unwrap());
+        drop(construction);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+    });
+}

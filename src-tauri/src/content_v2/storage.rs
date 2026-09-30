@@ -69,6 +69,9 @@ impl Store {
         })
     }
     pub(super) fn owner(&self, owner: Id, kind: &str, body: &[u8]) -> Result<()> {
+        // Metadata admission scans the volume too: do not observe another account's
+        // database between pathname creation and its schema/bootstrap commit.
+        let _admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, false)?;
         let (reserved, excess) = self.budget_from_disk()?;
         ensure!(reserved + excess + DIRTY_LIMIT <= self.quota, "metadata quota");
