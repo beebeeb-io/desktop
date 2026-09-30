@@ -166,13 +166,16 @@ pub(super) struct Ledger {
     pub path: PathBuf,
     keys: PathBuf,
     run: Id,
+    volume: Arc<Mutex<Budget>>,
 }
 pub(super) struct ReadCapability {
     account: Id,
     run: Id,
+    volume: Arc<Mutex<Budget>>,
 }
 impl Ledger {
     pub(super) fn open(h: &Harness) -> Result<Self> {
+        let _admission = h.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         let path = h.path().join("installation.db");
         let db = open_db(&path, include_str!("ledger.sql"))?;
         let keys = h.path().join("keyslots");
@@ -181,26 +184,45 @@ impl Ledger {
             "INSERT OR IGNORE INTO installation_format VALUES(1,1,?1,NULL)",
             [id().as_slice()],
         )?;
-        Ok(Self {
-            db,
-            path,
-            keys,
-            run: id(),
-        })
+        let ledger = Self { db, path, keys, run: id(), volume: h.volume.clone() };
+        ledger.reconcile_keys()?;
+        Ok(ledger)
     }
     fn key_path(&self, slot: &Id) -> PathBuf {
         self.keys.join(hex(slot))
     }
+    fn slot_referenced(&self, slot: &Id) -> Result<bool> {
+        Ok(self.db.query_row("SELECT count(*) FROM protected_records WHERE key_slot=?1", [slot.as_slice()], |r| r.get::<_, u64>(0))? > 0)
+    }
+    fn reconcile_keys(&self) -> Result<()> {
+        for entry in fs::read_dir(&self.keys)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("invalid key filename")?;
+            let slot_name = name.split('.').next().context("key slot")?;
+            ensure!(slot_name.len() == 64, "unknown key-slot name");
+            let mut slot = [0; 32];
+            for (i, byte) in slot.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&slot_name[2*i..2*i+2], 16)?;
+            }
+            // Open and put hold the same volume allocator as the ledger writer.
+            // Never repair a damaged slot still referenced by committed ciphertext.
+            if !self.slot_referenced(&slot)? {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
     fn save_key(&self, slot: &Id, key: &Id, fault: &mut Fault) -> Result<()> {
         let wrapped = Zeroizing::new(wrap(key, true)?);
+        let temporary = self.keys.join(format!("{}.tmp.{}", hex(slot), hex(&id())));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
+        #[cfg(unix)] {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut f = options.open(self.key_path(slot))?;
+        let mut f = options.open(&temporary)?;
         fault.point("key create")?;
         let half = wrapped.len() / 2;
         f.write_all(&wrapped[..half])?;
@@ -209,6 +231,8 @@ impl Ledger {
         f.flush()?;
         fault.point("key flush")?;
         f.sync_all()?;
+        drop(f);
+        publish_key(&temporary, &self.key_path(slot))?;
         Ok(())
     }
     pub(super) fn key(&self, slot: &Id) -> Result<Zeroizing<Id>> {
@@ -228,6 +252,7 @@ impl Ledger {
         deny: Option<Id>,
         fault: &mut Fault,
     ) -> Result<Id> {
+        let _admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, false)?;
         let existing: Option<Vec<u8>> = self
             .db
@@ -259,6 +284,7 @@ impl Ledger {
             file_len(&self.path) + file_len(&wal_path(&self.path)) + 2 * MIB <= 1024 * MIB,
             "ledger quota"
         );
+        self.reconcile_keys()?;
         fault.point("before key publication")?;
         // A stable opaque slot survives an uncertain ledger commit. Its independently
         // random key is reused only for retries of this exact record, never another record.
@@ -455,5 +481,23 @@ pub(super) fn transfer(
         params![transfer.as_slice(), record.as_slice(), digest(body).as_slice()],
     )?;
     fault.point("after transfer ack")?;
+    Ok(())
+}
+
+fn publish_key(temporary: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)] {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "Kernel32")]
+        unsafe extern "system" { fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32; }
+        let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        // WRITE_THROUGH, deliberately without REPLACE_EXISTING or COPY_ALLOWED.
+        ensure!(unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 8) } != 0, "key publication failed: {}", std::io::Error::last_os_error());
+    }
+    #[cfg(unix)] {
+        fs::hard_link(temporary, destination)?; // atomic no-clobber publication
+        fs::remove_file(temporary)?;
+        fs::File::open(destination.parent().context("key parent")?)?.sync_all()?;
+    }
     Ok(())
 }
