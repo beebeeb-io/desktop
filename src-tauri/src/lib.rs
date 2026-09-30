@@ -749,6 +749,8 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
             return Err("Sign out of the current account before signing in again.".into());
         }
 
+        #[cfg(target_os = "windows")]
+        drop(_transition);
         let base_url = runner::api_base_url();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -844,6 +846,10 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
             // partial session token (+ email) so `desktop_login_2fa` can complete
             // the sign-in once the user enters their TOTP code. The partial token is
             // server-validated and short-lived — never log it.
+            #[cfg(target_os = "windows")]
+            let _transition = SESSION_TRANSITION.lock().await;
+            #[cfg(target_os = "windows")]
+            AUTH_ATTEMPTS.validate(&attempt)?;
             let partial_token = finish_body
                 .get("partial_token")
                 .and_then(|v| v.as_str())
@@ -869,6 +875,15 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
             .to_string();
 
         let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
+
         // Resolve the active account up front so we can both cache the profile and
         // segment the keychain write under its id (task 0800). The cache is
         // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
@@ -880,6 +895,8 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
         }
 
         if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+            #[cfg(target_os = "windows")]
+            drop(_transition);
             let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
             return Err(e);
         }
@@ -927,6 +944,8 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
             SESSION_COMMANDS.ensure_reactivation_allowed()?;
             windows_cf::ensure_reactivation_allowed()?;
         }
+        #[cfg(target_os = "windows")]
+        drop(_transition);
         let base_url = runner::api_base_url();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -981,6 +1000,15 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
         // Same post-finish setup as `desktop_login`'s no-2FA success path. The
         // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
         let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
+
         let account_id = state.active_account()?.id.as_str().to_string();
         if let Ok(acct) = state.active_account()
             && let Ok(mut guard) = acct.cached_profile.lock()
@@ -989,6 +1017,8 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
         }
 
         if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+            #[cfg(target_os = "windows")]
+            drop(_transition);
             let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
             return Err(e);
         }

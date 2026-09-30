@@ -98,6 +98,13 @@ fn auth_wiring(source: &str, browser: &str) -> bool {
         && close.contains("auth.drain(")
         && begin < handoff
         && start.contains("attempt.run(work).await")
+        && ["desktop_login", "desktop_login_2fa"].iter().all(|name| {
+            let code = body(source, name);
+            let network = code.find("fetch_session_profile(").unwrap();
+            let persist = code.find("persist_session_token_to_keychain(").unwrap();
+            code[..network].contains("drop(_transition)")
+                && code[network..persist].contains("AUTH_ATTEMPTS.validate(&attempt)?")
+        })
         && [
             "desktop_login",
             "desktop_login_2fa",
