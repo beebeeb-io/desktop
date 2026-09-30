@@ -28,7 +28,7 @@
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=382
+EXPECTED_CHECKS=397
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -150,7 +150,7 @@ STUB
   echo profile >"$HOME_FX/.private_keys/macos-developer-id-profiles/BeebeebFileProvider.provisionprofile"
   : >"$LOGF"
   local n
-  for n in git tar uname security bun bunx plutil ditto xcrun codesign spctl hdiutil minisign gh; do
+  for n in git tar uname security bun bunx plutil ditto xcrun codesign spctl hdiutil minisign gh base64; do
     ln -s "$SHIM_SRC" "$SHIMS/$n"
   done
   (
@@ -504,6 +504,35 @@ new_fixture signfail
 SCEN_ENV=(BB_SHIM_SIGN_RUN_FAIL=1)
 run_release 0.8.7 alpha
 expect_stop 11 "finished with conclusion 'failure'" pre-publish
+
+echo "== scenario: another dispatch of the same workflow is in flight and fails; we wait on OUR run (steps 11, 12) =="
+new_fixture extrarun
+SCEN_ENV=(BB_SHIM_EXTRA_RUN=1)
+run_release 0.8.7 alpha
+check "the run exits 0 (the other run's failure is not ours)" rc_is 0
+check "it followed the run gh workflow run created (1002 for signing, 1004 for the manifest)" \
+  bash -c "grep -q 'run 1002 started' '$OUT' && grep -q 'run 1004 started' '$OUT'"
+check "it never polled the unrelated runs 1001 and 1003" bash -c "! grep -qE '^gh run view (1001|1003) ' '$LOGF'"
+
+echo "== scenario: gh prints no run URL and two runs are candidates: refuse, do not guess (step 11) =="
+new_fixture extrarun_nourl
+SCEN_ENV=(BB_SHIM_EXTRA_RUN=1 BB_SHIM_NO_RUN_URL=1)
+run_release 0.8.7 alpha
+expect_stop 11 "cannot tell which one is ours" pre-publish
+
+echo "== scenario: gh prints no run URL and exactly one new run exists: that one is ours =="
+new_fixture nourl
+SCEN_ENV=(BB_SHIM_NO_RUN_URL=1)
+run_release 0.8.7 alpha
+check "the run exits 0 on the fallback" rc_is 0
+check "the output says the run was found by elimination" out_has "no run URL from gh"
+
+echo "== scenario: the decoder on this Mac only knows -D (macOS base64), step 11 still verifies the signature =="
+new_fixture macbase64
+run_release 0.8.7 alpha
+check "the run exits 0 with a base64 that rejects --decode" rc_is 0
+check "base64 was asked to decode (-D), never with --decode" bash -c "grep -qE '^base64 -D' '$LOGF' && ! grep -qE '^base64 (--decode|-d)( |\$)' '$LOGF'"
+check "minisign still ran against the decoded signature and key" log_has '^minisign -Vm '
 
 echo "== scenario: the signing run succeeds but no .sig is on the release (step 11) =="
 new_fixture nosig

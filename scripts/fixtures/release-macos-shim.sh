@@ -2,9 +2,11 @@
 # Stand-in for the macOS/GitHub tools scripts/release-macos-local.sh calls, so
 # scripts/test-release-macos-local.sh can run the whole release on Linux.
 # One file, linked under many names (xcrun, codesign, spctl, hdiutil, ditto,
-# plutil, gh, bunx, bun, security, uname, minisign, git, tar); it behaves like
+# plutil, gh, bunx, bun, security, uname, minisign, git, tar, base64); it behaves like
 # basename "$0". It is NOT a model of Apple's tools: it models only the
 # ordering and trust rules the release script relies on:
+#   - base64 is the macOS one: decoding is `-D` only (`--decode` and GNU's `-d` are "illegal option",
+#     as on the macOS base64(1) the operator's Mac may have); encoding passes through
 #   - stapling needs a prior Accepted notarization of THAT artifact
 #   - spctl accepts (as Notarized Developer ID) only a notarized artifact
 #   - codesign --verify on a dmg needs a signature made with --timestamp
@@ -18,7 +20,9 @@
 #   BB_SHIM_DMG_NOT_SIGNED=1, BB_SHIM_NO_RELEASE=1, BB_SHIM_CORRUPT_UPLOAD=1,
 #   BB_SHIM_SIGN_RUN_FAIL=1, BB_SHIM_NO_SIG=1, BB_SHIM_MINISIGN_FAIL=1,
 #   BB_SHIM_PUBLISH_RUN_FAIL=1, BB_SHIM_MANIFEST_VERSION=<v>, BB_SHIM_MANIFEST_TAG=<tag>,
-#   BB_SHIM_FINDER_DENIED=1 (bundle_dmg.sh fails with -10006 whenever a dmg is bundled).
+#   BB_SHIM_FINDER_DENIED=1 (bundle_dmg.sh fails with -10006 whenever a dmg is bundled),
+#   BB_SHIM_EXTRA_RUN=1 (another workflow_dispatch run of the same workflow, lower id, that fails, is in
+#   flight next to ours), BB_SHIM_NO_RUN_URL=1 (`gh workflow run` prints no run URL).
 
 set -uo pipefail
 
@@ -27,6 +31,7 @@ STATE="${BB_TEST_STATE:?}"
 LOG="${BB_TEST_LOG:?}"
 REAL_GIT="${BB_REAL_GIT:-/usr/bin/git}"
 REAL_TAR="${BB_REAL_TAR:-/usr/bin/tar}"
+REAL_BASE64="${BB_REAL_BASE64:-/usr/bin/base64}"
 
 mkdir -p "$STATE/release" "$STATE/runs"
 printf '%s %s\n' "$name" "$*" >>"$LOG"
@@ -43,6 +48,18 @@ label_of() { # path -> app | dmg
 case "$name" in
   git) exec "$REAL_GIT" "$@" ;;
   tar) exec "$REAL_TAR" "$@" ;;
+
+  base64)
+    args=()
+    for a in "$@"; do
+      case "$a" in
+        -D) args+=(-d) ;;
+        --decode | -d) echo "base64: illegal option -- ${a#-}" >&2; exit 64 ;;
+        *) args+=("$a") ;;
+      esac
+    done
+    exec "$REAL_BASE64" ${args[@]+"${args[@]}"}
+    ;;
 
   uname)
     case "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
@@ -284,6 +301,14 @@ case "$name" in
         # gh workflow run WF --repo R --ref REF -f k=v ...
         wf="$3"
         id=$(($(cat "$STATE/run-counter" 2>/dev/null || echo 1000) + 1))
+        if [[ "${BB_SHIM_EXTRA_RUN:-}" == 1 ]]; then
+          # someone else dispatched the same workflow a moment earlier: their run has the lower
+          # id, is still in flight when ours appears, and FAILS. Waiting on it is the bug.
+          echo "$wf" >"$STATE/runs/$id.wf"
+          echo 0 >"$STATE/runs/$id.views"
+          echo failure >"$STATE/runs/$id.conclusion"
+          id=$((id + 1))
+        fi
         echo "$id" >"$STATE/run-counter"
         echo "$wf" >"$STATE/runs/$id.wf"
         echo 0 >"$STATE/runs/$id.views"
@@ -314,6 +339,13 @@ case "$name" in
           fi
         fi
         echo "$concl" >"$STATE/runs/$id.conclusion"
+        # gh prints the created run's URL (recent versions); BB_SHIM_NO_RUN_URL=1 models one that does not
+        if [[ "${BB_SHIM_NO_RUN_URL:-}" == 1 ]]; then
+          echo "Created workflow_dispatch event for $wf at main"
+        else
+          echo "Created workflow_dispatch event for $wf at main"
+          echo "https://github.com/beebeeb-io/desktop/actions/runs/$id"
+        fi
         ;;
       run)
         act="${2:-}"

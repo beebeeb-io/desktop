@@ -238,6 +238,16 @@ capture_all() {
   printf -v "$__var" '%s' "$__out"
 }
 
+# b64decode: base64 on stdin -> decoded bytes on stdout. The macOS base64(1) decodes with -D
+# (older releases know nothing else), GNU coreutils with -d/--decode, and on some macOS versions
+# -d means something else, so try -D first and fall back to -d. Input is read once so the
+# retry sees it again.
+b64decode() {
+  local in=""
+  in="$(cat)"
+  printf '%s' "$in" | base64 -D 2>/dev/null || printf '%s' "$in" | base64 -d
+}
+
 need_cmd() {
   if is_dry; then say "would require command: $1"; return 0; fi
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
@@ -350,24 +360,38 @@ require_app_version() { # <path to .app> <label>
   say "$2 CFBundleShortVersionString = $got"
 }
 
-# dispatch_and_wait <workflow file> <gh workflow run args...>: dispatch, find the new run, wait for success.
+# dispatch_and_wait <workflow file> <gh workflow run args...>: dispatch, identify the run THIS
+# dispatch created, wait for it to succeed. Recent gh prints the created run's URL; its id is
+# the identity. Without a URL the run is found by elimination (newer than a snapshot taken before
+# the dispatch) and only if exactly one candidate exists: another dispatch of the same workflow
+# running at the same moment makes that ambiguous, and the script then stops rather than wait on
+# (and report the result of) somebody else's run.
 dispatch_and_wait() {
-  local wf="$1" list="" before=0 id="" view="" status="" conclusion="" url="" waited=0
+  local wf="$1" list="" before=0 id="" view="" status="" conclusion="" url="" waited=0 out="" cands="" n=0
   shift
   capture list gh run list --repo "$REPO" --workflow "$wf" --event workflow_dispatch --limit 20 --json databaseId
   ((CAPTURE_RC == 0)) || is_dry || fail "could not list runs of $wf"
   is_dry || before="$(jq '[.[].databaseId] | max // 0' <<<"$list")"
-  run gh workflow run "$wf" --repo "$REPO" --ref "$WORKFLOW_REF" "$@"
-  if is_dry; then say "(dry-run) would poll 'gh run list' for the new run of $wf, then 'gh run view' until it completes with conclusion success"; return 0; fi
+  capture_all out gh workflow run "$wf" --repo "$REPO" --ref "$WORKFLOW_REF" "$@"
+  if is_dry; then say "(dry-run) would take the run id from the URL 'gh workflow run' prints (else the one new run of $wf), then 'gh run view' until it completes with conclusion success"; return 0; fi
+  ((CAPTURE_RC == 0)) || fail "command failed (exit $CAPTURE_RC): gh workflow run $wf: $out"
 
-  while :; do
-    list="$(gh run list --repo "$REPO" --workflow "$wf" --event workflow_dispatch --limit 20 --json databaseId 2>/dev/null || true)"
-    id="$(jq -r --argjson b "$before" '[.[] | select(.databaseId > $b) | .databaseId] | min // empty' <<<"${list:-[]}" 2>/dev/null || true)"
-    [[ -n "$id" ]] && break
-    ((waited < 300)) || fail "the dispatched run of $wf never appeared within 300 s"
-    sleep "$POLL_INTERVAL"
-    waited=$((waited + POLL_INTERVAL + 1))
-  done
+  [[ -z "$out" ]] || printf '%s\n' "$out" | sed 's/^/    /'
+  id="$(grep -oE '/actions/runs/[0-9]+' <<<"$out" | head -1 | grep -oE '[0-9]+$' || true)"
+  if [[ -z "$id" ]]; then
+    say "no run URL from gh; looking for the one new run of $wf"
+    while :; do
+      list="$(gh run list --repo "$REPO" --workflow "$wf" --event workflow_dispatch --limit 20 --json databaseId 2>/dev/null || true)"
+      cands="$(jq -r --argjson b "$before" '[.[] | select(.databaseId > $b) | .databaseId] | sort | .[]' <<<"${list:-[]}" 2>/dev/null || true)"
+      n="$(grep -c . <<<"$cands" || true)"
+      ((n >= 1)) && break
+      ((waited < 300)) || fail "the dispatched run of $wf never appeared within 300 s"
+      sleep "$POLL_INTERVAL"
+      waited=$((waited + POLL_INTERVAL + 1))
+    done
+    ((n == 1)) || fail "$n runs of $wf appeared after the dispatch ($(tr '\n' ' ' <<<"$cands")) and gh gave no run URL, so I cannot tell which one is ours. Another dispatch of the same workflow is running; wait for it to finish, then resume with --from-step $CURRENT_STEP. Nothing was guessed."
+    id="$cands"
+  fi
   say "run $id started: https://github.com/$REPO/actions/runs/$id"
   waited=0
   while :; do
@@ -723,12 +747,12 @@ step_11_sign_updater_bundle() {
     pub="$VERIFY_PUBKEY_OVERRIDE"
     pub_from="BB_UPDATER_VERIFY_PUBKEY (NOT the key baked into $CONF; correct only for a key-rotation transition release, where CI still signs with the old key)"
   else
-    pub="$(jq -r .plugins.updater.pubkey "$CONF" | base64 --decode | sed -n 2p)"
+    pub="$(jq -r .plugins.updater.pubkey "$CONF" | b64decode | sed -n 2p)"
     pub_from="the pubkey baked into $CONF"
   fi
   [[ -n "$pub" ]] || fail "could not read the updater public key from $CONF (and BB_UPDATER_VERIFY_PUBKEY is not set)"
   key="$WORK/readback/tarball.minisig"
-  base64 --decode <"$sig_file" >"$key" || fail "$SIG_NAME is not valid base64 (a Tauri updater signature is the base64 of a minisign file)"
+  b64decode <"$sig_file" >"$key" || fail "$SIG_NAME is not valid base64 (a Tauri updater signature is the base64 of a minisign file)"
   say "verifying against $pub_from"
   run "$MINISIGN" -Vm "$TARBALL" -x "$key" -P "$pub"
   say "signature verified against $pub_from"
