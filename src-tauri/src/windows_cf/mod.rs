@@ -325,7 +325,16 @@ pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
             return Err(error.into());
         }
     }
-    Ok(())
+    // Prove the Cloud Files registration itself is gone, independently of the
+    // Explorer/WinRT registration and its per-user registry metadata.
+    let mut buffer = vec![0u64; 1024];
+    let result = unsafe { CfGetSyncRootInfoByPath(PCWSTR(wide.as_ptr()), CF_SYNC_ROOT_INFO_BASIC,
+        buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None) };
+    match result {
+        Err(error) if [378u32, 376, 405].iter().any(|code| error.code() == HRESULT::from_win32(*code)) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
+        Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
+    }
 }
 
 /// Internal accessor for the daemon's tokio runtime handle, used by the

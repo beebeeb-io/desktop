@@ -318,3 +318,36 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
         assert_eq!(remaining, ERROR_FILE_NOT_FOUND, "owned HKCU key must be absent");
     }
 }
+
+#[test]
+fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
+    for foreign in [false, true] {
+        let registered = RegisteredRoot::new();
+        let f = &registered.0;
+        let path = f.root.join("server-id");
+        let payload = f.temp.path().join("uploaded");
+        std::fs::write(&path, b"new local edit").unwrap();
+        std::fs::write(&payload, if foreign { b"new local edit".as_slice() } else { b"uploaded original".as_slice() }).unwrap();
+        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, if foreign { "foreign-id" } else { "local-id" }).unwrap();
+        let error = crate::windows_cf::placeholders::complete_upload_placeholder(&path, "server-id", Some(("local-id", &payload))).unwrap_err();
+        assert!(error.to_string().contains(if foreign { "belongs to another file" } else { "bytes changed" }), "{error:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new local edit");
+        f.track("server-id", ItemKind::File, FileStatus::Local);
+        assert!(purge(&f.db, Some(&f.root)).is_err());
+    }
+}
+
+#[test]
+fn round6_verified_upload_finalization_updates_identity() {
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    let path = f.root.join("server-id");
+    let payload = f.temp.path().join("uploaded");
+    std::fs::write(&path, b"uploaded bytes").unwrap();
+    std::fs::write(&payload, b"uploaded bytes").unwrap();
+    crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "local-id").unwrap();
+    crate::windows_cf::placeholders::complete_upload_placeholder(&path, "server-id", Some(("local-id", &payload))).unwrap();
+    f.track("server-id", ItemKind::File, FileStatus::Local);
+    purge(&f.db, Some(&f.root)).unwrap();
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+}
