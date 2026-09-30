@@ -1,65 +1,87 @@
-# Beebeeb Desktop 0.8.5 — macOS is public
+# Beebeeb Desktop 0.8.6 — Finder: truthful state, and opening a file that isn't downloaded yet
 
-Beebeeb Desktop is now available on macOS. Apple Silicon only for this release — Intel Mac
-support is a separate follow-up, not silently dropped. The app is Developer ID signed and
-notarized by Apple, and installs the same "Beebeeb Drive" Finder location that has been running
-on real hardware for weeks: a native File Provider extension, not a synced folder copy. Windows
-and Linux carry no source changes in this release — they are rebuilt from the same code as 0.8.4
-so every platform ships under one shared version number and one manifest, not because the launch
-needed anything from them.
+This is an alpha build, macOS only. It exists so the Finder fix below can be tested by hand
+before it goes anywhere near the stable channel — it is not a general feature release, and
+Windows/Linux carry no new work of their own in it.
 
 ### What's New
 
-- **macOS launch (Apple Silicon / arm64, macOS 14 Sonoma or later required):** download a
-  notarized `.dmg` from the GitHub release, or update in place if you already have a
-  Developer-signed build. Installs a Finder location (`~/Library/CloudStorage/Beebeeb-Drive`)
-  backed by a native File Provider extension — browse, open and save files directly in Finder,
-  encrypted on your device before anything leaves it.
-- The auto-updater now carries a `darwin-aarch64` entry, so existing macOS installs discover this
-  release the same way Windows and Linux installs already do.
+Nothing user-facing beyond the fixes below. This release exists to get the Finder fix in front of
+a real Mac.
 
 ### Bug Fixes / Hardening
 
-- **File Provider extension no longer crash-loops on macOS 26 (task 1524):** a hand-written
-  `main.swift` that called `NSExtensionMain()` as an ordinary function recursed forever once
-  macOS 26's `ExtensionFoundation` started re-invoking the process's real entry point during its
-  own bootstrap. The extension binary now has no `main()` of its own — its Mach-O entry point is
-  set purely via the linker (`-e _NSExtensionMain`), exactly as Xcode does for every extension
-  target. `scripts/macos-release-preflight.sh` now asserts this on every build (source scan +
-  built-binary entry-point check) so it can't regress unnoticed.
-- **User-disabled File Provider domains are now detected** instead of the app assuming an
-  install always succeeds silently.
-- **Uploads resume instead of restarting after an interruption** (flow 7): the chunk-upload
-  session and acknowledged-chunk watermark are persisted, so a retry continues from where it left
-  off instead of re-uploading a large file from byte zero.
-- **0-byte files now upload** instead of failing forever with no user-visible error.
-- **Orphaned upload sessions are cleaned up** when the file they belonged to is deleted mid-upload.
+- **[macOS] Finder location pane no longer shows contradictory install state (task 1670):** the
+  Settings → Finder location card could show the green "Installed" pill, the amber "Install in
+  Finder" button, and "Open in Finder" all at once. The underlying state was already correct —
+  the button row just rendered unconditionally. A single `finderLocationButtonPlan(installed)`
+  helper now decides the one truthful button to show.
+- **[macOS] Opening a not-yet-downloaded file from Finder no longer fails with "Couldn't
+  communicate with a helper application" (task 1670):** the File Provider extension and the
+  daemon run in separate sandboxes, each with its own private temp directory, so the extension's
+  hydration destination was never inside a root the daemon was allowed to write to — every
+  hydration was silently rejected. Fixed end to end: the daemon decrypts into the shared App
+  Group staging directory both sandboxes are actually entitled to; the extension then copies that
+  plaintext into the system-managed `NSFileProviderManager.temporaryDirectoryURL()` and deletes
+  our staging copy immediately, handing the system copy's URL to Finder — from that point its
+  lifetime belongs to the OS, not to a timer. The daemon's own staging directory is additionally
+  swept on a 10-minute TTL as a crash backstop, and purged outright on sign-out, lock, and daemon
+  startup. A failure now surfaces as a specific `NSFileProviderError`, not the generic
+  helper-application dialog that was masking the real cause.
+- **[Windows] Lock/sign-out now revokes in-flight CFAPI callbacks and hydration (task 1639,
+  P0):** a lock or sign-out could leave the Windows sync engine mid-hydration with credentials
+  and callbacks that outlived the session, including upload-identity finalization, stale
+  auth-attempt cancellation, and registry/vault teardown races.
+- **[Windows] Recovery-word entry no longer blanks the onboarding WebView (task 1644, P1):**
+  Backspace moving focus to the previous field, and a deferred Windows state update landing
+  mid-entry, could both wipe recovery-phrase input the user had already typed. Full-phrase paste
+  into any field is now honored, and setup render failures show a retry state instead of a blank
+  screen.
+- **[Windows] The configured sync root is now shown consistently across Files, Settings, and the
+  tray (task 1646):** these surfaces could each resolve a different path; they now share the same
+  backend-resolved root, and "Open folder" works from all of them. macOS Finder behavior is
+  unchanged.
+- **Native "Check for updates" now reports its result (task 1665):** the menu action previously
+  gave no feedback either way. It now routes through the Settings controller and surfaces success
+  or failure with the existing retry toast.
+- **Data residency copy no longer depends on provider metadata (task 1664) and now says "Stored
+  in the EU" per the brand rule (task 1663):** location copy is derived from the effective
+  continent/region instead of a value that could be absent, and macOS/desktop copy was aligned
+  with the "Europe" / "the EU" wording used everywhere else.
+- **IPC socket is owner-only from the first moment it can be connected to (task 1637):** the
+  socket is now bound inside a private sibling directory and published atomically at 0600,
+  instead of being creatable-then-chmod'd, closing a narrow window where another local process
+  could have raced a connection before permissions were tightened.
+- **Deterministic native-parity test fixtures (task 1612):** a reusable, socket-free fixture
+  corpus for exercising sync/engine behavior without a live server, used by several of the fixes
+  above. No user-facing change.
 
 ### Verification
 
-- `bun test` (frontend): 98 pass, 0 fail, 21 files.
-- `cargo test --locked` (src-tauri, all binaries): 423 passed, 0 failed (`beebeeb_desktop_lib`
-  403, `beebeeb_desktop` main 0, `keychain.rs` integration 20, doc-tests 0).
-- `scripts/macos-release-preflight.sh` — source checks and, after building, the built `.app`:
-  entitlements/Info.plist lint, File Provider entry-point guard, embedded Developer ID
-  provisioning profiles on both the app and the extension.
-- Signed: `codesign --verify --deep --strict` on the app, the File Provider `.appex`, and the
-  `BeebeebFileProviderCtl` helper, each showing `Authority=Developer ID Application: Devidee B.V.
-  (R8352WDJJR)` and the hardened runtime flag.
-- Notarized: `xcrun notarytool submit --wait` → `Accepted`; `xcrun stapler staple` + `validate` on
-  both the `.app` and the `.dmg`; `spctl -a -vv` (app) and `spctl -a -vv -t install` (dmg) →
-  accepted, source=Notarized Developer ID.
-- Release workflow: the shared `bun test` + `cargo test --locked` gate (the counts above) runs
-  once on `ubuntu-latest` before any platform builds; Windows and Linux are then rebuilt by
-  `.github/workflows/release.yml`'s `tauri-action` step on `windows-latest`/`ubuntu-latest` from
-  that same gated, unchanged source (no test suite re-runs per platform — the gate is what's
-  tested, the platform matrix is what's built).
-- Not verified in this release: a real universal (Intel + Apple Silicon) macOS build — Apple
-  Silicon only ships today; Intel Mac users should wait for a follow-up release.
+- Gate run by the lead on `99856b2` plus PR #75 (task 1670, merge `01e3c4f`): `bun test` 359
+  pass, 0 fail; `cargo test --locked` (src-tauri, all binaries) 466 passed (`beebeeb_desktop_lib`)
+  + 0 (`beebeeb_desktop` main) + 20 (`keychain.rs`) + 8 (`windows_session_wiring.rs`) + 3
+  (`windows_signout_cleanup.rs`), 0 failed. Independently re-run for this release in a fresh
+  worktree at the same commit: identical counts.
+- `scripts/build-fileprovider-extension.sh` — the File Provider extension and its
+  `BeebeebFileProviderCtl` helper build and codesign cleanly (`codesign --verify` satisfies its
+  Designated Requirement on both).
+- Desktop CI (`.github/workflows/ci.yml`): 4/4 green on the release PR.
+- **Not verified: opening a file from Finder on a real Mac against a live File Provider domain.**
+  This alpha exists so that can be tested before anything reaches the stable channel. The task
+  1670 notes explain why it couldn't be reached in the development sandbox: this same Mac already
+  runs Guus's real Beebeeb.app 0.8.5, the IPC socket path and File Provider domain ID are
+  hardcoded singletons under the shared App Group container, and macOS sandbox home resolution
+  ignores `$HOME`, so a second, isolated daemon instance risked hijacking the real one's IPC
+  channel rather than testing in isolation.
+- Not verified: Windows/Linux real-hardware smoke tests for this release specifically (0.8.5's
+  hardware-smoke gap is unchanged; these platforms carry the same merged source as everything
+  else on `main` since 0.8.5 but are not the reason for this release).
 
 ### Install / Update
 
-Existing desktop installs (0.3.0 or later, on any platform) receive this release through the
-in-app updater automatically. For a fresh macOS install, download the `.dmg` from the GitHub
-release and drag Beebeeb into Applications — first launch is Gatekeeper-clean (notarized). For a
-fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+Alpha channel only — this build does not touch the stable manifest, and existing installs on the
+stable channel will not see it. Download the `.dmg` from the `desktop-v0.8.6` GitHub release and
+open it by hand; a Developer ID signed, notarized build installs Gatekeeper-clean the same way
+0.8.5 did. There is no in-app update path onto the alpha channel yet — this is a manual install
+for testing, not a rollout.
