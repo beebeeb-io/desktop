@@ -198,7 +198,7 @@ WebView shortcuts.
 | Files (Ctrl+1); Activity (Ctrl+2); Trash (Ctrl+4) | `open_menu_view` | Correct page, including already-open window |
 | Zoom in (Ctrl+=); out (Ctrl+-); Actual size (Ctrl+0) | WebView zoom | Visible zoom and reset |
 | Documentation; Keyboard shortcuts (Ctrl+/); Service status | external constants in lib.rs | Correct reachable page |
-| Report a problem | diagnostics export + support URL | Redacted artifact and external destination |
+| Report a problem | diagnostics export + support URL | Bundle holds queue counts, an error code and an allow-list-filtered last error (no paths, no file or folder names; task 1685); email draft opens without the local bundle path |
 | Cut/Copy/Paste/Select all | Tauri predefined edit menu | WebView text selection/editing |
 | About Beebeeb | Tauri predefined about dialog | Version/product identity |
 
@@ -253,7 +253,7 @@ placeholder default is unreachable for a validated NavId.
 | `sync_status` | `pages/VersionCenter.tsx`, `pages/SyncFolder.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `desktop_storage_summary` | `WindowsApp.tsx`, `pages/Status.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `free_up_space` | `windows/views/SettingsView.tsx` | Wired (surface table above) |
-| `export_diagnostics` | `pages/Account.tsx` | Native/internal handler; menu/daemon, no direct Windows TS button |
+| `export_diagnostics` | No TS literal | Native/internal handler; returns the redacted bundle JSON (format 2, task 1685) and is called by `report_problem`; no direct Windows TS button |
 | `list_version_conflict_center` | `pages/VersionCenter.tsx` | Compact-only; no Windows view action |
 | `list_file_versions` | `DesktopVersionHistory.tsx`, `pages/VersionCenter.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `restore_file_version` | `DesktopVersionHistory.tsx`, `pages/VersionCenter.tsx`, `desktopApi.ts` | Wired (surface table above) |
@@ -325,7 +325,7 @@ placeholder default is unreachable for a validated NavId.
 | `tray_resume_sync` | No TS literal | Native/internal handler; menu/daemon, no direct Windows TS button |
 | `upload_files_to_sync_root` | No TS literal | Native/internal handler; menu/daemon, no direct Windows TS button |
 | `create_folder_in_sync_root` | No TS literal | Native/internal handler; menu/daemon, no direct Windows TS button |
-| `report_problem` | No TS literal | Native/internal handler; menu/daemon, no direct Windows TS button |
+| `report_problem` | `pages/Account.tsx` | Compact Account page "Support bundle" button (task 1685; before it called `export_diagnostics`, which saved nothing) and the native Help menu; writes the bundle, reveals it, opens a support email draft; no direct Windows TS button |
 | `set_sync_mode` | `WindowsFirstRun.tsx` | Stub: persisted only; chooser absent |
 | `reveal_and_open_file` | `desktopApi.ts` | Wired (surface table above) |
 | `run_speedtest` | `desktopApi.ts` | Wired (surface table above) |

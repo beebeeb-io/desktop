@@ -25,6 +25,7 @@ mod callback_gate;
 mod config;
 mod conflict;
 mod desktop_search;
+mod diagnostic_redaction;
 mod desktop_capabilities;
 mod engine_bridge;
 #[cfg(test)]
@@ -3934,36 +3935,184 @@ fn free_up_space_unix(
     Ok(FreeUpSpaceResult { bytes_freed })
 }
 
+/// Version of the support-bundle shape. 2 = task 1685: `queue.last_error` is an
+/// allow-list-filtered message plus `last_error_code` and `last_error_redactions`;
+/// it never carries file paths or file/folder names.
+const DIAGNOSTICS_FORMAT: u32 = 2;
+
 #[tauri::command]
 fn export_diagnostics() -> Result<serde_json::Value, String> {
     let cfg = DesktopConfig::load()?;
-    let Some(_) = cfg.sync_root else {
+    match cfg.sync_root {
+        None => export_diagnostics_from(None, Path::new("")),
+        Some(root) => {
+            let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+            export_diagnostics_from(Some(&root), &db_path)
+        }
+    }
+}
+
+/// Builds the support-bundle JSON. Separate from the command so the real export
+/// path (including redaction) is unit-testable against a temp state DB.
+fn export_diagnostics_from(sync_root: Option<&Path>, db_path: &Path) -> Result<serde_json::Value, String> {
+    let Some(sync_root) = sync_root else {
         return Ok(serde_json::json!({
+            "diagnostics_format": DIAGNOSTICS_FORMAT,
             "sync_root_configured": false,
             "queue": serde_json::Value::Null,
         }));
     };
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(serde_json::json!({
+            "diagnostics_format": DIAGNOSTICS_FORMAT,
             "sync_root_configured": true,
             "state_db_exists": false,
             "queue": serde_json::Value::Null,
         }));
     }
-    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    let db = state_db::StateDb::open(db_path).map_err(|e| format!("open state.db: {e}"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    // The sync-root path (and so the account's home folder name) is a name too.
+    let extra_paths = vec![sync_root.to_string_lossy().into_owned()];
     let queue = db
-        .queue_diagnostics(now)
+        .queue_diagnostics_with_paths(now, &extra_paths)
         .map_err(|e| format!("queue diagnostics: {e}"))?;
     Ok(serde_json::json!({
+        "diagnostics_format": DIAGNOSTICS_FORMAT,
         "sync_root_configured": true,
         "state_db_exists": true,
         "queue": queue,
     }))
+}
+
+#[cfg(test)]
+mod diagnostics_export_tests {
+    use super::*;
+    use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
+
+    fn seeded_db(dir: &Path, name_path: &str, error: &str) -> PathBuf {
+        let db_path = dir.join("state.db");
+        let db = StateDb::open(&db_path).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f1".into(),
+            path: name_path.into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("f1".into()),
+            parent_id: None,
+            target_path: Some(name_path.into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+        db.record_operation_attempt("op-1", 1, 10, Some(error)).unwrap();
+        db_path
+    }
+
+    /// Task 1685: the whole bundle that `report_problem` writes to disk and the
+    /// user emails to support, not just one struct.
+    #[test]
+    fn bundle_has_no_path_or_known_name_and_reports_the_redaction_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Path::new("/Users/guus/Library/CloudStorage/Beebeeb-Drive");
+        let db_path = seeded_db(
+            dir.path(),
+            "Tax 2025/aangifte.pdf",
+            "/Users/guus/Library/CloudStorage/Beebeeb-Drive/Tax 2025/aangifte.pdf failed Bearer abc.def.ghi",
+        );
+        let bundle = export_diagnostics_from(Some(root), &db_path).unwrap();
+        let text = serde_json::to_string_pretty(&bundle).unwrap();
+        for leaked in ["guus", "Users", "CloudStorage", "Beebeeb-Drive", "Tax 2025", "Tax", "aangifte", "abc.def.ghi"] {
+            assert!(!text.contains(leaked), "{leaked:?} leaked into the bundle:\n{text}");
+        }
+        assert_eq!(bundle["diagnostics_format"], 2);
+        assert_eq!(bundle["queue"]["last_error_code"], "other");
+        assert!(
+            bundle["queue"]["last_error_redactions"].as_u64().unwrap() >= 2,
+            "a path and a token were removed, the count must say so:\n{text}"
+        );
+        assert!(bundle["queue"]["last_error"].as_str().unwrap().contains("failed"));
+    }
+
+    #[test]
+    fn sync_root_components_are_scrubbed_even_when_the_error_names_only_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Path::new("/Users/guus/Library/CloudStorage/Beebeeb-Drive");
+        let db_path = seeded_db(dir.path(), "a.txt", "sync root Beebeeb-Drive guus is not writable");
+        let bundle = export_diagnostics_from(Some(root), &db_path).unwrap();
+        let text = serde_json::to_string(&bundle).unwrap();
+        assert!(!text.contains("guus"), "{text}");
+        assert!(!text.contains("Beebeeb-Drive"), "{text}");
+    }
+
+    #[test]
+    fn sync_root_components_reach_the_name_scan() {
+        // `folder` is an ordinary error word, so only the name scan (fed the
+        // sync root) can remove it: this proves the extra-path plumbing.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(dir.path(), "a.txt", "sync root folder is not allowed");
+        let bundle = export_diagnostics_from(Some(Path::new("/srv/folder")), &db_path).unwrap();
+        let text = bundle["queue"]["last_error"].as_str().unwrap().to_string();
+        assert_eq!(text, "sync root [name] is not allowed", "{text}");
+    }
+
+    #[test]
+    fn multiword_name_without_a_slash_is_scrubbed_end_to_end() {
+        // `2025` is a bare number, which the allow-list keeps, so only the
+        // known-name scan can remove this one.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(dir.path(), "Tax 2025/aangifte.pdf", "upload of Tax 2025 failed");
+        let bundle = export_diagnostics_from(Some(Path::new("/x")), &db_path).unwrap();
+        let text = bundle["queue"]["last_error"].as_str().unwrap().to_string();
+        assert!(!text.contains("2025"), "{text}");
+        assert!(!text.contains("Tax"), "{text}");
+        assert!(text.contains("failed"), "{text}");
+    }
+
+    #[test]
+    fn email_draft_names_the_bundle_file_but_not_its_folder() {
+        let body = problem_report_email_body(Path::new(
+            "/Users/guus/Library/Application Support/io.beebeeb.app/diagnostics/beebeeb-diagnostics-1.json",
+        ));
+        assert!(body.contains("beebeeb-diagnostics-1.json"), "{body}");
+        for leaked in ["guus", "Users", "Application Support", "io.beebeeb.app"] {
+            assert!(!body.contains(leaked), "{leaked:?} in {body}");
+        }
+    }
+
+    #[test]
+    fn unconfigured_and_missing_db_bundles_carry_the_format_version_and_no_queue() {
+        let none = export_diagnostics_from(None, Path::new("")).unwrap();
+        assert_eq!(none["diagnostics_format"], 2);
+        assert_eq!(none["sync_root_configured"], false);
+        let dir = tempfile::tempdir().unwrap();
+        let missing =
+            export_diagnostics_from(Some(Path::new("/x")), &dir.path().join("absent.db")).unwrap();
+        assert_eq!(missing["state_db_exists"], false);
+        assert!(missing["queue"].is_null());
+    }
 }
 
 // ── IPC commands: conflict/version center ───────────────────────────────────
@@ -4562,6 +4711,18 @@ fn diagnostics_bundle_path() -> Result<PathBuf, String> {
     Ok(dir.join(format!("beebeeb-diagnostics-{}.json", now_unix_seconds())))
 }
 
+/// Body of the support email draft. Names only the bundle's file name, never
+/// its folder: the folder sits under the user's home directory (task 1685).
+fn problem_report_email_body(bundle_path: &Path) -> String {
+    let file_name = bundle_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "beebeeb-diagnostics.json".to_string());
+    format!(
+        "Describe the problem here.\n\nThe support bundle {file_name} was saved on this computer and shown in your file manager. Attach it to this email after you have read it."
+    )
+}
+
 fn report_problem_impl(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let diagnostics = export_diagnostics()?;
     let path = diagnostics_bundle_path()?;
@@ -4570,10 +4731,7 @@ fn report_problem_impl(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
     let _ = app.opener().reveal_item_in_dir(&path);
     let subject = urlencoding::encode("Beebeeb desktop problem report");
-    let body_text = format!(
-        "Describe the problem here.\n\nDiagnostics bundle saved at:\n{}",
-        path.display()
-    );
+    let body_text = problem_report_email_body(&path);
     let body = urlencoding::encode(&body_text);
     app.opener()
         .open_url(

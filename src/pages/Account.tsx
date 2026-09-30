@@ -12,6 +12,12 @@ import {
   type Subscription,
   type SyncStatus,
 } from '../desktopApi'
+import {
+  SUPPORT_BUNDLE_DETAIL,
+  SUPPORT_BUNDLE_SAVED_TITLE,
+  SUPPORT_BUNDLE_TITLE,
+  supportBundleSavedMessage,
+} from '../diagnosticsCopy'
 import { planRenewalCopy, planStatusTone, quotaPercent, titleCasePlan } from '../planPresentation'
 
 const WEB_APP_URL = 'https://app.beebeeb.io'
@@ -144,14 +150,25 @@ export default function Account() {
     })
   }
 
+  // `report_problem` writes the bundle and reveals it; `export_diagnostics`
+  // only returns the JSON to the webview, so calling it here saved nothing.
   const diagnostics = async () => {
-    if (await runAction('export_diagnostics')) {
+    setBusy('report_problem')
+    const result = await command<string>('report_problem')
+    setBusy(null)
+    if (!result.ok) {
       showToast({
-        variant: 'success',
-        title: 'Diagnostics export started',
-        message: 'The bundle is being written to your sync folder.',
+        variant: 'error',
+        title: 'Couldn’t save the support bundle',
+        message: result.unsupported ? commandUnavailableLabel('report_problem') : result.reason,
       })
+      return
     }
+    showToast({
+      variant: 'success',
+      title: SUPPORT_BUNDLE_SAVED_TITLE,
+      message: supportBundleSavedMessage(result.value),
+    })
   }
 
   const loggedIn = status?.logged_in ?? false
@@ -279,10 +296,10 @@ export default function Account() {
           <h2 className="section-title">Diagnostics</h2>
           <div className="row">
             <div>
-              <div className="row-title">Support bundle</div>
-              <div className="row-detail">Export logs and daemon state without secrets or plaintext names.</div>
+              <div className="row-title">{SUPPORT_BUNDLE_TITLE}</div>
+              <div className="row-detail">{SUPPORT_BUNDLE_DETAIL}</div>
             </div>
-            <button className="button" disabled={busy === 'export_diagnostics'} onClick={() => void diagnostics()}>
+            <button className="button" disabled={busy === 'report_problem'} onClick={() => void diagnostics()}>
               Export
             </button>
           </div>
