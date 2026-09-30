@@ -1000,6 +1000,9 @@ mod tests {
             while Instant::now() < deadline && matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
+                        // Winsock inherits the listener's nonblocking mode.
+                        // Read a complete request with the bounded timeout below.
+                        socket.set_nonblocking(false).unwrap();
                         socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                         let mut bytes = Vec::new();
                         let mut buf = [0; 4096];
