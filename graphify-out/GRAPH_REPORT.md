@@ -1,11 +1,11 @@
 # Graph Report - desktop-1640  (2026-09-30)
 
 ## Corpus Check
-- 168 files · ~385,967 words
+- 168 files · ~386,027 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2656 nodes · 5765 edges · 36 communities detected
+- 2656 nodes · 5767 edges · 36 communities detected
 - Extraction: 82% EXTRACTED · 18% INFERRED · 0% AMBIGUOUS · INFERRED: 1052 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
@@ -83,83 +83,83 @@ Nodes (229): is_text_file(), apply_shared_context(), apply_shared_metadata_file_
 
 ### Community 2 - "Community 2"
 Cohesion: 0.02
-Nodes (138): diagnostics(), lock(), refresh(), runAction(), toggleStartAtLogin(), unlock(), toggleFolder(), openRoot() (+130 more)
+Nodes (93): local_index_builds_from_state_db_leaf_file_names_and_skips_folders(), local_query_uses_core_tokenization_and_returns_ranked_results(), seed_file(), apply_metadata_file_row(), record_moved_to_trash_activity_writes_deletion_event(), resolve_relative_path(), test_metadata_file_row_classifies_folder_rows(), test_metadata_file_row_composes_nested_path_under_parent() (+85 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.02
-Nodes (93): local_index_builds_from_state_db_leaf_file_names_and_skips_folders(), local_query_uses_core_tokenization_and_returns_ranked_results(), seed_file(), apply_metadata_file_row(), record_moved_to_trash_activity_writes_deletion_event(), resolve_relative_path(), test_metadata_file_row_classifies_folder_rows(), test_metadata_file_row_composes_nested_path_under_parent() (+85 more)
+Nodes (116): toggleFolder(), openRoot(), formatBytes(), openSetup(), refresh(), chooseFolderClick(), installFinder(), openFinder() (+108 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.02
-Nodes (98): AccountConfig, AccountId, AccountRuntime, active_account_after_synthesis_is_default_shape(), active_account_empty_registry_errs(), fixed_id(), synthesize_is_idempotent(), synthesize_single_account() (+90 more)
-
-### Community 5 - "Community 5"
 Cohesion: 0.03
 Nodes (49): api_client_list_files_sends_provenance_headers_on_the_wire(), api_client_zeroizes_master_key_on_drop(), ApiClient, CreatedSession, DesktopUploadInitRequest, DesktopUploadInitResponse, header_secs(), header_secs_parses_numeric_and_rejects_dates() (+41 more)
 
-### Community 6 - "Community 6"
+### Community 5 - "Community 5"
 Cohesion: 0.04
 Nodes (41): AndroidKeyboard(), IOSKeyboard(), account_email_absent_returns_none(), account_email_round_trips(), AuthSecretStore, AuthStoreError, AuthVault, AuthVault<S> (+33 more)
 
-### Community 7 - "Community 7"
+### Community 6 - "Community 6"
 Cohesion: 0.03
 Nodes (101): account_activity_parses_events_and_summary(), account_profile_parses_full_shape(), account_profile_parses_minimal_shape(), account_sessions_parse(), AccountActivity, AccountActivityEvent, AccountActivitySummary, AccountProfile (+93 more)
 
+### Community 7 - "Community 7"
+Cohesion: 0.03
+Nodes (86): AccountConfig, AccountId, AccountRuntime, active_account_after_synthesis_is_default_shape(), active_account_empty_registry_errs(), fixed_id(), synthesize_is_idempotent(), synthesize_single_account() (+78 more)
+
 ### Community 8 - "Community 8"
 Cohesion: 0.03
-Nodes (92): DesktopSettings, engine_internal_filters_state_dir_and_lock(), relative_db_path_is_slash_joined_without_leading_slash(), build_macos_file_provider_bridge(), main(), content_is_confirmed(), should_inspect_close(), db_placeholder_path() (+84 more)
+Nodes (77): DesktopSettings, engine_internal_filters_state_dir_and_lock(), ipc_hydrate_roundtrip(), ipc_socket_file_is_chmod_0600_after_bind(), relative_db_path_is_slash_joined_without_leading_slash(), bind_ipc_listener(), capabilities_for_status(), file_entry_payload() (+69 more)
 
 ### Community 9 - "Community 9"
+Cohesion: 0.05
+Nodes (75): is_ignored_finder_name(), path_is_engine_internal(), relative_db_path(), assert_uploading_row(), debounce_loop(), dispatch_local_create(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths() (+67 more)
+
+### Community 10 - "Community 10"
 Cohesion: 0.04
 Nodes (34): FileProviderEnumerator, FileProviderExtension, BeebeebItemKind, file, folder, namespace, BeebeebNamespace, conflicts (+26 more)
 
-### Community 10 - "Community 10"
-Cohesion: 0.06
-Nodes (61): check(), main(), self_test(), ipc_hydrate_roundtrip(), ipc_socket_file_is_chmod_0600_after_bind(), bind_ipc_listener(), capabilities_for_status(), file_entry_payload() (+53 more)
-
 ### Community 11 - "Community 11"
-Cohesion: 0.12
-Nodes (35): is_ignored_finder_name(), path_is_engine_internal(), relative_db_path(), assert_uploading_row(), debounce_loop(), dispatch_local_create(), engine_delete_suppress(), engine_delete_suppression_distinguishes_paths() (+27 more)
+Cohesion: 0.04
+Nodes (42): diagnostics(), lock(), refresh(), runAction(), toggleStartAtLogin(), unlock(), initialPage(), refresh() (+34 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.11
-Nodes (23): api_client_search_shard_urls_match_web_paths(), build_local_index(), compare_records_for_query(), DesktopSearchIndexState, DesktopSearchResponse, DesktopSearchResult, FixtureSearchStore, FixtureState (+15 more)
+Cohesion: 0.06
+Nodes (30): backup_dest_root(), backup_source_key_for_rel_path(), backup_source_key_for_this_device(), classify_copy(), classify_skip_when_size_and_mtime_match(), copy_preserving_mtime(), CopyDecision, dest_root_builds_backup_device_folder() (+22 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.11
-Nodes (20): build_ws_request(), decrypt_payload(), device_code_recv_errors_immediately_on_closed_connection(), device_code_recv_returns_promptly_on_healthy_connection(), device_code_recv_times_out_when_server_stalls_after_connect(), emit(), HealthyStream, open_browser() (+12 more)
+Nodes (25): check(), main(), self_test(), Contract, Fixture, purge(), StateDb, windows_signout_hydrated_sentinel_is_not_external_cache() (+17 more)
 
 ### Community 14 - "Community 14"
+Cohesion: 0.11
+Nodes (23): api_client_search_shard_urls_match_web_paths(), build_local_index(), compare_records_for_query(), DesktopSearchIndexState, DesktopSearchResponse, DesktopSearchResult, FixtureSearchStore, FixtureState (+15 more)
+
+### Community 15 - "Community 15"
 Cohesion: 0.19
 Nodes (24): http_json(), resumable_mock_response(), regression_1640_r3_changed_download_never_establishes_baseline(), regression_1640_r3_download_baseline_survives_remote_update(), regression_1640_r3_keep_both_chain_restart_save(), regression_1640_r3_keep_mine_chain_restart_save(), regression_1640_r3_keep_theirs_chain_restart_save(), regression_1640_r3_native_append_queues_dirty_partial() (+16 more)
 
-### Community 15 - "Community 15"
+### Community 16 - "Community 16"
 Cohesion: 0.12
 Nodes (17): file_provider_domain_user_enabled(), finder_domain_user_enabled(), buffer_to_string(), call_bridge(), decide_install_step(), domain_exists(), domain_user_enabled(), domain_user_enabled_state() (+9 more)
 
-### Community 16 - "Community 16"
+### Community 17 - "Community 17"
 Cohesion: 0.14
 Nodes (18): ancestors(), classifyJsxUsage(), comparesToErrorPhase(), isCorrectableInput(), isErrorOrigin(), isInsideUseEffect(), isLoadPath(), isRetryCallback() (+10 more)
 
-### Community 17 - "Community 17"
+### Community 18 - "Community 18"
 Cohesion: 0.19
 Nodes (12): CallbackGate, CallbackGate<T>, CallbackLease, CallbackLease<T>, drain_waits_for_transfer_and_releases_credentials(), Generation, LeaseState, revoke_denies_new_work_and_cancels_existing_work() (+4 more)
-
-### Community 18 - "Community 18"
-Cohesion: 0.24
-Nodes (19): archive_legacy_state_dir_if_present(), beebeeb_state_dir_from_app_local_data(), copy_dir_all(), copy_dir_contents_no_clobber(), copy_file(), fresh_sync_root_uses_app_local_state_dir(), init_from_app(), migrate_legacy_state_dir() (+11 more)
 
 ### Community 19 - "Community 19"
 Cohesion: 0.18
 Nodes (15): remove_linux_freedesktop_thumbnails_for_evicted_files(), encode_freedesktop_png(), file_uri(), fixture_png(), FreedesktopThumbnailSize, md5_hex(), png_output_is_rgba_resized_and_embeds_uri_and_mtime_text_chunks(), remove_freedesktop_thumbnails() (+7 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.16
-Nodes (11): auto_resolution_deadline(), ConflictRecord, is_conflict(), Resolution, test_conflict_detected_when_both_sides_changed(), test_no_conflict_when_both_sides_landed_on_same_hash(), test_no_conflict_when_only_local_changed(), test_no_conflict_when_only_remote_changed() (+3 more)
+Cohesion: 0.24
+Nodes (19): archive_legacy_state_dir_if_present(), beebeeb_state_dir_from_app_local_data(), copy_dir_all(), copy_dir_contents_no_clobber(), copy_file(), fresh_sync_root_uses_app_local_state_dir(), init_from_app(), migrate_legacy_state_dir() (+11 more)
 
 ### Community 21 - "Community 21"
-Cohesion: 0.22
-Nodes (7): Contract, Fixture, purge(), StateDb, windows_signout_hydrated_sentinel_is_not_external_cache(), windows_signout_rejects_external_cache_before_deleting_placeholders(), windows_signout_retries_after_partial_cleanup_with_hydrated_sentinel()
+Cohesion: 0.16
+Nodes (11): auto_resolution_deadline(), ConflictRecord, is_conflict(), Resolution, test_conflict_detected_when_both_sides_changed(), test_no_conflict_when_both_sides_landed_on_same_hash(), test_no_conflict_when_only_local_changed(), test_no_conflict_when_only_remote_changed() (+3 more)
 
 ### Community 22 - "Community 22"
 Cohesion: 0.34
@@ -236,11 +236,11 @@ Nodes (1): StatusUiSourceFactory_Impl
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `load()` connect `Community 0` to `Community 11`, `Community 1`, `Community 2`, `Community 10`?**
+- **Why does `load()` connect `Community 0` to `Community 8`, `Community 1`, `Community 3`, `Community 9`?**
   _High betweenness centrality (0.120) - this node is a cross-community bridge._
-- **Why does `commandUnavailableLabel()` connect `Community 2` to `Community 0`, `Community 9`?**
+- **Why does `commandUnavailableLabel()` connect `Community 3` to `Community 0`, `Community 10`, `Community 11`?**
   _High betweenness centrality (0.108) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 0` to `Community 1`, `Community 4`, `Community 6`, `Community 7`, `Community 9`, `Community 18`?**
+- **Why does `run()` connect `Community 0` to `Community 1`, `Community 5`, `Community 6`, `Community 7`, `Community 10`, `Community 20`?**
   _High betweenness centrality (0.060) - this node is a cross-community bridge._
 - **Are the 69 inferred relationships involving `load()` (e.g. with `commandUnavailableLabel()` and `.do_upload_version()`) actually correct?**
   _`load()` has 69 INFERRED edges - model-reasoned connections that need verification._
