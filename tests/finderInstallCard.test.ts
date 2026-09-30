@@ -21,7 +21,13 @@
  * one, including the user_disabled case).
  */
 import { describe, expect, test } from 'bun:test'
-import { classifyFinderInstallResult, finderLocationButtonPlan, shouldRetryAfterUserEnabledPoll } from '../src/finderInstallCard'
+import {
+  classifyFinderInstallResult,
+  finderInstallStateAfterAttempt,
+  finderInstallStateWhileAttempting,
+  finderLocationButtonPlan,
+  shouldRetryAfterUserEnabledPoll,
+} from '../src/finderInstallCard'
 import type { CommandResult, FinderInstallState } from '../src/desktopApi'
 
 function installState(overrides: Partial<FinderInstallState> = {}): FinderInstallState {
@@ -121,5 +127,45 @@ describe('finderInstallCard.finderLocationButtonPlan (task 1670)', () => {
 
   test('not installed -> only "Install in Finder"', () => {
     expect(finderLocationButtonPlan(false)).toEqual({ showInstall: true, showOpen: false })
+  })
+})
+
+describe('finderInstallCard one-inline-error helpers (task 1683 slice 5, decision D1)', () => {
+  const UNAVAILABLE = 'install_finder_location is not wired in this build yet.'
+  const saved = installState({ status: 'error', last_error: 'Timed out', reason_category: 'timeout', path: 'Beebeeb in Finder' })
+
+  test('a saved failure returned as a state is passed through untouched (it is already the one source)', () => {
+    expect(finderInstallStateAfterAttempt({ ok: true, value: saved }, null, UNAVAILABLE)).toEqual(saved)
+  })
+
+  test('a rejected command (never saved) is folded into the same inline state, keeping the known path', () => {
+    const next = finderInstallStateAfterAttempt({ ok: false, reason: 'Finder location must be absolute', unsupported: false }, installState({ path: 'Beebeeb in Finder' }), UNAVAILABLE)
+    expect(next).toMatchObject({ installed: false, status: 'error', last_error: 'Finder location must be absolute', reason_category: null, path: 'Beebeeb in Finder' })
+  })
+
+  test('a rejection with no previous state still yields an inline error, not nothing', () => {
+    const next = finderInstallStateAfterAttempt({ ok: false, reason: 'boom', unsupported: false }, null, UNAVAILABLE)
+    expect(next.installed).toBe(false)
+    expect(next.last_error).toBe('boom')
+  })
+
+  test('an unsupported command shows the honest label, not the raw transport error', () => {
+    const next = finderInstallStateAfterAttempt({ ok: false, reason: 'unknown command install_finder_location', unsupported: true }, null, UNAVAILABLE)
+    expect(next.last_error).toBe(UNAVAILABLE)
+  })
+
+  test('a failed attempt never reads as installed, even if the previous state was', () => {
+    const next = finderInstallStateAfterAttempt({ ok: false, reason: 'boom', unsupported: false }, installState({ installed: true }), UNAVAILABLE)
+    expect(next.installed).toBe(false)
+  })
+
+  test('starting a new attempt clears the stale failure and keeps everything else', () => {
+    const next = finderInstallStateWhileAttempting(saved)
+    expect(next).toMatchObject({ last_error: null, status: 'missing', reason_category: null, path: 'Beebeeb in Finder', installed: false })
+  })
+
+  test('starting a new attempt does not rewrite a non-error status, and tolerates no state yet', () => {
+    expect(finderInstallStateWhileAttempting(installState({ status: 'installed', installed: true }))?.status).toBe('installed')
+    expect(finderInstallStateWhileAttempting(null)).toBeNull()
   })
 })

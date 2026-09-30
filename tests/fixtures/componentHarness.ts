@@ -1,0 +1,138 @@
+/**
+ * Minimal harness that EXECUTES a production component declaration with controlled hooks
+ * (same technique as `tests/syncRoot.test.ts`, extracted so task 1683's one-error-surface
+ * tests can drive click -> await backend -> re-render without a DOM library).
+ *
+ * What it proves: the component's real handlers and real render output for a scripted
+ * sequence of backend answers. What it does NOT prove: browser layout, React scheduling,
+ * focus, or native macOS behaviour (the Playwright screenshots in the task evidence cover
+ * the real-DOM side locally).
+ */
+import { readFileSync } from 'node:fs'
+import { createElement, Fragment } from 'react'
+import ts from 'typescript'
+
+export function loadComponent(file: string, name: string, bindings: Record<string, unknown>) {
+  const source = readFileSync(new URL(`../../src/${file}`, import.meta.url), 'utf8')
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const declaration = ast.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === name)
+  if (!declaration) throw new Error(`Missing component ${name} in ${file}`)
+  const compiled = ts.transpileModule(declaration.getText(ast).replace(/^export (default )?/, ''), {
+    compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  return new Function(...Object.keys(bindings), `${compiled}; return ${name}`)(...Object.values(bindings))
+}
+
+export interface TreeNode {
+  type: unknown
+  props: Record<string, any>
+}
+
+export function elementsOf(node: any): TreeNode[] {
+  if (Array.isArray(node)) return node.flatMap(elementsOf)
+  return node?.props ? [node, ...elementsOf(node.props.children)] : []
+}
+
+export function textOf(node: any): string {
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  if (node?.props) return textOf(node.props.children)
+  return node == null || typeof node === 'boolean' ? '' : String(node)
+}
+
+export type Handler = (args: any) => unknown | Promise<unknown>
+
+export interface Mounted {
+  toasts: any[]
+  calls: Array<{ name: string; args: any }>
+  tree: () => any
+  elements: () => TreeNode[]
+  render: () => void
+  flush: () => Promise<void>
+  /** Click the button whose text is exactly `label`; resolves after the handler and a re-render. */
+  click: (label: string) => Promise<void>
+  /** Start the click but do not wait for it (to inspect the in-flight render). */
+  clickNoWait: (label: string) => Promise<void>
+  close: () => void
+}
+
+export function mount(
+  file: string,
+  name: string,
+  opts: { backend: Record<string, Handler>; bindings?: Record<string, unknown>; props?: any },
+): Mounted {
+  const states: any[] = []
+  const deps: any[][] = []
+  const effects: Array<() => unknown> = []
+  const toasts: any[] = []
+  const calls: Array<{ name: string; args: any }> = []
+  let cursor = 0
+  let tree: any
+  const previousWindow = (globalThis as any).window
+  ;(globalThis as any).window = {
+    setInterval: () => 0,
+    clearInterval() {},
+    __TAURI_INTERNALS__: {
+      invoke: async (command: string, args: any) => {
+        calls.push({ name: command, args })
+        const handler = opts.backend[command]
+        if (!handler) throw new Error(`unscripted command ${command}`)
+        return handler(args)
+      },
+    },
+  }
+  const View = loadComponent(file, name, {
+    React: { createElement, Fragment },
+    useState(initial: any) {
+      const index = cursor++
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
+      return [states[index], (next: any) => { states[index] = typeof next === 'function' ? next(states[index]) : next }]
+    },
+    useEffect(fn: any, next: any[]) {
+      const index = cursor++
+      if (!deps[index] || !next || next.some((v, i) => v !== deps[index][i])) effects.push(fn)
+      deps[index] = next
+    },
+    useMemo: (fn: any) => fn(),
+    useCallback: (fn: any) => fn,
+    useToast: () => ({ showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }),
+    ...opts.bindings,
+  })
+  const render = () => { cursor = 0; tree = View(opts.props ?? {}) }
+  const flush = async () => {
+    for (let i = 0; i < 12; i++) { while (effects.length) effects.shift()!(); await Promise.resolve() }
+    render()
+  }
+  const findButton = (label: string) => {
+    const match = elementsOf(tree).find((el) => el.type === 'button' && textOf(el.props.children).trim() === label)
+    if (!match) throw new Error(`no button "${label}" in the current render`)
+    return match
+  }
+  render()
+  return {
+    toasts,
+    calls,
+    tree: () => tree,
+    elements: () => elementsOf(tree),
+    render,
+    flush,
+    click: async (label) => { await findButton(label).props.onClick(); await flush() },
+    clickNoWait: async (label) => { void findButton(label).props.onClick(); render() },
+    close() { (globalThis as any).window = previousWindow },
+  }
+}
+
+/**
+ * Every error surface currently visible: inline notices styled as errors (`notice error`),
+ * anything explicitly marked `data-error-surface`, plus error toasts. Returned as labelled
+ * strings so a failing assertion shows WHICH surfaces rendered.
+ */
+export function visibleErrorSurfaces(m: Mounted): string[] {
+  const inline = m.elements()
+    .filter((el) => {
+      const cls = String(el.props.className ?? '')
+      return (/\bnotice\b/.test(cls) && /\berror\b/.test(cls)) || el.props['data-error-surface'] != null
+    })
+    .map((el) => `inline: ${textOf(el.props.children).trim()}`)
+  const toasts = m.toasts.filter((t) => t.variant === 'error').map((t) => `toast: ${t.title} — ${t.message}`)
+  return [...inline, ...toasts]
+}

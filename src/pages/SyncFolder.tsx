@@ -8,7 +8,7 @@ import {
   type MacosIntegrationResetResult,
   type SyncStatus,
 } from '../desktopApi'
-import { finderLocationButtonPlan } from '../finderInstallCard'
+import { finderInstallStateAfterAttempt, finderInstallStateWhileAttempting, finderLocationButtonPlan } from '../finderInstallCard'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -26,11 +26,20 @@ export default function SyncFolder() {
   const [resetPhase, setResetPhase] = useState<ResetPhase>('idle')
   const [rootUnavailable, setRootUnavailable] = useState(false)
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
+  // Deliberately inline (decision D1, task 1683 slice 5): the last install attempt's failure
+  // lives in this state and GATES "Open in Finder" — that button only exists once the install
+  // has succeeded (`finderLocationButtonPlan(installed)` below) — so it is an error that gates a
+  // control, which the house rule keeps inline. It is also the state `finder_location_state`
+  // persists, so the same failure is read back after a reopen. Toasting it too is the
+  // double render this task removed; tests/finderInstallOneSurface.test.tsx pins "exactly one".
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- gates "Open in Finder"; see above
   const [installState, setInstallState] = useState<FinderInstallState | null>(null)
   const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
   const [busy, setBusy] = useState(false)
   // Survives the split: still carries the LOAD failure for the Finder install state, which
-  // must persist because the panel stays on screen without it. All four action failures toast.
+  // must persist because the panel stays on screen without it. The folder-picker, open-folder and
+  // reset failures toast. The Finder INSTALL failure does not: it gates "Open in Finder", so it is
+  // the inline banner driven by `installState` (decision D1, task 1683 slice 5).
   //
   // The `setNotice(null)` resets that used to open each action handler are gone ON PURPOSE.
   // They predate the split, when the same state carried both failures and clearing it before
@@ -70,19 +79,19 @@ export default function SyncFolder() {
     })
   }
 
+  // D1 (task 1683 slice 5): a failed install GATES "Open in Finder", so it is ONE inline banner
+  // (`installState.last_error` below), never also a toast. The backend saves the failure and
+  // returns it as a state; a rejected command (a failure that was never saved) is folded into
+  // the same state, so the pane renders it from one place. The previous attempt's failure is
+  // cleared while a new attempt runs. See finderInstallCard.ts.
   const installFinder = async () => {
     setBusy(true)
+    setInstallState(finderInstallStateWhileAttempting)
     const result = await command<FinderInstallState>('install_finder_location', { path: syncRoot })
     setBusy(false)
-    if (result.ok) {
-      setInstallState(result.value)
-      return
-    }
-    showToast({
-      variant: 'error',
-      title: 'Couldn’t install the Finder location',
-      message: result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason,
-    })
+    setInstallState((previous) =>
+      finderInstallStateAfterAttempt(result, previous, commandUnavailableLabel('install_finder_location')),
+    )
   }
 
   const openFinder = async () => {
@@ -163,7 +172,7 @@ export default function SyncFolder() {
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
       {finderLastError && (
-        <div className="notice error" style={{ marginBottom: 14 }}>
+        <div className="notice error" data-error-surface="finder-install" style={{ marginBottom: 14 }}>
           {finderLastError}
         </div>
       )}

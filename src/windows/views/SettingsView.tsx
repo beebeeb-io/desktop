@@ -54,6 +54,7 @@ import {
   buildDataResidencyViewState,
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
+import { finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../../finderInstallCard'
 import { setDesktopThemePreference } from '../theme'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
 
@@ -936,27 +937,25 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     return () => { cancelled = true }
   }, [showToast, midSentenceLabel, commands])
 
+  // D1 (task 1683 slice 5): a failed install GATES the row's action, so it is ONE inline error
+  // under the row (`state.last_error`), never also a toast. The backend saves the failure and
+  // returns it as a state; a rejected command (never saved, or the Windows twin) is folded into
+  // the same state by finderInstallStateAfterAttempt. A new attempt clears the old failure.
   const enable = async () => {
     if (!commands) return
     setBusy(true)
+    setState(finderInstallStateWhileAttempting)
     // macOS ignores `path` and always installs at the default sync root
     // (src-tauri/src/lib.rs `install_finder_location`), same as Onboarding.tsx.
     const args = platform === 'macos' ? { path: null } : undefined
     const r = await command<ShellIntegrationState>(commands.install, args)
     setBusy(false)
-    if (r.ok) {
-      setState(r.value)
-      void refresh()
-      return
-    }
-    showToast({
-      variant: 'error',
-      title: `Couldn’t ${actionVerb.toLowerCase()} ${midSentenceLabel}`,
-      message: r.unsupported ? commandUnavailableLabel(commands.install) : r.reason,
-    })
+    setState((previous) => finderInstallStateAfterAttempt(r, previous, commandUnavailableLabel(commands.install)))
+    if (r.ok && r.value.installed) void refresh()
   }
 
   const active = state?.installed === true
+  const installError = !active ? state?.last_error?.trim() : undefined
   const deviceNoun = platform ? thisDeviceNoun(platform) : 'this device'
   const statusText = !resolved
     ? 'Checking...'
@@ -994,6 +993,26 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
         )}
         {commands && !checking && active && <Chip tone="green">Active</Chip>}
       </Card>
+
+      {commands && !checking && installError && (
+        <div
+          role="alert"
+          data-error-surface="finder-install"
+          style={{
+            marginTop: 10,
+            padding: '10px 12px',
+            background: 'var(--err-bg)',
+            border: '1px solid var(--err-line)',
+            borderRadius: 8,
+            color: T.ink,
+            fontSize: 12,
+            lineHeight: 1.5,
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {installError}
+        </div>
+      )}
     </SettingsSectionShell>
   )
 }
