@@ -308,10 +308,10 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
     unsafe {
         let mut handle = HKEY::default();
         assert_eq!(RegCreateKeyExW(HKEY_CURRENT_USER, &key, 0, None, REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut handle, None), ERROR_SUCCESS);
-        RegCloseKey(handle).unwrap();
+        assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
         let result = crate::windows_cf::unregister_shell_sync_root(&f.root);
         let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
-        if remaining == ERROR_SUCCESS { RegCloseKey(handle).unwrap(); }
+        if remaining == ERROR_SUCCESS { assert_eq!(RegCloseKey(handle), ERROR_SUCCESS); }
         // Test cleanup even when the baseline leaves the key behind.
         let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
         assert!(result.is_ok(), "unregister: {result:?}");
