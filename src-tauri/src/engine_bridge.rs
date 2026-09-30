@@ -4001,28 +4001,6 @@ fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
-#[cfg(test)]
-fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) -> anyhow::Result<String> {
-    let source = Path::new(contents_path);
-    if !source.is_file() {
-        return Err(anyhow::anyhow!(
-            "Finder content path is not a file: {}",
-            source.display()
-        ));
-    }
-    std::fs::create_dir_all(&staging_root)
-        .map_err(|e| anyhow::anyhow!("create Finder staging dir {}: {e}", staging_root.display()))?;
-    let op_id = uuid::Uuid::new_v4();
-    let safe_name = source
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(sanitize_staging_name)
-        .unwrap_or_else(|| "payload".to_string());
-    let dest = staging_root.join(format!("{op_id}-{safe_name}"));
-    std::fs::copy(source, &dest)
-        .map_err(|e| anyhow::anyhow!("copy Finder payload {} -> {}: {e}", source.display(), dest.display()))?;
-    Ok(dest.to_string_lossy().into_owned())
-}
 
 fn default_finder_staging_root() -> PathBuf {
     let primary = dirs::cache_dir()
@@ -4052,16 +4030,6 @@ fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-fn sanitize_staging_name(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' => '_',
-            _ if c.is_control() => '_',
-            _ => c,
-        })
-        .collect()
-}
 
 fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
     version_identifier.and_then(|value| {
@@ -5880,8 +5848,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("report.txt");
         std::fs::write(&source, b"finder data").unwrap();
-        let staged = stage_finder_payload_with_root(source.to_str().unwrap(), dir.path().join("staging")).unwrap();
-        assert_eq!(std::fs::read(staged).unwrap(), b"finder data");
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let staged = crate::staged_payload::StagedPayload::copy(db.clone(), &source, dir.path().join("staging")).unwrap();
+        assert_eq!(std::fs::read(staged.path()).unwrap(), b"finder data");
+        assert_eq!(db.staged_payloads_for_signout().unwrap().len(), 1);
     }
 
     fn test_bridge(db_path: &Path) -> EngineBridge {
@@ -8155,7 +8125,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("error sending request") || err.contains("Connection refused"));
+        assert!(err.contains("error sending request") || err.contains("Connection refused"), "actual hydration error: {err}");
 
         let row = bridge.db.get_file(file_id).unwrap().unwrap();
         assert_eq!(row.status, FileStatus::Error);
