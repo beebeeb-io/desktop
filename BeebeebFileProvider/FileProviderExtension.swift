@@ -46,8 +46,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-        let destinationURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(itemIdentifier.rawValue)
+
+        // Task 1670: MUST be the shared App Group container, not
+        // `FileManager.default.temporaryDirectory` — see
+        // `XPCBridge.hydrateDestinationURL(for:)`'s doc comment for why the
+        // old destination could never pass the daemon's containment check.
+        guard let destinationURL = XPCBridge.hydrateDestinationURL(for: itemIdentifier) else {
+            completionHandler(nil, nil, BeebeebIPCError.daemonUnavailable)
+            progress.completedUnitCount = 1
+            return progress
+        }
 
         do {
             try ipc.hydrateFile(itemIdentifier: itemIdentifier, destinationURL: destinationURL)

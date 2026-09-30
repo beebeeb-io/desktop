@@ -3789,7 +3789,7 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
 ///
 /// Returns true if ANY root passes; false if none do. An empty `allowed_roots`
 /// slice returns false (fail-closed), never vacuously true.
-fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
+pub(crate) fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> bool {
     for &root in allowed_roots {
         let ok = if dest_path.exists() {
             crate::is_contained(root, dest_path)

@@ -15,6 +15,42 @@ enum BeebeebIPCError: LocalizedError {
     }
 }
 
+/// Task 1670: without this, Swift's default `Error` -> `NSError` bridging
+/// uses the TYPE's own module+name string as the error domain
+/// ("BeebeebFileProvider.BeebeebIPCError") -- not a domain the File Provider
+/// host process recognizes. Its own log made this exact failure explicit:
+/// "[CRIT] Provider returned error 0 from domain
+/// BeebeebFileProvider.BeebeebIPCError which is unsupported. Supported error
+/// domains are NSCocoaErrorDomain, NSFileProviderErrorDomain." When that
+/// happens the host can't relay the real error text to Finder at all, so
+/// Finder falls back to its generic, unhelpful "Couldn't communicate with a
+/// helper application" dialog -- masking whatever `errorDescription` above
+/// actually says. `CustomNSError` conformance makes every `BeebeebIPCError`
+/// bridge into a domain the host DOES support, so a real failure (the daemon
+/// isn't running, a permission check rejected the request, etc.) surfaces as
+/// an actual, specific message instead.
+extension BeebeebIPCError: CustomNSError {
+    static var errorDomain: String { NSFileProviderErrorDomain }
+
+    var errorCode: Int {
+        switch self {
+        case .daemonUnavailable:
+            // Semantically the closest fit: the daemon (this extension's only
+            // "server") cannot be reached.
+            return NSFileProviderError.serverUnreachable.rawValue
+        case .invalidResponse:
+            // Covers the daemon's own rejections (e.g. a hydration
+            // destination outside an allowed root, task 1670's actual root
+            // cause) and any other explicit error message it returned.
+            return NSFileProviderError.cannotSynchronize.rawValue
+        }
+    }
+
+    var errorUserInfo: [String: Any] {
+        [NSLocalizedDescriptionKey: errorDescription ?? "Beebeeb couldn't complete this Finder operation."]
+    }
+}
+
 final class XPCBridge {
     /// The App Group shared with the containing app — see
     /// `BeebeebFileProvider.entitlements`' `com.apple.security.application-
@@ -30,6 +66,13 @@ final class XPCBridge {
     /// `crate::ipc_socket::MACOS_IPC_SOCKET_FILENAME`.
     private static let ipcSocketFileName = "ipc.sock"
 
+    /// Task 1670: subdirectory name for staging hydrated plaintext, mirroring
+    /// `crate::ipc_socket::MACOS_HYDRATE_CACHE_DIRNAME` on the Rust side —
+    /// keep both in sync if it ever changes. See `hydrateDestinationURL(for:)`
+    /// for why this has to be the App Group container and not
+    /// `FileManager.default.temporaryDirectory`.
+    private static let hydrateCacheDirectoryName = "hydrate-cache"
+
     private let socketPath: String
 
     /// Task 1524: this extension is sandboxed (`com.apple.security.app-
@@ -42,9 +85,7 @@ final class XPCBridge {
     /// (`ipc_socket::ipc_socket_path`) since a plain, unsigned `cargo test`
     /// binary can't call this API at all.
     init() {
-        if let groupContainer = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: Self.appGroupID
-        ) {
+        if let groupContainer = Self.resolveGroupContainer() {
             self.socketPath = groupContainer.appendingPathComponent(Self.ipcSocketFileName).path
         } else {
             // Should not happen in a properly provisioned build (both
@@ -57,6 +98,39 @@ final class XPCBridge {
             let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp"
             self.socketPath = "\(runtimeDir)/beebeeb-daemon.sock"
         }
+    }
+
+    private static func resolveGroupContainer() -> URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+    }
+
+    /// Task 1670 root cause: `fetchContents` used to build its destination
+    /// from `FileManager.default.temporaryDirectory`, which for a SANDBOXED
+    /// process (this extension has `com.apple.security.app-sandbox`) resolves
+    /// INSIDE that process's own per-bundle-ID container
+    /// (`io.beebeeb.app.FileProvider`). The daemon that validates the
+    /// destination is a DIFFERENT sandboxed process
+    /// (`io.beebeeb.app`) with its OWN, different private temp dir
+    /// (`crate::ipc_socket`'s `macos_hydrate_cache_dir` doc comment has the
+    /// full writeup) — so the destination this extension built could never be
+    /// inside any root the daemon was willing to write to. Every real
+    /// `fetchContents` call failed with "hydrate destination is not within an
+    /// allowed root" (confirmed via the unified log), and because
+    /// `BeebeebIPCError` didn't bridge to a supported `NSError` domain either,
+    /// Finder showed the generic "Couldn't communicate with a helper
+    /// application" instead of any real message.
+    ///
+    /// The shared App Group container is the one directory BOTH sandboxes are
+    /// actually entitled to and already use, for the IPC socket itself
+    /// (`socketPath` above) — this reuses that exact, already-proven-working
+    /// mechanism for hydration staging instead of each process's own private
+    /// temp dir. `nil` only in the same group-container-unavailable case
+    /// `init()` already falls back from.
+    static func hydrateDestinationURL(for itemIdentifier: NSFileProviderItemIdentifier) -> URL? {
+        guard let groupContainer = resolveGroupContainer() else { return nil }
+        let dir = groupContainer.appendingPathComponent(hydrateCacheDirectoryName, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(itemIdentifier.rawValue)
     }
 
     func enumerate(containerIdentifier: NSFileProviderItemIdentifier) throws -> [BeebeebProviderItem] {

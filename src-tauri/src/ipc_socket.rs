@@ -177,6 +177,53 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
     macos_ipc_socket_path_in(&macos_real_home_dir())
 }
 
+/// Task 1670: subdirectory (of the same shared App Group container as
+/// `ipc.sock` above) that stages a freshly-hydrated file's decrypted plaintext
+/// before the File Provider extension hands its URL to Finder.
+///
+/// Deliberately a DIFFERENT name than the socket file, in the SAME directory —
+/// nothing about that collides with `MACOS_IPC_SOCKET_FILENAME`.
+#[cfg(target_os = "macos")]
+const MACOS_HYDRATE_CACHE_DIRNAME: &str = "hydrate-cache";
+
+/// Root cause of task 1670 issue 2 ("Couldn't communicate with a helper
+/// application" opening any file from Finder): BOTH the daemon
+/// (`io.beebeeb.app`) and the File Provider extension
+/// (`io.beebeeb.app.FileProvider`) are sandboxed (`com.apple.security.app-
+/// sandbox`, both entitlements files), and macOS gives every sandboxed
+/// process its OWN per-bundle-ID temp directory — `std::env::temp_dir()` here
+/// and `FileManager.default.temporaryDirectory` in `XPCBridge.swift` resolve
+/// to two DIFFERENT real directories on disk, one per container. The
+/// extension built its `fetchContents` destination from ITS OWN temp dir, so
+/// it could never be `is_contained` in this process's `temp_root` — every real
+/// hydration was rejected with "hydrate destination is not within an allowed
+/// root" (confirmed via the unified log, task 1670's evidence capture: 5
+/// occurrences in a 2h window, each immediately followed by the File Provider
+/// host logging `[CRIT] Provider returned error 0 from domain
+/// BeebeebFileProvider.BeebeebIPCError which is unsupported` — which is what
+/// Finder surfaces as the generic "Couldn't communicate with a helper
+/// application", masking this real cause).
+///
+/// The shared App Group container is the one directory both sandboxes are
+/// ACTUALLY entitled to and already use for the IPC socket itself
+/// (`ipc_socket_path`, proven working since task 1524) — this mirrors that
+/// exact pattern for hydration staging instead of inventing a new mechanism.
+/// `XPCBridge.hydrateDestinationURL(for:)` is the Swift-side mirror; keep the
+/// directory name in sync with `MACOS_HYDRATE_CACHE_DIRNAME` there.
+#[cfg(target_os = "macos")]
+fn macos_hydrate_cache_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir
+        .join("Library")
+        .join("Group Containers")
+        .join(MACOS_APP_GROUP_ID)
+        .join(MACOS_HYDRATE_CACHE_DIRNAME)
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
+    macos_hydrate_cache_dir_in(&macos_real_home_dir())
+}
+
 /// Task 1524 follow-up: resolve the real user home directory from the OS
 /// password database (`getpwuid_r(getuid())` → `pw_dir`), never from `$HOME`.
 ///
@@ -488,13 +535,34 @@ async fn handle_connection(
                 // no sync root is configured yet, only the temp dir is.
                 // Resolve sync_root the same way the SetRecursivePin handler
                 // below already does.
+                //
+                // Task 1670: on macOS, `temp_root` above is THIS (sandboxed)
+                // process's own private container temp dir — the File Provider
+                // extension is a DIFFERENT sandboxed process with its own
+                // separate container temp dir, so a real destination it builds
+                // can never be inside `temp_root` (see `macos_hydrate_cache_dir`'s
+                // doc comment for the full root-cause). Add the shared App
+                // Group hydrate-cache directory as a third allowed root, and
+                // make sure it exists before the containment check runs.
                 let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
                 let temp_root = std::env::temp_dir();
                 let dest = std::path::Path::new(&dest_path);
-                let result = match &sync_root {
-                    Some(root) => bridge.hydrate_file(&file_id, dest, &[root.as_path(), temp_root.as_path()]).await,
-                    None => bridge.hydrate_file(&file_id, dest, &[temp_root.as_path()]).await,
+                #[cfg(target_os = "macos")]
+                let macos_hydrate_dir = {
+                    let dir = macos_hydrate_cache_dir();
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
+                    }
+                    dir
                 };
+                let mut allowed_roots: Vec<&std::path::Path> = Vec::new();
+                if let Some(root) = &sync_root {
+                    allowed_roots.push(root.as_path());
+                }
+                allowed_roots.push(temp_root.as_path());
+                #[cfg(target_os = "macos")]
+                allowed_roots.push(macos_hydrate_dir.as_path());
+                let result = bridge.hydrate_file(&file_id, dest, &allowed_roots).await;
                 match result {
                     Ok(_) => IpcResponse::Ok,
                     Err(e) => IpcResponse::Error { message: e.to_string() },
@@ -1006,6 +1074,73 @@ mod tests {
             "path must fit sockaddr_un.sun_path (104 bytes incl. NUL); \
              got a {byte_len}-byte path for a 20-char username: {path:?}"
         );
+    }
+
+    // ── Task 1670: macOS hydrate-cache dir (fetchContents helper error) ────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_hydrate_cache_dir_is_inside_group_container_not_tmp() {
+        // Regression pin for the actual bug: a hydration destination built
+        // from THIS process's own `std::env::temp_dir()` can never match one
+        // the File Provider extension builds from ITS OWN (different)
+        // sandboxed temp dir — see `macos_hydrate_cache_dir`'s doc comment.
+        // The shared App Group container is the one directory both sides can
+        // actually agree on.
+        let home = std::path::Path::new("/Users/guuslangelaar");
+        let path = macos_hydrate_cache_dir_in(home);
+
+        assert!(
+            path.starts_with(home.join("Library").join("Group Containers")),
+            "must live inside the shared App Group container, got {path:?}"
+        );
+        assert!(
+            path.to_str().unwrap().contains(MACOS_APP_GROUP_ID),
+            "must be namespaced under the app's own App Group id, got {path:?}"
+        );
+        assert!(
+            !path.starts_with(std::env::temp_dir()),
+            "must not be this process's own private sandboxed temp dir \
+             (that is exactly the bug), got {path:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_hydrate_cache_dir_does_not_collide_with_ipc_socket_path() {
+        // Both live under the same App Group container by design (task
+        // 1670's doc comment); they must still be distinct paths, or a
+        // hydrated file could shadow (or be shadowed by) the IPC socket.
+        let home = std::path::Path::new("/Users/guuslangelaar");
+        let socket = macos_ipc_socket_path_in(home);
+        let hydrate_dir = macos_hydrate_cache_dir_in(home);
+
+        assert_ne!(socket, hydrate_dir, "must not reuse the socket's own path");
+        assert!(
+            !hydrate_dir.starts_with(&socket) && !socket.starts_with(&hydrate_dir),
+            "must not nest one inside the other: socket={socket:?} hydrate_dir={hydrate_dir:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_hydrate_cache_dir_is_a_real_allowed_root_for_hydration() {
+        // End-to-end proof (within what a sandbox-free `cargo test` process
+        // can exercise) that a destination built the way
+        // `XPCBridge.hydrateDestinationURL(for:)` builds it — a file directly
+        // inside the hydrate-cache dir — passes the SAME containment check
+        // `hydrate_dest_is_allowed` (engine_bridge.rs) runs against the
+        // `allowed_roots` this handler now includes it in.
+        let dir = std::env::temp_dir().join(format!("bb-hydrate-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("some-file-id");
+
+        assert!(
+            crate::engine_bridge::hydrate_dest_is_allowed(&dest, &[dir.as_path()]),
+            "a destination directly inside the hydrate-cache dir must be an allowed hydration target"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Serializes every test that mutates the process-wide `$HOME` env var,
