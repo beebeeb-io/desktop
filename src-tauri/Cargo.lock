@@ -411,6 +411,7 @@ dependencies = [
  "hkdf",
  "hostname",
  "image",
+ "json-patch",
  "libc",
  "notify",
  "p256",
