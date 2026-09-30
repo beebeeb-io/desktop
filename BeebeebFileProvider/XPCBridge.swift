@@ -154,6 +154,23 @@ final class XPCBridge {
     /// group-container location; see the task file for the full writeup with
     /// sources.
     ///
+    /// **Round 3 (task 1670, lead review of round 2): the caller no longer
+    /// deletes the returned file immediately on success.** Apple's own
+    /// `fetchContents` docs say only "After you call the completion handler,
+    /// the system takes complete control over the local copy" and that the
+    /// system "can clone it" — never that the clone happens synchronously,
+    /// inside the `completionHandler` call itself. See
+    /// `FileProviderExtension.fetchContents`'s doc comment for the full
+    /// reasoning (round 2's unconditional post-success delete raced an
+    /// undocumented-timing clone and could reopen this task's original bug).
+    /// Practical effect here: the per-request random suffix below is no
+    /// longer just anti-collision insurance between two CONCURRENT fetches —
+    /// it is also what keeps two hydrations of the SAME item, minutes apart,
+    /// from ever sharing a leaf name while both are still waiting on the
+    /// daemon's TTL sweep (`crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL`,
+    /// swept periodically every 60s from `runner.rs`, not just on the next
+    /// hydration).
+    ///
     /// `nil` only in the same group-container-unavailable case `init()`
     /// already falls back from, or when `itemIdentifier` fails
     /// `sanitizedHydrateFilename` — see that function's doc comment.

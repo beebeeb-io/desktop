@@ -224,15 +224,43 @@ pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
     macos_hydrate_cache_dir_in(&macos_real_home_dir())
 }
 
-/// Task 1670 round 2: cap how long a hydrate-cache entry can survive if its
-/// own per-request cleanup path was somehow skipped (a crash between the
-/// write and `fetchContents`' `completionHandler`, a force-quit mid-fetch).
-/// Swept opportunistically on every real hydration (the `HydrateFile`
-/// handler below), not on a background timer — costs nothing when Finder is
-/// never used to open a file, and still bounds a missed cleanup to roughly
-/// this long past whatever hydration next runs.
+/// Task 1670 round 3 (lead review of round 2): Apple's own `fetchContents`
+/// docs say only "After you call the completion handler, the system takes
+/// complete control over the local copy" and that the system "can clone it"
+/// — never that the clone happens SYNCHRONOUSLY, inside the
+/// `completionHandler` call itself. Round 2 deleted the staged file
+/// unconditionally right after a successful `completionHandler`, which is
+/// only safe if that clone is synchronous; since the docs don't say either
+/// way, `FileProviderExtension.fetchContents` (Swift) no longer deletes on
+/// the success path at all (see its doc comment for the full reasoning). That
+/// makes THIS TTL, plus the periodic sweep that applies it
+/// (`MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`, `runner.rs`, every 60s on the
+/// daemon's existing tick loop — not a new timer/thread), the PRIMARY bound
+/// on a successfully-hydrated file's plaintext lifetime on the common path,
+/// not just a crash-recovery backstop for a skipped per-request cleanup (a
+/// crash between the write and `completionHandler`, a force-quit mid-fetch —
+/// still covered too).
+///
+/// **2 minutes, chosen as:**
+/// - **Long enough for any real clone.** Per Apple's own requirement, the
+///   destination is on the SAME VOLUME as `NSFileProviderManager
+///   .temporaryDirectoryURL()` — a local filesystem clone/hardlink-style
+///   operation, not a network transfer — so it completes in well under a
+///   second even under load; 2 minutes is roughly two orders of magnitude of
+///   headroom over that, covering a loaded Mac or several concurrent Finder
+///   opens without guessing at an exact clone duration Apple never
+///   documents.
+/// - **Short enough to bound exposure.** A successfully-opened file's
+///   decrypted plaintext should not linger indefinitely in a durable,
+///   shared-container location; capped at ~2 sweep intervals (worst case
+///   ~3 minutes, given the 60s cadence below) keeps that window comparable
+///   to "the file was recently opened", not "forgotten on disk".
+///
+/// Swept periodically (the primary mechanism, see above) AND opportunistically
+/// on every real hydration (the `HydrateFile` handler below, catches anything
+/// the next periodic tick hasn't reached yet in a hydration-heavy session).
 #[cfg(target_os = "macos")]
-const MACOS_HYDRATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+pub(crate) const MACOS_HYDRATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2 * 60);
 
 /// Task 1670 round 2: reject a raw File Provider item identifier BEFORE it is
 /// used as a path component — either here or in its Swift mirror,
@@ -371,10 +399,33 @@ pub(crate) fn macos_purge_hydrate_cache_dir(dir: &std::path::Path) -> std::io::R
     Ok(removed)
 }
 
+/// Task 1670 round 3: `true` for a hydrate-cache entry that
+/// `write_hydrated_plaintext` (`engine_bridge.rs`) is still (or was, if it
+/// crashed) mid-writing — its per-call temp name, `.{leaf}.{uuid}.part`
+/// (dot-prefixed, `.part`-suffixed), created BEFORE any bytes are written and
+/// published to the real, final leaf name only by one atomic `renameat` at
+/// the very end. Used by [`macos_sweep_stale_hydrate_cache_entries`] to skip
+/// these outright rather than age-checking them: this function's caller only
+/// ever needs to look at the mtime of a FINAL (already-renamed) name.
+#[cfg(target_os = "macos")]
+fn macos_is_hydrate_cache_temp_name(name: &std::ffi::OsStr) -> bool {
+    match name.to_str() {
+        Some(s) => s.starts_with('.') && s.ends_with(".part"),
+        None => false,
+    }
+}
+
 /// Remove hydrate-cache entries whose mtime is at least `ttl` old, relative
 /// to `now`. `now`/`ttl` are parameters (never `SystemTime::now()` read
 /// inline) so this is deterministic and testable without a real clock or
 /// real sleeps.
+///
+/// Task 1670 round 3: never touches an entry that is still being written.
+/// Skips anything matching [`macos_is_hydrate_cache_temp_name`] before even
+/// reading its mtime — not "old temp files are probably safe to age-check
+/// too", an outright skip, so a sweep landing between a temp file's creation
+/// and its publishing `renameat` (`write_hydrated_plaintext`,
+/// `engine_bridge.rs`) can never remove or race a partially-written file.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
     dir: &std::path::Path,
@@ -389,6 +440,13 @@ pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
     let mut removed = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
+        if path
+            .file_name()
+            .map(macos_is_hydrate_cache_temp_name)
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let age = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
@@ -744,8 +802,12 @@ async fn handle_connection(
                 // doc comment for the full root-cause). Add the shared App
                 // Group hydrate-cache directory as a third allowed root, and
                 // make sure it exists (owner-only, backup-excluded — round 2)
-                // before the containment check runs, and opportunistically
-                // sweep anything the per-request cleanup path missed.
+                // before the containment check runs. Round 3: the Swift side
+                // no longer deletes on a successful hydration at all (see
+                // `MACOS_HYDRATE_CACHE_TTL`'s doc comment), so the periodic
+                // sweep in `runner.rs` is now the PRIMARY cleanup for the
+                // common path; this opportunistic sweep just catches anything
+                // the next periodic tick (every 60s) hasn't reached yet.
                 let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
                 let temp_root = std::env::temp_dir();
                 let dest = std::path::Path::new(&dest_path);
@@ -1476,6 +1538,60 @@ mod tests {
         assert_eq!(removed, 1, "exactly the stale entry must be swept");
         assert!(!stale.exists(), "the stale entry must be removed");
         assert!(fresh.exists(), "the fresh entry must survive the sweep");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_sweep_stale_hydrate_cache_entries_skips_in_progress_temp_files() {
+        // Task 1670 round 3: `write_hydrated_plaintext` (`engine_bridge.rs`)
+        // stages a hydration under a temp name shaped exactly like this
+        // (`.{leaf}.{uuid}.part`) BEFORE it writes a single byte, then
+        // publishes it with one atomic `renameat`. Give the temp-shaped entry
+        // an mtime far past the TTL — if the sweep age-checked it like any
+        // other file, this would (wrongly) remove it out from under a write
+        // that could still be in flight. A real, already-published (non-temp)
+        // stale entry alongside it proves the sweep is still doing real work,
+        // not just skipping everything.
+        let dir = tempdir().unwrap();
+        let in_progress = dir.path().join(".real-file.9f8e7d6c-1234-4abc-9def-0123456789ab.part");
+        let stale_final = dir.path().join("real-file");
+        std::fs::write(&in_progress, b"partial-write-in-flight").unwrap();
+        std::fs::write(&stale_final, b"already-published-plaintext").unwrap();
+
+        let now = std::time::SystemTime::now();
+        let ttl = std::time::Duration::from_secs(600);
+        let old_mtime = now - std::time::Duration::from_secs(700);
+        std::fs::File::open(&in_progress).unwrap().set_modified(old_mtime).unwrap();
+        std::fs::File::open(&stale_final).unwrap().set_modified(old_mtime).unwrap();
+
+        let removed = macos_sweep_stale_hydrate_cache_entries(dir.path(), ttl, now).expect("sweep must succeed");
+
+        assert_eq!(removed, 1, "only the final (non-temp) stale entry must be swept");
+        assert!(
+            in_progress.exists(),
+            "an in-progress temp-named entry must never be removed by the sweep, however old its mtime"
+        );
+        assert!(!stale_final.exists(), "the stale, already-published entry must still be removed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_is_hydrate_cache_temp_name_matches_write_hydrated_plaintexts_shape() {
+        assert!(macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            ".some-file-id.3f9a2b7e-1234-4c1a-8f9a-abcdef012345.part"
+        )));
+        // A final, already-published name must never be mistaken for a temp
+        // name — this is exactly what `macos_sweep_stale_hydrate_cache_entries`
+        // relies on to still age-check real entries.
+        assert!(!macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            "some-file-id.3f9a2b7e"
+        )));
+        assert!(!macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            ".dotfile-without-the-part-suffix"
+        )));
+        assert!(!macos_is_hydrate_cache_temp_name(std::ffi::OsStr::new(
+            "no-leading-dot.uuid.part"
+        )));
     }
 
     /// Serializes every test that mutates the process-wide `$HOME` env var,

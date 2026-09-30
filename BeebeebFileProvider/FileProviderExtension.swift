@@ -70,11 +70,32 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         // oryURL()], so that the system can clone it to provide the content
         // for the dataless item", and "After you call the completion
         // handler, the system takes complete control over the LOCAL COPY"
-        // (its clone, not our original). Our staged plaintext at
-        // `destinationURL` is never touched or removed by the framework, so
-        // WE always delete it ourselves — unconditionally, on every path
-        // below, not only a "system copied instead of moved" branch, because
-        // copy is the only documented behavior.
+        // (its clone, not our original).
+        //
+        // Task 1670 round 3 (lead review of round 2): NEITHER sentence says
+        // that clone happens SYNCHRONOUSLY, inside the `completionHandler`
+        // call itself. Round 2 read "the system takes complete control" as
+        // "safe to delete our own copy the instant completionHandler
+        // returns" and did so unconditionally on success. If `fileproviderd`
+        // actually clones asynchronously after that call returns — which the
+        // docs neither confirm nor rule out — that delete RACES the clone and
+        // can reopen the exact "Couldn't communicate with a helper
+        // application" bug this task exists to fix. It is also just not what
+        // "takes complete control" says: control passing to the system is not
+        // the same claim as "the system has already finished reading it".
+        //
+        // So: this function is now called ONLY on a FAILURE path below.
+        // Nothing was ever handed to the system when `fetchContents` fails —
+        // `completionHandler` was never called with a real URL — so deleting
+        // eagerly there is both safe and necessary (nothing else will ever
+        // clean that copy up). On the SUCCESS path we leave `destinationURL`
+        // in place; the daemon's periodic hydrate-cache TTL sweep (every 60s,
+        // `runner.rs`'s `MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`) plus its
+        // sign-out/lock/startup purge (`ipc_socket.rs`'s
+        // `MACOS_HYDRATE_CACHE_TTL` doc comment has the full writeup) now
+        // bound how long a successfully-handed-off copy can survive on disk,
+        // instead of an immediate delete that can't prove it isn't racing the
+        // system's own clone.
         func cleanupStagedPlaintext() {
             try? FileManager.default.removeItem(at: destinationURL)
         }
@@ -82,9 +103,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         do {
             try ipc.hydrateFile(itemIdentifier: itemIdentifier, destinationURL: destinationURL)
             let model = try ipc.item(identifier: itemIdentifier)
+            // Task 1670 round 3: do NOT clean up here — see the doc comment
+            // above this do/catch block. The system may still be cloning
+            // `destinationURL` asynchronously after this call.
             completionHandler(destinationURL, FileProviderItem(model: model), nil)
-            cleanupStagedPlaintext()
         } catch {
+            // Nothing was handed to the system on this path — the system
+            // never saw `destinationURL`, so nothing else will ever remove
+            // it. Clean up immediately; there is no race to lose here.
             cleanupStagedPlaintext()
             completionHandler(nil, nil, error)
         }

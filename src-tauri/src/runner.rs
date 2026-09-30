@@ -136,6 +136,27 @@ const LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR: i128 = 10;
 #[cfg(target_os = "windows")]
 const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 
+/// Task 1670 round 3 (lead review of round 2): cadence for the macOS
+/// hydrate-cache TTL sweep. With `TICK_INTERVAL` at 30s, every 2 ticks is
+/// ~60s — same "every Nth tick of the daemon's one already-running loop"
+/// idiom as `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS` above, reusing the existing
+/// runtime rather than spawning a second timer task.
+///
+/// Why a periodic sweep exists at all now: Apple's own `fetchContents` docs
+/// say only "After you call the completion handler, the system takes
+/// complete control over the local copy" and that the system "can clone it"
+/// — never that the clone happens synchronously, inside the
+/// `completionHandler` call itself. Round 2 deleted the staged file
+/// unconditionally right after a successful `completionHandler`, which is
+/// only safe if that clone is synchronous; since the docs don't say either
+/// way, `FileProviderExtension.fetchContents` (Swift) no longer deletes on
+/// the success path at all. This periodic sweep — applying
+/// `crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL` (see its doc comment for the
+/// 2-minute value and why) — is what now bounds a successfully-hydrated
+/// file's plaintext lifetime on the common (no-crash) path.
+#[cfg(target_os = "macos")]
+const MACOS_HYDRATE_SWEEP_EVERY_N_TICKS: u64 = 2;
+
 /// API base URL the engine talks to.
 ///
 /// Returns the value of the `BB_API_BASE` environment variable when it is set
@@ -1038,11 +1059,52 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     #[cfg(target_os = "windows")]
     let mut tick_count: u64 = 0;
 
+    // Task 1670 round 3: separate counter (not `tick_count` above, which is
+    // Windows-only and used for a different-purpose slow cadence) for the
+    // macOS hydrate-cache TTL sweep — see `MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`
+    // for why this exists.
+    #[cfg(target_os = "macos")]
+    let mut hydrate_sweep_tick_count: u64 = 0;
+
     loop {
         tokio::select! {
             biased;
             _ = &mut cancel => break,
             _ = tick.tick() => {
+                // Task 1670 round 3: run BEFORE the `sync_paused` check below
+                // — bounding staged plaintext lifetime is a security property
+                // independent of whether the user paused file sync, and
+                // Finder can still hydrate files (via the always-running IPC
+                // server) while sync is paused.
+                #[cfg(target_os = "macos")]
+                {
+                    if hydrate_sweep_tick_count.is_multiple_of(MACOS_HYDRATE_SWEEP_EVERY_N_TICKS) {
+                        let dir = crate::ipc_socket::macos_hydrate_cache_dir();
+                        match crate::ipc_socket::macos_sweep_stale_hydrate_cache_entries(
+                            &dir,
+                            crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL,
+                            std::time::SystemTime::now(),
+                        ) {
+                            Ok(removed) if removed > 0 => {
+                                tracing::debug!(
+                                    removed,
+                                    dir = %dir.display(),
+                                    "periodic macOS hydrate-cache TTL sweep"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    dir = %dir.display(),
+                                    "periodic macOS hydrate-cache TTL sweep failed (best-effort)"
+                                );
+                            }
+                        }
+                    }
+                    hydrate_sweep_tick_count = hydrate_sweep_tick_count.wrapping_add(1);
+                }
+
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.
