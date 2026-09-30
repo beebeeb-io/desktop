@@ -70,3 +70,7 @@ Round 3 native unit fixtures use Windows file handles, range writes, append,
 SQLite restart and real local HTTP, with injected CFAPI modified-range metadata.
 They do not register sync roots. Real CFAPI callback behavior and complete
 edit/upload/sign-out on a registered root remain the independently owned QA rung.
+
+Legacy dirty partials without a recorded base still enqueue their packed ranges
+and EOF durably. Reconstruction reports an unknown-base error and retains the
+snapshot; it must never invent a version precondition for those bytes.

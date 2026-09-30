@@ -240,7 +240,7 @@ async fn regression_1640_r3_keep_both_chain_restart_save() {
     round3_resolution("both").await;
 }
 
-async fn round3_partial(append: bool, native_queue: bool) {
+async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool) {
     use std::io::{Seek, SeekFrom, Write};
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
@@ -289,6 +289,11 @@ async fn round3_partial(append: bool, native_queue: bool) {
     });
     let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
     round3_seed(&bridge, &root, b"baseline");
+    if unknown_base {
+        let mut contract = bridge.db.get_file_contract_state(TEST_FILE_ID).unwrap().unwrap();
+        contract.local_base_version = 0;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+    }
     let path = root.join("edit.txt");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -360,6 +365,21 @@ async fn round3_partial(append: bool, native_queue: bool) {
             .unwrap();
     }
     assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1);
+    if unknown_base {
+        drop(bridge);
+        let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
+        let operations = bridge.db.list_review_operations().unwrap();
+        assert_eq!(operations.len(), 1, "unknown base must not lose durable pending work");
+        let meta = operation_metadata(&operations[0]).unwrap();
+        assert_eq!(meta["windows_partial"]["base_version"], 0);
+        assert_eq!(
+            std::fs::read(operations[0].payload_path.as_ref().unwrap()).unwrap(),
+            patch
+        );
+        #[cfg(target_os = "windows")]
+        crate::windows_cf::placeholders::partial_edits::TEST_RANGES.with(|v| *v.borrow_mut() = None);
+        return;
+    }
     let result = bridge.process_due_operations(&root, i64::MAX / 4).await.unwrap();
     assert_eq!(result.retried_op_ids.len(), 1);
     assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1);
@@ -406,21 +426,21 @@ async fn round3_partial(append: bool, native_queue: bool) {
 }
 #[tokio::test]
 async fn regression_1640_r3_partial_range_restart_reconstructs_base() {
-    round3_partial(false, false).await;
+    round3_partial(false, false, false).await;
 }
 #[tokio::test]
 async fn regression_1640_r3_partial_append_restart_reconstructs_base() {
-    round3_partial(true, false).await;
+    round3_partial(true, false, false).await;
 }
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn regression_1640_r3_native_range_write_queues_dirty_partial() {
-    round3_partial(false, true).await;
+    round3_partial(false, true, false).await;
 }
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn regression_1640_r3_native_append_queues_dirty_partial() {
-    round3_partial(true, true).await;
+    round3_partial(true, true, false).await;
 }
 
 #[tokio::test]
@@ -456,21 +476,40 @@ async fn regression_1640_r3_changed_download_never_establishes_baseline() {
 fn regression_1640_r3_resolution_rebases_later_save_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.db");
-    let bridge = test_bridge_with_api(&db_path, "http://127.0.0.1:9".into(), [9;32]);
-    round3_seed(&bridge,dir.path(),b"baseline");
+    let bridge = test_bridge_with_api(&db_path, "http://127.0.0.1:9".into(), [9; 32]);
+    round3_seed(&bridge, dir.path(), b"baseline");
     std::fs::write(dir.path().join("edit.txt"), b"captured at resolution").unwrap();
-    bridge.queue_windows_tracked_edit(dir.path(),&dir.path().join("edit.txt")).unwrap();
+    bridge
+        .queue_windows_tracked_edit(dir.path(), &dir.path().join("edit.txt"))
+        .unwrap();
     let captured = bridge.db.list_review_operations().unwrap()[0].op_id.clone();
     std::fs::write(dir.path().join("edit.txt"), b"save while resolution in flight").unwrap();
-    bridge.queue_windows_tracked_edit(dir.path(),&dir.path().join("edit.txt")).unwrap();
-    bridge.db.record_download_baseline(TEST_FILE_ID,20,"resolved hash").unwrap();
-    bridge.db.finish_windows_resolution(TEST_FILE_ID,&[captured]).unwrap();
+    bridge
+        .queue_windows_tracked_edit(dir.path(), &dir.path().join("edit.txt"))
+        .unwrap();
+    bridge
+        .db
+        .record_download_baseline(TEST_FILE_ID, 20, "resolved hash")
+        .unwrap();
+    bridge.db.finish_windows_resolution(TEST_FILE_ID, &[captured]).unwrap();
     drop(bridge);
-    let bridge = test_bridge_with_api(&db_path,"http://127.0.0.1:9".into(),[9;32]);
+    let bridge = test_bridge_with_api(&db_path, "http://127.0.0.1:9".into(), [9; 32]);
     let ops = bridge.db.list_review_operations().unwrap();
-    assert_eq!(ops.len(),1);
-    assert_eq!(ops[0].base_version,Some(20));
-    assert_eq!(ops[0].attempts,0);
-    assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(),b"save while resolution in flight");
-    assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status,FileStatus::Uploading);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].base_version, Some(20));
+    assert_eq!(ops[0].attempts, 0);
+    assert_eq!(
+        std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(),
+        b"save while resolution in flight"
+    );
+    assert_eq!(
+        bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status,
+        FileStatus::Uploading
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn regression_1640_r3_native_unknown_base_preserves_pending_write() {
+    round3_partial(true, true, true).await;
 }

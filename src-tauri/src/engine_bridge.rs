@@ -547,6 +547,7 @@ impl EngineBridge {
     }
 
     async fn download_base_version(&self, file_id: &str, version: i64) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        anyhow::ensure!(version > 0, "partial base version unknown; durable snapshot retained for recovery");
         let meta = self.api.get_file(file_id).await?;
         if meta["version_number"].as_i64() == Some(version) {
             let bytes = self.do_hydrate_with_meta(file_id, &meta).await?;
@@ -1589,7 +1590,8 @@ impl EngineBridge {
             let Some(snapshot) = crate::windows_cf::placeholders::partial_edits::capture(path)? else { return Ok(Some(false)); };
             let contract = self.db.get_file_contract_state(&entry.file_id)?
                 .ok_or_else(|| anyhow::anyhow!("partial file has no base"))?;
-            anyhow::ensure!(contract.local_base_version > 0, "partial file has no known base version");
+            // Unknown legacy bases must still preserve their dirty bytes and
+            // queue intent. Reconstruction fails closed later, after durability.
             partial = Some((crate::windows_edits::PartialWrite { base_version: contract.local_base_version,
                 eof: snapshot.eof, ranges: snapshot.ranges }, snapshot.bytes));
         }
