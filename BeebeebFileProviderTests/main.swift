@@ -451,5 +451,226 @@ check("exchange: a peer that hangs up before replying is closedBeforeReply") {
     }
 }
 
+// MARK: - Write-queue idempotency key (task 1684)
+
+let sampleContents = IPCContentFingerprint(sizeBytes: 16_106_127_360, modifiedNanos: 1_788_000_000_123_456_789)
+
+func sampleCreateKey(
+    parent: String = "NSFileProviderRootContainerItemIdentifier",
+    filename: String = "video.mov",
+    kind: String = "file",
+    contentType: String? = "public.movie",
+    contents: IPCContentFingerprint = sampleContents
+) -> String {
+    return IPCWriteKey.create(
+        parentIdentifier: parent,
+        filename: filename,
+        kind: kind,
+        contentType: contentType,
+        contents: contents
+    )
+}
+
+func sampleModifyKey(
+    item: String = "3f2a9c1e-0000-4000-8000-000000000001",
+    parent: String = "NSFileProviderRootContainerItemIdentifier",
+    filename: String = "notes.txt",
+    kind: String = "file",
+    contentType: String? = "public.plain-text",
+    base: String? = "7",
+    changedFields: UInt64 = 0b1010,
+    contents: IPCContentFingerprint = IPCContentFingerprint(sizeBytes: 1234, modifiedNanos: 1_788_000_000_000_000_001)
+) -> String {
+    return IPCWriteKey.modify(
+        itemIdentifier: item,
+        parentIdentifier: parent,
+        filename: filename,
+        kind: kind,
+        contentType: contentType,
+        baseVersionIdentifier: base,
+        changedFields: changedFields,
+        contents: contents
+    )
+}
+
+func requestPayload(_ request: [String: Any], _ op: String) throws -> [String: Any] {
+    guard let payload = request[op] as? [String: Any] else {
+        throw TestFailure(description: "request has no \(op) payload: \(request)")
+    }
+    return payload
+}
+
+check("write key: identical create inputs give the identical key, a 64-character lowercase hex SHA-256") {
+    let first = sampleCreateKey()
+    let second = sampleCreateKey()
+    try expect(first == second, "same inputs must give the same key (a per-call random id would fail this): \(first) vs \(second)")
+    try expect(first.count == 64, "expected 64 hex characters, got \(first.count)")
+    try expect(first.allSatisfy { "0123456789abcdef".contains($0) }, "key must be lowercase hex: \(first)")
+}
+
+check("write key: pinned vectors match an independent implementation of the encoding (create and modify)") {
+    // Computed with Python hashlib over the same canonical encoding
+    // (docs/IPC_PROTOCOL.md, "Write-queue idempotency"); pins the byte format so
+    // an accidental change to it -- which would break dedup against keys
+    // remembered by a daemon mid-update -- fails here.
+    try expect(
+        sampleCreateKey() == "24d844f42d9574efec2950af17915c65f62b2999556a0ca2199bd891b49e1803",
+        "create vector mismatch: \(sampleCreateKey())"
+    )
+    try expect(
+        sampleModifyKey() == "a6d2f8a36a80d3a1bf19c8063ef90634a820753f4c041ad06e5e4a861f72626e",
+        "modify vector mismatch: \(sampleModifyKey())"
+    )
+}
+
+check("write key: changing ANY create input changes the key") {
+    let base = sampleCreateKey()
+    let variants: [(String, String)] = [
+        ("parent", sampleCreateKey(parent: "other-folder")),
+        ("filename", sampleCreateKey(filename: "video2.mov")),
+        ("kind", sampleCreateKey(kind: "folder")),
+        ("contentType", sampleCreateKey(contentType: "public.data")),
+        ("contentType nil", sampleCreateKey(contentType: nil)),
+        ("size", sampleCreateKey(contents: IPCContentFingerprint(sizeBytes: sampleContents.sizeBytes + 1, modifiedNanos: sampleContents.modifiedNanos))),
+        ("mtime", sampleCreateKey(contents: IPCContentFingerprint(sizeBytes: sampleContents.sizeBytes, modifiedNanos: sampleContents.modifiedNanos + 1))),
+    ]
+    for (name, key) in variants {
+        try expect(key != base, "changing \(name) must change the create key")
+    }
+    try expect(Set(variants.map { $0.1 }).count == variants.count, "every variant must also differ from each other")
+}
+
+check("write key: changing ANY modify input changes the key") {
+    let base = sampleModifyKey()
+    let variants: [(String, String)] = [
+        ("item", sampleModifyKey(item: "3f2a9c1e-0000-4000-8000-000000000002")),
+        ("parent", sampleModifyKey(parent: "other-folder")),
+        ("filename", sampleModifyKey(filename: "renamed.txt")),
+        ("kind", sampleModifyKey(kind: "folder")),
+        ("contentType", sampleModifyKey(contentType: "public.data")),
+        ("base version", sampleModifyKey(base: "8")),
+        ("base version nil", sampleModifyKey(base: nil)),
+        ("changed fields", sampleModifyKey(changedFields: 0b1011)),
+        ("size", sampleModifyKey(contents: IPCContentFingerprint(sizeBytes: 1235, modifiedNanos: 1_788_000_000_000_000_001))),
+        ("mtime", sampleModifyKey(contents: IPCContentFingerprint(sizeBytes: 1234, modifiedNanos: 1_788_000_000_000_000_002))),
+    ]
+    for (name, key) in variants {
+        try expect(key != base, "changing \(name) must change the modify key")
+    }
+}
+
+check("write key: field boundaries are unambiguous and create never collides with modify") {
+    try expect(
+        sampleCreateKey(parent: "ab", filename: "c") != sampleCreateKey(parent: "a", filename: "bc"),
+        "(ab, c) and (a, bc) must not share a key"
+    )
+    try expect(
+        sampleCreateKey(contentType: "") != sampleCreateKey(contentType: nil),
+        "an empty content type and an absent one must not share a key"
+    )
+    let sameValues = IPCContentFingerprint(sizeBytes: 5, modifiedNanos: 5)
+    let create = IPCWriteKey.create(parentIdentifier: "p", filename: "f", kind: "file", contentType: nil, contents: sameValues)
+    let modify = IPCWriteKey.modify(
+        itemIdentifier: "p", parentIdentifier: "p", filename: "f", kind: "file", contentType: nil,
+        baseVersionIdentifier: nil, changedFields: 0, contents: sameValues
+    )
+    try expect(create != modify, "a create and a modify must never share a key")
+}
+
+func sampleCreateRequest(contentsPath: String? = "/tmp/staged", contents: IPCContentFingerprint? = sampleContents) -> [String: Any] {
+    return IPCWriteRequest.create(
+        parentIdentifier: "NSFileProviderRootContainerItemIdentifier",
+        filename: "video.mov",
+        kind: "file",
+        contentsPath: contentsPath,
+        contentType: "public.movie",
+        contents: contents
+    )
+}
+
+func sampleModifyRequest(contentsPath: String? = "/tmp/staged", contents: IPCContentFingerprint? = IPCContentFingerprint(sizeBytes: 1234, modifiedNanos: 1_788_000_000_000_000_001)) -> [String: Any] {
+    return IPCWriteRequest.modify(
+        itemIdentifier: "3f2a9c1e-0000-4000-8000-000000000001",
+        parentIdentifier: "NSFileProviderRootContainerItemIdentifier",
+        filename: "notes.txt",
+        kind: "file",
+        contentsPath: contentsPath,
+        contentType: "public.plain-text",
+        baseVersionIdentifier: "7",
+        changedFields: 0b1010,
+        contents: contents
+    )
+}
+
+check("write request: QueueFinderCreate with contents carries the derived request_id (and the same one on every build)") {
+    let payload = try requestPayload(sampleCreateRequest(), "QueueFinderCreate")
+    let id = payload["request_id"] as? String
+    try expect(id == sampleCreateKey(), "request_id must be the derived create key, got \(String(describing: id))")
+    try expect(payload["contents_path"] as? String == "/tmp/staged", "contents_path must be kept")
+    try expect(payload["filename"] as? String == "video.mov" && payload["kind"] as? String == "file", "other fields must be kept")
+    let again = try requestPayload(sampleCreateRequest(contentsPath: "/tmp/a-different-staged-path"), "QueueFinderCreate")
+    try expect(
+        again["request_id"] as? String == id,
+        "a retry whose staged path differs must still get the same request_id (the path is not a key input)"
+    )
+}
+
+check("write request: QueueFinderModify with contents carries the derived request_id") {
+    let payload = try requestPayload(sampleModifyRequest(), "QueueFinderModify")
+    let id = payload["request_id"] as? String
+    try expect(id == sampleModifyKey(), "request_id must be the derived modify key, got \(String(describing: id))")
+    try expect(payload["file_id"] as? String == "3f2a9c1e-0000-4000-8000-000000000001", "file_id must be kept")
+    try expect(payload["base_version_identifier"] as? String == "7", "base version must be kept")
+}
+
+check("write request: no contents, or contents that could not be fingerprinted, sends no request_id") {
+    let noContentsCreate = try requestPayload(sampleCreateRequest(contentsPath: nil), "QueueFinderCreate")
+    try expect(noContentsCreate["request_id"] == nil, "a folder create is fast and is not deduplicated")
+    let noContentsModify = try requestPayload(sampleModifyRequest(contentsPath: nil), "QueueFinderModify")
+    try expect(noContentsModify["request_id"] == nil, "a rename/move is fast and is not deduplicated")
+    let unreadableCreate = try requestPayload(sampleCreateRequest(contents: nil), "QueueFinderCreate")
+    try expect(unreadableCreate["request_id"] == nil, "no fingerprint means no key, never a made-up one")
+    let unreadableModify = try requestPayload(sampleModifyRequest(contents: nil), "QueueFinderModify")
+    try expect(unreadableModify["request_id"] == nil, "no fingerprint means no key, never a made-up one")
+}
+
+check("write request: request_id survives framing on the wire for both shapes") {
+    for (op, request) in [("QueueFinderCreate", sampleCreateRequest()), ("QueueFinderModify", sampleModifyRequest())] {
+        let frame = try IPCFraming.encodeRequest(request)
+        let json = try JSONSerialization.jsonObject(with: frame.dropLast()) as? [String: Any]
+        let payload = json?[op] as? [String: Any]
+        let id = payload?["request_id"] as? String
+        try expect(id?.count == 64, "\(op) frame must carry a 64-character request_id, got \(String(describing: id))")
+    }
+}
+
+check("content fingerprint: stable for an untouched file, changes with size and with mtime, nil for a missing file") {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ipc-fingerprint-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let file = dir.appendingPathComponent("staged.bin")
+    try Data("hello".utf8).write(to: file)
+    guard let first = IPCContentFingerprint.ofFile(at: file), let second = IPCContentFingerprint.ofFile(at: file) else {
+        throw TestFailure(description: "a readable file must fingerprint")
+    }
+    try expect(first == second, "an untouched file must fingerprint identically twice")
+    try expect(first.sizeBytes == 5, "size must be the byte length, got \(first.sizeBytes)")
+
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)], ofItemAtPath: file.path)
+    guard let touched = IPCContentFingerprint.ofFile(at: file) else {
+        throw TestFailure(description: "touched file must fingerprint")
+    }
+    try expect(touched.modifiedNanos != first.modifiedNanos, "a different mtime must change the fingerprint")
+    try expect(touched.modifiedNanos == 1_700_000_000 * 1_000_000_000, "mtime must be reported in nanoseconds, got \(touched.modifiedNanos)")
+
+    try Data("hello world".utf8).write(to: file)
+    guard let grown = IPCContentFingerprint.ofFile(at: file) else {
+        throw TestFailure(description: "grown file must fingerprint")
+    }
+    try expect(grown.sizeBytes == 11 && grown != touched, "a different size must change the fingerprint")
+
+    try expect(IPCContentFingerprint.ofFile(at: dir.appendingPathComponent("missing.bin")) == nil, "a missing file has no fingerprint")
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

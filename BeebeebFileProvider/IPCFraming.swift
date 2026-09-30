@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // Wire framing + exchange for the desktop daemon's Unix socket (task 1670
@@ -15,6 +16,11 @@ import Foundation
 // successful hydrate with the bare JSON string "Ok", which
 // JSONSerialization rejects unless fragments are allowed -- so every
 // successful hydrate surfaced as "daemon response was not valid JSON".
+//
+// Task 1684 adds the write-queue idempotency key (IPCWriteKey) and the request
+// builders (IPCWriteRequest) that attach it. CryptoKit is system-provided on
+// every macOS the extension runs on, so this file is still free of any
+// FileProvider dependency.
 //
 // This file is deliberately pure Foundation (no FileProvider import): the
 // macOS CI job compiles it together with BeebeebFileProviderTests/main.swift
@@ -55,9 +61,10 @@ enum IPCFraming {
     /// pessimistic 25 MB/s (spinning or USB disk; an APFS same-volume copy is
     /// a clone and near-instant), and it is the same 20x-metadata ceiling as
     /// hydrate. A wedged daemon still surfaces after 10 minutes, not never.
-    /// A copy that would take longer still times out; making THAT
-    /// duplicate-proof needs a request id the daemon dedups on (protocol
-    /// change, tracked in the task file, not done here).
+    /// A copy that would take longer still times out; task 1684 closes that:
+    /// the same requests carry a stable `request_id` (see `IPCWriteKey`) and
+    /// the daemon returns the first result for a repeat instead of queueing the
+    /// upload again.
     static let stagedCopyTimeoutSeconds = 600
 
     /// Timeout for a write-queue request: long only when the daemon has file
@@ -422,5 +429,208 @@ enum IPCExchange {
             }
             throw error
         }
+    }
+}
+
+
+// MARK: - Write-queue idempotency (task 1684)
+
+/// Size and modification time of the file the system staged for a write
+/// (`createItem` / `modifyItem` `contents`). These are the content-derived
+/// inputs of `IPCWriteKey`.
+///
+/// The inode is deliberately NOT part of this: the system may hand a retry a
+/// re-staged copy of the same content at a new path (and so a new inode), and a
+/// key that changed with the inode would never match across retries, which is
+/// the one thing it exists to do. Size + nanosecond mtime is preserved by a
+/// clone/copy that keeps metadata; if a retry's staged file carries a different
+/// mtime the key simply differs and the daemon falls back to its pre-1684
+/// behaviour (one extra upload), which is the same as no key at all.
+struct IPCContentFingerprint: Equatable {
+    let sizeBytes: Int64
+    let modifiedNanos: Int64
+
+    /// `nil` if the file cannot be stat'ed (the request is then sent with no
+    /// key and behaves as it did before 1684).
+    static func ofFile(at url: URL) -> IPCContentFingerprint? {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else {
+            return nil
+        }
+        let nanos = Int64(info.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_mtimespec.tv_nsec)
+        return IPCContentFingerprint(sizeBytes: Int64(info.st_size), modifiedNanos: nanos)
+    }
+}
+
+/// The idempotency key sent as `request_id` on `QueueFinderCreate` /
+/// `QueueFinderModify` requests that carry file contents.
+///
+/// **It must be STABLE across the system's retries, so it is derived, never
+/// random.** A retry after an IPC timeout is a NEW `createItem` / `modifyItem`
+/// invocation, so a fresh `UUID()` per call would be different every time and
+/// dedup nothing. The key is SHA-256 (lowercase hex, 64 characters) over a
+/// canonical, length-prefixed encoding of the inputs that identify the logical
+/// operation:
+///
+/// * create: parent item identifier, filename, kind, content type, content size,
+///   content modification time;
+/// * modify: item identifier, base version identifier, parent, filename, kind,
+///   content type, changed-fields bitmask, content size, content modification
+///   time.
+///
+/// **False-dedup risk (two genuinely different operations producing one key).**
+/// Two creates collide only if parent, name, size and nanosecond mtime are all
+/// equal -- i.e. the same file into the same folder, which would be a name
+/// collision anyway. The realistic hazard is the SAME inputs recurring as a new
+/// operation inside the daemon's 30 minute window (create `a.txt`, delete it,
+/// copy the identical file back with its mtime preserved). The daemon guards
+/// that, not this file: it returns a remembered result only while the row it
+/// created still exists under the same name, and it never merges a key across a
+/// different operation/parent-or-item/filename/kind. A modify additionally folds
+/// in the base version and the changed-fields mask, which change when the item
+/// does. A sha256 hash collision is not a concern.
+enum IPCWriteKey {
+    /// Bumping this changes every key; never reuse a version for a different encoding.
+    static let version = "bb-write-v1"
+
+    private static func field(_ value: String?) -> String {
+        guard let value = value else {
+            return "n;"
+        }
+        // Length-prefixed so ("ab", "c") and ("a", "bc") cannot produce the same bytes.
+        return "s\(value.utf8.count):\(value);"
+    }
+
+    private static func field(_ value: Int64) -> String {
+        return "i\(value);"
+    }
+
+    private static func hexSHA256(_ material: String) -> String {
+        let digest = SHA256.hash(data: Data(material.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func create(
+        parentIdentifier: String,
+        filename: String,
+        kind: String,
+        contentType: String?,
+        contents: IPCContentFingerprint
+    ) -> String {
+        var material = field(version) + field("create")
+        material += field(parentIdentifier)
+        material += field(filename)
+        material += field(kind)
+        material += field(contentType)
+        material += field(contents.sizeBytes)
+        material += field(contents.modifiedNanos)
+        return hexSHA256(material)
+    }
+
+    static func modify(
+        itemIdentifier: String,
+        parentIdentifier: String,
+        filename: String,
+        kind: String,
+        contentType: String?,
+        baseVersionIdentifier: String?,
+        changedFields: UInt64,
+        contents: IPCContentFingerprint
+    ) -> String {
+        var material = field(version) + field("modify")
+        material += field(itemIdentifier)
+        material += field(baseVersionIdentifier)
+        material += field(parentIdentifier)
+        material += field(filename)
+        material += field(kind)
+        material += field(contentType)
+        material += field(Int64(bitPattern: changedFields))
+        material += field(contents.sizeBytes)
+        material += field(contents.modifiedNanos)
+        return hexSHA256(material)
+    }
+}
+
+/// Builds the two write-queue requests that can make the daemon copy a file.
+/// Both attach `request_id` whenever they carry contents AND the contents could
+/// be fingerprinted; a request with no contents (a folder, a rename, a move) is
+/// answered from the database in milliseconds under the short timeout, so it
+/// has nothing to deduplicate and is sent without one.
+///
+/// XPCBridge must build these requests through here (scripts/check-ipc-
+/// timeouts.py fails if a call site stops doing so) so the key cannot be
+/// dropped by a refactor, and BeebeebFileProviderTests pins that both shapes
+/// carry it.
+enum IPCWriteRequest {
+    static func create(
+        parentIdentifier: String,
+        filename: String,
+        kind: String,
+        contentsPath: String?,
+        contentType: String?,
+        contents: IPCContentFingerprint?
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "parent_id": parentIdentifier,
+            "filename": filename,
+            "kind": kind,
+        ]
+        if let contentsPath = contentsPath {
+            payload["contents_path"] = contentsPath
+        }
+        if let contentType = contentType {
+            payload["content_type"] = contentType
+        }
+        if contentsPath != nil, let contents = contents {
+            payload["request_id"] = IPCWriteKey.create(
+                parentIdentifier: parentIdentifier,
+                filename: filename,
+                kind: kind,
+                contentType: contentType,
+                contents: contents
+            )
+        }
+        return ["QueueFinderCreate": payload]
+    }
+
+    static func modify(
+        itemIdentifier: String,
+        parentIdentifier: String,
+        filename: String,
+        kind: String,
+        contentsPath: String?,
+        contentType: String?,
+        baseVersionIdentifier: String?,
+        changedFields: UInt64,
+        contents: IPCContentFingerprint?
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "file_id": itemIdentifier,
+            "parent_id": parentIdentifier,
+            "filename": filename,
+            "kind": kind,
+        ]
+        if let contentsPath = contentsPath {
+            payload["contents_path"] = contentsPath
+        }
+        if let contentType = contentType {
+            payload["content_type"] = contentType
+        }
+        if let baseVersionIdentifier = baseVersionIdentifier {
+            payload["base_version_identifier"] = baseVersionIdentifier
+        }
+        if contentsPath != nil, let contents = contents {
+            payload["request_id"] = IPCWriteKey.modify(
+                itemIdentifier: itemIdentifier,
+                parentIdentifier: parentIdentifier,
+                filename: filename,
+                kind: kind,
+                contentType: contentType,
+                baseVersionIdentifier: baseVersionIdentifier,
+                changedFields: changedFields,
+                contents: contents
+            )
+        }
+        return ["QueueFinderModify": payload]
     }
 }

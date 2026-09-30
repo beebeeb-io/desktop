@@ -362,7 +362,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 kind: kind,
                 contentsURL: newContents,
                 contentType: kind == .file ? contentType?.identifier : nil,
-                baseVersionIdentifier: Self.versionIdentifier(version)
+                baseVersionIdentifier: Self.versionIdentifier(version),
+                changedFields: changedFields
             )
             if result.ignored {
                 completionHandler(nil, [], false, nil)

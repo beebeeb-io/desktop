@@ -18,13 +18,14 @@ use tokio::net::UnixStream;
 
 use crate::api_client::ApiClient;
 use crate::engine_bridge::EngineBridge;
-use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, StateDb};
 
 const READ_DEADLINE: Duration = Duration::from_secs(5);
 
 struct IpcFixture {
     rt: tokio::runtime::Runtime,
     sock: std::path::PathBuf,
+    db: Arc<StateDb>,
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     _state_dir: tempfile::TempDir,
@@ -46,7 +47,7 @@ impl IpcFixture {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server = rt.spawn(crate::ipc_socket::serve_ipc_at_with_ready(
             sock.clone(),
-            db,
+            db.clone(),
             bridge,
             cancel_rx,
             Some(ready_tx),
@@ -60,6 +61,7 @@ impl IpcFixture {
         Self {
             rt,
             sock,
+            db,
             cancel: Some(cancel_tx),
             server: Some(server),
             _state_dir: state_dir,
@@ -333,4 +335,464 @@ fn a_rejected_write_keeps_the_connection_open_for_the_next_request() {
         let next = parse(&lines.next_line().await);
         assert!(next.get("SyncSummary").is_some(), "connection must still be usable: {next}");
     });
+}
+
+// ---------------------------------------------------------------------------
+// Task 1684: write-queue request-id dedup, over the real socket, counting the
+// REAL queued operations in the state DB (not a mock).
+// ---------------------------------------------------------------------------
+
+fn queued_operation_count(fx: &IpcFixture) -> usize {
+    fx.db.list_due_operations(i64::MAX).unwrap().len()
+}
+
+fn source_file(dir: &tempfile::TempDir, name: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, b"finder file contents").unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn create_request(filename: &str, contents_path: &str, request_id: Option<&str>) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "parent_id": null,
+        "filename": filename,
+        "kind": "file",
+        "contents_path": contents_path,
+        "content_type": null,
+    });
+    if let Some(id) = request_id {
+        body["request_id"] = serde_json::json!(id);
+    }
+    let mut line = serde_json::to_vec(&serde_json::json!({ "QueueFinderCreate": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+fn modify_request(file_id: &str, filename: &str, contents_path: &str, request_id: Option<&str>) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "file_id": file_id,
+        "parent_id": null,
+        "filename": filename,
+        "kind": "file",
+        "contents_path": contents_path,
+        "content_type": null,
+        "base_version_identifier": null,
+    });
+    if let Some(id) = request_id {
+        body["request_id"] = serde_json::json!(id);
+    }
+    let mut line = serde_json::to_vec(&serde_json::json!({ "QueueFinderModify": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+async fn send_one(fx: &IpcFixture, request: Vec<u8>) -> serde_json::Value {
+    let mut client = fx.connect().await;
+    client.write_all(&request).await.unwrap();
+    parse(&read_line(&mut client).await)
+}
+
+fn assert_write_queued(reply: &serde_json::Value) {
+    assert!(reply.get("WriteQueued").is_some(), "expected WriteQueued, got {reply}");
+    assert!(
+        reply["WriteQueued"]["item"]["identifier"].as_str().is_some(),
+        "a queued create must report the item it created: {reply}"
+    );
+}
+
+/// Park every database writer behind a held lock until the returned sender is
+/// dropped or used. While it is held the leader's copy cannot reach the queue,
+/// so every request sent meanwhile is GUARANTEED to overlap the in-flight
+/// leader: the wait-for-the-first-result path is exercised over the real
+/// socket, not left to scheduling (with a tiny source file the leader can finish
+/// before the others claim the key, and they then take the cached path instead).
+fn hold_database(fx: &IpcFixture) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let db = fx.db.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let _guard = db.hold_lock_for_test();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv(); // a message or the sender being dropped
+    });
+    held_rx.recv_timeout(Duration::from_secs(5)).expect("database lock was not taken");
+    (release_tx, handle)
+}
+
+/// Send `count` copies of `request` on separate connections while the database
+/// is held, prove none has answered (they are all parked behind the leader, or
+/// behind the lock), then release and collect the replies.
+fn send_overlapping(fx: &IpcFixture, count: usize, request: impl Fn() -> Vec<u8>) -> Vec<serde_json::Value> {
+    let (release, holder) = hold_database(fx);
+    let replies = fx.rt.block_on(async {
+        // Connect everything FIRST: a mutated daemon that runs the work inline
+        // parks its workers behind the lock, and a later `connect().await` would
+        // then never get polled (a hang instead of a clean red).
+        let mut clients = Vec::new();
+        for _ in 0..count {
+            clients.push(fx.connect().await);
+        }
+        let mut tasks = Vec::new();
+        for mut client in clients {
+            let request = request();
+            tasks.push(tokio::spawn(async move {
+                client.write_all(&request).await.unwrap();
+                parse(&read_line(&mut client).await)
+            }));
+        }
+        // A blocking sleep on purpose: if the daemon wrongly runs the work inline
+        // on its workers, they are all parked behind the lock and nothing would
+        // drive a tokio timer, turning a clean red into a hang.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            tasks.iter().all(|t| !t.is_finished()),
+            "no request may be answered while the first is still copying"
+        );
+        release.send(()).unwrap();
+        let mut out = Vec::new();
+        for t in tasks {
+            out.push(t.await.unwrap());
+        }
+        out
+    });
+    holder.join().unwrap();
+    replies
+}
+
+#[test]
+fn concurrent_creates_with_one_request_id_queue_exactly_one_upload() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "big.bin");
+    let replies = send_overlapping(&fx, 8, || create_request("big.bin", &path, Some("key-concurrent")));
+    assert_eq!(replies.len(), 8);
+    for r in &replies {
+        assert_write_queued(r);
+        assert_eq!(r, &replies[0], "every repeat must get the SAME WriteQueued reply");
+    }
+    assert_eq!(queued_operation_count(&fx), 1, "one logical create must queue exactly one upload");
+}
+
+#[test]
+fn a_repeat_after_completion_returns_the_cached_reply_without_queueing() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("a.bin", &path, Some("key-after"))).await;
+        assert_write_queued(&first);
+        assert_eq!(queued_operation_count(&fx), 1);
+        // The retry comes on a NEW connection, well after the first finished.
+        let retry = send_one(&fx, create_request("a.bin", &path, Some("key-after"))).await;
+        assert_eq!(retry, first);
+    });
+    assert_eq!(queued_operation_count(&fx), 1, "the retry must not queue a second upload");
+}
+
+#[test]
+fn different_request_ids_each_queue_their_own_upload() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let one = send_one(&fx, create_request("a.bin", &path, Some("key-one"))).await;
+        let two = send_one(&fx, create_request("a.bin", &path, Some("key-two"))).await;
+        assert_write_queued(&one);
+        assert_write_queued(&two);
+        assert_ne!(
+            one["WriteQueued"]["item"]["identifier"], two["WriteQueued"]["item"]["identifier"],
+            "two different keys are two different creates"
+        );
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn a_request_without_a_request_id_behaves_exactly_as_before() {
+    // Version skew: the 0.8.6 extension sends no key. Two identical key-less
+    // requests are two creates, as they always were.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let one = send_one(&fx, create_request("a.bin", &path, None)).await;
+        let two = send_one(&fx, create_request("a.bin", &path, None)).await;
+        assert_write_queued(&one);
+        assert_write_queued(&two);
+        assert_ne!(one, two);
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn a_cached_create_is_not_returned_once_its_row_is_gone() {
+    // The false-dedup guard: the same key arriving after the user deleted the
+    // file is a NEW create, not a retry.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("a.bin", &path, Some("key-gone"))).await;
+        assert_write_queued(&first);
+        let id = first["WriteQueued"]["item"]["identifier"].as_str().unwrap().to_string();
+        fx.db.delete_file(&id).unwrap();
+        let again = send_one(&fx, create_request("a.bin", &path, Some("key-gone"))).await;
+        assert_write_queued(&again);
+        assert_ne!(again["WriteQueued"]["item"]["identifier"], first["WriteQueued"]["item"]["identifier"]);
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn a_request_id_reused_for_another_file_name_is_not_merged() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let a = send_one(&fx, create_request("a.bin", &path, Some("key-collide"))).await;
+        let b = send_one(&fx, create_request("b.bin", &path, Some("key-collide"))).await;
+        assert_write_queued(&a);
+        assert_write_queued(&b);
+        assert_ne!(a["WriteQueued"]["item"]["identifier"], b["WriteQueued"]["item"]["identifier"]);
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn concurrent_modifies_with_one_request_id_queue_exactly_one_version() {
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: "00000000-0000-0000-0000-00000000aaaa".into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "doc.txt");
+    let replies = send_overlapping(&fx, 6, || {
+        modify_request("00000000-0000-0000-0000-00000000aaaa", "doc.txt", &path, Some("key-modify"))
+    });
+    for r in &replies {
+        assert!(r.get("WriteQueued").is_some(), "expected WriteQueued, got {r}");
+        assert_eq!(r, &replies[0]);
+    }
+    assert_eq!(queued_operation_count(&fx), 1, "one logical modify must queue exactly one version");
+}
+
+#[test]
+fn an_unusable_request_id_is_refused_not_ignored() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        for bad in ["".to_string(), "x".repeat(129), "line\nbreak".to_string()] {
+            let reply = send_one(&fx, create_request("a.bin", &path, Some(&bad))).await;
+            let message = reply["Error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains("request_id"), "a bad key must be refused, got {reply}");
+        }
+    });
+    assert_eq!(queued_operation_count(&fx), 0, "a refused request must queue nothing");
+}
+
+#[test]
+fn a_failed_create_is_not_remembered_so_the_retry_actually_runs() {
+    // The first attempt fails (its source file is unreadable), which must not
+    // poison the key: the system's retry, now with a readable file, has to queue.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let good = source_file(&src, "a.bin");
+    let missing = src.path().join("does-not-exist.bin").to_string_lossy().into_owned();
+    fx.rt.block_on(async {
+        let failed = send_one(&fx, create_request("a.bin", &missing, Some("key-fail"))).await;
+        assert!(failed.get("Error").is_some(), "the first attempt must fail, got {failed}");
+        assert_eq!(queued_operation_count(&fx), 0);
+        let retried = send_one(&fx, create_request("a.bin", &good, Some("key-fail"))).await;
+        assert_write_queued(&retried);
+    });
+    assert_eq!(queued_operation_count(&fx), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Task 1684 fix round: a Finder delete must never be undone by a cached create.
+//
+// The REAL delete path (`QueueFinderDelete`) enqueues a `TrashFile` op and leaves
+// the `files` row in place (it stays until the snapshot prune or the op echo
+// removes it). So `delete_file` — what `a_cached_create_is_not_returned_once_its_
+// row_is_gone` uses — is a state the daemon never produces after a user delete.
+// These tests drive the real request and the real post-delete database states.
+// ---------------------------------------------------------------------------
+
+fn delete_request(file_id: &str) -> Vec<u8> {
+    let mut line = serde_json::to_vec(&serde_json::json!({
+        "QueueFinderDelete": { "file_id": file_id, "base_version_identifier": null }
+    }))
+    .unwrap();
+    line.push(b'\n');
+    line
+}
+
+fn operations_of_kind(fx: &IpcFixture, kind: OperationKind) -> Vec<crate::state_db::PendingOperation> {
+    fx.db
+        .list_due_operations(i64::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.kind == kind)
+        .collect()
+}
+
+fn item_id(reply: &serde_json::Value) -> String {
+    reply["WriteQueued"]["item"]["identifier"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_real_finder_delete_then_the_same_create_uploads_the_new_file() {
+    // Copy report.pdf in (Finder keeps the mtime, so the key is stable), delete
+    // it, copy the same file back within the TTL: same key, but a NEW create.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "report.pdf");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("report.pdf", &path, Some("key-del-recreate"))).await;
+        assert_write_queued(&first);
+        let id = item_id(&first);
+        let deleted = send_one(&fx, delete_request(&id)).await;
+        assert!(deleted.get("WriteQueued").is_some(), "the delete must queue, got {deleted}");
+        let again = send_one(&fx, create_request("report.pdf", &path, Some("key-del-recreate"))).await;
+        assert_write_queued(&again);
+        assert_ne!(
+            item_id(&again),
+            id,
+            "the re-created file must be a NEW item, not the trashed one"
+        );
+    });
+    assert_eq!(
+        operations_of_kind(&fx, OperationKind::UploadVersion).len(),
+        2,
+        "the re-created file must queue its own upload"
+    );
+    assert_eq!(operations_of_kind(&fx, OperationKind::TrashFile).len(), 1);
+}
+
+#[test]
+fn a_create_after_the_trash_op_finished_still_uploads_the_new_file() {
+    // After the server trash succeeds the op is REMOVED but the row is kept (see
+    // the `TrashFile` arm in engine_bridge.rs), and the IPC delete path does not
+    // mark it `Trashing`. Nothing in the row or the queue says "deleted" any
+    // more, so only the delete itself forgetting the dedup entry can save this.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "report.pdf");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("report.pdf", &path, Some("key-after-trash"))).await;
+        let id = item_id(&first);
+        send_one(&fx, delete_request(&id)).await;
+        for op in operations_of_kind(&fx, OperationKind::TrashFile) {
+            fx.db.remove_operation(&op.op_id).unwrap(); // what a successful trash does
+        }
+        assert!(fx.db.get_file(&id).unwrap().is_some(), "the row outlives the trash op");
+        let again = send_one(&fx, create_request("report.pdf", &path, Some("key-after-trash"))).await;
+        assert_write_queued(&again);
+        assert_ne!(item_id(&again), id);
+    });
+    assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 2);
+}
+
+#[test]
+fn a_cached_create_is_not_returned_while_a_trash_op_is_pending_for_its_row() {
+    // A trash queued by any path other than the IPC delete (which also forgets
+    // the entry) is caught by the row's pending `TrashFile` op.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "report.pdf");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("report.pdf", &path, Some("key-pending-trash"))).await;
+        let id = item_id(&first);
+        let now = 1_700_000_000;
+        fx.db
+            .enqueue_operation(&crate::state_db::PendingOperation {
+                op_id: "trash-op".into(),
+                kind: OperationKind::TrashFile,
+                file_id: Some(id.clone()),
+                parent_id: None,
+                target_path: None,
+                metadata_json: None,
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 25,
+                next_retry_at: now,
+                last_error: None,
+                backup_source_key: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        let again = send_one(&fx, create_request("report.pdf", &path, Some("key-pending-trash"))).await;
+        assert_write_queued(&again);
+        assert_ne!(item_id(&again), id);
+    });
+    assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 2);
+}
+
+#[test]
+fn a_cached_create_is_not_returned_for_a_row_parked_trashing() {
+    // `watcher::handle_delete` parks a locally-deleted row in `Trashing`.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "report.pdf");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("report.pdf", &path, Some("key-trashing"))).await;
+        let id = item_id(&first);
+        fx.db.set_status(&id, FileStatus::Trashing).unwrap();
+        let again = send_one(&fx, create_request("report.pdf", &path, Some("key-trashing"))).await;
+        assert_write_queued(&again);
+        assert_ne!(item_id(&again), id);
+    });
+    assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 2);
+}
+
+#[test]
+fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
+    // A >600 s copy times out, the upload then finalizes, and only then does the
+    // system's backed-off retry arrive. The cached reply must carry the CURRENT
+    // version and status, or the user's next edit sends a stale base version.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "big.bin");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
+        let id = item_id(&first);
+        assert_eq!(first["WriteQueued"]["item"]["status"], "uploading");
+        // Upload finalization: the row becomes Local at a real server version.
+        fx.db
+            .upsert_file(&FileEntry {
+                file_id: id.clone(),
+                path: "big.bin".into(),
+                status: FileStatus::Local,
+                size_bytes: 20,
+                modified_at: 1_700_000_123,
+                content_hash: None,
+                remote_updated_at: 7,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let retry = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
+        assert_eq!(item_id(&retry), id, "it is still the same item (a true retry)");
+        assert_eq!(retry["WriteQueued"]["item"]["status"], "local", "status must be current: {retry}");
+        assert_eq!(
+            retry["WriteQueued"]["item"]["version_identifier"], "7:1700000123:20",
+            "version must be current: {retry}"
+        );
+        assert_ne!(retry, first);
+    });
+    assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 1);
 }
