@@ -10687,3 +10687,7 @@ mod recovery_phrase_unlock_tests {
         );
     }
 }
+
+// Slice 1 is an isolated storage harness until spec 50 P7 activation.
+#[cfg(test)]
+mod content_v2;
