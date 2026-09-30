@@ -902,9 +902,6 @@ impl EngineBridge {
                 "upload-time thumbnail generation/upload skipped"
             );
         }
-        if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
-            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
-        }
 
         // Windows Cloud Files (task 0780): the file the user dropped in the
         // sync root is, at this point, a PLAIN local file — Explorer shows it
@@ -917,7 +914,11 @@ impl EngineBridge {
         // user file). Best-effort — a failure here leaves a working local file,
         // it just won't show the synced overlay until the next reconcile.
         #[cfg(target_os = "windows")]
-        self.finalize_local_upload_placeholder(op, &server_file_id, sync_root);
+        self.finalize_local_upload_placeholder(op, &server_file_id, sync_root, payload_path);
+        if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
+            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+        }
+
     }
 
     /// Give up on a persisted upload session (payload changed, session gone,
@@ -993,7 +994,7 @@ impl EngineBridge {
     /// happy path of task 0780. Modify-as-new-version is a deferred follow-up
     /// and is intentionally not converted here.
     #[cfg(target_os = "windows")]
-    fn finalize_local_upload_placeholder(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path) {
+    fn finalize_local_upload_placeholder(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path, payload_path: &Path) {
         let Some(metadata) = op.metadata_json.as_deref() else {
             return;
         };
@@ -1017,7 +1018,7 @@ impl EngineBridge {
             // later tick from the server row instead.
             return;
         }
-        if let Err(e) = crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&on_disk, server_file_id) {
+        if let Err(e) = crate::windows_cf::placeholders::complete_upload_placeholder(&on_disk, server_file_id, Some((op.file_id.as_deref().unwrap_or(server_file_id), payload_path))) {
             // Zero-knowledge: log the file_id only, never the path/filename.
             tracing::warn!(file_id = %server_file_id, error = %e, "could not convert uploaded file to in-sync placeholder");
         }

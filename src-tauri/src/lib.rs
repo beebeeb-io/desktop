@@ -573,8 +573,14 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
     }
 }
 
+// UI cache epoch, independent of the credential-bearing command lease epoch.
+static UI_SESSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn set_auth_present(state: &AppState, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
+        if *guard != present {
+            UI_SESSION_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         *guard = present;
     }
 }
@@ -586,6 +592,9 @@ fn set_auth_email(state: &AppState, email: Option<String>) {
     if let Ok(acct) = state.active_account()
         && let Ok(mut guard) = acct.auth_email.lock()
     {
+        if *guard != email {
+            UI_SESSION_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         *guard = email;
     }
 }
@@ -3464,6 +3473,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 
     Ok(serde_json::json!({
         "logged_in": logged_in,
+        "session_revision": UI_SESSION_REVISION.load(std::sync::atomic::Ordering::SeqCst),
         "auth_expired": auth_expired,
         "sync_root": sync_root,
         "engine_running": engine_running,

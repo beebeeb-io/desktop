@@ -782,7 +782,28 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
             "Explorer registration remains after unregister; sign-out did not finish"
         );
     }
+    // WinRT removes the live registration but can leave our per-user handler
+    // key behind. Delete only this root's stable ID, then prove absence.
+    remove_owned_shell_key(&id)?;
     tracing::info!(sync_root = %sync_root.display(), shell_id = %id, "Explorer shell sync root unregistered");
+    Ok(())
+}
+
+fn remove_owned_shell_key(id: &str) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    let key = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"));
+    unsafe {
+        let result = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
+        anyhow::ensure!(result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND,
+            "Could not remove owned Explorer registry key: {result:?}");
+        let mut handle = HKEY::default();
+        let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
+        if remaining == ERROR_SUCCESS { let _ = RegCloseKey(handle); }
+        anyhow::ensure!(remaining == ERROR_FILE_NOT_FOUND || remaining == ERROR_PATH_NOT_FOUND,
+            "Could not verify owned Explorer registry key removal: {remaining:?}");
+    }
     Ok(())
 }
 

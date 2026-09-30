@@ -27,6 +27,7 @@
 import { StrictMode, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import AccountSessionBoundary from './AccountSessionBoundary'
 import ConflictWindow from './ConflictWindow'
 import Onboarding from './Onboarding'
 import WindowsTray from './WindowsTray'
@@ -83,6 +84,10 @@ if (which === 'conflict') {
 
 createRoot(container).render(
   <StrictMode>
-    <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
+    {which === 'onboarding' ? (
+      <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
+    ) : (
+      <AccountSessionBoundary><ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider></AccountSessionBoundary>
+    )}
   </StrictMode>,
 )

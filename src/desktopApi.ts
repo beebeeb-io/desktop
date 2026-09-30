@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
+import { accountSessionRevision, observeAccountSession, subscribeAccountSession } from './accountSession'
 
 export type CommandResult<T> =
   | { ok: true; value: T }
   | { ok: false; reason: string; unsupported: boolean }
 
 export interface SyncStatus {
+  session_revision?: number
   logged_in: boolean
   engine: string
   sync_root: string | null
@@ -386,8 +388,13 @@ export function conflictContentPreview(fileId: string): Promise<CommandResult<Co
 }
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
+  const revision = accountSessionRevision()
   try {
-    return { ok: true, value: await invoke<T>(name, args) }
+    const value = await invoke<T>(name, args)
+    if (name !== 'sync_status' && revision !== accountSessionRevision()) {
+      return { ok: false, reason: 'Account changed. Please try again.', unsupported: false }
+    }
+    return { ok: true, value }
   } catch (error) {
     const reason = reasonFrom(error)
     return { ok: false, reason, unsupported: isUnsupported(reason) }
@@ -396,6 +403,7 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
+  if (result.ok && result.value.session_revision !== undefined) observeAccountSession(result.value.session_revision)
   return result.ok ? result.value : null
 }
 
@@ -786,6 +794,7 @@ export interface SetPreferredRegionResponse {
 // Coalesce concurrent readers, but never retain a previous account or failed
 // request across mounts/sign-in. Product hooks begin with neutral copy.
 let regionPromise: Promise<UserRegionResponse | null> | null = null
+subscribeAccountSession(() => { regionPromise = null })
 
 export function fetchRegion(): Promise<UserRegionResponse | null> {
   if (!regionPromise) {
