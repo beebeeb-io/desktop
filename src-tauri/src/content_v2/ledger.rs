@@ -184,7 +184,13 @@ impl Ledger {
             "INSERT OR IGNORE INTO installation_format VALUES(1,1,?1,NULL)",
             [id().as_slice()],
         )?;
-        let ledger = Self { db, path, keys, run: id(), volume: h.volume.clone() };
+        let ledger = Self {
+            db,
+            path,
+            keys,
+            run: id(),
+            volume: h.volume.clone(),
+        };
         ledger.reconcile_keys()?;
         Ok(ledger)
     }
@@ -192,7 +198,11 @@ impl Ledger {
         self.keys.join(hex(slot))
     }
     fn slot_referenced(&self, slot: &Id) -> Result<bool> {
-        Ok(self.db.query_row("SELECT count(*) FROM protected_records WHERE key_slot=?1", [slot.as_slice()], |r| r.get::<_, u64>(0))? > 0)
+        Ok(self.db.query_row(
+            "SELECT count(*) FROM protected_records WHERE key_slot=?1",
+            [slot.as_slice()],
+            |r| r.get::<_, u64>(0),
+        )? > 0)
     }
     fn reconcile_keys(&self) -> Result<()> {
         for entry in fs::read_dir(&self.keys)? {
@@ -200,10 +210,13 @@ impl Ledger {
             let name = entry.file_name();
             let name = name.to_str().context("invalid key filename")?;
             let slot_name = name.split('.').next().context("key slot")?;
-            ensure!(slot_name.len() == 64 && slot_name.bytes().all(|b| b.is_ascii_hexdigit()), "unknown key-slot name");
+            ensure!(
+                slot_name.len() == 64 && slot_name.bytes().all(|b| b.is_ascii_hexdigit()),
+                "unknown key-slot name"
+            );
             let mut slot = [0; 32];
             for (i, byte) in slot.iter_mut().enumerate() {
-                *byte = u8::from_str_radix(&slot_name[2*i..2*i+2], 16)?;
+                *byte = u8::from_str_radix(&slot_name[2 * i..2 * i + 2], 16)?;
             }
             // Open and put hold the same volume allocator as the ledger writer.
             // Never repair a damaged slot still referenced by committed ciphertext.
@@ -218,7 +231,8 @@ impl Ledger {
         let temporary = self.keys.join(format!("{}.tmp.{}", hex(slot), hex(&id())));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
@@ -315,7 +329,9 @@ impl Ledger {
         }
         fault.point("before ledger commit")?;
         tx.commit()?;
-        if file_len(&wal_path(&self.path)) >= 64 * MIB { checkpoint(&self.db, &self.path, false)?; }
+        if file_len(&wal_path(&self.path)) >= 64 * MIB {
+            checkpoint(&self.db, &self.path, false)?;
+        }
         fault.point("after ledger commit")?;
         Ok(slot)
     }
@@ -490,16 +506,24 @@ pub(super) fn transfer(
 }
 
 pub(super) fn publish_key(temporary: &Path, destination: &Path) -> Result<()> {
-    #[cfg(windows)] {
+    #[cfg(windows)]
+    {
         use std::os::windows::ffi::OsStrExt;
         #[link(name = "Kernel32")]
-        unsafe extern "system" { fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32; }
+        unsafe extern "system" {
+            fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+        }
         let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
         let to: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
         // WRITE_THROUGH, deliberately without REPLACE_EXISTING or COPY_ALLOWED.
-        ensure!(unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 8) } != 0, "key publication failed: {}", std::io::Error::last_os_error());
+        ensure!(
+            unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 8) } != 0,
+            "key publication failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         fs::hard_link(temporary, destination)?; // atomic no-clobber publication
         fs::remove_file(temporary)?;
         fs::File::open(destination.parent().context("key parent")?)?.sync_all()?;
