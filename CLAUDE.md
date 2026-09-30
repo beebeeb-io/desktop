@@ -37,10 +37,13 @@ keychain identity, and that key is never exported to a CI secret. The remaining 
 (`scripts/build-fileprovider-extension.sh`'s arch-detection doesn't support
 `TAURI_ENV_ARCH=universal`, needed for a real Intel+Apple Silicon universal build) only matters
 once Intel support is undertaken. See `docs/RELEASING.md` → "macOS: local build, then backfill the
-manifest" for the exact procedure — build locally, notarize, upload assets to the same GitHub
-release the Windows/Linux build already created, run `.github/workflows/sign-macos-updater-artifact.yml`
-for the one step that needs CI's `TAURI_SIGNING_PRIVATE_KEY` secret, then re-run `release.yml` with
-`publish_existing=true` to backfill the manifest's `darwin-aarch64` entry.
+manifest": the procedure is ONE fail-closed command on the Mac,
+`scripts/release-macos-local.sh <VERSION> <CHANNEL>` (build, notarize, staple, rebuild the dmg from
+the stapled app, upload to the release the Windows/Linux build already created, run
+`.github/workflows/sign-macos-updater-artifact.yml` for the one step that needs CI's
+`TAURI_SIGNING_PRIVATE_KEY` secret, re-run `release.yml` with `publish_existing=true` to backfill
+the manifest's `darwin-aarch64` entry, assert the manifest). The manual steps stay in that doc as
+reference; `scripts/test-release-macos-local.sh` is its Linux-runnable test.
 
 **Not yet verified:** a real install + close-to-tray smoke test on physical Windows hardware
 (only build/sign/publish has been confirmed, from CI + local Linux verification — see below).
