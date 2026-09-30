@@ -57,6 +57,7 @@ mod lockfile;
 mod macos_file_provider;
 mod runner;
 mod state_db;
+mod staged_payload;
 mod state_paths;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
@@ -77,6 +78,11 @@ mod session_commands;
 static SESSION_COMMANDS: LazyLock<session_commands::SessionCommands> =
     LazyLock::new(session_commands::SessionCommands::new);
 
+#[cfg(any(target_os = "windows", test))]
+mod auth_attempts;
+#[cfg(target_os = "windows")]
+static AUTH_ATTEMPTS: LazyLock<auth_attempts::AuthAttempts> = LazyLock::new(auth_attempts::AuthAttempts::new);
+
 // Windows only: cancel the entire command, including independently built clients.
 // Other platforms poll the original command body directly.
 macro_rules! session_command {
@@ -95,8 +101,13 @@ macro_rules! session_command {
 #[cfg(target_os = "windows")]
 async fn close_session_commands() -> Result<(), String> {
     let revoked = SESSION_COMMANDS.close();
-    let worker =
-        tokio::task::spawn_blocking(move || SESSION_COMMANDS.drain(revoked, std::time::Duration::from_secs(3)));
+    let auth_revoked = AUTH_ATTEMPTS.close();
+    let worker = tokio::task::spawn_blocking(move || {
+        if let Some(auth) = auth_revoked {
+            auth.drain(std::time::Duration::from_secs(3))?;
+        }
+        SESSION_COMMANDS.drain(revoked, std::time::Duration::from_secs(3))
+    });
     tokio::time::timeout(std::time::Duration::from_secs(4), worker)
         .await
         .map_err(|_| {
@@ -722,156 +733,171 @@ struct LoginOutcome {
 #[tauri::command]
 async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<LoginOutcome, String> {
     #[cfg(target_os = "windows")]
-    let _transition = SESSION_TRANSITION.lock().await;
-    #[cfg(target_os = "windows")]
-    {
-        SESSION_COMMANDS.ensure_reactivation_allowed()?;
-        windows_cf::ensure_reactivation_allowed()?;
-    }
-    #[cfg(target_os = "windows")]
-    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
-        return Err("Sign out of the current account before signing in again.".into());
-    }
-
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-
-    let email = email.trim().to_lowercase();
-    if email.is_empty() || password.is_empty() {
-        return Err("Email and password are required.".to_string());
-    }
-
-    let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
-        .map_err(|e| format!("opaque login start: {e}"))?;
-    let client_message = encode_base64(&login_start.message);
-
-    let start_resp = client
-        .post(format!("{base_url}/api/v1/opaque/login-start"))
-        .json(&serde_json::json!({ "email": email, "client_message": client_message }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED || start_resp.status() == reqwest::StatusCode::NOT_FOUND
-    {
-        return Err("Invalid email or password".to_string());
-    }
-    if !start_resp.status().is_success() {
-        let status = start_resp.status();
-        let body = start_resp.text().await.unwrap_or_default();
-        return Err(format!("Login start failed ({status}): {body}"));
-    }
-
-    let start_body: serde_json::Value = start_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse login start response: {e}"))?;
-    let server_message = start_body
-        .get("server_message")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No server_message in login start response".to_string())?;
-    let server_state = start_body
-        .get("server_state")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No server_state in login start response".to_string())?;
-    // Dual-KSF login (task 0815): the server forwards the account's OPAQUE KSF
-    // version (0 = legacy Identity, 1 = Argon2id) in the login-start response.
-    // The client must finish under the matching CipherSuite, so thread it into
-    // client_login_finish — mirrors web/iOS and the server's own call shape in
-    // beebeeb-api/tests/api_integration.rs (`as u32` from the JSON number).
-    let ksf_version = start_body
-        .get("ksf_version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "No ksf_version in login start response".to_string())? as u32;
-    let server_message_bytes =
-        decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
-    let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
-        &login_start.state,
-        password.as_bytes(),
-        &server_message_bytes,
-        ksf_version,
-    )
-    .map_err(|e| format!("Invalid email or password ({e})"))?;
-
-    let finish_resp = client
-        .post(format!("{base_url}/api/v1/opaque/login-finish"))
-        .json(&serde_json::json!({
-            "email": email,
-            "client_message": encode_base64(&login_finish.message),
-            "server_state": server_state,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("Invalid email or password".to_string());
-    }
-    if !finish_resp.status().is_success() {
-        let status = finish_resp.status();
-        let body = finish_resp.text().await.unwrap_or_default();
-        return Err(format!("Login finish failed ({status}): {body}"));
-    }
-    let finish_body: serde_json::Value = finish_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse login finish response: {e}"))?;
-    if finish_body
-        .get("requires_2fa")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        // Password proven, but the account has 2FA. Capture the short-lived
-        // partial session token (+ email) so `desktop_login_2fa` can complete
-        // the sign-in once the user enters their TOTP code. The partial token is
-        // server-validated and short-lived — never log it.
-        let partial_token = finish_body
-            .get("partial_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "No partial_token in login finish response".to_string())?
-            .to_string();
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
         {
-            let mut guard = state
-                .pending_2fa
-                .lock()
-                .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
-            *guard = Some(Pending2fa {
-                partial_token,
-                email: email.clone(),
-            });
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
         }
-        tracing::info!("desktop login requires 2FA; awaiting TOTP code");
-        return Ok(LoginOutcome { requires_2fa: true });
-    }
-    let session_token = finish_body
-        .get("session_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No session_token in login finish response".to_string())?
-        .to_string();
+        #[cfg(target_os = "windows")]
+        if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
 
-    let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    // Resolve the active account up front so we can both cache the profile and
-    // segment the keychain write under its id (task 0800). The cache is
-    // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
-    let account_id = state.active_account()?.id.as_str().to_string();
-    if let Ok(acct) = state.active_account()
-        && let Ok(mut guard) = acct.cached_profile.lock()
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+
+        let email = email.trim().to_lowercase();
+        if email.is_empty() || password.is_empty() {
+            return Err("Email and password are required.".to_string());
+        }
+
+        let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
+            .map_err(|e| format!("opaque login start: {e}"))?;
+        let client_message = encode_base64(&login_start.message);
+
+        let start_resp = client
+            .post(format!("{base_url}/api/v1/opaque/login-start"))
+            .json(&serde_json::json!({ "email": email, "client_message": client_message }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            || start_resp.status() == reqwest::StatusCode::NOT_FOUND
+        {
+            return Err("Invalid email or password".to_string());
+        }
+        if !start_resp.status().is_success() {
+            let status = start_resp.status();
+            let body = start_resp.text().await.unwrap_or_default();
+            return Err(format!("Login start failed ({status}): {body}"));
+        }
+
+        let start_body: serde_json::Value = start_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse login start response: {e}"))?;
+        let server_message = start_body
+            .get("server_message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No server_message in login start response".to_string())?;
+        let server_state = start_body
+            .get("server_state")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No server_state in login start response".to_string())?;
+        // Dual-KSF login (task 0815): the server forwards the account's OPAQUE KSF
+        // version (0 = legacy Identity, 1 = Argon2id) in the login-start response.
+        // The client must finish under the matching CipherSuite, so thread it into
+        // client_login_finish — mirrors web/iOS and the server's own call shape in
+        // beebeeb-api/tests/api_integration.rs (`as u32` from the JSON number).
+        let ksf_version = start_body
+            .get("ksf_version")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "No ksf_version in login start response".to_string())? as u32;
+        let server_message_bytes =
+            decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
+        let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
+            &login_start.state,
+            password.as_bytes(),
+            &server_message_bytes,
+            ksf_version,
+        )
+        .map_err(|e| format!("Invalid email or password ({e})"))?;
+
+        let finish_resp = client
+            .post(format!("{base_url}/api/v1/opaque/login-finish"))
+            .json(&serde_json::json!({
+                "email": email,
+                "client_message": encode_base64(&login_finish.message),
+                "server_state": server_state,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Invalid email or password".to_string());
+        }
+        if !finish_resp.status().is_success() {
+            let status = finish_resp.status();
+            let body = finish_resp.text().await.unwrap_or_default();
+            return Err(format!("Login finish failed ({status}): {body}"));
+        }
+        let finish_body: serde_json::Value = finish_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse login finish response: {e}"))?;
+        if finish_body
+            .get("requires_2fa")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            // Password proven, but the account has 2FA. Capture the short-lived
+            // partial session token (+ email) so `desktop_login_2fa` can complete
+            // the sign-in once the user enters their TOTP code. The partial token is
+            // server-validated and short-lived — never log it.
+            let partial_token = finish_body
+                .get("partial_token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "No partial_token in login finish response".to_string())?
+                .to_string();
+            {
+                let mut guard = state
+                    .pending_2fa
+                    .lock()
+                    .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+                *guard = Some(Pending2fa {
+                    partial_token,
+                    email: email.clone(),
+                });
+            }
+            tracing::info!("desktop login requires 2FA; awaiting TOTP code");
+            return Ok(LoginOutcome { requires_2fa: true });
+        }
+        let session_token = finish_body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No session_token in login finish response".to_string())?
+            .to_string();
+
+        let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+        // Resolve the active account up front so we can both cache the profile and
+        // segment the keychain write under its id (task 0800). The cache is
+        // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
+        let account_id = state.active_account()?.id.as_str().to_string();
+        if let Ok(acct) = state.active_account()
+            && let Ok(mut guard) = acct.cached_profile.lock()
+        {
+            *guard = Some(profile);
+        }
+
+        if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+            let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+            return Err(e);
+        }
+
+        set_auth_present(&state, true);
+        set_auth_email(&state, Some(email.clone()));
+        tracing::info!("desktop account session installed");
+
+        Ok(LoginOutcome { requires_2fa: false })
+    };
+    #[cfg(target_os = "windows")]
     {
-        *guard = Some(profile);
+        attempt.run(work).await
     }
-
-    if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
-        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-        return Err(e);
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
     }
-
-    set_auth_present(&state, true);
-    set_auth_email(&state, Some(email.clone()));
-    tracing::info!("desktop account session installed");
-
-    Ok(LoginOutcome { requires_2fa: false })
 }
 
 /// Complete a 2FA-gated sign-in: trade the held partial token + the user's TOTP
@@ -890,88 +916,102 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
 #[tauri::command]
 async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let _transition = SESSION_TRANSITION.lock().await;
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
+        }
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+
+        // Read (don't yet consume) the pending challenge: we only clear it on
+        // success so an invalid code stays retryable within the 5-minute window.
+        let (partial_token, email) = {
+            let guard = state
+                .pending_2fa
+                .lock()
+                .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+            let pending = guard
+                .as_ref()
+                .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
+            (pending.partial_token.clone(), pending.email.clone())
+        };
+
+        let code = code.trim().to_string();
+        if code.is_empty() {
+            return Err("Enter your authentication code.".to_string());
+        }
+
+        let verify_resp = client
+            .post(format!("{base_url}/api/v1/auth/2fa/verify"))
+            .json(&serde_json::json!({ "partial_token": partial_token, "code": code }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if verify_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            // Invalid/expired code. Keep `pending_2fa` so the user can retry while
+            // the partial token is still valid.
+            return Err("Invalid authentication code".to_string());
+        }
+        if !verify_resp.status().is_success() {
+            let status = verify_resp.status();
+            let body = verify_resp.text().await.unwrap_or_default();
+            return Err(format!("Two-factor verification failed ({status}): {body}"));
+        }
+        let verify_body: serde_json::Value = verify_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse 2FA verify response: {e}"))?;
+        let session_token = verify_body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
+            .to_string();
+
+        // Same post-finish setup as `desktop_login`'s no-2FA success path. The
+        // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
+        let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+        let account_id = state.active_account()?.id.as_str().to_string();
+        if let Ok(acct) = state.active_account()
+            && let Ok(mut guard) = acct.cached_profile.lock()
+        {
+            *guard = Some(profile);
+        }
+
+        if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+            let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+            return Err(e);
+        }
+
+        set_auth_present(&state, true);
+        set_auth_email(&state, Some(email));
+        // Challenge satisfied — drop the pending state so a stale partial token
+        // can't be reused.
+        if let Ok(mut guard) = state.pending_2fa.lock() {
+            *guard = None;
+        }
+        tracing::info!("desktop account session installed after 2FA");
+
+        Ok(())
+    };
     #[cfg(target_os = "windows")]
     {
-        SESSION_COMMANDS.ensure_reactivation_allowed()?;
-        windows_cf::ensure_reactivation_allowed()?;
+        attempt.run(work).await
     }
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-
-    // Read (don't yet consume) the pending challenge: we only clear it on
-    // success so an invalid code stays retryable within the 5-minute window.
-    let (partial_token, email) = {
-        let guard = state
-            .pending_2fa
-            .lock()
-            .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
-        let pending = guard
-            .as_ref()
-            .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
-        (pending.partial_token.clone(), pending.email.clone())
-    };
-
-    let code = code.trim().to_string();
-    if code.is_empty() {
-        return Err("Enter your authentication code.".to_string());
-    }
-
-    let verify_resp = client
-        .post(format!("{base_url}/api/v1/auth/2fa/verify"))
-        .json(&serde_json::json!({ "partial_token": partial_token, "code": code }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if verify_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        // Invalid/expired code. Keep `pending_2fa` so the user can retry while
-        // the partial token is still valid.
-        return Err("Invalid authentication code".to_string());
-    }
-    if !verify_resp.status().is_success() {
-        let status = verify_resp.status();
-        let body = verify_resp.text().await.unwrap_or_default();
-        return Err(format!("Two-factor verification failed ({status}): {body}"));
-    }
-    let verify_body: serde_json::Value = verify_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse 2FA verify response: {e}"))?;
-    let session_token = verify_body
-        .get("session_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
-        .to_string();
-
-    // Same post-finish setup as `desktop_login`'s no-2FA success path. The
-    // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
-    let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    let account_id = state.active_account()?.id.as_str().to_string();
-    if let Ok(acct) = state.active_account()
-        && let Ok(mut guard) = acct.cached_profile.lock()
+    #[cfg(not(target_os = "windows"))]
     {
-        *guard = Some(profile);
+        work.await
     }
-
-    if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
-        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-        return Err(e);
-    }
-
-    set_auth_present(&state, true);
-    set_auth_email(&state, Some(email));
-    // Challenge satisfied — drop the pending state so a stale partial token
-    // can't be reused.
-    if let Ok(mut guard) = state.pending_2fa.lock() {
-        *guard = None;
-    }
-    tracing::info!("desktop account session installed after 2FA");
-
-    Ok(())
 }
 
 /// Provision this Mac with the user's vault key after account sign-in.
@@ -987,20 +1027,72 @@ async fn desktop_unlock_with_recovery_phrase(
     recovery_phrase: String,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let _transition = SESSION_TRANSITION.lock().await;
-    #[cfg(target_os = "windows")]
-    {
-        SESSION_COMMANDS.ensure_reactivation_allowed()?;
-        windows_cf::ensure_reactivation_allowed()?;
-    }
-    let acct = state.active_account()?;
-    let existing = acct
-        .session
-        .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?
-        .as_ref()
-        .map(|session| (session.token.clone(), session.master_key));
-    if let Some((token, master_key)) = existing {
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
+        }
+        let acct = state.active_account()?;
+        let existing = acct
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?
+            .as_ref()
+            .map(|session| (session.token.clone(), session.master_key));
+        if let Some((token, master_key)) = existing {
+            start_engine_if_possible(
+                app,
+                &state,
+                token,
+                master_key,
+                #[cfg(target_os = "windows")]
+                &_transition,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let account_id = acct.id.as_str().to_string();
+        let token = load_session_token_from_keychain(&account_id)?
+            .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+        let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+        let master_key = provision_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase, |key| {
+            persist_vault_key_to_keychain(&account_id, key)
+        })
+        .await?;
+        // `desktop_login` already persisted the email when it stored the token, but
+        // persist again here (idempotent) so the invariant "a fully-provisioned
+        // session has its email in the store" holds even if memory and store drift.
+        if let Some(email) = email.as_deref() {
+            let vault = AuthVault::new(platform_keychain_store_for(&account_id));
+            if let Err(e) = vault.store_account_email(email) {
+                // Non-fatal: the email is display metadata, not required to unlock.
+                tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
+            }
+        }
+
+        {
+            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            *guard = Some(Session {
+                token: token.clone(),
+                master_key,
+                email,
+            });
+        }
+        set_auth_present(&state, true);
+        tracing::info!("vault provisioned from recovery phrase");
         start_engine_if_possible(
             app,
             &state,
@@ -1010,54 +1102,16 @@ async fn desktop_unlock_with_recovery_phrase(
             &_transition,
         )
         .await?;
-        return Ok(());
-    }
-
-    let account_id = acct.id.as_str().to_string();
-    let token = load_session_token_from_keychain(&account_id)?
-        .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
-    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-    let master_key = provision_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase, |key| {
-        persist_vault_key_to_keychain(&account_id, key)
-    })
-    .await?;
-    // `desktop_login` already persisted the email when it stored the token, but
-    // persist again here (idempotent) so the invariant "a fully-provisioned
-    // session has its email in the store" holds even if memory and store drift.
-    if let Some(email) = email.as_deref() {
-        let vault = AuthVault::new(platform_keychain_store_for(&account_id));
-        if let Err(e) = vault.store_account_email(email) {
-            // Non-fatal: the email is display metadata, not required to unlock.
-            tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
-        }
-    }
-
+        Ok(())
+    };
+    #[cfg(target_os = "windows")]
     {
-        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(Session {
-            token: token.clone(),
-            master_key,
-            email,
-        });
+        attempt.run(work).await
     }
-    set_auth_present(&state, true);
-    tracing::info!("vault provisioned from recovery phrase");
-    start_engine_if_possible(
-        app,
-        &state,
-        token,
-        master_key,
-        #[cfg(target_os = "windows")]
-        &_transition,
-    )
-    .await?;
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
+    }
 }
 
 const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
@@ -1228,7 +1282,10 @@ pub(crate) async fn apply_session(
     token: String,
     master_key: [u8; 32],
     email: Option<String>,
+    #[cfg(target_os = "windows")] attempt: &auth_attempts::Attempt,
 ) -> Result<(), String> {
+    let token = zeroize::Zeroizing::new(token);
+    let master_key = zeroize::Zeroizing::new(master_key);
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -1241,16 +1298,19 @@ pub(crate) async fn apply_session(
         return Err("Sign out of the current account before signing in again.".into());
     }
 
+    #[cfg(target_os = "windows")]
+    AUTH_ATTEMPTS.validate(attempt)?;
+
     let account_id = state.active_account()?.id.as_str().to_string();
-    persist_session_to_keychain(&account_id, &token, master_key, email.as_deref())?;
-    let token_clone = token.clone();
+    persist_session_to_keychain(&account_id, &token, *master_key, email.as_deref())?;
+    let token_clone = token.to_string();
 
     {
         let acct = state.active_account()?;
         let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
-            token,
-            master_key,
+            token: token.to_string(),
+            master_key: *master_key,
             email: email.clone(),
         });
     }
@@ -1264,7 +1324,7 @@ pub(crate) async fn apply_session(
         app,
         state,
         token_clone,
-        master_key,
+        *master_key,
         #[cfg(target_os = "windows")]
         &_transition,
     )
@@ -1279,6 +1339,8 @@ pub(crate) async fn apply_session(
 async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    let mut _auth_reopen = None;
     let acct = state.active_account()?;
     #[cfg(target_os = "windows")]
     close_session_commands().await?;
@@ -1322,7 +1384,10 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
         windows_cf::wait_for_credential_release().await?;
         // Native/credential shutdown is now confirmed. Cleanup may refuse dirty
         // files; allow an explicit unlock so the user can sync and retry.
-        SESSION_COMMANDS.finish_close();
+        {
+            SESSION_COMMANDS.finish_close();
+            _auth_reopen = Some(auth_attempts::ReopenOnDrop(&AUTH_ATTEMPTS));
+        }
         let root = DesktopConfig::load()?.sync_root;
         let db = state_db_from_app_local_state_dir()?;
         if let Some(db) = db {
@@ -1349,11 +1414,17 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
             .lock()
             .ok()
             .and_then(|s| s.as_ref().map(|s| zeroize::Zeroizing::new(s.token.clone())))
-            .or_else(|| load_session_token_from_keychain(acct.id.as_str()).ok().flatten().map(zeroize::Zeroizing::new));
+            .or_else(|| {
+                load_session_token_from_keychain(acct.id.as_str())
+                    .ok()
+                    .flatten()
+                    .map(zeroize::Zeroizing::new)
+            });
         if let Some(token) = token {
             let client = reqwest::Client::builder()
                 .default_headers(api_client::provenance_headers())
-                .build().map_err(|e| format!("Could not initialize logout request: {e}"))?;
+                .build()
+                .map_err(|e| format!("Could not initialize logout request: {e}"))?;
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 revoke_desktop_session(&client, &runner::api_base_url(), &token),
@@ -1476,20 +1547,48 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let _transition = SESSION_TRANSITION.lock().await;
-    #[cfg(target_os = "windows")]
-    {
-        SESSION_COMMANDS.ensure_reactivation_allowed()?;
-        windows_cf::ensure_reactivation_allowed()?;
-    }
-    let acct = state.active_account()?;
-    let existing = acct
-        .session
-        .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?
-        .as_ref()
-        .map(|session| (session.token.clone(), session.master_key));
-    if let Some((token, master_key)) = existing {
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
+        }
+        let acct = state.active_account()?;
+        let existing = acct
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?
+            .as_ref()
+            .map(|session| (session.token.clone(), session.master_key));
+        if let Some((token, master_key)) = existing {
+            start_engine_if_possible(
+                app,
+                &state,
+                token,
+                master_key,
+                #[cfg(target_os = "windows")]
+                &_transition,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
+        let session = load_session_from_keychain(acct.id.as_str(), email)?
+            .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+        let token = session.token.clone();
+        let master_key = session.master_key;
+        {
+            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            *guard = Some(session);
+        }
+        set_auth_present(&state, true);
+        tracing::info!("vault unlocked from Keychain");
         start_engine_if_possible(
             app,
             &state,
@@ -1499,30 +1598,16 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             &_transition,
         )
         .await?;
-        return Ok(());
-    }
-
-    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let session = load_session_from_keychain(acct.id.as_str(), email)?
-        .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
-    let token = session.token.clone();
-    let master_key = session.master_key;
+        Ok(())
+    };
+    #[cfg(target_os = "windows")]
     {
-        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(session);
+        attempt.run(work).await
     }
-    set_auth_present(&state, true);
-    tracing::info!("vault unlocked from Keychain");
-    start_engine_if_possible(
-        app,
-        &state,
-        token,
-        master_key,
-        #[cfg(target_os = "windows")]
-        &_transition,
-    )
-    .await?;
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
+    }
 }
 
 /// Lock clears all runtime key material and stops the sync daemon, but keeps
@@ -1588,7 +1673,10 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         *guard = "stopped".to_string();
     }
     #[cfg(target_os = "windows")]
-    SESSION_COMMANDS.finish_close();
+    {
+        SESSION_COMMANDS.finish_close();
+        AUTH_ATTEMPTS.finish_close();
+    }
     set_auth_present(&state, keychain_session_present(acct.id.as_str()));
     Ok(())
 }

@@ -586,15 +586,37 @@ impl EngineBridge {
         let previous_status = self.db.get_file(local_file_id)?.map(|entry| entry.status);
         self.db.set_status(local_file_id, FileStatus::Uploading)?;
 
-        let result = self.do_upload_version(local_file_id, op, sync_root).await;
-        if result.is_err() {
-            let fallback_status = match previous_status {
-                Some(FileStatus::Conflict) => FileStatus::Conflict,
-                _ => FileStatus::Error,
-            };
-            let _ = self.db.set_status(local_file_id, fallback_status);
+        struct Rollback<'a> {
+            db: &'a StateDb,
+            id: &'a str,
+            previous: Option<FileStatus>,
         }
-        result
+        impl Drop for Rollback<'_> {
+            fn drop(&mut self) {
+                // A server-completed upload has already committed Local; don't
+                // undo that if cancellation happens during thumbnail work.
+                if self
+                    .db
+                    .get_file(self.id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|r| r.status == FileStatus::Uploading)
+                {
+                    let status = if self.previous == Some(FileStatus::Conflict) {
+                        FileStatus::Conflict
+                    } else {
+                        FileStatus::Error
+                    };
+                    let _ = self.db.set_status(self.id, status);
+                }
+            }
+        }
+        let _rollback = Rollback {
+            db: &self.db,
+            id: local_file_id,
+            previous: previous_status,
+        };
+        self.do_upload_version(local_file_id, op, sync_root).await
     }
 
     async fn do_upload_version(
@@ -727,6 +749,7 @@ impl EngineBridge {
                     content_type,
                     Some(session.object_version_id.clone()),
                 )?;
+                self.db.track_staged_payload(&payload_path.to_string_lossy(), None, true)?;
                 self.db.clear_upload_resume(&op.op_id)?;
                 self.finish_completed_upload(
                     op,
@@ -879,10 +902,8 @@ impl EngineBridge {
                 "upload-time thumbnail generation/upload skipped"
             );
         }
-        if let Err(e) = std::fs::remove_file(payload_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(path = %payload_path.display(), error = %e, "failed to remove staged upload payload");
-            }
+        if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
+            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
         }
 
         // Windows Cloud Files (task 0780): the file the user dropped in the
@@ -1383,7 +1404,12 @@ impl EngineBridge {
                     .contents_path
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("Finder create file callback did not include contents"))?;
-                let staged_path = stage_finder_payload(contents_path)?;
+                let staged = crate::staged_payload::StagedPayload::copy(
+                    self.db.clone(),
+                    Path::new(contents_path),
+                    default_finder_staging_root(),
+                )?;
+                let staged_path = staged.path().to_string();
                 let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
                 let mime = target
                     .content_type
@@ -1414,7 +1440,7 @@ impl EngineBridge {
                     "uploaded_by": "authenticated_desktop_user",
                 });
                 apply_shared_context(&mut payload, parent_contract.as_ref());
-                self.enqueue_finder_operation(
+                let outcome = self.enqueue_finder_operation(
                     OperationKind::UploadVersion,
                     Some(file_id),
                     target.parent_id,
@@ -1426,7 +1452,9 @@ impl EngineBridge {
                     Some(staged_path),
                     None,
                     None,
-                )
+                )?;
+                staged.retain();
+                Ok(outcome)
             }
         }
     }
@@ -1449,7 +1477,12 @@ impl EngineBridge {
         let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
 
         if let Some(contents_path) = target.contents_path.as_deref() {
-            let staged_path = stage_finder_payload(contents_path)?;
+            let staged = crate::staged_payload::StagedPayload::copy(
+                self.db.clone(),
+                Path::new(contents_path),
+                default_finder_staging_root(),
+            )?;
+            let staged_path = staged.path().to_string();
             let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
             let mime = target
                 .content_type
@@ -1466,7 +1499,7 @@ impl EngineBridge {
                 "uploaded_by": "authenticated_desktop_user",
             });
             apply_shared_context(&mut payload, item_contract.as_ref());
-            self.enqueue_finder_operation(
+            let outcome = self.enqueue_finder_operation(
                 OperationKind::UploadVersion,
                 Some(file_id),
                 target.parent_id,
@@ -1477,7 +1510,9 @@ impl EngineBridge {
                 item_contract
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
-            )
+            )?;
+            staged.retain();
+            Ok(outcome)
         } else {
             let name_encrypted = encrypted_metadata_for_name(
                 self.api.master_key(),
@@ -2801,7 +2836,9 @@ impl EngineBridge {
             encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
-        let staged_path = stage_finder_payload(&local_path.to_string_lossy())?;
+        let staged =
+            crate::staged_payload::StagedPayload::copy(self.db.clone(), &local_path, default_finder_staging_root())?;
+        let staged_path = staged.path().to_string();
         let staged_size = std::fs::metadata(&staged_path).map(|m| m.len()).unwrap_or(0);
 
         let mut metadata = serde_json::json!({
@@ -2838,15 +2875,6 @@ impl EngineBridge {
         if let Err(e) = self.upload_version(&op, sync_root).await {
             // One-shot op (never queued): nothing will resume its session.
             self.abandon_upload_after_give_up(&op).await;
-            if let Err(cleanup_error) = std::fs::remove_file(&staged_path) {
-                if cleanup_error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        file_id = %file_id,
-                        error = %cleanup_error,
-                        "failed to remove staged Keep Mine payload after upload error"
-                    );
-                }
-            }
             return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
         }
 
@@ -3750,9 +3778,6 @@ fn plan_hydration_chunk_range(
     }))
 }
 
-fn stage_finder_payload(contents_path: &str) -> anyhow::Result<String> {
-    stage_finder_payload_with_root(contents_path, default_finder_staging_root())
-}
 
 fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
     crate::reject_unsafe_rel_path(rel_path)
@@ -3976,6 +4001,7 @@ fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
+#[cfg(test)]
 fn stage_finder_payload_with_root(contents_path: &str, staging_root: PathBuf) -> anyhow::Result<String> {
     let source = Path::new(contents_path);
     if !source.is_file() {
@@ -4026,6 +4052,7 @@ fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn sanitize_staging_name(name: &str) -> String {
     name.chars()
         .map(|c| match c {
@@ -8489,6 +8516,98 @@ mod tests {
             .iter()
             .filter(|r| r.method == method && r.path == path)
             .count()
+    }
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn round5_lock_during_keep_mine_restores_conflict_and_removes_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("conflict.bin");
+        std::fs::write(&original, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21; 32]);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "server-file-1".into(),
+                path: "conflict.bin".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 20,
+                modified_at: 100,
+                content_hash: None,
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let commands = crate::session_commands::SessionCommands::new();
+        commands.open().unwrap();
+        let held = async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if server
+                        .requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r.path.ends_with("/chunks/1"))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("positive control: upload reached held second chunk");
+        };
+        let work = commands.run(async {
+            bridge
+                .resolve_keep_mine("server-file-1", &root)
+                .await
+                .map_err(|e| e.to_string())
+        });
+        let mut work = Box::pin(work);
+        tokio::select! { biased; _ = held => (), result = &mut work => panic!("upload completed before lock: {result:?}") }
+        let conn = rusqlite::Connection::open(dir.path().join("state.db")).unwrap();
+        let staged: Vec<String> = conn
+            .prepare("SELECT payload_path FROM upload_resume")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(staged.len(), 1, "positive control: resume owns staged upload");
+        assert!(std::path::Path::new(&staged[0]).is_file());
+        let revoked = commands.close();
+        assert!(work.await.is_err());
+        commands.drain(revoked, Duration::from_secs(1)).unwrap();
+        let requests = server.finish();
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/1"),
+            1
+        );
+        assert_eq!(
+            bridge.db.get_file("server-file-1").unwrap().unwrap().status,
+            FileStatus::Conflict,
+            "cancelled Keep Mine must restore the conflict state"
+        );
+        assert_eq!(
+            staged.iter().filter(|p| std::path::Path::new(p).exists()).count(),
+            0,
+            "cancelled Keep Mine left orphaned plaintext"
+        );
+        assert_eq!(std::fs::read(&original).unwrap(), b"0123456789abcdefghij");
+        assert!(
+            bridge.db.windows_signout_preflight().is_err(),
+            "sign-out must preserve the original unsynced conflict"
+        );
+        // User resolves/moves the original; subsequent account purge leaves zero staged plaintext.
+        bridge.db.set_status("server-file-1", FileStatus::Local).unwrap();
+        bridge.db.windows_signout_preflight().unwrap();
+        bridge.db.finish_windows_signout().unwrap();
+        assert_eq!(staged.iter().filter(|p| std::path::Path::new(p).exists()).count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

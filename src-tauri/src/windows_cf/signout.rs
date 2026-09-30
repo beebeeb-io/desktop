@@ -20,13 +20,14 @@ pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
         anyhow::anyhow!("Pending changes remain. Unlock, finish syncing and resolve failed changes before signing out.")
     })?;
     let rows = db.list_files()?;
-    let cache_paths = rows
+    let mut cache_paths = rows
         .iter()
         .map(|row| {
             db.get_file_contract_state(&row.file_id)
                 .map(|state| state.and_then(|state| state.cache_path))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    cache_paths.extend(crate::staged_payload::signout_paths(db)?);
     cleanup::purge(
         cache_paths,
         crate::is_disposable_cache_path,
@@ -67,7 +68,12 @@ pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
             }
             Ok(())
         },
-        || Ok(db.finish_windows_signout()?),
+        || {
+            // cleanup::purge has unlinked every inventoried payload. Keep rows
+            // until here so a native/unlink failure can be retried safely.
+            for (path, _, _) in db.staged_payloads_for_signout()? { db.forget_staged_payload(&path)?; }
+            Ok(db.finish_windows_signout()?)
+        },
     )
 }
 

@@ -193,3 +193,59 @@ fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
     assert!(purge(&f.db, Some(&f.root)).is_err());
     assert_eq!(std::fs::read(child).unwrap(), b"new unsynced bytes");
 }
+
+#[test]
+fn round5_signout_retries_busy_completed_upload_and_leaves_zero_staged_plaintext() {
+    let f = Fixture::new();
+    let payload = f.temp.path().join("staged-plaintext");
+    std::fs::write(&payload, b"server completed content").unwrap();
+    f.db.track_staged_payload(&payload.to_string_lossy(), None, true)
+        .unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&payload)
+        .unwrap();
+    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert_eq!(f.db.staged_payloads_for_signout().unwrap().len(), 1);
+    drop(held);
+    purge(&f.db, Some(&f.root)).unwrap();
+    assert_eq!(f.db.staged_payloads_for_signout().unwrap().len(), 0);
+    assert_eq!([payload].iter().filter(|p| p.exists()).count(), 0);
+}
+
+#[test]
+fn round5_signout_preserves_abandoned_legacy_upload_only_copy() {
+    let f = Fixture::new();
+    let payload = f.temp.path().join("legacy-only-copy");
+    std::fs::write(&payload, b"unsynced version").unwrap();
+    f.db.put_upload_resume(&crate::state_db::UploadResume {
+        op_id: "abandoned-keep-mine".into(),
+        payload_path: payload.to_string_lossy().into_owned(),
+        payload_size: 16,
+        payload_mtime_ns: 0,
+        upload_session_id: "session".into(),
+        server_file_id: "old-file".into(),
+        object_version_id: "version".into(),
+        chunk_size_bytes: 16,
+        chunk_count: 1,
+        acked_chunks: 0,
+        metadata_applied: false,
+        is_create: false,
+    })
+    .unwrap();
+    assert!(
+        purge(&f.db, Some(&f.root))
+            .unwrap_err()
+            .to_string()
+            .contains("recoverable bytes")
+    );
+    assert_eq!(std::fs::read(&payload).unwrap(), b"unsynced version");
+    assert!(f.db.get_upload_resume("abandoned-keep-mine").unwrap().is_some());
+    // User recovers their only copy outside the provider; retry may finish.
+    let recovered = f.temp.path().join("recovered");
+    std::fs::rename(&payload, &recovered).unwrap();
+    purge(&f.db, Some(&f.root)).unwrap();
+    assert_eq!(std::fs::read(recovered).unwrap(), b"unsynced version");
+    assert!(f.db.get_upload_resume("abandoned-keep-mine").unwrap().is_none());
+}

@@ -678,6 +678,11 @@ impl StateDb {
             -- acknowledged chunk, so a retry resumes instead of minting a
             -- second server file row. Keyed by op_id; the payload fingerprint
             -- (path + size + mtime) guards against resuming onto other bytes.
+            CREATE TABLE IF NOT EXISTS staged_payloads (
+                path TEXT PRIMARY KEY,
+                source_path TEXT,
+                completed INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS upload_resume (
                 op_id TEXT PRIMARY KEY,
                 payload_path TEXT NOT NULL,
@@ -695,6 +700,9 @@ impl StateDb {
             );
             ",
         )?;
+        // Upgrade inventory: old one-shot Keep Mine rows may have no queue
+        // owner. Preserve their plaintext reference before any resume purge.
+        conn.execute("INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume", [])?;
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -1803,6 +1811,33 @@ impl StateDb {
         Ok(deleted)
     }
 
+    /// Upload payload ownership outlives operation/resume rows and unlink errors.
+    pub fn track_staged_payload(&self, path: &str, source: Option<&str>, completed: bool) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "INSERT INTO staged_payloads(path,source_path,completed) VALUES (?1,?2,?3)
+             ON CONFLICT(path) DO UPDATE SET completed = MAX(completed, excluded.completed)",
+            params![path, source, completed],
+        )?;
+        Ok(())
+    }
+    pub fn forget_staged_payload(&self, path: &str) -> Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM staged_payloads WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn staged_payloads_for_signout(&self) -> Result<Vec<(String, Option<String>, bool)>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, source_path, completed FROM staged_payloads
+             UNION ALL SELECT payload_path, NULL, 0 FROM upload_resume
+             WHERE payload_path NOT IN (SELECT path FROM staged_payloads)",
+        )?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+    }
+
     // Windows account cleanup must not silently discard paused/exhausted writes.
     // Portable so both Windows CI and Linux exercise the exact DB policy.
     #[cfg(any(target_os = "windows", test))]
@@ -1828,6 +1863,8 @@ impl StateDb {
         if pending != 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let remaining: i64 = tx.query_row("SELECT COUNT(*) FROM staged_payloads", [], |r| r.get(0))?;
+        if remaining != 0 { return Err(rusqlite::Error::InvalidQuery); }
         tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM bandwidth_samples;")?;
         tx.commit()
     }
@@ -2016,6 +2053,7 @@ impl StateDb {
 
     /// Persist (insert or replace) the resumable upload session for `op_id`.
     pub fn put_upload_resume(&self, resume: &UploadResume) -> Result<()> {
+        self.track_staged_payload(&resume.payload_path, None, false)?;
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
             "INSERT INTO upload_resume (
@@ -2607,6 +2645,23 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round5_legacy_resume_inventory_survives_operation_purge() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        // Mimic an old database: no staging journal row, no queued owner.
+        db.0.lock().unwrap().execute_batch("INSERT INTO upload_resume
+            (op_id,payload_path,payload_size,payload_mtime_ns,upload_session_id,server_file_id,object_version_id,chunk_size_bytes,chunk_count)
+            VALUES ('old','only-copy',1,0,'session','file','version',1,1)").unwrap();
+        drop(db);
+        let db = StateDb::open(&path).unwrap();
+        db.purge_all_local_state().unwrap();
+        assert!(db.get_upload_resume("old").unwrap().is_none());
+        assert_eq!(db.staged_payloads_for_signout().unwrap(), vec![("only-copy".into(), None, false)],
+            "old payload lost its only durable owner on resume purge");
+    }
+
     #[test]
     fn windows_signout_refuses_paused_pending_bytes_without_mutation() {
         let db = super::StateDb::open(":memory:").unwrap();

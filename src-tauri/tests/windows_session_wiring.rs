@@ -81,3 +81,57 @@ fn admission_guard_selftest_detects_a_bypassed_command() {
         );
     }
 }
+
+fn auth_wiring(source: &str, browser: &str) -> bool {
+    let apply = body(source, "apply_session");
+    let close = body(source, "close_session_commands");
+    let start = body(browser, "start_browser_login");
+    let (Some(begin), Some(handoff)) = (start.find("AUTH_ATTEMPTS.begin()?"), start.find("run_handoff(")) else {
+        return false;
+    };
+    let Some(validation) = apply.find("AUTH_ATTEMPTS.validate(attempt)?") else {
+        return false;
+    };
+    validation > apply.find("SESSION_TRANSITION.lock().await").unwrap()
+        && validation < apply.find("persist_session_to_keychain(").unwrap()
+        && close.contains("AUTH_ATTEMPTS.close()")
+        && close.contains("auth.drain(")
+        && begin < handoff
+        && start.contains("attempt.run(work).await")
+        && [
+            "desktop_login",
+            "desktop_login_2fa",
+            "desktop_unlock_with_recovery_phrase",
+            "unlock_vault",
+        ]
+        .iter()
+        .all(|name| {
+            let code = body(source, name);
+            code.contains("AUTH_ATTEMPTS.begin()?")
+                && code.contains("AUTH_ATTEMPTS.validate(&attempt)?")
+                && code.contains("attempt.run(work).await")
+        })
+}
+#[test]
+fn round5_auth_attempts_admit_cancel_drain_and_validate_before_persistence() {
+    let browser = include_str!("../src/browser_login.rs").replace("\r\n", "\n");
+    assert!(auth_wiring(&SOURCE, &browser));
+}
+#[test]
+fn round5_auth_wiring_guard_rejects_missing_validation_and_cancellation() {
+    let browser = include_str!("../src/browser_login.rs").replace("\r\n", "\n");
+    for mutation in [
+        "AUTH_ATTEMPTS.validate(attempt)?",
+        "AUTH_ATTEMPTS.close()",
+        "auth.drain(",
+    ] {
+        assert!(
+            !auth_wiring(&SOURCE.replace(mutation, "BYPASSED"), &browser),
+            "surviving mutant: {mutation}"
+        );
+    }
+    assert!(!auth_wiring(
+        &SOURCE,
+        &browser.replace("attempt.run(work).await", "work.await")
+    ));
+}
