@@ -937,6 +937,18 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
         .as_ref()
         .map(|(_, task, _)| AbortWorkerOnDrop(task.abort_handle()));
 
+    // Task 1670 round 2: purge the macOS hydrate-cache staging dir on every
+    // (re)start of this runner — this IS "daemon startup" in this
+    // single-process architecture (there is no separate boot phase distinct
+    // from the vault-unlock that calls `run`). Bounds any staged plaintext
+    // that survived a crash between a previous session's write and its
+    // per-request cleanup, or a force-quit mid-fetch, to at most one restart.
+    // Runs BEFORE the IPC server below starts accepting HydrateFile requests
+    // so a fresh session never inherits a stale entry. `purge_macos_hydrate_cache`
+    // is a no-op on non-macOS (called unconditionally, like its other two call
+    // sites in `lib.rs`, so this file doesn't need its own cfg gate).
+    crate::purge_macos_hydrate_cache("daemon-startup");
+
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
     // (macOS File Provider, Linux FUSE) can query status and trigger

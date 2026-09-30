@@ -2343,9 +2343,18 @@ impl EngineBridge {
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
                 // Make the destination directory if needed.
-                if let Some(parent) = dest_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| anyhow::anyhow!("create dest dir {}: {e}", parent.display()))?;
+                if let Some(parent) = dest_path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    buf.zeroize();
+                    // Task 1670 round 2: this used to `?` straight out of the
+                    // match arm below, which skipped the `Err(e) =>` arm's
+                    // `FileStatus::Error` flip entirely — a directory-create
+                    // failure left the row stuck on `Downloading` forever.
+                    // Route it through the same status flip as every other
+                    // failure in this function.
+                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()));
                 }
                 // Write via an O_NOFOLLOW handle (task 1247): the containment
                 // guard at the top of this fn is a check-then-use, and there is
@@ -2356,13 +2365,21 @@ impl EngineBridge {
                 // and overwrite the real target with decrypted plaintext.
                 // `write_hydrated_plaintext` fails closed if the final component
                 // is (or race-becomes) a symlink, closing the race atomically at
-                // open() time rather than re-checking-then-hoping.
-                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf)
-                    .map_err(|e| anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                // open() time rather than re-checking-then-hoping. Since task
+                // 1670 round 2 it also stages the write under a temp name and
+                // publishes with one atomic rename, so a failure anywhere in
+                // that sequence is guaranteed to leave NOTHING new at
+                // `dest_path` — there is no separate "delete the half-written
+                // file" step needed here because the primitive itself never
+                // makes one externally visible.
+                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf);
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
-                write_result?;
+                if let Err(e) = write_result {
+                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                }
 
                 self.db.set_status(file_id, FileStatus::Local)?;
                 let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
@@ -3845,6 +3862,31 @@ pub(crate) fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path])
 /// and the Windows Cloud Files path never writes plaintext to disk via this fn —
 /// it uses `hydrate_file_to_memory`).
 ///
+/// **Task 1670 round 2 addition:** the plaintext is staged under a per-call,
+/// randomly-suffixed temp name in the SAME directory, then published onto the
+/// real `leaf` name with one atomic `renameat` — anchored to the SAME
+/// already-validated `dir_fd` for the temp create, the write, AND the rename,
+/// never re-resolving by path (this keeps the anchored-descent invariant
+/// `create_leaf_relative_is_anchored_to_original_dir_fd_across_rename_swap`
+/// pins). Two consequences:
+/// - Any reader racing this write (another same-UID process, or the macOS
+///   hydrate-cache TTL sweep running concurrently in a different IPC
+///   connection) can never observe a file at `dest_path` that exists but is
+///   only partially written — it either isn't there yet, or it's complete.
+/// - On ANY failure after the temp file is created, that temp file is removed
+///   before the error is returned, so nothing new is ever left behind at
+///   `dest_path` — there is no separate "clean up the half-written file" step
+///   for a caller to remember.
+///
+/// The leaf-is-currently-a-symlink refusal is preserved with the EXACT same
+/// observable behavior as before (a probe `open(O_NOFOLLOW)`, not
+/// `fstat`/`lstat`, so a symlink leaf still fails closed with `ELOOP`) even
+/// though the final publish step is now a `renameat`, which — unlike
+/// `open`+`O_TRUNC` — does not dereference a symlink destination at all and so
+/// could never be tricked into writing THROUGH one to an outside target on its
+/// own. Keeping the probe is about not silently replacing a foreign symlink
+/// with a real file, not about a plaintext-leak risk `renameat` doesn't have.
+///
 /// Known residual (documented follow-up, not closed here): a same-filesystem
 /// HARD link to a file outside all allowed roots bypasses containment (the walk
 /// sees a regular in-root leaf), and `O_TRUNC` would overwrite the linked inode.
@@ -3892,16 +3934,70 @@ fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8
         dir_fd = open_dir_relative_no_follow(dir_fd.as_raw_fd(), comp)?;
     }
 
-    // Create/open the leaf relative to the anchored parent fd, refusing a symlink
-    // at the leaf itself, then force owner-only perms on the fd unconditionally
-    // (before any plaintext is written).
-    let file_fd = create_leaf_relative(dir_fd.as_raw_fd(), leaf)?;
-    if unsafe { libc::fchmod(file_fd.as_raw_fd(), 0o600 as libc::mode_t) } != 0 {
-        return Err(std::io::Error::last_os_error());
+    // Refuse (without creating or writing anything) if the leaf currently
+    // exists as a symlink — same ELOOP-producing O_NOFOLLOW semantics the
+    // previous direct-open implementation used, reproduced here via a
+    // read-only probe open so the observable failure mode for
+    // `write_hydrated_plaintext_refuses_symlink_and_sets_0600` is unchanged.
+    // ENOENT (no existing leaf — the common, fresh-hydrate case) is fine; the
+    // rename below creates it. Any other pre-existing entry (a regular file)
+    // is also fine — it gets atomically replaced below, same as before.
+    let leaf_c = path_to_cstring(leaf)?;
+    // SAFETY: `dir_fd` is a live, already-validated directory fd; `leaf_c` is
+    // NUL-terminated. We only inspect the syscall's return value / errno.
+    let probe = unsafe { libc::openat(dir_fd.as_raw_fd(), leaf_c.as_ptr(), libc::O_NOFOLLOW | libc::O_RDONLY | libc::O_CLOEXEC) };
+    if probe < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOENT) {
+            return Err(err);
+        }
+    } else {
+        // SAFETY: `probe` is a valid fd just returned by the openat above.
+        unsafe { libc::close(probe) };
     }
 
-    let mut file = std::fs::File::from(file_fd);
-    file.write_all(buf)
+    // Stage under a per-call, randomly-suffixed temp name in the same
+    // directory (task 1670 round 2 — see the fn doc comment).
+    let temp_leaf_name = format!(".{}.{}.part", leaf.to_string_lossy(), uuid::Uuid::new_v4());
+    let temp_leaf = std::ffi::OsStr::new(&temp_leaf_name);
+    let temp_leaf_c = path_to_cstring(temp_leaf)?;
+    let remove_temp = || {
+        // SAFETY: `dir_fd` is still live (we only ever drop it by falling out
+        // of this function); `temp_leaf_c` is NUL-terminated and owned for the
+        // duration of this closure's use. Best-effort — errors are ignored,
+        // matching every other cleanup-on-failure path in this module.
+        let _ = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), temp_leaf_c.as_ptr(), 0) };
+    };
+
+    // Create/open the temp leaf relative to the anchored parent fd, refusing a
+    // symlink at the leaf itself (it never pre-exists — the name is fresh —
+    // but O_NOFOLLOW costs nothing and matches the invariant every other leaf
+    // open in this function keeps), then force owner-only perms on the fd
+    // unconditionally (before any plaintext is written).
+    let file_fd = create_leaf_relative(dir_fd.as_raw_fd(), temp_leaf)?;
+    if unsafe { libc::fchmod(file_fd.as_raw_fd(), 0o600 as libc::mode_t) } != 0 {
+        let err = std::io::Error::last_os_error();
+        remove_temp();
+        return Err(err);
+    }
+
+    if let Err(e) = std::fs::File::from(file_fd).write_all(buf) {
+        remove_temp();
+        return Err(e);
+    }
+
+    // Atomically publish: same `dir_fd` for both sides, so this is anchored to
+    // the already-validated directory inode, not a fresh path resolution.
+    // SAFETY: both name arguments are NUL-terminated `CString`s alive for this
+    // call; `dir_fd` is a live, already-validated directory fd.
+    let rc = unsafe { libc::renameat(dir_fd.as_raw_fd(), temp_leaf_c.as_ptr(), dir_fd.as_raw_fd(), leaf_c.as_ptr()) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        remove_temp();
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -10441,6 +10537,37 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "fchmod must force owner-only perms even on a pre-existing file, got {mode:o}"
+        );
+    }
+
+    /// Task 1670 round 2: the temp-then-rename publish step must clean up its
+    /// own temp file when the final `renameat` fails, so a failed hydration
+    /// never leaves a stray `.part` file behind in the hydrate-cache (or any
+    /// other) directory. Forced deterministically (no quota tricks, no
+    /// threads): pre-create the destination as a DIRECTORY, so the write to
+    /// the temp file succeeds but `renameat(file -> existing dir)` always
+    /// fails (EISDIR/ENOTDIR) — exactly the failure shape this cleanup exists
+    /// for.
+    #[cfg(unix)]
+    #[test]
+    fn write_hydrated_plaintext_removes_temp_file_when_final_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = write_hydrated_plaintext(&dest, &[dir.path()], b"plaintext-payload");
+        assert!(result.is_err(), "a rename onto an existing directory must fail");
+
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            leftover,
+            vec![std::ffi::OsString::from("out.bin")],
+            "the temp file must be removed after a failed rename, leaving only the \
+             pre-existing dest untouched, got {leftover:?}"
         );
     }
 

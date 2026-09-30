@@ -51,17 +51,41 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         // `FileManager.default.temporaryDirectory` — see
         // `XPCBridge.hydrateDestinationURL(for:)`'s doc comment for why the
         // old destination could never pass the daemon's containment check.
-        guard let destinationURL = XPCBridge.hydrateDestinationURL(for: itemIdentifier) else {
-            completionHandler(nil, nil, BeebeebIPCError.daemonUnavailable)
+        let destinationURL: URL
+        switch XPCBridge.hydrateDestinationURL(for: itemIdentifier) {
+        case .failure(let error):
+            completionHandler(nil, nil, error)
             progress.completedUnitCount = 1
             return progress
+        case .success(let url):
+            destinationURL = url
+        }
+
+        // Task 1670 round 2: Apple's own docs for this method (fetched
+        // 2026-09-30, developer.apple.com/documentation/fileprovider/
+        // nsfileprovidermanager/temporarydirectoryurl() and .../nsfileprovid
+        // erreplicatedextension/fetchcontents(...)) say the system CLONES —
+        // never moves — the URL we hand back here: "the URL you pass to the
+        // completion handler must be on the same volume as [temporaryDirect
+        // oryURL()], so that the system can clone it to provide the content
+        // for the dataless item", and "After you call the completion
+        // handler, the system takes complete control over the LOCAL COPY"
+        // (its clone, not our original). Our staged plaintext at
+        // `destinationURL` is never touched or removed by the framework, so
+        // WE always delete it ourselves — unconditionally, on every path
+        // below, not only a "system copied instead of moved" branch, because
+        // copy is the only documented behavior.
+        func cleanupStagedPlaintext() {
+            try? FileManager.default.removeItem(at: destinationURL)
         }
 
         do {
             try ipc.hydrateFile(itemIdentifier: itemIdentifier, destinationURL: destinationURL)
             let model = try ipc.item(identifier: itemIdentifier)
             completionHandler(destinationURL, FileProviderItem(model: model), nil)
+            cleanupStagedPlaintext()
         } catch {
+            cleanupStagedPlaintext()
             completionHandler(nil, nil, error)
         }
 

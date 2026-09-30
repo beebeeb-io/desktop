@@ -4,6 +4,7 @@ import Foundation
 enum BeebeebIPCError: LocalizedError {
     case daemonUnavailable
     case invalidResponse(String)
+    case invalidIdentifier
 
     var errorDescription: String? {
         switch self {
@@ -11,6 +12,8 @@ enum BeebeebIPCError: LocalizedError {
             return "Open Beebeeb and unlock your vault."
         case .invalidResponse(let message):
             return message
+        case .invalidIdentifier:
+            return "This item's identifier could not be used for a Finder operation."
         }
     }
 }
@@ -42,6 +45,10 @@ extension BeebeebIPCError: CustomNSError {
             // Covers the daemon's own rejections (e.g. a hydration
             // destination outside an allowed root, task 1670's actual root
             // cause) and any other explicit error message it returned.
+            return NSFileProviderError.cannotSynchronize.rawValue
+        case .invalidIdentifier:
+            // Task 1670 round 2: same category as `.invalidResponse` — the
+            // request is refused before it ever reaches the daemon.
             return NSFileProviderError.cannotSynchronize.rawValue
         }
     }
@@ -124,13 +131,91 @@ final class XPCBridge {
     /// actually entitled to and already use, for the IPC socket itself
     /// (`socketPath` above) — this reuses that exact, already-proven-working
     /// mechanism for hydration staging instead of each process's own private
-    /// temp dir. `nil` only in the same group-container-unavailable case
-    /// `init()` already falls back from.
-    static func hydrateDestinationURL(for itemIdentifier: NSFileProviderItemIdentifier) -> URL? {
-        guard let groupContainer = resolveGroupContainer() else { return nil }
+    /// temp dir.
+    ///
+    /// **Round 2 (task 1670): considered and rejected `NSFileProviderManager
+    /// .temporaryDirectoryURL()`.** Apple's own docs for it: "Returns the URL
+    /// of a directory that **the File Provider extension** can use to
+    /// temporarily store files before passing them to the system" — framed
+    /// around the EXTENSION process handing content to the framework
+    /// (`createItem`/`modifyItem`/`fetchContents`, all `NSFileProviderReplic
+    /// atedExtension` methods this extension implements), not around a
+    /// SEPARATE companion daemon process writing there too. There is no
+    /// documented guarantee that calling it from the containing app
+    /// (`io.beebeeb.app`, where the daemon that does the actual decrypt
+    /// runs — see `crate::ipc_socket`) resolves to the SAME literal directory
+    /// as calling it from this extension; the App Group container, by
+    /// contrast, is explicitly and symmetrically keyed by the group id both
+    /// entitlements files declare, which is exactly the cross-process sharing
+    /// contract this two-process architecture needs. Verifying the
+    /// alternative empirically would require a signed build against a real,
+    /// registered domain, which this round's restrictions rule out (no
+    /// touching Guus's real domain, no second daemon instance). Kept the
+    /// group-container location; see the task file for the full writeup with
+    /// sources.
+    ///
+    /// `nil` only in the same group-container-unavailable case `init()`
+    /// already falls back from, or when `itemIdentifier` fails
+    /// `sanitizedHydrateFilename` — see that function's doc comment.
+    static func hydrateDestinationURL(for itemIdentifier: NSFileProviderItemIdentifier) -> Result<URL, BeebeebIPCError> {
+        guard let safeName = sanitizedHydrateFilename(for: itemIdentifier) else {
+            return .failure(.invalidIdentifier)
+        }
+        guard let groupContainer = resolveGroupContainer() else {
+            return .failure(.daemonUnavailable)
+        }
         let dir = groupContainer.appendingPathComponent(hydrateCacheDirectoryName, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent(itemIdentifier.rawValue)
+        do {
+            // Task 1670 round 2: owner-only (0o700) — this directory only
+            // ever holds decrypted plaintext. Mirrors
+            // `crate::ipc_socket::macos_ensure_hydrate_cache_dir`, which also
+            // forces the mode down on an already-existing dir and carries the
+            // tested contract (this target has no XCTest target).
+            try FileManager.default.createDirectory(
+                at: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            NSLog("BeebeebFileProvider: could not create hydrate-cache dir: \(error)")
+            return .failure(.daemonUnavailable)
+        }
+
+        // Task 1670 round 2: belt-and-suspenders backup exclusion via the
+        // modern Foundation resource-key API. The Rust daemon sets the SAME
+        // underlying xattr directly on every hydration
+        // (`crate::ipc_socket::macos_exclude_from_backups`, which is what
+        // actually has a test) — this covers the case where THIS extension
+        // creates the directory before the daemon has run this session.
+        // Best-effort: a failure here must not block hydration.
+        var excludedDir = dir
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        try? excludedDir.setResourceValues(resourceValues)
+
+        // Task 1670 round 2: a random per-request suffix so two concurrent
+        // fetches of the SAME item (two Finder windows opening the same file,
+        // a retry racing the original attempt) get DIFFERENT destination
+        // files — never sharing a leaf name, so neither can collide with or
+        // observe the other mid-write.
+        let unique = "\(safeName).\(UUID().uuidString.prefix(8))"
+        return .success(dir.appendingPathComponent(unique))
+    }
+
+    /// Task 1670 round 2: reject a raw item identifier before it is ever used
+    /// as a path component — no `/` or `\` (also covers a leading `/`
+    /// absolute path), no embedded `..`, not empty, no embedded NUL. Mirrors
+    /// `crate::ipc_socket::macos_validate_hydrate_item_identifier` (Rust,
+    /// `ipc_socket.rs`) — THAT function carries the tested contract (this
+    /// repo's File Provider extension target has no XCTest target, so this
+    /// Swift copy cannot be unit-tested the same way); keep both in sync if
+    /// the rule ever changes.
+    private static func sanitizedHydrateFilename(for itemIdentifier: NSFileProviderItemIdentifier) -> String? {
+        let raw = itemIdentifier.rawValue
+        if raw.isEmpty || raw.contains("/") || raw.contains("\\") || raw.contains("..") || raw.contains("\0") {
+            return nil
+        }
+        return raw
     }
 
     func enumerate(containerIdentifier: NSFileProviderItemIdentifier) throws -> [BeebeebProviderItem] {

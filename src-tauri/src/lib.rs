@@ -1555,6 +1555,11 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
             tracing::warn!(error = %error, "Finder File Provider domain removal on logout failed (best-effort)");
         }
     }
+    // Task 1670 round 2: also the account-switch boundary — this codebase's
+    // sign-out IS its account-switch mechanism (single active-account slot,
+    // see `AppState::active_account`'s own "Phase 0" comment), so there is no
+    // separate switch-account hook to add this to.
+    purge_macos_hydrate_cache("sign-out");
 
     match acct.session.lock() {
         Ok(mut guard) => {
@@ -1681,11 +1686,12 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(prev) = engine_slot.take() {
         // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
         // session/master key right after this — an unconfirmed stop means
-        // the old engine could still be alive and using it. No purge is
-        // gated on this (lock keeps the account's Keychain session, so
-        // there's nothing cross-account to protect here), but it's still
-        // worth a loud warning rather than a silent "we waited 3s and moved
-        // on".
+        // the old engine could still be alive and using it. No general
+        // local-file purge is gated on this (lock keeps the account's
+        // Keychain session AND the regular local file cache, so re-unlocking
+        // stays fast — there's nothing cross-account to protect here), but
+        // it's still worth a loud warning rather than a silent "we waited 3s
+        // and moved on".
         if !prev.abort().await {
             #[cfg(target_os = "windows")]
             return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
@@ -1697,6 +1703,12 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     }
     #[cfg(not(target_os = "windows"))]
     drop(engine_slot);
+    // Task 1670 round 2: UNLIKE the general local-file cache above, the macOS
+    // hydrate-cache holds nothing but ephemeral per-Finder-open staging
+    // copies (never the user's regular offline files), so purging it on
+    // every lock is always safe and always right — it does not touch
+    // anything `unlock_vault` needs to stay fast.
+    purge_macos_hydrate_cache("lock");
 
     #[cfg(target_os = "windows")]
     {
@@ -2351,6 +2363,35 @@ fn remove_file_provider_domain() -> Result<(), String> {
 fn remove_file_provider_domain() -> Result<(), String> {
     Err("File Provider is only available on macOS.".to_string())
 }
+
+/// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
+/// account-security boundary (sign-out, lock, daemon startup) so a decrypted
+/// plaintext copy staged for a Finder open can never outlive the boundary
+/// that's supposed to end its access — independent of, and in addition to,
+/// the per-request cleanup `fetchContents` itself does. Distinct from the
+/// general local-file/smart-cache purge `purge_local_state_files` runs on
+/// sign-out: THAT purge intentionally does NOT run on lock (lock keeps the
+/// regular local file cache so re-unlocking stays fast), but the hydrate
+/// cache holds nothing but ephemeral per-open staging copies, so it is always
+/// safe — and always right — to empty here too. Best-effort and non-fatal:
+/// logout/lock must always appear to succeed, and daemon startup must never
+/// block on this.
+#[cfg(target_os = "macos")]
+pub(crate) fn purge_macos_hydrate_cache(context: &str) {
+    let dir = crate::ipc_socket::macos_hydrate_cache_dir();
+    match crate::ipc_socket::macos_purge_hydrate_cache_dir(&dir) {
+        Ok(removed) if removed > 0 => {
+            tracing::info!(removed, context, "purged macOS hydrate-cache staged plaintext");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, context, "failed to purge macOS hydrate-cache dir (best-effort)");
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn purge_macos_hydrate_cache(_context: &str) {}
 
 #[cfg(target_os = "macos")]
 fn file_provider_visible_location() -> Result<Option<String>, String> {
