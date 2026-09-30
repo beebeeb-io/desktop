@@ -1,0 +1,296 @@
+//! The popover's phase: ONE reducer decides what the popover body shows
+//! (spec section 3 "State machine", section 9 "Popover phase").
+//!
+//! It replaces the UI-side guess `locked = logged_in && engine !== 'running'`,
+//! which today says "Needs unlock" for a paused, offline or not-yet-started
+//! engine. The function reads only the fields the snapshot command will return
+//! (slice 2 builds them); it never reads the network, the keychain or a clock.
+//!
+//! Precedence, first match wins (spec section 3):
+//! signed out, session ended, locked, Finder failed, Finder adding, Finder
+//! missing, PAUSED (nothing is attempted while paused, so no failure is shown),
+//! storage full, offline, error, syncing, synced.
+//!
+//! Two calls the spec left implicit, made here so they are tested:
+//! - "Signed out or session ended" is two phases (states e and e2). Not logged
+//!   in is checked first: with no session there is nothing to have ended.
+//!   `auth_expired` is independent of `logged_in` in `sync_status` (a stale
+//!   token can still be installed), so `SessionEnded` needs `logged_in`.
+//! - A conflict is not a phase. It is a row in the list states (a1) and a badge
+//!   on the menu-bar icon, so it does not appear here.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderSetup {
+    Ready,
+    Missing,
+    /// An install attempt is in flight (state f1).
+    Adding,
+    /// The last attempt failed (state f2).
+    Failed,
+}
+
+/// Why the engine cannot reach Beebeeb, when it cannot (spec section 9: NEW in
+/// slice 2). `ServerDidNotAnswer` covers timeouts and 5xx; `Offline` is a
+/// connection-level failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connectivity {
+    Online,
+    Offline,
+    ServerDidNotAnswer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PopoverSnapshot {
+    pub logged_in: bool,
+    pub auth_expired: bool,
+    pub vault_unlocked: bool,
+    pub finder: FinderSetup,
+    pub paused: bool,
+    pub storage_full: bool,
+    pub connectivity: Connectivity,
+    /// Files are in flight (`sync_in_flight_count > 0`).
+    pub syncing: bool,
+}
+
+impl PopoverSnapshot {
+    /// Signed in, unlocked, Finder ready, nothing wrong, nothing moving.
+    pub const fn healthy() -> Self {
+        Self {
+            logged_in: true,
+            auth_expired: false,
+            vault_unlocked: true,
+            finder: FinderSetup::Ready,
+            paused: false,
+            storage_full: false,
+            connectivity: Connectivity::Online,
+            syncing: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverPhase {
+    SignedOut,
+    SessionEnded,
+    Locked,
+    FinderFailed,
+    FinderAdding,
+    FinderMissing,
+    Paused,
+    StorageFull,
+    Offline,
+    Error,
+    Syncing,
+    Synced,
+}
+
+/// The precedence order, highest first. Kept as data so the tests can walk it.
+pub const PRECEDENCE: [PopoverPhase; 12] = [
+    PopoverPhase::SignedOut,
+    PopoverPhase::SessionEnded,
+    PopoverPhase::Locked,
+    PopoverPhase::FinderFailed,
+    PopoverPhase::FinderAdding,
+    PopoverPhase::FinderMissing,
+    PopoverPhase::Paused,
+    PopoverPhase::StorageFull,
+    PopoverPhase::Offline,
+    PopoverPhase::Error,
+    PopoverPhase::Syncing,
+    PopoverPhase::Synced,
+];
+
+pub fn popover_phase(s: &PopoverSnapshot) -> PopoverPhase {
+    use PopoverPhase::*;
+    if !s.logged_in {
+        SignedOut
+    } else if s.auth_expired {
+        SessionEnded
+    } else if !s.vault_unlocked {
+        Locked
+    } else if s.finder == FinderSetup::Failed {
+        FinderFailed
+    } else if s.finder == FinderSetup::Adding {
+        FinderAdding
+    } else if s.finder == FinderSetup::Missing {
+        FinderMissing
+    } else if s.paused {
+        Paused
+    } else if s.storage_full {
+        StorageFull
+    } else if s.connectivity == Connectivity::Offline {
+        Offline
+    } else if s.connectivity == Connectivity::ServerDidNotAnswer {
+        Error
+    } else if s.syncing {
+        Syncing
+    } else {
+        Synced
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use PopoverPhase::*;
+
+    /// For every phase but `Synced`, the smallest change to a healthy snapshot
+    /// that makes it the answer.
+    fn trigger(phase: PopoverPhase) -> fn(&mut PopoverSnapshot) {
+        match phase {
+            SignedOut => |s| s.logged_in = false,
+            SessionEnded => |s| s.auth_expired = true,
+            Locked => |s| s.vault_unlocked = false,
+            FinderFailed => |s| s.finder = FinderSetup::Failed,
+            FinderAdding => |s| s.finder = FinderSetup::Adding,
+            FinderMissing => |s| s.finder = FinderSetup::Missing,
+            Paused => |s| s.paused = true,
+            StorageFull => |s| s.storage_full = true,
+            Offline => |s| s.connectivity = Connectivity::Offline,
+            Error => |s| s.connectivity = Connectivity::ServerDidNotAnswer,
+            Syncing => |s| s.syncing = true,
+            Synced => |_| {},
+        }
+    }
+
+    #[test]
+    fn a_healthy_snapshot_is_synced() {
+        assert_eq!(popover_phase(&PopoverSnapshot::healthy()), Synced);
+    }
+
+    #[test]
+    fn each_trigger_alone_yields_its_phase() {
+        for phase in PRECEDENCE {
+            let mut s = PopoverSnapshot::healthy();
+            trigger(phase)(&mut s);
+            assert_eq!(popover_phase(&s), phase, "{phase:?} alone");
+        }
+    }
+
+    /// Phases that are values of the SAME snapshot field (`finder`,
+    /// `connectivity`) cannot hold at once, so they have no pair to order.
+    fn same_field(a: PopoverPhase, b: PopoverPhase) -> bool {
+        let finder = [FinderFailed, FinderAdding, FinderMissing];
+        let net = [Offline, Error];
+        (finder.contains(&a) && finder.contains(&b)) || (net.contains(&a) && net.contains(&b))
+    }
+
+    #[test]
+    fn the_higher_phase_always_wins_a_pair() {
+        let mut pairs = 0;
+        for (i, &high) in PRECEDENCE.iter().enumerate() {
+            for &low in &PRECEDENCE[i + 1..] {
+                if same_field(high, low) {
+                    continue;
+                }
+                // Apply the lower trigger first, then the higher, and the other
+                // way round: order of mutation must not matter.
+                for flip in [false, true] {
+                    let mut s = PopoverSnapshot::healthy();
+                    if flip {
+                        trigger(high)(&mut s);
+                        trigger(low)(&mut s);
+                    } else {
+                        trigger(low)(&mut s);
+                        trigger(high)(&mut s);
+                    }
+                    assert_eq!(popover_phase(&s), high, "{high:?} must beat {low:?}");
+                }
+                pairs += 1;
+            }
+        }
+        // C(12, 2) = 66, minus 3 Finder pairs and 1 network pair.
+        assert_eq!(pairs, 62);
+    }
+
+    #[test]
+    fn everything_wrong_at_once_is_signed_out() {
+        let mut s = PopoverSnapshot::healthy();
+        for phase in PRECEDENCE {
+            trigger(phase)(&mut s);
+        }
+        assert_eq!(popover_phase(&s), SignedOut);
+    }
+
+    #[test]
+    fn paused_hides_every_failure_below_it() {
+        // Nothing is attempted while paused, so no failure may be shown.
+        let s = PopoverSnapshot {
+            paused: true,
+            storage_full: true,
+            connectivity: Connectivity::ServerDidNotAnswer,
+            syncing: true,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&s), Paused);
+        let offline = PopoverSnapshot {
+            connectivity: Connectivity::Offline,
+            ..s
+        };
+        assert_eq!(popover_phase(&offline), Paused);
+    }
+
+    #[test]
+    fn finder_problems_outrank_paused_and_the_network_states() {
+        let s = PopoverSnapshot {
+            finder: FinderSetup::Missing,
+            paused: true,
+            connectivity: Connectivity::Offline,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&s), FinderMissing);
+    }
+
+    #[test]
+    fn a_stopped_or_unstarted_engine_is_not_locked() {
+        // The UI-side guess this reducer replaces said "Needs unlock" here.
+        // Unlocked and signed in, but nothing is moving: that is Synced.
+        let s = PopoverSnapshot {
+            logged_in: true,
+            vault_unlocked: true,
+            syncing: false,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&s), Synced);
+    }
+
+    #[test]
+    fn locked_needs_a_session_and_a_locked_vault() {
+        let locked = PopoverSnapshot {
+            vault_unlocked: false,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&locked), Locked);
+        let signed_out = PopoverSnapshot {
+            logged_in: false,
+            vault_unlocked: false,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&signed_out), SignedOut);
+    }
+
+    #[test]
+    fn session_ended_needs_a_stale_token_that_is_still_installed() {
+        let s = PopoverSnapshot {
+            auth_expired: true,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&s), SessionEnded);
+        // expired flag without a session: there is nothing to have ended.
+        let gone = PopoverSnapshot {
+            logged_in: false,
+            auth_expired: true,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&gone), SignedOut);
+    }
+
+    #[test]
+    fn the_precedence_table_lists_every_phase_once() {
+        let mut seen = std::collections::HashSet::new();
+        for p in PRECEDENCE {
+            assert!(seen.insert(format!("{p:?}")), "{p:?} listed twice");
+        }
+        assert_eq!(seen.len(), 12);
+    }
+}

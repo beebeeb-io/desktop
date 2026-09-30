@@ -61,6 +61,11 @@ mod macos_file_provider;
 mod runner;
 mod state_db;
 mod staged_payload;
+// Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
+// platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
+// so dead-code is allowed for the module (remove the allow when slice 6 lands).
+#[allow(dead_code)]
+mod surfaces;
 mod state_paths;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
@@ -8298,7 +8303,11 @@ pub fn run() {
             // App windows stay hidden (visible:false in tauri.conf.json) until
             // onboarding or the configured-startup path opens the right one.
             let no_sync_root = DesktopConfig::load().map(|c| c.sync_root.is_none()).unwrap_or(true);
-            if no_sync_root {
+            // The decision is `surfaces::policy::startup_surface` (task 1683 slice 1):
+            // identical on every platform today, so this is a refactor, not a change.
+            if surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root)
+                == surfaces::policy::StartupSurface::Onboarding
+            {
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     // Small delay so the tray and menu are fully initialised first.
