@@ -5,6 +5,11 @@ enum BeebeebIPCError: LocalizedError {
     case daemonUnavailable
     case invalidResponse(String)
     case invalidIdentifier
+    /// The daemon accepted the connection but sent nothing for `seconds`
+    /// (task 1670 issue 3: previously a stall looked like "not valid JSON").
+    case timedOut(seconds: Int)
+    /// Finder cancelled the transfer.
+    case cancelled
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +19,10 @@ enum BeebeebIPCError: LocalizedError {
             return message
         case .invalidIdentifier:
             return "This item's identifier could not be used for a Finder operation."
+        case .timedOut(let seconds):
+            return "Beebeeb's sync engine did not answer within \(seconds) seconds. Open Beebeeb, make sure it is unlocked, and try again."
+        case .cancelled:
+            return "The transfer was cancelled."
         }
     }
 }
@@ -49,6 +58,12 @@ extension BeebeebIPCError: CustomNSError {
         case .invalidIdentifier:
             // Task 1670 round 2: same category as `.invalidResponse` — the
             // request is refused before it ever reaches the daemon.
+            return NSFileProviderError.cannotSynchronize.rawValue
+        case .timedOut:
+            // The daemon is there but not answering: same category as it
+            // being unreachable.
+            return NSFileProviderError.serverUnreachable.rawValue
+        case .cancelled:
             return NSFileProviderError.cannotSynchronize.rawValue
         }
     }
@@ -297,16 +312,33 @@ final class XPCBridge {
         return item
     }
 
+    /// Ask the daemon to download + decrypt `itemIdentifier` into
+    /// `destinationURL`. Blocks the calling thread until the daemon answers,
+    /// so call it off the File Provider callback queue.
+    ///
+    /// `onProgress(done, total)` is called (on the calling thread) with
+    /// plaintext byte counts as the daemon works; `cancellation.cancel()` from
+    /// another thread aborts the request (and the daemon stops downloading).
     func hydrateFile(
         itemIdentifier: NSFileProviderItemIdentifier,
-        destinationURL: URL
+        destinationURL: URL,
+        cancellation: IPCCancellation? = nil,
+        onProgress: ((Int64, Int64) -> Void)? = nil
     ) throws {
-        let response = try sendRequest([
-            "HydrateFile": [
-                "file_id": itemIdentifier.rawValue,
-                "dest_path": destinationURL.path,
-            ],
-        ])
+        var payload: [String: Any] = [
+            "file_id": itemIdentifier.rawValue,
+            "dest_path": destinationURL.path,
+        ]
+        if onProgress != nil {
+            // Opt in: an older daemon ignores the field and sends no progress.
+            payload["progress"] = true
+        }
+        let response = try sendRequest(
+            ["HydrateFile": payload],
+            timeoutSeconds: IPCFraming.hydrateTimeoutSeconds,
+            cancellation: cancellation,
+            onProgress: onProgress
+        )
         if let error = response["Error"] as? [String: Any] {
             throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "hydration failed")
         }
@@ -416,11 +448,16 @@ final class XPCBridge {
         )
     }
 
-    private func sendRequest(_ request: [String: Any]) throws -> [String: Any] {
-        guard let data = try? JSONSerialization.data(withJSONObject: request) else {
-            throw BeebeebIPCError.invalidResponse("could not encode daemon request")
-        }
-
+    /// One framed request/reply exchange with the daemon (see
+    /// `IPCFraming.swift` and docs/IPC_PROTOCOL.md). Every failure is a
+    /// `BeebeebIPCError` with fixed, human-readable text -- raw reply bytes
+    /// are never put in an error message.
+    private func sendRequest(
+        _ request: [String: Any],
+        timeoutSeconds: Int = IPCFraming.metadataTimeoutSeconds,
+        cancellation: IPCCancellation? = nil,
+        onProgress: ((Int64, Int64) -> Void)? = nil
+    ) throws -> [String: Any] {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw BeebeebIPCError.daemonUnavailable }
         defer { close(fd) }
@@ -443,15 +480,39 @@ final class XPCBridge {
         }
         guard connected else { throw BeebeebIPCError.daemonUnavailable }
 
-        _ = data.withUnsafeBytes { write(fd, $0.baseAddress, data.count) }
-
-        var buffer = Data(count: 65536)
-        let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, 65536) }
-        guard count > 0,
-              let response = try? JSONSerialization.jsonObject(with: buffer.prefix(count)) as? [String: Any] else {
-            throw BeebeebIPCError.invalidResponse("daemon response was not valid JSON")
+        do {
+            return try IPCExchange.perform(
+                fd: fd,
+                request: request,
+                timeoutSeconds: timeoutSeconds,
+                cancellation: cancellation,
+                onProgress: onProgress
+            )
+        } catch let error as IPCTransportError {
+            throw Self.map(error, timeoutSeconds: timeoutSeconds)
         }
-        return response
+    }
+
+    private static func map(_ error: IPCTransportError, timeoutSeconds: Int) -> BeebeebIPCError {
+        switch error {
+        case .timedOut:
+            return .timedOut(seconds: timeoutSeconds)
+        case .cancelled:
+            return .cancelled
+        case .encodingFailed:
+            return .invalidResponse("Could not encode the request for Beebeeb's sync engine.")
+        case .closedBeforeReply:
+            return .invalidResponse("Beebeeb's sync engine closed the connection before answering. Reopen Beebeeb and try again.")
+        case .replyTooLarge(let limit):
+            return .invalidResponse("Beebeeb's sync engine sent a reply larger than Finder can accept (\(limit / (1024 * 1024)) MB limit).")
+        case .malformedReply:
+            return .invalidResponse("Beebeeb's sync engine sent a reply the Finder extension could not read. Update Beebeeb and try again.")
+        case .readFailed(let code), .writeFailed(let code):
+            if code == EPIPE || code == ECONNRESET {
+                return .daemonUnavailable
+            }
+            return .invalidResponse("Lost the connection to Beebeeb's sync engine (error \(code)).")
+        }
     }
 }
 

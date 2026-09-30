@@ -45,7 +45,22 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
+        // Task 1670 issue 3: this used to be `Progress(totalUnitCount: 1)`
+        // that was never updated -- and the whole download ran synchronously
+        // BEFORE `fetchContents` returned, so Finder never even received the
+        // Progress object. Now the work runs on a background queue, the
+        // Progress is returned immediately, its units are plaintext BYTES
+        // (switched from the placeholder 1 as soon as the daemon reports the
+        // real size), and cancelling it cancels the daemon request.
         let progress = Progress(totalUnitCount: 1)
+        progress.kind = .file
+        progress.setUserInfoObject(Progress.FileOperationKind.downloading, forKey: .fileOperationKindKey)
+        progress.isCancellable = true
+        progress.isPausable = false
+        let cancellation = IPCCancellation()
+        progress.cancellationHandler = {
+            cancellation.cancel()
+        }
 
         // Task 1670: MUST be the shared App Group container, not
         // `FileManager.default.temporaryDirectory` — see
@@ -100,34 +115,55 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             try? FileManager.default.removeItem(at: destinationURL)
         }
 
-        do {
-            try ipc.hydrateFile(itemIdentifier: itemIdentifier, destinationURL: destinationURL)
-            let model = try ipc.item(identifier: itemIdentifier)
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            do {
+                try ipc.hydrateFile(
+                    itemIdentifier: itemIdentifier,
+                    destinationURL: destinationURL,
+                    cancellation: cancellation,
+                    onProgress: { done, total in
+                        // Real progress from the daemon's download + decrypt.
+                        // `total` is 0 when the size is unknown: stay
+                        // indeterminate rather than show a wrong bar.
+                        if total > 0 {
+                            progress.totalUnitCount = total
+                            progress.completedUnitCount = min(done, total)
+                        }
+                    }
+                )
+                let model = try ipc.item(identifier: itemIdentifier)
 
-            // Copy the decrypted plaintext into the SYSTEM's own handoff
-            // directory BEFORE we ever call completionHandler.
-            let handoffURL = try copyToSystemTemporaryDirectory(stagedAt: destinationURL)
+                // Copy the decrypted plaintext into the SYSTEM's own handoff
+                // directory BEFORE we ever call completionHandler.
+                let handoffURL = try copyToSystemTemporaryDirectory(stagedAt: destinationURL)
 
-            // Our staging copy was never handed to the system — only
-            // `handoffURL` is, below. Delete it now; there is nothing left
-            // to race, because nothing outside this function has ever seen
-            // `destinationURL`.
-            cleanupStagedPlaintext()
+                // Our staging copy was never handed to the system — only
+                // `handoffURL` is, below. Delete it now; there is nothing left
+                // to race, because nothing outside this function has ever seen
+                // `destinationURL`.
+                cleanupStagedPlaintext()
 
-            completionHandler(handoffURL, FileProviderItem(model: model), nil)
-        } catch {
-            // Nothing was ever handed to the system on this path —
-            // `hydrateFile` failed, the item lookup failed, or the handoff
-            // copy itself failed (which, on its own failure, already cleans
-            // up any partial copy it made — see its doc comment). Either
-            // way `completionHandler` below is called with `nil`, so nothing
-            // else will ever clean up our staging copy at `destinationURL`.
-            // Do it now; there is no race to lose here.
-            cleanupStagedPlaintext()
-            completionHandler(nil, nil, error)
+                completionHandler(handoffURL, FileProviderItem(model: model), nil)
+            } catch {
+                // Nothing was ever handed to the system on this path —
+                // `hydrateFile` failed, the item lookup failed, or the handoff
+                // copy itself failed (which, on its own failure, already cleans
+                // up any partial copy it made — see its doc comment). Either
+                // way `completionHandler` below is called with `nil`, so nothing
+                // else will ever clean up our staging copy at `destinationURL`.
+                // Do it now; there is no race to lose here.
+                cleanupStagedPlaintext()
+                if cancellation.isCancelled {
+                    // Finder asked for this; report it as a user cancellation
+                    // rather than a failure.
+                    completionHandler(nil, nil, NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError, userInfo: nil))
+                } else {
+                    completionHandler(nil, nil, error)
+                }
+            }
+            progress.completedUnitCount = progress.totalUnitCount
         }
 
-        progress.completedUnitCount = 1
         return progress
     }
 

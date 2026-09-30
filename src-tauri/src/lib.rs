@@ -34,6 +34,8 @@ mod native_parity_tests;
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
 // in-process (see `windows_cf`), so this module is `unix`-only.
 #[cfg(unix)]
+mod ipc_frame;
+#[cfg(unix)]
 mod ipc_socket;
 mod keychain;
 // Known-folder backup ("Manage backup", task 0797 / Model 2). The catalog +
@@ -2282,8 +2284,10 @@ async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sy
 
     let path = ipc_socket::ipc_socket_path();
     let deadline = Instant::now() + Duration::from_secs(3);
-    let request = serde_json::to_vec(&ipc_socket::IpcRequest::GetSyncSummary)
+    // One `\n`-terminated frame (task 1670 issue 3; see `docs/IPC_PROTOCOL.md`).
+    let mut request = serde_json::to_vec(&ipc_socket::IpcRequest::GetSyncSummary)
         .map_err(|e| format!("encode IPC readiness probe: {e}"))?;
+    request.push(b'\n');
 
     loop {
         if let Ok(guard) = ipc_bind_error.lock()

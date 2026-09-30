@@ -6,7 +6,7 @@
 #![cfg(unix)]
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::ipc_frame::{FrameError, FrameReader, MAX_REQUEST_BYTES, write_frame};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -23,6 +23,11 @@ pub enum IpcRequest {
     HydrateFile {
         file_id: String,
         dest_path: String,
+        /// Opt in to `HydrateProgress` frames before the final reply (task
+        /// 1670 issue 3). Absent/false for old extensions, which read exactly
+        /// one reply and would mistake the first progress frame for it.
+        #[serde(default)]
+        progress: bool,
     },
     ListFileProviderItems {
         container_id: String,
@@ -69,7 +74,20 @@ pub enum IpcResponse {
     FileProviderItems {
         items: Vec<FileProviderItemPayload>,
     },
-    Ok,
+    /// Success with no payload. Deliberately an (empty) object on the wire —
+    /// `{"Ok":{}}` — not the bare string `"Ok"` a unit variant serialises to:
+    /// JSONSerialization on the Swift side rejects a top-level string unless
+    /// fragments are allowed, which is what made every successful Finder
+    /// hydrate surface as "daemon response was not valid JSON" (task 1670
+    /// issue 3). The Swift reader still accepts the legacy bare string.
+    Ok {},
+    /// Sent only in answer to `HydrateFile { progress: true }`, zero or more
+    /// times before the final reply. `total` is the plaintext size in bytes
+    /// (0 when unknown); `done` is plaintext bytes decrypted so far.
+    HydrateProgress {
+        done: u64,
+        total: u64,
+    },
     Error {
         message: String,
     },
@@ -755,7 +773,7 @@ fn is_authorized_peer(daemon_uid: u32, peer_uid: u32) -> bool {
 }
 
 async fn handle_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
 ) {
@@ -778,17 +796,40 @@ async fn handle_connection(
         }
     }
 
-    let mut buf = vec![0u8; 65536];
+    // Framing (task 1670 issue 3): one compact-JSON request per `\n`-terminated
+    // line, exactly one delimited reply per request (hydrate may send
+    // `HydrateProgress` lines first when asked). See `crate::ipc_frame` and
+    // `docs/IPC_PROTOCOL.md`.
+    let (read_half, mut write_half) = stream.into_split();
+    let mut frames = FrameReader::new(read_half, MAX_REQUEST_BYTES);
     loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        let line = match frames.next_frame().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(FrameError::TooLarge { limit }) => {
+                tracing::warn!(limit, "IPC request exceeded the size limit; closing connection");
+                let _ = write_frame(
+                    &mut write_half,
+                    &IpcResponse::Error {
+                        message: format!("request exceeds the {limit}-byte limit"),
+                    },
+                )
+                .await;
+                break;
+            }
+            Err(FrameError::Io(_)) => break,
         };
-        let req: IpcRequest = match serde_json::from_slice(&buf[..n]) {
+        let req: IpcRequest = match serde_json::from_slice(&line) {
             Ok(r) => r,
             Err(e) => {
-                let err = serde_json::to_vec(&IpcResponse::Error { message: e.to_string() }).unwrap();
-                let _ = stream.write_all(&err).await;
+                // The stream is still in sync (we consumed exactly one line),
+                // so answer and keep serving the connection.
+                if write_frame(&mut write_half, &IpcResponse::Error { message: e.to_string() })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
         };
@@ -802,72 +843,15 @@ async fn handle_connection(
             IpcRequest::ListFileProviderItems { container_id } => IpcResponse::FileProviderItems {
                 items: list_file_provider_items(&db, &container_id),
             },
-            IpcRequest::HydrateFile { file_id, dest_path } => {
-                // Task 1670 round 2: `file_id` here is the raw File Provider
-                // item identifier straight off the wire — reject it before it
-                // is trusted for anything else in this arm. See
-                // `macos_validate_hydrate_item_identifier`'s doc comment.
-                #[cfg(target_os = "macos")]
-                let identifier_check = macos_validate_hydrate_item_identifier(&file_id);
-                #[cfg(not(target_os = "macos"))]
-                let identifier_check: Result<(), &'static str> = Ok(());
-
-                if let Err(msg) = identifier_check {
-                    IpcResponse::Error { message: msg.to_string() }
-                } else {
-                // `dest_path` arrives straight off the wire (untrusted). Bound
-                // it to the caller's legitimate destinations before handing it
-                // to `hydrate_file`, which decrypts vault plaintext to disk
-                // (task 1247). The only real IPC caller (the File Provider
-                // extension / FUSE mount) writes either under the sync root or
-                // into the per-file temp cache, so both are allowed roots; if
-                // no sync root is configured yet, only the temp dir is.
-                // Resolve sync_root the same way the SetRecursivePin handler
-                // below already does.
-                //
-                // Task 1670: on macOS, `temp_root` above is THIS (sandboxed)
-                // process's own private container temp dir — the File Provider
-                // extension is a DIFFERENT sandboxed process with its own
-                // separate container temp dir, so a real destination it builds
-                // can never be inside `temp_root` (see `macos_hydrate_cache_dir`'s
-                // doc comment for the full root-cause). Add the shared App
-                // Group hydrate-cache directory as a third allowed root, and
-                // make sure it exists (owner-only, backup-excluded — round 2)
-                // before the containment check runs. Round 4: the Swift side
-                // copies its staging file into the SYSTEM's own temp
-                // directory and deletes THIS copy immediately after (see
-                // `MACOS_HYDRATE_CACHE_TTL`'s doc comment), so this and the
-                // periodic sweep in `runner.rs` are now a crash backstop —
-                // they only ever find staging orphaned by a crash between
-                // decrypt and that copy, not a file the system still holds.
-                let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
-                let temp_root = std::env::temp_dir();
-                let dest = std::path::Path::new(&dest_path);
-                #[cfg(target_os = "macos")]
-                let macos_hydrate_dir = {
-                    let dir = macos_hydrate_cache_dir();
-                    if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
-                        tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
-                    }
-                    if let Err(e) =
-                        macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now())
-                    {
-                        tracing::warn!(error = %e, dir = %dir.display(), "hydrate-cache TTL sweep failed (best-effort)");
-                    }
-                    dir
-                };
-                let mut allowed_roots: Vec<&std::path::Path> = Vec::new();
-                if let Some(root) = &sync_root {
-                    allowed_roots.push(root.as_path());
-                }
-                allowed_roots.push(temp_root.as_path());
-                #[cfg(target_os = "macos")]
-                allowed_roots.push(macos_hydrate_dir.as_path());
-                let result = bridge.hydrate_file(&file_id, dest, &allowed_roots).await;
-                match result {
-                    Ok(_) => IpcResponse::Ok,
-                    Err(e) => IpcResponse::Error { message: e.to_string() },
-                }
+            IpcRequest::HydrateFile {
+                file_id,
+                dest_path,
+                progress,
+            } => {
+                match hydrate_over_ipc(&mut frames, &mut write_half, &bridge, &file_id, &dest_path, progress).await {
+                    HydrateOutcome::Reply(resp) => resp,
+                    // The client hung up mid-hydrate: nobody is left to reply to.
+                    HydrateOutcome::ClientGone => break,
                 }
             }
             IpcRequest::QueueFinderCreate {
@@ -878,13 +862,20 @@ async fn handle_connection(
                 content_type,
             } => {
                 if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
-                    return write_ipc_response(
-                        &mut stream,
-                        IpcResponse::Error {
+                    // Answer and keep serving the connection (this used to
+                    // `return`, silently dropping the connection).
+                    if write_frame(
+                        &mut write_half,
+                        &IpcResponse::Error {
                             message: "Shared with me is read-only at the namespace root".into(),
                         },
                     )
-                    .await;
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                    continue;
                 }
                 let target = crate::engine_bridge::FinderWriteTarget {
                     file_id: None,
@@ -992,14 +983,134 @@ async fn handle_connection(
                     conflicts,
                 }
             }
-            IpcRequest::SetFileStatus { .. } => IpcResponse::Ok,
+            IpcRequest::SetFileStatus { .. } => IpcResponse::Ok {},
         };
-        let _ = stream.write_all(&serde_json::to_vec(&resp).unwrap()).await;
+        if write_frame(&mut write_half, &resp).await.is_err() {
+            break;
+        }
     }
 }
 
-async fn write_ipc_response(stream: &mut UnixStream, response: IpcResponse) {
-    let _ = stream.write_all(&serde_json::to_vec(&response).unwrap()).await;
+enum HydrateOutcome {
+    Reply(IpcResponse),
+    ClientGone,
+}
+
+/// Serve one `HydrateFile` request: validate, hydrate, and (when the client
+/// opted in) stream `HydrateProgress` frames while the download + decrypt run.
+///
+/// While the hydrate future runs, this also watches the read half: if the
+/// client hangs up (Finder cancelled the transfer, the extension was killed)
+/// the future is dropped — the download stops and `hydrate_file`'s guard puts
+/// the row's status back — instead of decrypting a file nobody will collect.
+async fn hydrate_over_ipc(
+    frames: &mut FrameReader<tokio::net::unix::OwnedReadHalf>,
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    bridge: &crate::engine_bridge::EngineBridge,
+    file_id: &str,
+    dest_path: &str,
+    want_progress: bool,
+) -> HydrateOutcome {
+    // Task 1670 round 2: `file_id` here is the raw File Provider
+    // item identifier straight off the wire — reject it before it
+    // is trusted for anything else in this arm. See
+    // `macos_validate_hydrate_item_identifier`'s doc comment.
+    #[cfg(target_os = "macos")]
+    let identifier_check = macos_validate_hydrate_item_identifier(file_id);
+    #[cfg(not(target_os = "macos"))]
+    let identifier_check: Result<(), &'static str> = Ok(());
+
+    if let Err(msg) = identifier_check {
+        return HydrateOutcome::Reply(IpcResponse::Error { message: msg.to_string() });
+    }
+    // `dest_path` arrives straight off the wire (untrusted). Bound
+    // it to the caller's legitimate destinations before handing it
+    // to `hydrate_file`, which decrypts vault plaintext to disk
+    // (task 1247). The only real IPC caller (the File Provider
+    // extension / FUSE mount) writes either under the sync root or
+    // into the per-file temp cache, so both are allowed roots; if
+    // no sync root is configured yet, only the temp dir is.
+    // Resolve sync_root the same way the SetRecursivePin handler
+    // resolves it.
+    //
+    // Task 1670: on macOS, `temp_root` above is THIS (sandboxed)
+    // process's own private container temp dir — the File Provider
+    // extension is a DIFFERENT sandboxed process with its own
+    // separate container temp dir, so a real destination it builds
+    // can never be inside `temp_root` (see `macos_hydrate_cache_dir`'s
+    // doc comment for the full root-cause). Add the shared App
+    // Group hydrate-cache directory as a third allowed root, and
+    // make sure it exists (owner-only, backup-excluded — round 2)
+    // before the containment check runs. Round 4: the Swift side
+    // copies its staging file into the SYSTEM's own temp
+    // directory and deletes THIS copy immediately after (see
+    // `MACOS_HYDRATE_CACHE_TTL`'s doc comment), so this and the
+    // periodic sweep in `runner.rs` are now a crash backstop —
+    // they only ever find staging orphaned by a crash between
+    // decrypt and that copy, not a file the system still holds.
+    let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    let temp_root = std::env::temp_dir();
+    let dest = std::path::Path::new(dest_path);
+    #[cfg(target_os = "macos")]
+    let macos_hydrate_dir = {
+        let dir = macos_hydrate_cache_dir();
+        if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
+        }
+        if let Err(e) = macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now()) {
+            tracing::warn!(error = %e, dir = %dir.display(), "hydrate-cache TTL sweep failed (best-effort)");
+        }
+        dir
+    };
+    let mut allowed_roots: Vec<&std::path::Path> = Vec::new();
+    if let Some(root) = &sync_root {
+        allowed_roots.push(root.as_path());
+    }
+    allowed_roots.push(temp_root.as_path());
+    #[cfg(target_os = "macos")]
+    allowed_roots.push(macos_hydrate_dir.as_path());
+
+    // The engine calls `report` synchronously from inside the download loop;
+    // hop through an unbounded channel so this task does the socket writes.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+    let report = move |done: u64, total: u64| {
+        let _ = tx.send((done, total));
+    };
+    let progress_cb: Option<&(dyn Fn(u64, u64) + Send + Sync)> = if want_progress { Some(&report) } else { None };
+    let hydrate = bridge.hydrate_file_with_progress(file_id, dest, &allowed_roots, progress_cb);
+    tokio::pin!(hydrate);
+
+    let result = loop {
+        tokio::select! {
+            biased;
+            result = &mut hydrate => break Some(result),
+            Some((done, total)) = rx.recv() => {
+                if write_frame(write_half, &IpcResponse::HydrateProgress { done, total }).await.is_err() {
+                    break None;
+                }
+            }
+            read = frames.fill_more() => {
+                // 0 / error = the peer closed. Bytes = a pipelined request,
+                // which stays buffered for the next `next_frame()`; the
+                // extension never pipelines during a hydrate, so a flood
+                // beyond the request cap is treated as a hang-up.
+                match read {
+                    Ok(n) if n > 0 && frames.buffered_len() <= MAX_REQUEST_BYTES => {}
+                    _ => break None,
+                }
+            }
+        }
+    };
+
+    match result {
+        Some(Ok(())) => HydrateOutcome::Reply(IpcResponse::Ok {}),
+        Some(Err(e)) => HydrateOutcome::Reply(IpcResponse::Error { message: e.to_string() }),
+        None => {
+            // `hydrate` is dropped when this function returns.
+            tracing::info!(file_id, "IPC client went away mid-hydrate; hydration cancelled");
+            HydrateOutcome::ClientGone
+        }
+    }
 }
 
 fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
@@ -1260,6 +1371,10 @@ fn is_top_level_path(path: &str) -> bool {
     let trimmed = path.trim_matches('/');
     !trimmed.is_empty() && !trimmed.contains('/')
 }
+
+#[cfg(test)]
+#[path = "ipc_socket_framing_tests.rs"]
+mod framing_tests;
 
 #[cfg(test)]
 mod tests {
