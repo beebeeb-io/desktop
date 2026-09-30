@@ -179,7 +179,11 @@ impl Ledger {
         let db = open_db(&path, include_str!("ledger.sql"))?;
         let keys = h.path().join("keyslots");
         fs::create_dir_all(&keys)?;
-        grow_emergency(h.path(), None)?;
+        // Recovery opens remain possible after an interrupted terminal release.
+        // New payload/metadata admission still requires the full reserve refill.
+        if file_len(&h.path().join("reserve")) >= 256 * MIB {
+            grow_emergency(h.path(), None)?;
+        }
         db.execute(
             "INSERT OR IGNORE INTO installation_format VALUES(1,1,?1,NULL)",
             [id().as_slice()],

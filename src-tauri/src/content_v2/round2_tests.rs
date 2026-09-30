@@ -370,3 +370,66 @@ fn slice1_r2_key_publication_never_clobbers_existing_slot() {
     );
     assert_eq!(fs::read(&destination).unwrap(), b"existing wrapped key");
 }
+
+#[test]
+fn slice1_r2_extent_writes_schedule_real_checkpoint_progress() {
+    let h = Harness::new().unwrap();
+    let s = Store::new(&h).unwrap();
+    let o = owner(&s, "Migration");
+    let a = s
+        .allocate(o, "LegacyRecovery", "LegacyPartial", 64 * MIB, 0, &mut Fault::default())
+        .unwrap();
+    checkpoint(&s.db, &s.path, true).unwrap();
+    let before = allocated_len(&s.path).unwrap();
+    let mut peak = 0;
+    for ordinal in 0..10_000 {
+        s.extent(
+            &a,
+            ordinal,
+            Extent {
+                offset: ordinal * 2,
+                packed: ordinal,
+                len: 1,
+            },
+        )
+        .unwrap();
+        peak = peak.max(file_len(&wal_path(&s.path)));
+        assert!(
+            peak <= 64 * MIB + DIRTY_LIMIT,
+            "extent scheduler did not checkpoint/reuse WAL at 64 MiB: {peak}"
+        );
+    }
+    assert!(
+        allocated_len(&s.path).unwrap() > before,
+        "checkpoint did not copy any actual extent pages to the DB"
+    );
+    assert_eq!(
+        s.db.query_row("SELECT count(*) FROM v2_extents", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        10_000
+    );
+    println!(
+        "extent_checkpoint_rows=10000 peak_wal={peak} db_allocation_growth={}",
+        allocated_len(&s.path).unwrap() - before
+    );
+}
+
+#[test]
+fn slice1_r2_reserve_grows_for_all_participating_databases() {
+    let h = Harness::new().unwrap();
+    let _ledger = Ledger::open(&h).unwrap();
+    let mut stores = Vec::new();
+    for _ in 0..5 {
+        let s = Store::new(&h).unwrap();
+        let o = owner(&s, "Snapshot");
+        s.allocate(o, "Capture", "Full", 1, 0, &mut Fault::default()).unwrap();
+        stores.push(s);
+    }
+    let reserve = h.path().join("reserve");
+    assert_eq!(
+        file_len(&reserve),
+        6 * 64 * MIB,
+        "six participating databases need six terminal budgets"
+    );
+    assert!(allocated_len(&reserve).unwrap() >= 6 * 64 * MIB);
+}
