@@ -234,3 +234,44 @@ jobs:
             ${{ runner.temp }}/ipc-framing-tests/run.log
             ${{ runner.temp }}/ipc-framing-tests/run.exit
             ${{ runner.temp }}/fileprovider-build.log
+
+  release-script:
+    # scripts/release-macos-local.sh is the ONE command Guus runs on a Mac to turn the
+    # CI-created desktop-v<VERSION> release into a macOS release (notarize, staple,
+    # rebuild the dmg from the stapled app, upload, sign, backfill the manifest). It
+    # cannot run here, but its ORDER and its fail-closed gates can: the test puts shims
+    # for xcrun/codesign/spctl/hdiutil/ditto/plutil/gh/bunx on PATH and runs the real
+    # script against a throwaway repo. The truth line is a count
+    # ("release-macos-local: N passed, 0 failed"), guarded by a self-test that goes red.
+    name: macOS release script (shim test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/release-macos-local.sh \
+            scripts/test-release-macos-local.sh \
+            scripts/fixtures/release-macos-shim.sh \
+            scripts/macos-release-preflight.sh
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-macos-local.sh --self-test
+
+      - name: Release script test (shims, real script)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-macos-local.sh 2>&1 | tee "$RUNNER_TEMP/release-script-test.log"
+
+      - name: Upload release script test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-script-test
+          path: ${{ runner.temp }}/release-script-test.log

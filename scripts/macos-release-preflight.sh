@@ -199,7 +199,14 @@ if [[ "${1:-}" != "" ]]; then
           fi
         done
         printf 'ok: hardened runtime present on app, appex and CTL helper\n'
-        spctl --assess --type execute -vv "$artifact"
+        # scripts/release-macos-local.sh sets this ONLY for the pre-notarization pass
+        # (Gatekeeper cannot accept an app Apple has not notarized yet); every later
+        # pass, on the stapled app, runs the assessment.
+        if [[ -n "${BB_PREFLIGHT_SKIP_SPCTL_EXECUTE:-}" ]]; then
+          printf 'skipped spctl execute assessment (BB_PREFLIGHT_SKIP_SPCTL_EXECUTE set: pre-notarization pass)\n'
+        else
+          spctl --assess --type execute -vv "$artifact"
+        fi
       fi
       ;;
     *)
