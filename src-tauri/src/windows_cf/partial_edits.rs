@@ -22,6 +22,11 @@ thread_local! {
     pub(crate) static TEST_RANGES: std::cell::RefCell<Option<(std::path::PathBuf, bool, Vec<(u64,u64)>)>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 fn modified_ranges(file: &File, path: &Path, eof: u64) -> anyhow::Result<Option<Vec<(u64, u64)>>> {
     #[cfg(test)]
     if let Some((_, dirty, ranges)) = TEST_RANGES.with(|v| v.borrow().clone()).filter(|v| v.0 == path) {
@@ -152,6 +157,12 @@ pub(crate) fn materialize_if_unchanged(
     // interrupted local materialization cannot lose the settled user save.
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
+    #[cfg(test)]
+    if let Some(count) = TEST_FAIL_AFTER.with(|v| v.get()) {
+        file.write_all(&bytes[..count.min(bytes.len())])?;
+        file.sync_all()?;
+        anyhow::bail!("injected materialization write failure after {count} bytes");
+    }
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(true)

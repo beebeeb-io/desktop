@@ -213,7 +213,31 @@ async fn round3_resolution(choice: &str) {
     let queued = bridge.db.list_review_operations().unwrap();
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].base_version, Some(if choice == "mine" { 21 } else { 20 }));
-    let result = bridge.process_due_operations(&root, i64::MAX / 2).await.unwrap();
+    #[cfg(target_os = "windows")]
+    if let Some(count) = fault {
+        crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(Some(count)));
+        let result = bridge.process_due_operations(&root, i64::MAX / 2).await.unwrap();
+        crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(None));
+        // Actual scanner observes the provider-created empty/short live file.
+        // Clear only the injected CF metadata; no manual queue entries.
+        crate::windows_cf::placeholders::partial_edits::TEST_RANGES.with(|v| *v.borrow_mut() = None);
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe { windows::Win32::Storage::FileSystem::SetFileAttributesW(
+            windows::core::PCWSTR(wide.as_ptr()), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL).unwrap(); }
+        crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+        assert_eq!(received.lock().unwrap().len(), 0, "unfinished live materialization must not upload");
+        assert_eq!(result.retried_op_ids.len(), 1);
+        assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "provider partial is not another save");
+        let ops = bridge.db.list_review_operations().unwrap();
+        assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), expected);
+    }
+    let _ = fault;
+    drop(bridge);
+    let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
+    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "restart scan must not capture provider bytes");
+    let result = bridge.process_due_operations(&root, i64::MAX / 2 + 10000).await.unwrap();
     assert_eq!(
         result.completed_op_ids.len(),
         1,
@@ -240,7 +264,7 @@ async fn regression_1640_r3_keep_both_chain_restart_save() {
     round3_resolution("both").await;
 }
 
-async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool) {
+async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool, fault: Option<usize>) {
     use std::io::{Seek, SeekFrom, Write};
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
@@ -326,10 +350,10 @@ async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool) {
             );
             crate::windows_cf::placeholders::partial_edits::TEST_RANGES
                 .with(|v| *v.borrow_mut() = Some((path.clone(), true, vec![(offset, patch.len() as u64)])));
-            let queued = bridge.queue_windows_tracked_edit(&root, &path).unwrap();
+            crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
             assert_eq!(
-                queued,
-                Some(true),
+                bridge.db.list_review_operations().unwrap().len(),
+                1,
                 "dirty partial must be durably queued before hydration"
             );
         }
@@ -387,7 +411,31 @@ async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool) {
     drop(bridge);
     offline.store(false, Ordering::SeqCst);
     let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
-    let result = bridge.process_due_operations(&root, i64::MAX / 2).await.unwrap();
+    #[cfg(target_os = "windows")]
+    if let Some(count) = fault {
+        crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(Some(count)));
+        let result = bridge.process_due_operations(&root, i64::MAX / 2).await.unwrap();
+        crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(None));
+        // Actual scanner observes the provider-created empty/short live file.
+        // Clear only the injected CF metadata; no manual queue entries.
+        crate::windows_cf::placeholders::partial_edits::TEST_RANGES.with(|v| *v.borrow_mut() = None);
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe { windows::Win32::Storage::FileSystem::SetFileAttributesW(
+            windows::core::PCWSTR(wide.as_ptr()), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL).unwrap(); }
+        crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+        assert_eq!(received.lock().unwrap().len(), 0, "unfinished live materialization must not upload");
+        assert_eq!(result.retried_op_ids.len(), 1);
+        assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "provider partial is not another save");
+        let ops = bridge.db.list_review_operations().unwrap();
+        assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), expected);
+    }
+    let _ = fault;
+    drop(bridge);
+    let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
+    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "restart scan must not capture provider bytes");
+    let result = bridge.process_due_operations(&root, i64::MAX / 2 + 10000).await.unwrap();
     assert_eq!(
         result.completed_op_ids.len(),
         1,
@@ -426,21 +474,21 @@ async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool) {
 }
 #[tokio::test]
 async fn regression_1640_r3_partial_range_restart_reconstructs_base() {
-    round3_partial(false, false, false).await;
+    round3_partial(false, false, false, None).await;
 }
 #[tokio::test]
 async fn regression_1640_r3_partial_append_restart_reconstructs_base() {
-    round3_partial(true, false, false).await;
+    round3_partial(true, false, false, None).await;
 }
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn regression_1640_r3_native_range_write_queues_dirty_partial() {
-    round3_partial(false, true, false).await;
+    round3_partial(false, true, false, None).await;
 }
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn regression_1640_r3_native_append_queues_dirty_partial() {
-    round3_partial(true, true, false).await;
+    round3_partial(true, true, false, None).await;
 }
 
 #[tokio::test]
@@ -511,5 +559,53 @@ fn regression_1640_r3_resolution_rebases_later_save_atomically() {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn regression_1640_r3_native_unknown_base_preserves_pending_write() {
-    round3_partial(true, true, true).await;
+    round3_partial(true, true, true, None).await;
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn regression_1640_r4_materialize_after_truncate_watcher_restart() {
+    round3_partial(false, true, false, Some(0)).await;
+}
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn regression_1640_r4_materialize_mid_write_watcher_restart() {
+    round3_partial(true, true, false, Some(8192)).await;
+}
+
+#[tokio::test]
+async fn regression_1640_r4_keep_theirs_save_at_download_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("edit.txt");
+    let during = path.clone();
+    let key = hydration_test_key([9; 32], TEST_FILE_ID);
+    let server = Round3Server::start(move |request| {
+        if request.path.ends_with("/chunks/0") {
+            // Save completes at the last network boundary, before debounce/scan.
+            std::fs::write(&during, b"save made during download").unwrap();
+            return round3_binary(&beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"remote winner").unwrap());
+        }
+        http_json("200 OK", serde_json::json!({"id":TEST_FILE_ID,"version_number":20,"chunk_count":1,"size_bytes":13})).into_bytes()
+    });
+    let bridge = Arc::new(test_bridge_with_api(&dir.path().join("state.db"), server.url.clone(), [9; 32]));
+    round3_seed(&bridge, &root, b"baseline");
+    let watcher = crate::watcher::spawn(bridge.clone(), root.clone()).unwrap();
+    bridge.db.set_status(TEST_FILE_ID, FileStatus::Conflict).unwrap();
+    let result = bridge.resolve_keep_theirs(TEST_FILE_ID, &root).await;
+    assert_eq!(std::fs::read(&path).unwrap(), b"save made during download", "unobserved save must survive Keep Theirs");
+    assert!(result.is_err(), "a changed destination must abort resolution");
+    // Let the production periodic scanner capture that save, without manual dispatch.
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            if !bridge.db.list_review_operations().unwrap().is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap();
+    let ops = bridge.db.list_review_operations().unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), b"save made during download");
+    assert_eq!(ops[0].base_version, Some(7));
+    drop(watcher);
 }

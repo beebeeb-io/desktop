@@ -378,7 +378,7 @@ async fn scan_loop(
 /// every genuinely-new file for upload, and keep `in_flight` in sync with disk
 /// reality (add dispatched paths, prune vanished ones). Synchronous — called
 /// inside [`tokio::task::spawn_blocking`] from [`scan_loop`].
-fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &mut std::collections::HashSet<PathBuf>) {
+pub(crate) fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &mut std::collections::HashSet<PathBuf>) {
     let mut seen_on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut dispatched = 0usize;
     tracing::debug!(

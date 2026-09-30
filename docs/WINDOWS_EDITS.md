@@ -74,3 +74,20 @@ edit/upload/sign-out on a registered root remain the independently owned QA rung
 Legacy dirty partials without a recorded base still enqueue their packed ranges
 and EOF durably. Reconstruction reports an unknown-base error and retains the
 snapshot; it must never invent a version precondition for those bytes.
+
+## Round 4 correction (2026-09-30, Guus task 1640 ruling)
+
+Materialization is a durable pending phase, not best-effort local cleanup. The
+complete replacement is flushed before any truncation; intent is committed while
+holding exclusive destination access. A failed write blocks upload and watcher
+capture until recovery, including after restart. The packed original and complete
+replacement remain available. Recovery preserves ambiguous intervening bytes in
+reserved engine storage before restoring; these are never uploaded as user saves.
+
+The Windows path retains the placeholder and writes under a share-mode-zero
+handle. Atomic rename would require allowing destination deletion, reopening the
+revalidation race; journaled exclusive writes preserve both identity and exclusion.
+Keep Theirs downloads separately, then opens the destination exclusively and
+revalidates the captured digest before installing. A changed destination aborts
+resolution and keeps the chain and latest local save. Decision 1674 changes no
+hydration policy in this round.
