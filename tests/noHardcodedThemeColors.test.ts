@@ -37,6 +37,17 @@
  * into `src/Onboarding.tsx` — each failed the test, naming the file and
  * line, then passed again once reverted. See the task's Notes for the
  * pasted command output.
+ *
+ * `oklch(` literals (task 1683 slice 5, 2026-09-30): the hex/rgb matcher above never saw
+ * `oklch(...)`, which is how four toast variants shipped hard-coded pale backgrounds that
+ * made the dark-theme error title 1.10:1 (screenshot 1). The second `describe` below counts
+ * `oklch(` occurrences per file outside `design.css` and compares them to a RECORDED
+ * ALLOWLIST with a RATCHET: a file may not gain a literal, and when one is removed the
+ * recorded number must be lowered in the same change, so the total only ever goes down.
+ * Why an allowlist and not a flat ban: 75 literals in 15 files existed when the guard was
+ * extended (Windows UI, first-run, charts), and banning them outright would have turned a
+ * toast fix into a Windows-UI rewrite; that clean-up is its own backlog task. The toast
+ * variants were fixed in this task, which is why `windows/ui.tsx` is recorded at 5, not 17.
  */
 import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -126,6 +137,77 @@ function listSourceFiles(dir: string): string[] {
   }
   return out
 }
+
+// ── oklch( literals: recorded allowlist + ratchet (task 1683 slice 5) ──────────
+//
+// Paths are relative to `src/`, forward slashes. Counts are non-comment occurrences of the
+// text `oklch(`. 75 before slice 5 (grep -ro 'oklch(' src/ minus design.css, 15 files);
+// 63 after the four Toast variants moved to tokens. LOWER THESE, NEVER RAISE THEM: a new
+// colour belongs in `design.css` as a token with a light AND a dark value.
+export const OKLCH_ALLOWLIST: Record<string, number> = {
+  'UpdateBanner.tsx': 1,
+  'WindowsApp.tsx': 2,
+  'WindowsFirstRun.tsx': 19,
+  'WindowsTray.tsx': 5,
+  'windows/KnownFolderOnboarding.tsx': 1,
+  'windows/ui.tsx': 5,
+  'windows/views/AccountView.tsx': 4,
+  'windows/views/ActivityView.tsx': 1,
+  'windows/views/BandwidthChart.tsx': 4,
+  'windows/views/BandwidthView.tsx': 6,
+  'windows/views/DevicesView.tsx': 3,
+  'windows/views/InsightsView.tsx': 3,
+  'windows/views/SecurityView.tsx': 5,
+  'windows/views/SelectiveSyncView.tsx': 2,
+  'windows/views/SettingsView.tsx': 2,
+}
+export const OKLCH_ALLOWLIST_TOTAL = 63
+
+/** 1-based line numbers of every non-comment `oklch(` occurrence in `source` (one entry per occurrence). */
+export function oklchLiteralLines(source: string): number[] {
+  const hits: number[] = []
+  source.replace(/\r\n/g, '\n').split('\n').forEach((line, index) => {
+    if (isCommentLine(line)) return
+    for (const _ of line.matchAll(/oklch\(/g)) hits.push(index + 1)
+  })
+  return hits
+}
+
+describe('oklch( literals outside design.css: recorded allowlist with a ratchet', () => {
+  test('the detector counts every non-comment occurrence and skips comment lines', () => {
+    expect(oklchLiteralLines("const a = { background: 'oklch(0.9 0.02 25)' }")).toEqual([1])
+    expect(oklchLiteralLines("x: 'oklch(0.9 0.02 25)', y: 'oklch(0.5 0.1 25)'")).toEqual([1, 1])
+    expect(oklchLiteralLines("// was oklch(0.9 0.02 25)\n  * oklch(1 0 0)\n/* oklch(1 0 0) */\nconst b = `oklch(${l} 0 0)`")).toEqual([4])
+    expect(oklchLiteralLines("const c = 'var(--err-bg)'")).toEqual([])
+  })
+
+  test('the recorded allowlist adds up to its recorded total, and only lists .ts/.tsx/.css files that exist', () => {
+    const sum = Object.values(OKLCH_ALLOWLIST).reduce((a, b) => a + b, 0)
+    expect(sum).toBe(OKLCH_ALLOWLIST_TOTAL)
+    const scanned = new Set(listSourceFiles(SRC_ROOT).map((file) => relative(SRC_ROOT, file).replaceAll('\\', '/')))
+    expect(Object.keys(OKLCH_ALLOWLIST).filter((name) => !scanned.has(name))).toEqual([])
+  })
+
+  test('no file gains an oklch( literal, and every removal is ratcheted down in the allowlist', () => {
+    const grew: string[] = []
+    const ratchet: string[] = []
+    let total = 0
+    for (const file of listSourceFiles(SRC_ROOT)) {
+      const name = relative(SRC_ROOT, file).replaceAll('\\', '/')
+      const lines = oklchLiteralLines(readFileSync(file, 'utf8'))
+      total += lines.length
+      const allowed = OKLCH_ALLOWLIST[name] ?? 0
+      if (lines.length > allowed) {
+        grew.push(`${name}: ${lines.length} oklch( literals, allowlist records ${allowed} (lines ${lines.join(', ')}). Use a design.css token with a light and a dark value.`)
+      } else if (lines.length < allowed) {
+        ratchet.push(`${name}: now ${lines.length}, allowlist still records ${allowed}. Lower OKLCH_ALLOWLIST (and OKLCH_ALLOWLIST_TOTAL) in the same change.`)
+      }
+    }
+    expect(grew).toEqual([])
+    expect(ratchet).toEqual([])
+    expect(total).toBe(OKLCH_ALLOWLIST_TOTAL)
+  })
+})
 
 describe('no hard-coded, non-theme-aware colors in src/', () => {
   const files = listSourceFiles(SRC_ROOT)

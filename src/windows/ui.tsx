@@ -254,41 +254,34 @@ export type ToastVariant = 'info' | 'success' | 'warning' | 'error'
 export interface ToastTone {
   background: string
   border: string
-  color: string
+  title: string
+  message: string
+  close: string
   iconBackground: string
+  iconGlyph: string
 }
 
+/**
+ * Every toast colour is a `var(--token)` from design.css (task 1683 slice 5). The title/message/
+ * close colours are the theme's own ink tokens on a per-variant surface token pair, so contrast
+ * follows the theme instead of fighting it: before this, the success/warning/error variants
+ * hard-coded pale backgrounds while the title used the theme ink, which made the dark-theme
+ * error title 1.10:1 (screenshot 1). `tests/toastContrast.test.tsx` asserts >= 4.5:1 for text and
+ * >= 3:1 for the icon, for every variant, in every theme scope. Do not add a literal colour here;
+ * add a token to design.css with a light and a dark value and extend that test.
+ */
 export function toastToneForVariant(variant: ToastVariant): ToastTone {
+  const text = { title: T.ink, message: T.ink2, close: T.ink3, iconGlyph: T.paper }
   switch (variant) {
     case 'success':
-      return {
-        background: 'oklch(0.96 0.04 155)',
-        border: 'oklch(0.84 0.08 155)',
-        color: 'oklch(0.28 0.09 155)',
-        iconBackground: 'oklch(0.44 0.11 155)',
-      }
+      return { ...text, background: 'var(--ok-bg)', border: 'var(--ok-line)', iconBackground: 'var(--ok-icon)' }
     case 'warning':
-      return {
-        background: 'oklch(0.97 0.025 255)',
-        border: 'oklch(0.84 0.055 255)',
-        color: 'oklch(0.31 0.08 255)',
-        iconBackground: 'oklch(0.48 0.11 255)',
-      }
+      return { ...text, background: 'var(--warn-bg)', border: 'var(--warn-line)', iconBackground: 'var(--warn-icon)' }
     case 'error':
-      return {
-        background: 'oklch(0.98 0.02 25)',
-        border: 'oklch(0.88 0.05 25)',
-        color: 'oklch(0.42 0.15 25)',
-        iconBackground: 'oklch(0.52 0.17 25)',
-      }
+      return { ...text, background: 'var(--err-bg)', border: 'var(--err-line)', iconBackground: 'var(--red)' }
     case 'info':
     default:
-      return {
-        background: T.paper,
-        border: T.line2,
-        color: T.ink2,
-        iconBackground: T.ink3,
-      }
+      return { ...text, background: T.paper, border: T.line2, iconBackground: T.ink3 }
   }
 }
 
@@ -429,7 +422,7 @@ export function Toast({ toast, onDismiss }: { toast: ToastRecord; onDismiss: (id
         border: `1px solid ${tone.border}`,
         borderRadius: 8,
         boxShadow: 'var(--shadow-2)',
-        color: tone.color,
+        color: tone.message,
       }}
     >
       <span
@@ -442,7 +435,7 @@ export function Toast({ toast, onDismiss }: { toast: ToastRecord; onDismiss: (id
           alignItems: 'center',
           justifyContent: 'center',
           background: tone.iconBackground,
-          color: T.paper,
+          color: tone.iconGlyph,
           fontSize: 12,
           fontWeight: 700,
           lineHeight: 1,
@@ -452,8 +445,8 @@ export function Toast({ toast, onDismiss }: { toast: ToastRecord; onDismiss: (id
         {toast.variant === 'success' ? <NavIcon name="check" size={11} color="currentColor" /> : toast.variant === 'info' ? 'i' : '!'}
       </span>
       <div style={{ minWidth: 0 }}>
-        {toast.title && <div style={{ color: T.ink, fontSize: 12.5, fontWeight: 700, lineHeight: 1.35, marginBottom: 2 }}>{toast.title}</div>}
-        <div style={{ fontSize: 12, lineHeight: 1.45, color: tone.color }}>{toast.message}</div>
+        {toast.title && <div style={{ color: tone.title, fontSize: 12.5, fontWeight: 700, lineHeight: 1.35, marginBottom: 2 }}>{toast.title}</div>}
+        <div style={{ fontSize: 12, lineHeight: 1.45, color: tone.message }}>{toast.message}</div>
         {toast.action && (
           <button
             type="button"
@@ -498,7 +491,7 @@ export function Toast({ toast, onDismiss }: { toast: ToastRecord; onDismiss: (id
             borderRadius: 6,
             border: 'none',
             background: 'transparent',
-            color: T.ink3,
+            color: tone.close,
             cursor: 'pointer',
             fontSize: 16,
             lineHeight: 1,
