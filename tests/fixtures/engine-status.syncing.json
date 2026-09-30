@@ -1,0 +1,11 @@
+{
+  "state": "syncing",
+  "legacy_state": "idle",
+  "sync_root": "/Users/sam/Beebeeb",
+  "error": null,
+  "files_remaining": 14,
+  "bytes_total": 1288490189,
+  "bytes_done": 489626271,
+  "last_tick_ok_at": 100,
+  "reason": null
+}

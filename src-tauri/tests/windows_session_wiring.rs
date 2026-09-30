@@ -26,7 +26,7 @@ fn unleased_credential_commands(source: &str) -> Vec<String> {
 }
 #[test]
 fn every_credential_command_has_admission_before_credential_reads() {
-    assert_eq!(SOURCE.matches("session_command!(async").count(), 31);
+    assert_eq!(SOURCE.matches("session_command!(async").count(), 32);
     assert!(
         unleased_credential_commands(&SOURCE).is_empty(),
         "unleased commands: {:?}",

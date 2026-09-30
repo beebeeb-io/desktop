@@ -1,0 +1,19 @@
+{
+  "phase": "syncing",
+  "generated_at": 1000,
+  "account": { "email": "sam@example.eu", "logged_in": true, "vault_unlocked": true, "auth_expired": false },
+  "paused": false,
+  "engine": { "state": "syncing", "files_remaining": 14, "bytes_total": 1200000000, "bytes_done": 456000000, "last_tick_ok_at": null },
+  "reason": null,
+  "finder": { "setup": "ready", "reason": null, "reason_line": null },
+  "storage": { "used_bytes": 84300000000, "quota_bytes": 200000000000, "fetched_at": 900, "stale": false },
+  "storage_full": false,
+  "pending_changes": 0,
+  "conflicts": { "count": 0, "files": [] },
+  "activity": [
+    { "id": "u1", "name": "ledger.xlsx", "folder": "Investigations", "path": "Investigations/ledger.xlsx", "direction": "up", "state": "active", "at": 50, "size_bytes": 100, "done_bytes": 62, "total_bytes": 100 },
+    { "id": "d1", "name": "meeting.md", "folder": "Notes", "path": "Notes/meeting.md", "direction": "down", "state": "active", "at": 40, "size_bytes": 200, "done_bytes": null, "total_bytes": null },
+    { "id": "e1", "name": "bad.bin", "folder": "Notes", "path": "Notes/bad.bin", "direction": null, "state": "failed", "at": 20, "size_bytes": 10, "done_bytes": null, "total_bytes": null },
+    { "id": "r1", "name": "q3.pdf", "folder": "Reports", "path": "Reports/q3.pdf", "direction": "up", "state": "done", "at": 10, "size_bytes": 10, "done_bytes": null, "total_bytes": null }
+  ]
+}

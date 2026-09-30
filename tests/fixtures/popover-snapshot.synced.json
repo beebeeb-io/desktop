@@ -1,0 +1,14 @@
+{
+  "phase": "synced",
+  "generated_at": 1000,
+  "account": { "email": "sam@example.eu", "logged_in": true, "vault_unlocked": true, "auth_expired": false },
+  "paused": false,
+  "engine": { "state": "idle", "files_remaining": 0, "bytes_total": 0, "bytes_done": 0, "last_tick_ok_at": 990 },
+  "reason": null,
+  "finder": { "setup": "ready", "reason": null, "reason_line": null },
+  "storage": { "used_bytes": 84300000000, "quota_bytes": 200000000000, "fetched_at": 900, "stale": false },
+  "storage_full": false,
+  "pending_changes": 0,
+  "conflicts": { "count": 0, "files": [] },
+  "activity": []
+}

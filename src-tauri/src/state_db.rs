@@ -30,6 +30,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
+/// Cap on `transfer_activity` (task 1683 slice 2). The popover shows five rows.
+pub const TRANSFER_ACTIVITY_MAX_ROWS: usize = 100;
 
 /// Server completion is independent from native identity stamping. This journal
 /// survives queue removal, restart and failed proof unlink.
@@ -471,6 +473,45 @@ pub struct LocalActivityEvent {
     pub occurred_at: i64,
 }
 
+/// One finished transfer, for the popover's "Recent activity" (task 1683 slice 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferActivityInput {
+    /// `"up"` (uploaded) or `"down"` (downloaded).
+    pub direction: &'static str,
+    pub file_id: Option<String>,
+    pub file_name: String,
+    pub rel_path: Option<String>,
+    pub bytes: i64,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferActivity {
+    pub id: i64,
+    pub direction: String,
+    pub file_id: Option<String>,
+    pub file_name: String,
+    pub rel_path: Option<String>,
+    pub bytes: i64,
+    pub occurred_at: i64,
+}
+
+/// What is waiting to transfer, read in one locked pass (task 1683 slice 2).
+/// `upload_files` counts queued upload operations that are due to run (not paused,
+/// attempts left); `download_*` counts rows currently `downloading`. The bytes are
+/// the plaintext sizes of those files' rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransferBacklog {
+    pub upload_files: u32,
+    pub upload_bytes: u64,
+    pub download_files: u32,
+    pub download_bytes: u64,
+    /// Every queued operation (renames, trashes and uploads), paused or not.
+    pub queued_ops: u32,
+    /// Queued operations paused because the account is over its storage quota.
+    pub paused_for_quota: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingOperation {
     pub op_id: String,
@@ -660,6 +701,19 @@ impl StateDb {
                 occurred_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_local_activity_recent ON local_activity(occurred_at DESC, id DESC);
+            -- Task 1683 slice 2: which way each recent transfer went (the popover's
+            -- arrow). A separate table, not new `local_activity` kinds: that table's
+            -- cap is 200 rows and a large sync would push the trash events out of it.
+            CREATE TABLE IF NOT EXISTS transfer_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                direction TEXT NOT NULL,
+                file_id TEXT,
+                file_name TEXT NOT NULL,
+                rel_path TEXT,
+                bytes INTEGER NOT NULL DEFAULT 0,
+                occurred_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_transfer_activity_recent ON transfer_activity(occurred_at DESC, id DESC);
         ",
         )?;
         ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -984,6 +1038,95 @@ impl StateDb {
             })
         })?;
         rows.collect()
+    }
+
+    /// Record a finished upload or download and prune old rows.
+    pub fn record_transfer_activity(&self, input: TransferActivityInput) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO transfer_activity (direction, file_id, file_name, rel_path, bytes, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                input.direction,
+                input.file_id,
+                input.file_name,
+                input.rel_path,
+                input.bytes.max(0),
+                input.occurred_at
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM transfer_activity
+             WHERE id NOT IN (
+               SELECT id FROM transfer_activity
+               ORDER BY occurred_at DESC, id DESC
+               LIMIT ?1
+             )",
+            params![TRANSFER_ACTIVITY_MAX_ROWS as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Newest finished transfers first, capped by the caller's limit.
+    pub fn list_recent_transfer_activity(&self, limit: usize) -> Result<Vec<TransferActivity>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(TRANSFER_ACTIVITY_MAX_ROWS);
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, direction, file_id, file_name, rel_path, bytes, occurred_at
+             FROM transfer_activity
+             ORDER BY occurred_at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(TransferActivity {
+                id: row.get(0)?,
+                direction: row.get(1)?,
+                file_id: row.get(2)?,
+                file_name: row.get(3)?,
+                rel_path: row.get(4)?,
+                bytes: row.get(5)?,
+                occurred_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// What is waiting to transfer (see [`TransferBacklog`]).
+    pub fn transfer_backlog(&self) -> Result<TransferBacklog> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let (upload_files, upload_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(MAX(COALESCE(f.size_bytes, 0), 0)), 0)
+             FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
+             WHERE q.kind IN ('upload_file', 'upload_version')
+               AND q.paused_reason IS NULL AND q.attempts < q.max_attempts",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (download_files, download_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(MAX(size_bytes, 0)), 0) FROM files WHERE status = 'downloading'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let queued_ops: i64 = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))?;
+        let paused_for_quota: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM operation_queue WHERE paused_reason = 'quota'",
+            [],
+            |row| row.get(0),
+        )?;
+        let to_u32 = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+        Ok(TransferBacklog {
+            upload_files: to_u32(upload_files),
+            upload_bytes: upload_bytes.max(0) as u64,
+            download_files: to_u32(download_files),
+            download_bytes: download_bytes.max(0) as u64,
+            queued_ops: to_u32(queued_ops),
+            paused_for_quota: to_u32(paused_for_quota),
+        })
     }
 
     /// Sweep and delete every descendant of `folder_id` from the DB when the
@@ -1929,7 +2072,7 @@ impl StateDb {
         }
         let remaining: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)", [], |r| r.get(0))?;
         if remaining != 0 { return Err(rusqlite::Error::InvalidQuery); }
-        tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM bandwidth_samples;")?;
+        tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM transfer_activity; DELETE FROM bandwidth_samples;")?;
         tx.commit()
     }
 
@@ -1971,6 +2114,9 @@ impl StateDb {
         // Flow 7: the leaving account's persisted upload sessions (session id,
         // server file id, staged path) go with its queue.
         tx.execute("DELETE FROM upload_resume", [])?;
+        // Task 1683 slice 2: the leaving account's recent-transfer names go too, so the
+        // next account's popover never lists them.
+        tx.execute("DELETE FROM transfer_activity", [])?;
 
         let cache_paths: Vec<String> = {
             let mut stmt = tx.prepare("SELECT cache_path FROM files WHERE cache_path IS NOT NULL")?;
@@ -2745,6 +2891,10 @@ fn collect_known_names(conn: &Connection, extra_paths: &[String]) -> Result<Know
         "SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL",
         "SELECT file_name FROM local_activity",
         "SELECT rel_path FROM local_activity WHERE rel_path IS NOT NULL",
+        // Task 1683 slice 2: the recent-transfer names are known names too, so the
+        // support bundle's error text is scrubbed of them (task 1685).
+        "SELECT file_name FROM transfer_activity",
+        "SELECT rel_path FROM transfer_activity WHERE rel_path IS NOT NULL",
     ] {
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -2937,6 +3087,160 @@ mod tests {
         assert_eq!(events.len(), LOCAL_ACTIVITY_MAX_ROWS);
         assert_eq!(events[0].occurred_at, (LOCAL_ACTIVITY_MAX_ROWS + 4) as i64);
         assert_eq!(events.last().unwrap().occurred_at, 5);
+    }
+
+    // ── transfer activity + backlog (task 1683 slice 2) ──────────────────────
+
+    fn queued_op(id: &str, kind: OperationKind, file_id: &str) -> PendingOperation {
+        PendingOperation {
+            op_id: id.into(),
+            kind,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn transfer(direction: &'static str, name: &str, at: i64) -> TransferActivityInput {
+        TransferActivityInput {
+            direction,
+            file_id: Some(format!("id-{name}")),
+            file_name: name.into(),
+            rel_path: Some(format!("Work/{name}")),
+            bytes: 10,
+            occurred_at: at,
+        }
+    }
+
+    #[test]
+    fn transfer_activity_round_trips_newest_first_with_its_direction() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.record_transfer_activity(transfer("up", "a.txt", 10)).unwrap();
+        db.record_transfer_activity(transfer("down", "b.txt", 20)).unwrap();
+        let rows = db.list_recent_transfer_activity(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].file_name.as_str(), rows[0].direction.as_str()), ("b.txt", "down"));
+        assert_eq!((rows[1].file_name.as_str(), rows[1].direction.as_str()), ("a.txt", "up"));
+        assert_eq!(rows[0].rel_path.as_deref(), Some("Work/b.txt"));
+        assert_eq!(db.list_recent_transfer_activity(1).unwrap().len(), 1);
+        assert!(db.list_recent_transfer_activity(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn transfer_activity_prunes_to_its_own_cap_and_leaves_local_activity_alone() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.record_local_activity(LocalActivityEventInput {
+            event_type: LocalActivityKind::MovedToTrash,
+            file_id: Some("t".into()),
+            file_name: "trashed.txt".into(),
+            rel_path: None,
+            occurred_at: 1,
+        })
+        .unwrap();
+        for i in 0..(TRANSFER_ACTIVITY_MAX_ROWS + 7) {
+            db.record_transfer_activity(transfer("up", &format!("f{i}.txt"), i as i64)).unwrap();
+        }
+        // Count the table itself: the read path also caps its own result, which would hide a
+        // write path that forgot to prune.
+        let stored: i64 = db
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM transfer_activity", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, TRANSFER_ACTIVITY_MAX_ROWS as i64, "107 written, 100 kept");
+        let rows = db.list_recent_transfer_activity(TRANSFER_ACTIVITY_MAX_ROWS + 50).unwrap();
+        assert_eq!(rows.len(), TRANSFER_ACTIVITY_MAX_ROWS);
+        assert_eq!(rows[0].occurred_at, (TRANSFER_ACTIVITY_MAX_ROWS + 6) as i64);
+        assert_eq!(rows.last().unwrap().occurred_at, 7);
+        // A large sync must not push the trash event out of its own table.
+        assert_eq!(db.list_recent_local_activity(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_backlog_counts_due_uploads_downloads_and_quota_pauses() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "f1", "A/one.bin", None, FileStatus::Uploading, 100);
+        seed_contract_row(&db, "f2", "A/two.bin", None, FileStatus::Local, 200);
+        seed_contract_row(&db, "f3", "A/three.bin", None, FileStatus::Local, 300);
+        seed_contract_row(&db, "f4", "A/four.bin", None, FileStatus::Downloading, 50);
+        seed_contract_row(&db, "f5", "A/five.bin", None, FileStatus::Local, 7);
+        db.enqueue_operation(&queued_op("u1", OperationKind::UploadFile, "f1")).unwrap();
+        db.enqueue_operation(&queued_op("u2", OperationKind::UploadVersion, "f2")).unwrap();
+        db.enqueue_operation(&queued_op("u3", OperationKind::UploadFile, "f3")).unwrap();
+        db.enqueue_operation(&queued_op("r1", OperationKind::RenameFile, "f5")).unwrap();
+        db.record_operation_pause("u3", OperationPauseReason::Quota, Some("quota exceeded"), 5).unwrap();
+
+        let backlog = db.transfer_backlog().unwrap();
+        assert_eq!(backlog.upload_files, 2, "u1 and u2 are due; u3 is paused; r1 is a rename");
+        assert_eq!(backlog.upload_bytes, 300, "100 + 200");
+        assert_eq!((backlog.download_files, backlog.download_bytes), (1, 50));
+        assert_eq!(backlog.queued_ops, 4, "every queued operation, paused or not");
+        assert_eq!(backlog.paused_for_quota, 1);
+    }
+
+    #[test]
+    fn an_exhausted_or_auth_paused_upload_is_not_work_left() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "f1", "one.bin", None, FileStatus::Local, 10);
+        seed_contract_row(&db, "f2", "two.bin", None, FileStatus::Local, 20);
+        let mut exhausted = queued_op("u1", OperationKind::UploadFile, "f1");
+        exhausted.attempts = 5;
+        db.enqueue_operation(&exhausted).unwrap();
+        db.enqueue_operation(&queued_op("u2", OperationKind::UploadFile, "f2")).unwrap();
+        db.record_operation_pause("u2", OperationPauseReason::Auth, None, 5).unwrap();
+        let backlog = db.transfer_backlog().unwrap();
+        assert_eq!(backlog.upload_files, 0);
+        assert_eq!(backlog.paused_for_quota, 0);
+        assert_eq!(backlog.queued_ops, 2);
+    }
+
+    #[test]
+    fn diagnostics_scrubs_names_known_only_from_recent_transfers() {
+        // Task 1685 guard: a name that lives only in `transfer_activity` is a known
+        // name, so the support bundle must not carry it. `2026` is a bare number the
+        // allow-list keeps, so only the name scan can remove it.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.record_transfer_activity(TransferActivityInput {
+            direction: "up",
+            file_id: None,
+            file_name: "Board minutes 2026".into(),
+            rel_path: None,
+            bytes: 1,
+            occurred_at: 1,
+        })
+        .unwrap();
+        db.enqueue_operation(&queued_op("op-1", OperationKind::UploadFile, "x")).unwrap();
+        db.record_operation_attempt("op-1", 1, 10, Some("copy of Board minutes 2026 failed")).unwrap();
+        let exported = serde_json::to_string(&db.queue_diagnostics(200).unwrap()).unwrap();
+        assert!(!exported.contains("2026"), "{exported}");
+        assert!(!exported.contains("Board"), "{exported}");
+        assert!(exported.contains("failed"), "{exported}");
+    }
+
+    #[test]
+    fn leaving_an_account_clears_its_recent_transfers() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.record_transfer_activity(transfer("up", "secret.txt", 1)).unwrap();
+        db.purge_all_local_state().unwrap();
+        assert!(db.list_recent_transfer_activity(10).unwrap().is_empty());
     }
 
     #[test]
