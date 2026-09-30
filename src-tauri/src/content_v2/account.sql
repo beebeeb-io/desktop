@@ -14,7 +14,8 @@ CREATE TABLE v2_owners (
     'Resolution','RemoteCatchUp','InstallIntent','RecoveryCase','Migration','RootRetirement')),
   revision INTEGER NOT NULL CHECK(revision>=0),
   body_version INTEGER NOT NULL CHECK(body_version=1), body BLOB NOT NULL CHECK(length(body)<=65536),
-  terminal_disposition BLOB REFERENCES v2_dispositions(disposition_id)
+  terminal_disposition BLOB REFERENCES v2_dispositions(disposition_id),
+  FOREIGN KEY(owner_id,terminal_disposition) REFERENCES v2_dispositions(owner_id,disposition_id)
 ) STRICT;
 CREATE TABLE v2_artifacts (
   artifact_id BLOB NOT NULL PRIMARY KEY CHECK(length(artifact_id)=32),
@@ -62,7 +63,8 @@ CREATE TABLE v2_dispositions (
   disposition_id BLOB NOT NULL PRIMARY KEY CHECK(length(disposition_id)=32),
   owner_id BLOB NOT NULL REFERENCES v2_owners(owner_id),
   kind TEXT NOT NULL CHECK(kind IN ('ServerReceipt','UserHandoff','UserDiscard','OwnershipTransfer')),
-  proof_version INTEGER NOT NULL CHECK(proof_version=1), proof BLOB NOT NULL CHECK(length(proof)<=65536)
+  proof_version INTEGER NOT NULL CHECK(proof_version=1), proof BLOB NOT NULL CHECK(length(proof)<=65536),
+  UNIQUE(owner_id,disposition_id)
 ) STRICT;
 CREATE TABLE v2_transfers (
   transfer_id BLOB NOT NULL PRIMARY KEY CHECK(length(transfer_id)=32),
@@ -90,6 +92,7 @@ CREATE TABLE v2_gc (
   phase TEXT NOT NULL CHECK(phase IN ('Pending','Deleting','Removed')),
   last_error_code INTEGER
 ) STRICT;
+CREATE UNIQUE INDEX v2_capture_per_owner ON v2_artifacts(allocation_owner) WHERE purpose='Capture' AND phase<>'Removed';
 CREATE INDEX v2_refs_by_artifact ON v2_refs(artifact_id);
 CREATE INDEX v2_owners_by_kind ON v2_owners(kind,owner_id);
 CREATE INDEX v2_gc_by_phase ON v2_gc(phase,artifact_id);
