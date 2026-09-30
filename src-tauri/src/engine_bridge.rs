@@ -3225,10 +3225,22 @@ impl EngineBridge {
             self.retire_resolution_chain(file_id, &chain)?;
             return Ok(());
         }
-        // Capture before network, but revalidate on the SAME exclusive handle
-        // used for replacement after download. A late save aborts resolution.
-        let before = crate::windows_edits::hash_file(&dest)?;
+        // Snapshot through the watcher classifier before reading whole bytes:
+        // a dirty partial must never implicitly recall a newer remote version.
+        #[cfg(target_os = "windows")]
+        self.queue_windows_tracked_edit(sync_root, &dest)?;
         let chain = self.preserve_resolution_chain(file_id, sync_root).await?;
+        // Revalidate the bytes we actually preserved, not a later path read
+        // that could silently adopt an unpreserved intervening save.
+        let before = if let Some(captured) = chain.iter().max_by_key(|op| op.base_version) {
+            operation_metadata(captured)?["windows_content_hash"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("captured resolution save has no digest"))?.to_owned()
+        } else {
+            #[cfg(target_os = "windows")]
+            anyhow::ensure!(crate::windows_cf::placeholders::resident_for_edit(&dest)?,
+                "Finish hydration before resolving this file; no local bytes were replaced.");
+            crate::windows_edits::hash_file(&dest)?
+        };
         let download = self.do_hydrate(file_id).await?;
         let staging = sync_root.join(".beebeeb/windows-writes");
         let mut destination = crate::windows_edits::open_exclusive(&dest)?;
