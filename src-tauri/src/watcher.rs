@@ -723,16 +723,17 @@ fn dispatch_local_create(
     // `Uploading` DB row synchronously before returning, so the very next
     // `classify_local_path` (filter 3) rejects this path → no double upload.
     match bridge.queue_finder_create(target) {
-        Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+        Ok(FinderWriteOutcome::Queued { op_id, file_id: local_id, .. }) => {
             // Windows: queue/stage FIRST, then hand the local file to Cloud Files
             // as an UNSYNCED placeholder. If staging ever fails, the file stays a
             // plain local file and a later scan can retry. Converting before the
             // row exists can poison that retry path: the next scan sees a
             // placeholder with no DB row and `classify_local_path` correctly
             // rejects it as engine-owned.
+            #[cfg(not(target_os = "windows"))]
+            let _ = &local_id;
             #[cfg(target_os = "windows")]
-            {
-                let local_id = uuid::Uuid::new_v4().to_string();
+            if let Some(local_id) = local_id {
                 if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id) {
                     tracing::warn!(
                         error = %e,
