@@ -1043,6 +1043,10 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                     continue;
                 }
 
+                // Native completion is local work: retry even if the API is offline.
+                #[cfg(target_os = "windows")]
+                crate::windows_cf::upload_finalization::retry(&db, &sync_root);
+
                 // Known-folder backup mirror (task 0797). Run BEFORE the sync
                 // tick on the slow cadence so any files it copies into the sync
                 // root are present when the enumeration scan next walks the tree.

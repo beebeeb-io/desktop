@@ -1559,3 +1559,5 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
     }
     created
 }
+
+pub(crate) mod upload_finalization;

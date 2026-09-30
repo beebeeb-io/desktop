@@ -379,7 +379,7 @@ pub fn complete_upload_placeholder(
 /// that were never uploaded). We pass `CF_CONVERT_FLAG_NONE`: the file becomes a
 /// placeholder that keeps its bytes on disk and is understood to be locally
 /// ahead of the cloud. Once the real `file_id` lands,
-/// [`super::super::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]
+/// [`super::super::engine_bridge::EngineBridge::defer_local_upload_finalization`]
 /// → [`convert_to_in_sync_placeholder`] re-stamps it in-sync with the server id.
 ///
 /// We use a throwaway identity here (the local op uuid would do, but we have no

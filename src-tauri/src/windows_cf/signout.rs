@@ -16,6 +16,11 @@ use windows::Win32::Foundation::{BOOLEAN, HANDLE};
 use windows::Win32::Storage::{CloudFilters::*, FileSystem::*};
 
 pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
+    if let Some(root) = root {
+        super::upload_finalization::retry(db, root);
+    }
+    anyhow::ensure!(db.upload_finalizations()?.is_empty(),
+        "An uploaded file still needs its local identity repaired. Close open files, unlock and retry sign-out.");
     db.windows_signout_preflight().map_err(|_| {
         anyhow::anyhow!("Pending changes remain. Unlock, finish syncing and resolve failed changes before signing out.")
     })?;

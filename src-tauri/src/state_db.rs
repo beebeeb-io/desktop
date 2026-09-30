@@ -27,6 +27,19 @@ use std::sync::Mutex;
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
 
+/// Server completion is independent from native identity stamping. This journal
+/// survives queue removal, restart and failed proof unlink.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadFinalization {
+    pub op_id: String,
+    pub local_file_id: String,
+    pub server_file_id: String,
+    pub target_path: String,
+    pub payload_path: String,
+    pub stamped: bool,
+}
+
+
 /// High-level sync status for a single file. Maps 1:1 to the icon
 /// overlays rendered by the platform extensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -678,6 +691,14 @@ impl StateDb {
             -- acknowledged chunk, so a retry resumes instead of minting a
             -- second server file row. Keyed by op_id; the payload fingerprint
             -- (path + size + mtime) guards against resuming onto other bytes.
+            CREATE TABLE IF NOT EXISTS upload_finalizations (
+                op_id TEXT PRIMARY KEY,
+                local_file_id TEXT NOT NULL,
+                server_file_id TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                payload_path TEXT NOT NULL,
+                stamped INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS staged_payloads (
                 path TEXT PRIMARY KEY,
                 source_path TEXT,
@@ -1176,7 +1197,7 @@ impl StateDb {
     /// 2. **Rows with a pending operation** (`file_id` present in
     ///    `operation_queue`). A locally-created-but-not-yet-uploaded file lives
     ///    in the mirror under a CLIENT-minted UUID (re-keyed to the server id by
-    ///    `finalize_local_upload_placeholder` only AFTER the upload completes),
+    ///    `defer_local_upload_finalization` only AFTER the upload completes),
     ///    and is referenced by its `operation_queue` row. That client UUID is
     ///    NOT in the server snapshot's `seen` set, so without this guard the very
     ///    next snapshot would delete the user's in-flight upload. The
@@ -1811,6 +1832,37 @@ impl StateDb {
         Ok(deleted)
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    pub fn put_upload_finalization(&self, pending: &UploadFinalization) -> Result<()> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("INSERT INTO upload_finalizations(op_id,local_file_id,server_file_id,target_path,payload_path,stamped)
+            VALUES(?1,?2,?3,?4,?5,0)", params![pending.op_id,pending.local_file_id,pending.server_file_id,pending.target_path,pending.payload_path])?;
+        tx.execute("INSERT INTO staged_payloads(path,completed) VALUES(?1,1)
+            ON CONFLICT(path) DO UPDATE SET completed=1", params![pending.payload_path])?;
+        // Once the server completed, only local finalization may be retried.
+        // Remove the upload before the next cancellable thumbnail await.
+        tx.execute("DELETE FROM operation_queue WHERE op_id=?1", params![pending.op_id])?;
+        tx.execute("DELETE FROM upload_resume WHERE op_id=?1", params![pending.op_id])?;
+        tx.commit()
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn upload_finalizations(&self) -> Result<Vec<UploadFinalization>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped FROM upload_finalizations")?;
+        stmt.query_map([], |r| Ok(UploadFinalization { op_id:r.get(0)?,local_file_id:r.get(1)?,server_file_id:r.get(2)?,target_path:r.get(3)?,payload_path:r.get(4)?,stamped:r.get(5)? }))?.collect()
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn mark_upload_finalization_stamped(&self, op_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("UPDATE upload_finalizations SET stamped=1 WHERE op_id=?1",params![op_id])?;
+        Ok(())
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn forget_upload_finalization(&self, op_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("DELETE FROM upload_finalizations WHERE op_id=?1 AND stamped=1",params![op_id])?;
+        Ok(())
+    }
+
     /// Upload payload ownership outlives operation/resume rows and unlink errors.
     pub fn track_staged_payload(&self, path: &str, source: Option<&str>, completed: bool) -> Result<()> {
         self.0.lock().unwrap().execute(
@@ -1863,7 +1915,7 @@ impl StateDb {
         if pending != 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let remaining: i64 = tx.query_row("SELECT COUNT(*) FROM staged_payloads", [], |r| r.get(0))?;
+        let remaining: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)", [], |r| r.get(0))?;
         if remaining != 0 { return Err(rusqlite::Error::InvalidQuery); }
         tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM bandwidth_samples;")?;
         tx.commit()
@@ -2645,6 +2697,27 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round7_finalization_survives_restart_and_blocks_unfinished_signout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        let row = UploadFinalization { op_id: "op".into(), local_file_id:"local".into(), server_file_id:"server".into(), target_path:"file".into(), payload_path:"proof".into(), stamped:false };
+        db.put_upload_finalization(&row).unwrap();
+        assert_eq!(db.upload_finalizations().unwrap(), vec![row.clone()]);
+        db.forget_upload_finalization("op").unwrap();
+        assert_eq!(db.upload_finalizations().unwrap().len(), 1, "unstamped proof must not be forgotten");
+        db.forget_staged_payload("proof").unwrap();
+        assert!(db.finish_windows_signout().is_err(), "finalization owns its proof independently of staging");
+        db.mark_upload_finalization_stamped("op").unwrap();
+        drop(db);
+        let db = StateDb::open(&path).unwrap();
+        assert!(db.upload_finalizations().unwrap()[0].stamped);
+        db.forget_upload_finalization("op").unwrap();
+        db.finish_windows_signout().unwrap();
+        assert_eq!(db.upload_finalizations().unwrap().len(), 0);
+    }
+
     #[test]
     fn round5_legacy_resume_inventory_survives_operation_purge() {
         let temp = tempfile::tempdir().unwrap();

@@ -1107,10 +1107,17 @@ async fn desktop_unlock_with_recovery_phrase(
             .default_headers(api_client::provenance_headers())
             .build()
             .map_err(|e| format!("reqwest build: {e}"))?;
-        let master_key = provision_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase, |key| {
-            persist_vault_key_to_keychain(&account_id, key)
-        })
-        .await?;
+        // Verification is cancellable network work. Teardown must be able to
+        // acquire the transition and revoke this attempt while it is pending.
+        #[cfg(target_os = "windows")]
+        drop(_transition);
+        let verified_key = verify_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase).await?;
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        let master_key = *verified_key;
+        persist_vault_key_to_keychain(&account_id, master_key)?;
         // `desktop_login` already persisted the email when it stored the token, but
         // persist again here (idempotent) so the invariant "a fully-provisioned
         // session has its email in the store" holds even if memory and store drift.
@@ -1163,6 +1170,7 @@ const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your w
 /// keys the sync engine with a foreign key, so every upload from this device is
 /// undecryptable on every other device (flow 7 P0). Same gate as web's
 /// device-provision (`recoveredKeyMatchesAccount`, task 0874).
+#[cfg(test)]
 async fn provision_vault_key_from_phrase<P>(
     client: &reqwest::Client,
     base_url: &str,
@@ -1173,6 +1181,18 @@ async fn provision_vault_key_from_phrase<P>(
 where
     P: FnOnce([u8; 32]) -> Result<(), String>,
 {
+    let master_key = verify_vault_key_from_phrase(client, base_url, session_token, recovery_phrase).await?;
+    persist(*master_key)?;
+    Ok(*master_key)
+}
+
+/// Verification has no persistent side effects; callers fence installation.
+async fn verify_vault_key_from_phrase(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    recovery_phrase: &str,
+) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
     let recovery_phrase = normalize_recovery_phrase_input(recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
         .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
@@ -1180,9 +1200,7 @@ where
         // `master_key_struct` zeroizes on drop.
         return Err(INCORRECT_RECOVERY_PHRASE.to_string());
     }
-    let master_key: [u8; 32] = master_key_struct.to_bytes();
-    persist(master_key)?;
-    Ok(master_key)
+    Ok(zeroize::Zeroizing::new(master_key_struct.to_bytes()))
 }
 
 /// Ask the server whether `master_key` is the signed-in account's key by

@@ -142,3 +142,40 @@ fn round5_auth_wiring_guard_rejects_missing_validation_and_cancellation() {
         &browser.replace("attempt.run(work).await", "work.await")
     ));
 }
+
+fn recovery_verification_is_fenced(source: &str) -> bool {
+    let code = body(source, "desktop_unlock_with_recovery_phrase");
+    let Some(verify) = code.find("verify_vault_key_from_phrase(") else {
+        return false;
+    };
+    let Some(persist) = code.find("persist_vault_key_to_keychain(") else {
+        return false;
+    };
+    let Some(release) = code[..verify].rfind("drop(_transition)") else {
+        return false;
+    };
+    let Some(acquire) = code[verify..persist].find("SESSION_TRANSITION.lock().await") else {
+        return false;
+    };
+    let Some(validate) = code[verify..persist].find("AUTH_ATTEMPTS.validate(&attempt)?") else {
+        return false;
+    };
+    release < verify && acquire < validate && !code[verify..persist].contains("provision_vault_key_from_phrase")
+}
+#[test]
+fn round7_recovery_verifies_outside_transition_then_fences_persistence() {
+    assert!(recovery_verification_is_fenced(&SOURCE));
+}
+#[test]
+fn round7_recovery_guard_rejects_held_transition_and_missing_final_fence() {
+    for ending in ["\n", "\r\n"] {
+        let source = SOURCE.replace('\n', ending).replace("\r\n", "\n");
+        let code = body(&source, "desktop_unlock_with_recovery_phrase");
+        for mutation in [
+            code.replace("drop(_transition);", "/* held */"),
+            code.replace("AUTH_ATTEMPTS.validate(&attempt)?;", "/* bypassed */"),
+        ] {
+            assert!(!recovery_verification_is_fenced(&source.replace(code, &mutation)));
+        }
+    }
+}

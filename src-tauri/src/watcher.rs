@@ -50,7 +50,7 @@
 //! and the convert→queue sequence live in one place. The transfer loop then
 //! encrypts + uploads; on success a new local file becomes an in-sync
 //! placeholder (see
-//! [`crate::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]).
+//! [`crate::engine_bridge::EngineBridge::defer_local_upload_finalization`]).
 //!
 //! ## Lifecycle
 //!
@@ -686,6 +686,8 @@ fn walk_dir(
 /// — the CF NOTIFY close-completion path and the enumeration scan share the same
 /// convert→queue sequence.
 async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    crate::windows_cf::upload_finalization::retry(bridge.db(), sync_root);
     let _ = dispatch_local_create(bridge, sync_root, path, "notify");
 }
 

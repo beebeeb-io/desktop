@@ -211,6 +211,15 @@ watermark; a changed payload, a gone session (400/404/410), or a given-up op aba
 a create's orphaned `is_uploading` server row is trashed, a replace's never is. Snapshot rows
 still `is_uploading` and unknown locally are not materialised as placeholders.
 
+Windows local-create completion keeps a separate `upload_finalizations` journal
+(local/server identity, target, completed payload, stamped acknowledgement).
+The queue/resume rows stop owning uploads once this journal is committed; native
+sharing/identity failures retain the payload and retry locally on watcher events,
+periodic ticks and before sign-out preflight. The completed proof is removed only
+after identity stamping succeeds. `scripts/test-recovery-transition.py` exercises
+the exact recovery command with a held verifier and queued installation race;
+Cargo also tests the real auth-attempt cancellation and source wiring.
+
 Advanced desktop settings live in `DesktopConfig` (`desktop.toml`). `theme` is
 `light` / `dark` / `system` and is applied in the WebView through CSS variables.
 `local_cache_limit_bytes` is a per-device file-content cap over pinned plus

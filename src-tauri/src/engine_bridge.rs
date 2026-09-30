@@ -243,7 +243,7 @@ pub struct FinderWriteTarget {
     /// stores this as the row's `path` and threads it through as the upload's
     /// `target_path`, so (a) `classify_local_path`'s "already a known server
     /// file?" filter (which queries the FULL relative key) matches a nested
-    /// file's row immediately, (b) `finalize_local_upload_placeholder` joins
+    /// file's row immediately, (b) `defer_local_upload_finalization` joins
     /// `sync_root + rel_path` to find the file on disk and re-stamp it in-sync,
     /// and (c) a local delete looks up the full key and trashes it on the server.
     /// Without it, nested rows were keyed by the leaf only and all three broke
@@ -424,6 +424,10 @@ impl EngineBridge {
             paused_op_ids: Vec::new(),
             invalidated_item_ids: Vec::new(),
         };
+        #[cfg(target_os = "windows")]
+        if !self.is_stopping() {
+            crate::windows_cf::upload_finalization::retry(&self.db, sync_root);
+        }
         let operations = self.db.list_due_operations(now)?;
 
         for op in operations {
@@ -749,6 +753,8 @@ impl EngineBridge {
                     content_type,
                     Some(session.object_version_id.clone()),
                 )?;
+                #[cfg(target_os = "windows")]
+                self.defer_local_upload_finalization(op, &server_file_id, sync_root, payload_path)?;
                 self.db.track_staged_payload(&payload_path.to_string_lossy(), None, true)?;
                 self.db.clear_upload_resume(&op.op_id)?;
                 self.finish_completed_upload(
@@ -903,22 +909,19 @@ impl EngineBridge {
             );
         }
 
-        // Windows Cloud Files (task 0780): the file the user dropped in the
-        // sync root is, at this point, a PLAIN local file — Explorer shows it
-        // as always-local, and (worse) it has no Cloud Files identity, so it
-        // can never be dehydrated by "Free up space" or re-hydrated on demand.
-        // Convert it IN PLACE into an in-sync placeholder carrying the server
-        // file_id, so it shows the synced overlay and round-trips through the
-        // same fetch/dehydrate machinery as a downloaded file. Keyed on a
-        // `create_file` op with a `target_path` (the happy path: a brand-new
-        // user file). Best-effort — a failure here leaves a working local file,
-        // it just won't show the synced overlay until the next reconcile.
         #[cfg(target_os = "windows")]
-        self.finalize_local_upload_placeholder(op, &server_file_id, sync_root, payload_path);
+        {
+            crate::windows_cf::upload_finalization::retry(&self.db, sync_root);
+            // A failed stamp or unlink retains its durable completed proof.
+            match self.db.upload_finalizations() {
+                Ok(rows) if rows.iter().any(|row| row.op_id == op.op_id) => return,
+                Err(e) => { tracing::warn!(error = %e, "cannot inspect finalization journal"); return; }
+                _ => {}
+            }
+        }
         if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
             tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
         }
-
     }
 
     /// Give up on a persisted upload session (payload changed, session gone,
@@ -988,40 +991,25 @@ impl EngineBridge {
         Ok(())
     }
 
-    /// Convert a freshly-uploaded NEW local file (still a plain file on disk)
-    /// into an in-sync Cloud Files placeholder. Windows-only, best-effort.
-    /// Only runs for `create_file` operations that carry a `target_path` — the
-    /// happy path of task 0780. Modify-as-new-version is a deferred follow-up
-    /// and is intentionally not converted here.
+    /// Journal native stamping before any cancellable post-completion work.
     #[cfg(target_os = "windows")]
-    fn finalize_local_upload_placeholder(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path, payload_path: &Path) {
-        let Some(metadata) = op.metadata_json.as_deref() else {
-            return;
-        };
-        let is_create = serde_json::from_str::<serde_json::Value>(metadata)
-            .map(|m| m["operation"].as_str() == Some("create_file"))
-            .unwrap_or(false);
-        if !is_create {
-            return;
-        }
-        let Some(target_path) = op.target_path.as_deref() else {
-            return;
-        };
-        let on_disk = sync_root.join(
-            target_path
-                .trim_start_matches('/')
-                .replace('/', std::path::MAIN_SEPARATOR_STR),
-        );
-        if !on_disk.is_file() {
-            // The user moved/deleted it between drop and upload — nothing to
-            // convert; the placeholder seeder will mint a cloud-only stub on a
-            // later tick from the server row instead.
-            return;
-        }
-        if let Err(e) = crate::windows_cf::placeholders::complete_upload_placeholder(&on_disk, server_file_id, Some((op.file_id.as_deref().unwrap_or(server_file_id), payload_path))) {
-            // Zero-knowledge: log the file_id only, never the path/filename.
-            tracing::warn!(file_id = %server_file_id, error = %e, "could not convert uploaded file to in-sync placeholder");
-        }
+    fn defer_local_upload_finalization(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path, payload_path: &Path) -> anyhow::Result<()> {
+        let is_create = op.metadata_json.as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .is_some_and(|m| m["operation"].as_str() == Some("create_file"));
+        if !is_create { return Ok(()); }
+        let Some(target_path) = op.target_path.as_deref() else { return Ok(()); };
+        let on_disk = local_file_path_under_sync_root(sync_root, target_path)?;
+        if !on_disk.is_file() { return Ok(()); }
+        self.db.put_upload_finalization(&crate::state_db::UploadFinalization {
+            op_id: op.op_id.clone(),
+            local_file_id: op.file_id.as_deref().unwrap_or(server_file_id).to_string(),
+            server_file_id: server_file_id.to_string(),
+            target_path: target_path.to_string(),
+            payload_path: payload_path.to_string_lossy().into_owned(),
+            stamped: false,
+        })?;
+        Ok(())
     }
 
     fn apply_completed_upload(
@@ -1446,7 +1434,7 @@ impl EngineBridge {
                     Some(file_id),
                     target.parent_id,
                     // target_path = the FULL relative key, so
-                    // finalize_local_upload_placeholder joins sync_root + this
+                    // defer_local_upload_finalization joins sync_root + this
                     // and finds the nested file on disk to re-stamp it in-sync.
                     Some(rel_path),
                     payload,
@@ -3780,7 +3768,7 @@ fn plan_hydration_chunk_range(
 }
 
 
-fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
@@ -7525,6 +7513,132 @@ mod tests {
             FileStatus::Error,
             "a failed/deferred upload must not remain counted as active Uploading"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn round7_busy_upload_retries_identity_without_reupload() {
+        round7_completed_upload_retry(false).await;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn round7_signout_retries_completed_identity_without_reupload() {
+        round7_completed_upload_retry(true).await;
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn round7_completed_upload_retry(signout_retry: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::windows_cf::register_sync_root(&root).unwrap();
+        struct Registration(std::path::PathBuf);
+        impl Drop for Registration { fn drop(&mut self) { crate::windows_cf::unregister_sync_root(&self.0).unwrap(); } }
+        let _registration = Registration(root.clone());
+        let local = root.join("report.txt");
+        std::fs::write(&local, b"live upload payload").unwrap();
+        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&local, "local-file-1").unwrap();
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new().read(true).share_mode(7).open(&local).unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"live upload payload").unwrap();
+        let server = UploadMockServer::start(false);
+        let master_key = [11u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-live".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-file-1".into()),
+                parent_id: Some("folder-1".into()),
+                target_path: Some("report.txt".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "report.txt",
+                        "content_type": "text/plain"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(&root, 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-live".to_string()]);
+        assert!(outcome.retried_op_ids.is_empty());
+        assert!(
+            payload.exists(),
+            "completed payload proof must survive a busy identity stamp"
+        );
+        assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
+        assert!(bridge.db.get_file("local-file-1").unwrap().is_none());
+
+        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Local);
+        assert_eq!(entry.path, "report.txt");
+        assert_eq!(entry.size_bytes, 19);
+
+        let contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        assert_eq!(contract.current_version, 1);
+        assert_eq!(contract.local_base_version, 1);
+        assert_eq!(contract.current_object_version_id.as_deref(), Some("object-complete-1"));
+        assert_eq!(contract.content_type.as_deref(), Some("text/plain"));
+
+        assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 1);
+        assert!(!bridge.db.upload_finalizations().unwrap()[0].stamped);
+        drop(held);
+        // Retry uses durable state after the bridge and SQLite connection close.
+        drop(bridge);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 1);
+        if !signout_retry {
+            // Periodic operation pass has no upload op left to execute.
+            bridge.process_due_operations(&root, 300).await.unwrap();
+            assert!(!payload.exists(), "proof is removed after successful identity retry");
+            assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
+        }
+        crate::windows_cf::signout::purge(&bridge.db, Some(&root)).unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert!(!payload.exists());
+        assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            init_body.get("file_id").is_none(),
+            "new-file uploads must let the server mint the id"
+        );
+        assert_eq!(init_body["file_size_bytes"], 19);
+        assert_eq!(init_body["parent_id"], "folder-1");
+        assert_eq!(init_body["chunk_count"], 1);
+        assert_eq!(requests[1].method, "PATCH");
+        assert_eq!(requests[2].method, "PUT");
+        assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+        assert_ne!(requests[2].body, b"live upload payload");
+
+        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
+            b"live upload payload"
+        );
+        assert_eq!(requests[3].method, "POST");
+        assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
     }
 
     #[tokio::test]

@@ -70,6 +70,52 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
+    async fn round7_recovery_verification_cancels_and_late_install_is_rejected() {
+        for teardown in ["lock", "signout"] {
+            let auth = Arc::new(AuthAttempts::new());
+            let transition = Arc::new(tokio::sync::Mutex::new(()));
+            let writes = Arc::new(AtomicUsize::new(0));
+            let runners = Arc::new(AtomicUsize::new(0));
+            let attempt = auth.begin().unwrap();
+            let late_attempt = auth.begin().unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (reply, response) = tokio::sync::oneshot::channel();
+            let (a, t, w, r) = (auth.clone(), transition.clone(), writes.clone(), runners.clone());
+            let task = tokio::spawn(async move {
+                attempt
+                    .run(async {
+                        {
+                            let _transition = t.lock().await;
+                            a.validate(&attempt)?;
+                        }
+                        started.send(()).unwrap();
+                        let _verified_key = response.await.map_err(|_| "closed")?;
+                        let _transition = t.lock().await;
+                        a.validate(&attempt)?;
+                        w.fetch_add(1, Ordering::SeqCst);
+                        r.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+            });
+            ready.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let _transition = transition.lock().await;
+                let revoked = auth.close().unwrap();
+                assert!(task.await.unwrap().is_err(), "{teardown}");
+                // A successful verifier already waiting to install must also fail.
+                assert!(auth.validate(&late_attempt).is_err());
+                drop(late_attempt);
+                revoked.drain(Duration::ZERO).unwrap();
+            })
+            .await
+            .expect("teardown waited for recovery verifier");
+            assert!(reply.send([7u8; 32]).is_err());
+            assert_eq!((writes.load(Ordering::SeqCst), runners.load(Ordering::SeqCst)), (0, 0));
+        }
+    }
+
+    #[tokio::test]
     async fn round5_browser_handoff_after_signout_persists_nothing_and_starts_no_runner() {
         let auth = AuthAttempts::new();
         let attempt = auth.begin().unwrap();
