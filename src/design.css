@@ -45,6 +45,26 @@
   --green:  oklch(0.72 0.16 155);
   --red:    oklch(0.62 0.21 25);
 
+  /*
+   * Toast and inline status surfaces (task 1683 slice 5). Every variant is a background +
+   * border pair; the text on it is always --ink / --ink-2 / --ink-3, so a toast is as readable
+   * as the page it floats over in BOTH themes (tests/toastContrast.test.tsx asserts >= 4.5:1
+   * text and >= 3:1 icon for every variant in the light, [data-theme='dark'] and
+   * prefers-color-scheme dark scopes). Before this, four toast variants hard-coded pale
+   * backgrounds under theme-flipping ink and the dark error title measured 1.10:1.
+   * The icon discs are their own tokens: --green on a pale surface is only 2.2:1.
+   * The warning variant keeps its cool tint on purpose: amber is reserved for encryption state
+   * and primary actions. The error disc is --red.
+   */
+  --err-bg:    oklch(0.965 0.025 25);
+  --err-line:  oklch(0.86 0.06 25);
+  --ok-bg:     oklch(0.965 0.03 155);
+  --ok-line:   oklch(0.86 0.07 155);
+  --ok-icon:   oklch(0.56 0.14 155);
+  --warn-bg:   oklch(0.965 0.025 255);
+  --warn-line: oklch(0.86 0.05 255);
+  --warn-icon: oklch(0.5 0.13 255);
+
   /* Diff highlighting (conflict resolution window) — soft, theme-aware
    * tints of --green/--red rather than the flat Tailwind gray-50-ish hexes
    * (#dcfce7/#fee2e2) that used to be hardcoded there. */
@@ -127,6 +147,15 @@
   --green:  oklch(0.74 0.16 155);
   --red:    oklch(0.68 0.21 25);
 
+  --err-bg:    oklch(0.26 0.05 25);
+  --err-line:  oklch(0.38 0.08 25);
+  --ok-bg:     oklch(0.26 0.04 155);
+  --ok-line:   oklch(0.38 0.07 155);
+  --ok-icon:   oklch(0.74 0.16 155);
+  --warn-bg:   oklch(0.26 0.04 255);
+  --warn-line: oklch(0.38 0.06 255);
+  --warn-icon: oklch(0.72 0.13 255);
+
   --diff-add-bg:    oklch(0.32 0.06 155);
   --diff-remove-bg: oklch(0.32 0.07 25);
 
@@ -166,6 +195,15 @@
 
     --green:  oklch(0.74 0.16 155);
     --red:    oklch(0.68 0.21 25);
+
+    --err-bg:    oklch(0.26 0.05 25);
+    --err-line:  oklch(0.38 0.08 25);
+    --ok-bg:     oklch(0.26 0.04 155);
+    --ok-line:   oklch(0.38 0.07 155);
+    --ok-icon:   oklch(0.74 0.16 155);
+    --warn-bg:   oklch(0.26 0.04 255);
+    --warn-line: oklch(0.38 0.06 255);
+    --warn-icon: oklch(0.72 0.13 255);
 
     --diff-add-bg:    oklch(0.32 0.06 155);
     --diff-remove-bg: oklch(0.32 0.07 25);
@@ -935,10 +973,13 @@ button {
   line-height: 1.45;
 }
 
+/* The inline error banner (task 1683 slice 5): the same --err-* token pair the error toast uses,
+ * so it follows the theme instead of staying a pale pink slab in dark mode. Asserted
+ * (tokens only, >= 4.5:1, every theme scope) by tests/toastContrast.test.tsx. */
 .notice.error {
-  border-color: oklch(0.86 0.08 25);
-  background: oklch(0.97 0.03 25);
-  color: oklch(0.5 0.18 25);
+  border-color: var(--err-line);
+  background: var(--err-bg);
+  color: var(--ink);
 }
 
 .muted {
