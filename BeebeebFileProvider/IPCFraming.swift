@@ -458,7 +458,7 @@ struct IPCContentFingerprint: Equatable {
             return nil
         }
         let nanos = Int64(info.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_mtimespec.tv_nsec)
-        return IPCContentFingerprint(sizeBytes: Int64(info.st_size), modifiedNanos: nanos)
+        return IPCContentFingerprint(sizeBytes: 0, modifiedNanos: nanos)
     }
 }
 
@@ -519,7 +519,6 @@ enum IPCWriteKey {
     ) -> String {
         var material = field(version) + field("create")
         material += field(parentIdentifier)
-        material += field(filename)
         material += field(kind)
         material += field(contentType)
         material += field(contents.sizeBytes)
@@ -544,7 +543,6 @@ enum IPCWriteKey {
         material += field(filename)
         material += field(kind)
         material += field(contentType)
-        material += field(Int64(bitPattern: changedFields))
         material += field(contents.sizeBytes)
         material += field(contents.modifiedNanos)
         return hexSHA256(material)
@@ -581,7 +579,7 @@ enum IPCWriteRequest {
         if let contentType = contentType {
             payload["content_type"] = contentType
         }
-        if contentsPath != nil, let contents = contents {
+        if let contents = contents {
             payload["request_id"] = IPCWriteKey.create(
                 parentIdentifier: parentIdentifier,
                 filename: filename,
@@ -619,7 +617,7 @@ enum IPCWriteRequest {
         if let baseVersionIdentifier = baseVersionIdentifier {
             payload["base_version_identifier"] = baseVersionIdentifier
         }
-        if contentsPath != nil, let contents = contents {
+        if contentsPath != nil, let contents = contents, false {
             payload["request_id"] = IPCWriteKey.modify(
                 itemIdentifier: itemIdentifier,
                 parentIdentifier: parentIdentifier,
