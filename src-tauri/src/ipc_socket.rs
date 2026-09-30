@@ -231,34 +231,41 @@ pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
 /// `completionHandler` call itself. Round 2 deleted the staged file
 /// unconditionally right after a successful `completionHandler`, which is
 /// only safe if that clone is synchronous; since the docs don't say either
-/// way, `FileProviderExtension.fetchContents` (Swift) no longer deletes on
-/// the success path at all (see its doc comment for the full reasoning). That
-/// makes THIS TTL, plus the periodic sweep that applies it
-/// (`MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`, `runner.rs`, every 60s on the
-/// daemon's existing tick loop — not a new timer/thread), the PRIMARY bound
-/// on a successfully-hydrated file's plaintext lifetime on the common path,
-/// not just a crash-recovery backstop for a skipped per-request cleanup (a
-/// crash between the write and `completionHandler`, a force-quit mid-fetch —
-/// still covered too).
+/// way, round 3 made `FileProviderExtension.fetchContents` (Swift) stop
+/// deleting on the success path, and made THIS TTL/sweep the primary bound
+/// on plaintext lifetime instead of a crash-only backstop.
 ///
-/// **2 minutes, chosen as:**
-/// - **Long enough for any real clone.** Per Apple's own requirement, the
-///   destination is on the SAME VOLUME as `NSFileProviderManager
-///   .temporaryDirectoryURL()` — a local filesystem clone/hardlink-style
-///   operation, not a network transfer — so it completes in well under a
-///   second even under load; 2 minutes is roughly two orders of magnitude of
-///   headroom over that, covering a loaded Mac or several concurrent Finder
-///   opens without guessing at an exact clone duration Apple never
-///   documents.
-/// - **Short enough to bound exposure.** A successfully-opened file's
-///   decrypted plaintext should not linger indefinitely in a durable,
-///   shared-container location; capped at ~2 sweep intervals (worst case
-///   ~3 minutes, given the 60s cadence below) keeps that window comparable
-///   to "the file was recently opened", not "forgotten on disk".
+/// **Round 4 (Codex P1 on PR #75, review thread PRRT_kwDOSLX6Xs6ncqQ7): round
+/// 3's fix was still not enough** — it handed OUR staging URL straight to
+/// `completionHandler` and relied on THIS TTL to eventually delete it, and
+/// Codex's review made the sharper point: once `completionHandler` is
+/// called, "the File Provider contract transfers control of that local copy
+/// to the system; there is no documented maximum delay before the system
+/// finishes consuming it" — deleting that SAME handed-off URL later, on ANY
+/// timer, can still race a busy or suspended `fileproviderd`. So
+/// `fetchContents` no longer hands this staging URL to the system AT ALL: it
+/// copies the file into `NSFileProviderManager(for:).temporaryDirectoryURL()`
+/// (a directory this daemon never touches) and deletes OUR copy immediately
+/// after that copy succeeds — see `FileProviderExtension
+/// .copyToSystemTemporaryDirectory(stagedAt:)`'s doc comment for the full
+/// mechanism.
 ///
-/// Swept periodically (the primary mechanism, see above) AND opportunistically
-/// on every real hydration (the `HydrateFile` handler below, catches anything
-/// the next periodic tick hasn't reached yet in a hydration-heavy session).
+/// That makes this TTL/sweep a **crash backstop again, not the primary
+/// mechanism**: with round 4's fix, the ONLY thing that can be left behind
+/// in this directory past the per-request delete is staging orphaned by a
+/// crash between the decrypt and the copy-then-delete (a force-quit
+/// mid-fetch, the extension being killed) — never a file the system is
+/// still relying on, because we now never hand a file in THIS directory to
+/// the system in the first place. 2 minutes stays generous for that
+/// narrower job (a crash window, not a clone-timing guess); kept rather
+/// than shortened further because there is no benefit to being more
+/// aggressive against orphaned staging that nothing else is reading.
+///
+/// Swept periodically (`MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`, `runner.rs`,
+/// every 60s on the daemon's existing tick loop — not a new timer/thread)
+/// AND opportunistically on every real hydration (the `HydrateFile` handler
+/// below, catches anything the next periodic tick hasn't reached yet in a
+/// hydration-heavy session).
 #[cfg(target_os = "macos")]
 pub(crate) const MACOS_HYDRATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2 * 60);
 
@@ -802,12 +809,13 @@ async fn handle_connection(
                 // doc comment for the full root-cause). Add the shared App
                 // Group hydrate-cache directory as a third allowed root, and
                 // make sure it exists (owner-only, backup-excluded — round 2)
-                // before the containment check runs. Round 3: the Swift side
-                // no longer deletes on a successful hydration at all (see
-                // `MACOS_HYDRATE_CACHE_TTL`'s doc comment), so the periodic
-                // sweep in `runner.rs` is now the PRIMARY cleanup for the
-                // common path; this opportunistic sweep just catches anything
-                // the next periodic tick (every 60s) hasn't reached yet.
+                // before the containment check runs. Round 4: the Swift side
+                // copies its staging file into the SYSTEM's own temp
+                // directory and deletes THIS copy immediately after (see
+                // `MACOS_HYDRATE_CACHE_TTL`'s doc comment), so this and the
+                // periodic sweep in `runner.rs` are now a crash backstop —
+                // they only ever find staging orphaned by a crash between
+                // decrypt and that copy, not a file the system still holds.
                 let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
                 let temp_root = std::env::temp_dir();
                 let dest = std::path::Path::new(&dest_path);

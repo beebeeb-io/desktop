@@ -154,22 +154,35 @@ final class XPCBridge {
     /// group-container location; see the task file for the full writeup with
     /// sources.
     ///
-    /// **Round 3 (task 1670, lead review of round 2): the caller no longer
-    /// deletes the returned file immediately on success.** Apple's own
+    /// **Round 3 (task 1670, lead review of round 2): the caller stopped
+    /// deleting the returned file immediately on success** — Apple's own
     /// `fetchContents` docs say only "After you call the completion handler,
     /// the system takes complete control over the local copy" and that the
-    /// system "can clone it" — never that the clone happens synchronously,
-    /// inside the `completionHandler` call itself. See
-    /// `FileProviderExtension.fetchContents`'s doc comment for the full
-    /// reasoning (round 2's unconditional post-success delete raced an
-    /// undocumented-timing clone and could reopen this task's original bug).
-    /// Practical effect here: the per-request random suffix below is no
-    /// longer just anti-collision insurance between two CONCURRENT fetches —
-    /// it is also what keeps two hydrations of the SAME item, minutes apart,
-    /// from ever sharing a leaf name while both are still waiting on the
-    /// daemon's TTL sweep (`crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL`,
-    /// swept periodically every 60s from `runner.rs`, not just on the next
-    /// hydration).
+    /// system "can clone it", never that the clone happens synchronously
+    /// inside the `completionHandler` call itself, so round 2's unconditional
+    /// post-success delete could race an undocumented-timing clone.
+    ///
+    /// **Round 4 (task 1670, Codex P1 on PR #75): the URL returned by THIS
+    /// function is no longer what `fetchContents` hands to
+    /// `completionHandler` at all.** Codex's review of round 3 made the
+    /// sharper point: once `completionHandler` IS called with a URL, "the
+    /// File Provider contract transfers control of that local copy to the
+    /// system; there is no documented maximum delay before the system
+    /// finishes consuming it" — so deleting THAT SAME URL later, on any
+    /// timer, can race a busy or suspended `fileproviderd`, however
+    /// generous the timer. `FileProviderExtension.fetchContents` now copies
+    /// the file this function stages into `NSFileProviderManager(for:
+    /// domain).temporaryDirectoryURL()` — a SYSTEM-managed directory, not
+    /// this one — and hands `completionHandler` THAT copy's URL instead;
+    /// see `FileProviderExtension.copyToSystemTemporaryDirectory(stagedAt:)`
+    /// for the full mechanism. The file this function returns a destination
+    /// for is deleted by the caller immediately after that copy succeeds —
+    /// we own it end to end, it is never handed to anyone. The per-request
+    /// random suffix below still matters: it is what keeps two hydrations of
+    /// the SAME item, moments apart (two Finder windows, a retry racing the
+    /// original), from ever sharing a leaf name in EITHER this directory or
+    /// the system's temp directory the caller copies into (it reuses this
+    /// exact leaf name there too).
     ///
     /// `nil` only in the same group-container-unavailable case `init()`
     /// already falls back from, or when `itemIdentifier` fails

@@ -2382,9 +2382,28 @@ impl EngineBridge {
                 }
 
                 self.db.set_status(file_id, FileStatus::Local)?;
-                let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
-                self.db
-                    .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+
+                // Task 1670 round 4 (Codex P2 on PR #75, review thread on
+                // `runner.rs:1044`): see [`record_hydration_cache_state`]'s
+                // doc comment for the full "why" — in short, a macOS Finder
+                // `fetchContents` hydration writes here as a HANDOFF, not a
+                // durable local cache copy, and registering it via
+                // `mark_cached` anyway left a phantom cache-usage entry in
+                // `desktop_storage_summary` / smart-cache eviction after the
+                // system (not us) took over the materialized content.
+                #[cfg(target_os = "macos")]
+                record_hydration_cache_state(
+                    &self.db,
+                    file_id,
+                    dest_path,
+                    &crate::ipc_socket::macos_hydrate_cache_dir(),
+                )?;
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+                    self.db
+                        .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+                }
                 #[cfg(target_os = "linux")]
                 self.write_linux_freedesktop_thumbnails(file_id, dest_path).await;
                 let _ = self.enforce_configured_cache_limit();
@@ -3829,6 +3848,77 @@ pub(crate) fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path])
         }
     }
     false
+}
+
+/// Task 1670 round 4 (Codex P2 on PR #75, review thread on `runner.rs:1044`):
+/// `true` when `dest_path` is a macOS Finder `fetchContents` HANDOFF staging
+/// file — i.e. it lives inside `hydrate_dir`, never a durable local cache
+/// copy. `hydrate_dir` is a parameter (never
+/// `crate::ipc_socket::macos_hydrate_cache_dir()` read inline) so this is
+/// unit-testable with a throwaway directory, never the real, singleton
+/// App-Group container a live Beebeeb.app/Finder extension share on this
+/// same machine (`macos_hydrate_cache_dir`'s own doc comment covers why that
+/// directory must never be written to by a test process here — round 2's
+/// `disposable_cache_roots_includes_the_macos_hydrate_cache_dir` test follows
+/// the identical "real path, read-only, no write into it" precedent).
+///
+/// See [`record_hydration_cache_state`] for the full "why this matters"
+/// writeup: registering this file's path via `mark_cached` would point
+/// `files.cache_path`/`cache_bytes` at a file the SYSTEM (via
+/// `FileProviderExtension.copyToSystemTemporaryDirectory(stagedAt:)`), not
+/// this daemon, now owns and that our own copy stops existing moments after
+/// this check runs — `desktop_storage_summary` and smart-cache eviction both
+/// sum/act on any row with a non-null `cache_path` and no existence check.
+#[cfg(target_os = "macos")]
+fn is_macos_finder_handoff_staging_path(dest_path: &Path, hydrate_dir: &Path) -> bool {
+    crate::is_contained(hydrate_dir, dest_path)
+}
+
+/// Task 1670 round 4 (Codex P2 on PR #75, review thread on `runner.rs:1044`):
+/// register `dest_path` as this file's durable cache entry (`mark_cached`,
+/// same as before this round) — UNLESS it is a macOS Finder `fetchContents`
+/// HANDOFF staging file (i.e. [`is_macos_finder_handoff_staging_path`] against
+/// `macos_hydrate_dir`), in which case this deliberately does nothing.
+///
+/// **Why:** `FileProviderExtension.fetchContents` (round 4,
+/// `BeebeebFileProvider/FileProviderExtension.swift`) copies a staged file
+/// like this one into the SYSTEM's own
+/// `NSFileProviderManager.temporaryDirectoryURL()` and deletes OUR copy at
+/// `dest_path` immediately after — so `dest_path` can already be gone by the
+/// time anything reads `files.cache_path` again. Registering it anyway
+/// pointed `desktop_storage_summary` (`cache_bytes_by_effective_pin`,
+/// `state_db.rs`) and smart-cache eviction
+/// (`evict_unpinned_cache_until_under`, `enforce_configured_cache_limit`) at
+/// a file that stops existing almost immediately — both sum/act on ANY row
+/// with `cache_path IS NOT NULL AND cache_bytes > 0` with no existence
+/// check — so every Finder peek left a phantom cache-usage entry, and a
+/// target for a pointless eviction of a file that was never really
+/// "cached" at all. [`Self::hydrate_file`]'s `set_status(..., Local)` call
+/// (just before this one runs) still flips Finder's own downloaded badge
+/// (`FileProviderItem.isDownloaded` reads `status == "local"`,
+/// `BeebeebFileProvider/FileProviderItem.swift`) — that is the one real UI
+/// signal a momentary Finder peek should produce; it should not also claim
+/// a durable cache footprint the system, not us, now owns.
+///
+/// `macos_hydrate_dir` is a parameter — production passes the REAL
+/// `crate::ipc_socket::macos_hydrate_cache_dir()` (see the call site in
+/// [`Self::hydrate_file`]); tests pass a throwaway tempdir, so this whole
+/// decision is exercised end to end without ever touching the real,
+/// singleton App-Group directory a live Beebeeb.app/Finder extension share
+/// on this same machine.
+#[cfg(target_os = "macos")]
+fn record_hydration_cache_state(
+    db: &StateDb,
+    file_id: &str,
+    dest_path: &Path,
+    macos_hydrate_dir: &Path,
+) -> anyhow::Result<()> {
+    if is_macos_finder_handoff_staging_path(dest_path, macos_hydrate_dir) {
+        return Ok(());
+    }
+    let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+    db.mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+    Ok(())
 }
 
 /// Task 1247: write hydrated plaintext to `dest_path`, enforcing that it lands
@@ -10124,6 +10214,113 @@ mod tests {
         assert!(
             !hydrate_dest_is_allowed(&missing_parent, &[root_path]),
             "a path under a non-existent subdirectory must be rejected"
+        );
+    }
+
+    /// Task 1670 round 4 (Codex P2 on PR #75): the pure predicate
+    /// `hydrate_file` uses to decide whether a just-written destination is a
+    /// macOS Finder handoff staging file (never registered as durable cache)
+    /// versus a real cache copy (registered, as always). Uses a throwaway
+    /// tempdir as the "hydrate dir" — never the real, singleton App-Group
+    /// container a live Beebeeb.app/Finder extension share on this same
+    /// machine.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn is_macos_finder_handoff_staging_path_detects_dest_under_hydrate_dir() {
+        let hydrate_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let staged = hydrate_dir.path().join("file-id.abcd1234");
+        std::fs::write(&staged, b"decrypted plaintext").unwrap();
+        assert!(
+            is_macos_finder_handoff_staging_path(&staged, hydrate_dir.path()),
+            "a destination inside the hydrate dir must be recognized as Finder handoff staging"
+        );
+
+        let cached = elsewhere.path().join("file-id");
+        std::fs::write(&cached, b"a real cached copy").unwrap();
+        assert!(
+            !is_macos_finder_handoff_staging_path(&cached, hydrate_dir.path()),
+            "a destination outside the hydrate dir must NOT be treated as Finder handoff staging"
+        );
+    }
+
+    /// Task 1670 round 4: exercises the REAL [`record_hydration_cache_state`]
+    /// — the exact function [`EngineBridge::hydrate_file`] calls — end to
+    /// end against a real `StateDb`: a macOS-hydrate-dir-shaped destination
+    /// gets NO `cache_path`/`cache_bytes` after "hydration" (a plain on-disk
+    /// write here, no network involved — the decrypt/download path is
+    /// already covered by the pre-existing hydration tests, this one is
+    /// purely about the cache-registration DECISION), so the storage summary
+    /// (`cache_bytes_by_effective_pin`, `state_db.rs`) does not count it.
+    /// `macos_hydrate_dir` is a throwaway tempdir passed in directly (the
+    /// same injection seam production uses to pass the REAL
+    /// `macos_hydrate_cache_dir()` — see that function's call site in
+    /// `hydrate_file`) — this test never touches the real, singleton
+    /// App-Group container.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn record_hydration_cache_state_skips_mark_cached_under_the_hydrate_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/finder-peek.bin", None, FileStatus::CloudOnly, 0);
+
+        let hydrate_dir = tempfile::tempdir().unwrap();
+        let finder_dest = hydrate_dir.path().join("finder-peek.abcd1234");
+        std::fs::write(&finder_dest, b"decrypted plaintext for a Finder peek").unwrap();
+
+        record_hydration_cache_state(&bridge.db, TEST_FILE_ID, &finder_dest, hydrate_dir.path()).unwrap();
+
+        let row = bridge
+            .db
+            .get_file_contract_state(TEST_FILE_ID)
+            .unwrap()
+            .expect("row must still exist");
+        assert_eq!(
+            row.cache_path, None,
+            "a macOS Finder handoff staging destination must NOT be registered as cache_path"
+        );
+        assert_eq!(
+            bridge.db.cache_bytes_by_effective_pin(false).unwrap(),
+            0,
+            "the storage summary must not count a Finder handoff staging file as cache usage"
+        );
+    }
+
+    /// Task 1670 round 4: the same function, but `dest_path` is OUTSIDE the
+    /// hydrate dir — `mark_cached` must still run exactly as before this
+    /// round, and the file must still be counted in the storage summary.
+    /// Regression guard for the ordinary (non-macOS-Finder) hydration path,
+    /// which this round must not have touched.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn record_hydration_cache_state_marks_cached_outside_the_hydrate_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/ordinary.bin", None, FileStatus::CloudOnly, 0);
+
+        let hydrate_dir = tempfile::tempdir().unwrap();
+        let ordinary_root = tempfile::tempdir().unwrap();
+        let ordinary_dest = ordinary_root.path().join("ordinary.bin");
+        let plaintext = b"an ordinary cached copy, not a Finder handoff";
+        std::fs::write(&ordinary_dest, plaintext).unwrap();
+
+        record_hydration_cache_state(&bridge.db, TEST_FILE_ID, &ordinary_dest, hydrate_dir.path()).unwrap();
+
+        let row = bridge
+            .db
+            .get_file_contract_state(TEST_FILE_ID)
+            .unwrap()
+            .expect("row must still exist");
+        assert_eq!(
+            row.cache_path.as_deref(),
+            Some(ordinary_dest.to_string_lossy().as_ref()),
+            "an ordinary (non-hydrate-dir) destination must still be registered as cache_path"
+        );
+        assert_eq!(
+            bridge.db.cache_bytes_by_effective_pin(false).unwrap(),
+            plaintext.len() as i64,
+            "an ordinary cached file must still be counted in the storage summary"
         );
     }
 

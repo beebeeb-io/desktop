@@ -142,18 +142,19 @@ const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 /// idiom as `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS` above, reusing the existing
 /// runtime rather than spawning a second timer task.
 ///
-/// Why a periodic sweep exists at all now: Apple's own `fetchContents` docs
-/// say only "After you call the completion handler, the system takes
-/// complete control over the local copy" and that the system "can clone it"
-/// — never that the clone happens synchronously, inside the
-/// `completionHandler` call itself. Round 2 deleted the staged file
-/// unconditionally right after a successful `completionHandler`, which is
-/// only safe if that clone is synchronous; since the docs don't say either
-/// way, `FileProviderExtension.fetchContents` (Swift) no longer deletes on
-/// the success path at all. This periodic sweep — applying
+/// Why a periodic sweep exists at all: round 3 made `FileProviderExtension
+/// .fetchContents` (Swift) stop deleting its staged file on the success
+/// path and relied on this sweep to bound its lifetime instead — but round 4
+/// (Codex P1 on PR #75) found that was still handing OUR staging URL to the
+/// system and cleaning it up on a timer, which can race a busy/suspended
+/// `fileproviderd`. `fetchContents` now copies into the SYSTEM's own
+/// `NSFileProviderManager.temporaryDirectoryURL()` and deletes OUR copy
+/// immediately after that copy succeeds, so this sweep — applying
 /// `crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL` (see its doc comment for the
-/// 2-minute value and why) — is what now bounds a successfully-hydrated
-/// file's plaintext lifetime on the common (no-crash) path.
+/// current 2-minute value and why) — is a **crash backstop**, not the
+/// primary bound: on the no-crash path, nothing is ever left here long
+/// enough for the sweep to matter. It still runs unconditionally, catching
+/// staging orphaned by a crash between decrypt and that copy.
 #[cfg(target_os = "macos")]
 const MACOS_HYDRATE_SWEEP_EVERY_N_TICKS: u64 = 2;
 
