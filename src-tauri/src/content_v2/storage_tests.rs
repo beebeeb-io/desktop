@@ -656,13 +656,12 @@ fn slice1_g6_privacy_canaries_backup_and_all_purge_cuts() {
             assert_eq!(bytes.windows(canary.len()).filter(|b| *b == canary).count(), 0);
         }
         assert_eq!(l.purge(6, &mut Fault::default()).unwrap(), 0);
-        let _ = l.purge(
-            7,
-            &mut Fault {
-                cut: Some(cut),
-                seen: 0,
-            },
-        );
+        let mut fault = Fault {
+            cut: Some(cut),
+            seen: 0,
+        };
+        assert!(l.purge(7, &mut fault).is_err(), "purge cut {cut} did not execute");
+        assert_eq!(fault.seen, cut);
         drop(l);
         for _ in 0..2 {
             let l = Ledger::open(&h).unwrap();
@@ -675,7 +674,7 @@ fn slice1_g6_privacy_canaries_backup_and_all_purge_cuts() {
 }
 #[test]
 fn slice1_g6_cross_db_transfer_replays_once_at_each_cut() {
-    for cut in 1..=8 {
+    for cut in 1..=11 {
         let h = Harness::new().unwrap();
         let mut s = Store::new(&h).unwrap();
         let snapshot = captured(&mut s, b"terminal transfer payload");
@@ -706,20 +705,13 @@ fn slice1_g6_cross_db_transfer_replays_once_at_each_cut() {
             .try_into()
             .unwrap();
         let body = envelope(account);
-        let _ = transfer(
-            &s,
-            &l,
-            owner,
-            t,
-            token,
-            record,
-            &body,
-            30,
-            &mut Fault {
-                cut: Some(cut),
-                seen: 0,
-            },
-        );
+        let mut fault = Fault {
+            cut: Some(cut),
+            seen: 0,
+        };
+        let interrupted = transfer(&s, &l, owner, t, token, record, &body, 30, &mut fault);
+        assert!(interrupted.is_err(), "transfer cut {cut} did not execute");
+        assert_eq!(fault.seen, cut);
         transfer(&s, &l, owner, t, token, record, &body, 30, &mut Fault::default()).unwrap();
         assert!(l.deny(token).unwrap());
         assert_eq!(
@@ -1033,6 +1025,10 @@ fn slice1_g2_native_vfs_flush_aware_cutpoints() {
             Err(_) => None,
         };
         let events = vfs.event_count();
+        assert!(
+            cut == usize::MAX || events >= cut,
+            "VFS cut {cut} was never reached: {events}"
+        );
         let syncs = vfs.sync_count();
         drop(s);
         let restart = Harness::new().unwrap();
@@ -1067,18 +1063,17 @@ fn slice1_g2_uncertain_capture_and_adoption_deduplicate() {
         let mut s = Store::new(&h).unwrap();
         let o = owner(&s, "Snapshot");
         let bytes = b"same held-source fixture";
-        let result = s.capture(
-            o,
-            &mut std::io::Cursor::new(bytes),
-            bytes.len() as u64,
-            &mut Fault {
-                cut: Some(cut),
-                seen: 0,
-            },
-        );
-        if let Ok(a) = result {
-            let _ = s.adopt(&a, "Snapshot", true, &mut Fault { cut: Some(2), seen: 0 });
-        }
+        let mut fault = Fault {
+            cut: Some(cut),
+            seen: 0,
+        };
+        let result = (|| -> Result<()> {
+            let a = s.capture(o, &mut std::io::Cursor::new(bytes), bytes.len() as u64, &mut fault)?;
+            s.adopt(&a, "Snapshot", true, &mut fault)?;
+            Ok(())
+        })();
+        assert!(result.is_err(), "capture/adoption cut {cut} did not execute");
+        assert_eq!(fault.seen, cut);
         let a = s
             .capture(
                 o,
