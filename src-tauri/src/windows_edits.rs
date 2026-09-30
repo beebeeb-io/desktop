@@ -122,3 +122,142 @@ impl PartialWrite {
         Ok(base)
     }
 }
+
+
+/// Durable live-install journal. Its presence excludes the destination from
+/// watcher capture, even when a crash has left it empty or only partly written.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LiveInstall {
+    payload: std::path::PathBuf,
+    hash: String,
+    version: Option<i64>,
+}
+
+fn install_marker(root: &Path, path: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let relative = path.strip_prefix(root)?;
+    Ok(root.join(".beebeeb/windows-writes").join(format!("{}.install.json",
+        hash_bytes(relative.to_string_lossy().as_bytes()))))
+}
+
+pub(crate) fn install_pending(root: &Path, path: &Path) -> anyhow::Result<bool> {
+    Ok(install_marker(root, path)?.try_exists()?)
+}
+
+pub(crate) fn open_exclusive(path: &Path) -> anyhow::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.share_mode(0).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    anyhow::ensure!(!file.metadata()?.file_type().is_symlink(), "refusing symlink destination");
+    Ok(file)
+}
+
+fn sync_parent(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().ok_or_else(|| anyhow::anyhow!("missing parent"))?)?.sync_all()?;
+    let _ = path;
+    Ok(())
+}
+
+pub(crate) fn durable_bytes(directory: &Path, suffix: &str, bytes: &[u8]) -> anyhow::Result<std::path::PathBuf> {
+    use std::io::Write;
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join(format!("{}.{}", uuid::Uuid::new_v4(), suffix));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let mut file = options.open(&path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    sync_parent(&path)?;
+    Ok(path)
+}
+
+fn write_install(file: &mut std::fs::File, intent: &LiveInstall) -> anyhow::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let bytes = zeroize::Zeroizing::new(std::fs::read(&intent.payload)?);
+    anyhow::ensure!(hash_bytes(&bytes) == intent.hash, "live-install payload changed");
+    // Both payload and journal were flushed BEFORE this first destructive step.
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    #[cfg(all(test, target_os = "windows"))]
+    if let Some(count) = crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.get()) {
+        file.write_all(&bytes[..count.min(bytes.len())])?;
+        file.sync_all()?;
+        anyhow::bail!("injected materialization write failure after {count} bytes");
+    }
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn install_staged(
+    root: &Path, path: &Path, file: &mut std::fs::File, payload: &Path,
+    version: Option<i64>, finish: impl FnOnce(Option<i64>, &str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    // Never replace an unfinished intent, even if the new download succeeded.
+    let marker = install_marker(root, path)?;
+    let intent = LiveInstall { payload: payload.to_owned(), hash: hash_file(payload)?, version };
+    let journal = durable_bytes(marker.parent().unwrap(), "intent", &serde_json::to_vec(&intent)?)?;
+    publish_conflict_copy(&journal, &marker)?;
+    std::fs::remove_file(journal)?;
+    sync_parent(&marker)?;
+    write_install(file, &intent)?;
+    finish(intent.version, &intent.hash)?;
+    std::fs::remove_file(&marker)?;
+    sync_parent(&marker)?;
+    Ok(())
+}
+
+pub(crate) fn recover_install(
+    root: &Path, path: &Path,
+    finish: impl FnOnce(Option<i64>, &str) -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let marker = install_marker(root, path)?;
+    if !marker.try_exists()? { return Ok(false); }
+    let intent: LiveInstall = serde_json::from_slice(&std::fs::read(&marker)?)?;
+    let mut file = open_exclusive(path)?;
+    let mut current = zeroize::Zeroizing::new(Vec::new());
+    file.read_to_end(&mut current)?;
+    if hash_bytes(&current) != intent.hash {
+        // A writer may have saved after the failed provider write. We cannot
+        // distinguish it from a provider prefix after a crash. Preserve ALL
+        // ambiguous bytes in reserved storage (never a watcher upload source).
+        durable_bytes(marker.parent().unwrap(), "recovery", &current)?;
+        file.seek(SeekFrom::Start(0))?;
+        write_install(&mut file, &intent)?;
+    }
+    finish(intent.version, &intent.hash)?;
+    std::fs::remove_file(&marker)?;
+    sync_parent(&marker)?;
+    Ok(true)
+}
+
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn regression_1640_r4_destination_excludes_writers_and_atomic_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("destination");
+    let temporary = dir.path().join("save.tmp");
+    std::fs::write(&path, b"captured").unwrap();
+    std::fs::write(&temporary, b"atomic save").unwrap();
+    let held = open_exclusive(&path).unwrap();
+    assert!(std::fs::write(&path, b"racing save").is_err(), "exclusive destination must deny writers");
+    assert!(std::fs::rename(&temporary, &path).is_err(), "exclusive destination must deny replacement");
+    drop(held);
+    std::fs::rename(&temporary, &path).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"atomic save");
+}

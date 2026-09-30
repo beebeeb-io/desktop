@@ -135,9 +135,8 @@ pub(crate) fn materialize_if_unchanged(
     path: &Path,
     spec: &crate::windows_edits::PartialWrite,
     patch: &[u8],
-    bytes: &[u8],
+    install: impl FnOnce(&mut File) -> anyhow::Result<()>,
 ) -> anyhow::Result<bool> {
-    use std::io::Write;
     if super::resident_for_edit(path)? {
         return Ok(false);
     }
@@ -153,17 +152,6 @@ pub(crate) fn materialize_if_unchanged(
     if current.eof != spec.eof || current.ranges != spec.ranges || current.bytes.as_slice() != patch {
         return Ok(false);
     }
-    // The complete snapshot is fsynced and queued before this write. Even an
-    // interrupted local materialization cannot lose the settled user save.
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-    #[cfg(test)]
-    if let Some(count) = TEST_FAIL_AFTER.with(|v| v.get()) {
-        file.write_all(&bytes[..count.min(bytes.len())])?;
-        file.sync_all()?;
-        anyhow::bail!("injected materialization write failure after {count} bytes");
-    }
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    install(&mut file)?;
     Ok(true)
 }

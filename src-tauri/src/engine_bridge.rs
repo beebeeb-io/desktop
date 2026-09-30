@@ -509,7 +509,7 @@ impl EngineBridge {
     async fn materialize_partial_operation(&self, op: &PendingOperation,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path) -> anyhow::Result<PendingOperation> {
         let mut metadata = operation_metadata(op)?;
-        if metadata["windows_partial"].is_null() { return Ok(op.clone()); }
+        if metadata["windows_partial"].is_null() { return self.finish_partial_materialization(op, sync_root); }
         let spec: crate::windows_edits::PartialWrite = serde_json::from_value(metadata["windows_partial"].clone())?;
         let file_id = op.file_id.as_deref().ok_or_else(|| anyhow::anyhow!("partial snapshot missing identity"))?;
         let source = Path::new(op.payload_path.as_deref().ok_or_else(|| anyhow::anyhow!("partial snapshot missing payload"))?);
@@ -527,23 +527,41 @@ impl EngineBridge {
         #[cfg(unix)]
         std::fs::File::open(full_path.parent().unwrap())?.sync_all()?;
         let mut full = op.clone();
+        metadata["windows_materialization"] = serde_json::json!({"spec": spec, "packed": source});
         metadata["windows_partial"] = serde_json::Value::Null;
         metadata["windows_content_hash"] = crate::windows_edits::hash_bytes(&bytes).into();
         full.metadata_json = Some(serde_json::to_string(&metadata)?);
         full.payload_path = Some(full_path.to_string_lossy().into_owned());
         // Commit new payload authority before dropping the packed snapshot.
         self.db.enqueue_operation(&full)?;
+        self.finish_partial_materialization(&full, sync_root)
+    }
+
+    fn finish_partial_materialization(&self, op: &PendingOperation, root: &Path) -> anyhow::Result<PendingOperation> {
+        let mut metadata = operation_metadata(op)?;
+        if metadata["windows_materialization"].is_null() { return Ok(op.clone()); }
+        let source = std::path::PathBuf::from(metadata["windows_materialization"]["packed"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing packed materialization source"))?);
         #[cfg(target_os = "windows")]
         if let Some(target) = op.target_path.as_deref() {
-            let path = local_file_path_under_sync_root(sync_root, target)?;
-            // Fill the live file only if its modified ranges still match the
-            // captured save. A later writer keeps ownership of its new bytes.
-            if let Err(error) = crate::windows_cf::placeholders::partial_edits::materialize_if_unchanged(&path, &spec, &patch, &bytes) {
-                tracing::warn!(op_id = %op.op_id, error = %error, "partial live materialization deferred; durable full snapshot retained");
+            let path = local_file_path_under_sync_root(root, target)?;
+            let recovered = crate::windows_edits::recover_install(root, &path, |_, _| Ok(()))?;
+            if !recovered {
+                let spec = serde_json::from_value(metadata["windows_materialization"]["spec"].clone())?;
+                let patch = Zeroizing::new(std::fs::read(&source)?);
+                let payload = Path::new(op.payload_path.as_deref().ok_or_else(|| anyhow::anyhow!("missing full payload"))?);
+                crate::windows_cf::placeholders::partial_edits::materialize_if_unchanged(&path, &spec, &patch, |file| {
+                    crate::windows_edits::install_staged(root, &path, file, payload, None, |_, _| Ok(()))
+                })?;
             }
         }
+        let _ = root;
+        metadata["windows_materialization"] = serde_json::Value::Null;
+        let mut finished = op.clone();
+        finished.metadata_json = Some(serde_json::to_string(&metadata)?);
+        self.db.enqueue_operation(&finished)?;
         std::fs::remove_file(source)?;
-        Ok(full)
+        Ok(finished)
     }
 
     async fn download_base_version(&self, file_id: &str, version: i64) -> anyhow::Result<Zeroizing<Vec<u8>>> {
@@ -1580,6 +1598,11 @@ impl EngineBridge {
         if entry.is_dir() || !path.is_file() { return Ok(Some(false)); }
         if std::fs::symlink_metadata(path)?.file_type().is_symlink()
             || !path.canonicalize()?.starts_with(root.canonicalize()?) {
+            return Ok(Some(false));
+        }
+        if crate::windows_edits::install_pending(root, path)? { return Ok(Some(false)); }
+        if self.db.list_review_operations()?.iter().any(|op| op.file_id.as_deref() == Some(&entry.file_id)
+            && operation_metadata(op).ok().is_some_and(|m| !m["windows_materialization"].is_null())) {
             return Ok(Some(false));
         }
         self.ensure_item_allows_shared_write(&entry.file_id, "modify")?;
@@ -3179,23 +3202,38 @@ impl EngineBridge {
     /// Status ends in `Local`; `remote_updated_at` is anchored to
     /// "now" so the next tick treats the file as freshly synced.
     ///
-    /// Reuses [`Self::hydrate_file`], which already handles status
-    /// transitions and Error-on-failure rollback. The extra
-    /// `remote_updated_at` bump after a successful hydrate prevents
-    /// the next tick from re-flagging a conflict if the user's old
-    /// `content_hash` is still on the row (it isn't anymore — the row
-    /// was already in Conflict — but we belt-and-brace anchor anyway).
+    /// Downloads first, then revalidates the destination under exclusive
+    /// Windows access. Intervening saves abort resolution; interrupted writes
+    /// retain a durable installation journal and complete replacement payload.
     pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
-        let chain = self.preserve_resolution_chain(file_id, sync_root).await?;
         let mut entry = self
             .db
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
         let dest = local_file_path_under_sync_root(sync_root, &entry.path)?;
-        // hydrate_file flips Conflict → Downloading → Local on success
-        // (or Error on failure). We don't care about the intermediate
-        // state for this path.
-        self.hydrate_file(file_id, &dest, &[sync_root]).await?;
+        self.ensure_shared_hydrate_path_safe(file_id)?;
+        anyhow::ensure!(hydrate_dest_is_allowed(&dest, &[sync_root]), "invalid resolution destination");
+        crate::windows_edits::recover_install(sync_root, &dest, |version, hash| {
+            if let Some(version) = version { self.db.record_download_baseline(file_id, version, hash)?; }
+            Ok(())
+        })?;
+        // Capture before network, but revalidate on the SAME exclusive handle
+        // used for replacement after download. A late save aborts resolution.
+        let before = crate::windows_edits::hash_file(&dest)?;
+        let chain = self.preserve_resolution_chain(file_id, sync_root).await?;
+        let download = self.do_hydrate(file_id).await?;
+        let staging = sync_root.join(".beebeeb/windows-writes");
+        let mut destination = crate::windows_edits::open_exclusive(&dest)?;
+        anyhow::ensure!(crate::windows_edits::hash_reader(&mut destination)? == before,
+            "File changed during resolution; latest save and queued snapshots retained. Retry Keep Theirs.");
+        let payload = crate::windows_edits::durable_bytes(&staging, "resolution", &download.bytes)?;
+        crate::windows_edits::install_staged(sync_root, &dest, &mut destination, &payload, download.version, |version, hash| {
+            if let Some(version) = version { self.db.record_download_baseline(file_id, version, hash)?; }
+            Ok(())
+        })?;
+        self.db.mark_cached(file_id, &dest.to_string_lossy(), download.bytes.len() as i64, now_secs())?;
+        drop(destination);
+        std::fs::remove_file(payload)?;
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

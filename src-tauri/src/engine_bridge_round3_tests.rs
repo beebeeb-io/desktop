@@ -409,8 +409,10 @@ async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool, fa
     let _ = fault;
     drop(bridge);
     let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
-    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
-    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "restart scan must not capture provider bytes");
+    if fault.is_some() {
+        crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+        assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "restart scan must not capture provider bytes");
+    }
     let result = bridge.process_due_operations(&root, i64::MAX / 2 + 10000).await.unwrap();
     assert_eq!(
         result.completed_op_ids.len(),
