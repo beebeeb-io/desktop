@@ -171,7 +171,6 @@ pub(super) struct Ledger {
 pub(super) struct ReadCapability {
     account: Id,
     run: Id,
-    volume: Arc<Mutex<Budget>>,
 }
 impl Ledger {
     pub(super) fn open(h: &Harness) -> Result<Self> {
@@ -180,6 +179,7 @@ impl Ledger {
         let db = open_db(&path, include_str!("ledger.sql"))?;
         let keys = h.path().join("keyslots");
         fs::create_dir_all(&keys)?;
+        grow_emergency(h.path(), None)?;
         db.execute(
             "INSERT OR IGNORE INTO installation_format VALUES(1,1,?1,NULL)",
             [id().as_slice()],
@@ -200,7 +200,7 @@ impl Ledger {
             let name = entry.file_name();
             let name = name.to_str().context("invalid key filename")?;
             let slot_name = name.split('.').next().context("key slot")?;
-            ensure!(slot_name.len() == 64, "unknown key-slot name");
+            ensure!(slot_name.len() == 64 && slot_name.bytes().all(|b| b.is_ascii_hexdigit()), "unknown key-slot name");
             let mut slot = [0; 32];
             for (i, byte) in slot.iter_mut().enumerate() {
                 *byte = u8::from_str_radix(&slot_name[2*i..2*i+2], 16)?;
@@ -252,8 +252,10 @@ impl Ledger {
         deny: Option<Id>,
         fault: &mut Fault,
     ) -> Result<Id> {
-        let _admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
-        metadata_admitted(&self.db, &self.path, false)?;
+        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        let terminal = class != "Activation";
+        admission.space_admitted(self.path.parent().context("ledger volume")?, DIRTY_LIMIT, terminal)?;
+        metadata_admitted(&self.db, &self.path, terminal)?;
         let existing: Option<Vec<u8>> = self
             .db
             .query_row(
@@ -313,6 +315,7 @@ impl Ledger {
         }
         fault.point("before ledger commit")?;
         tx.commit()?;
+        if file_len(&wal_path(&self.path)) >= 64 * MIB { checkpoint(&self.db, &self.path, false)?; }
         fault.point("after ledger commit")?;
         Ok(slot)
     }
@@ -346,7 +349,9 @@ impl Ledger {
         Ok(())
     }
     pub(super) fn purge(&self, now: i64, fault: &mut Fault) -> Result<usize> {
+        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, true)?;
+        admission.space_admitted(self.path.parent().context("ledger volume")?, DIRTY_LIMIT, true)?;
         let mut count = 0;
         loop {
             let slot:Option<Vec<u8>>=self.db.query_row("SELECT key_slot FROM purge_jobs WHERE (due_at IS NOT NULL AND due_at<=?1) OR phase<>'Retained' ORDER BY key_slot LIMIT 1",[now],|r|r.get(0)).optional()?;

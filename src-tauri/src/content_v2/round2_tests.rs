@@ -134,3 +134,41 @@ fn slice1_r2_restore_test_has_no_constant_predicate_or_unused_variant() {
     let source = include_str!("mod.rs");
     assert!(!source.contains("fn recovered_can_submit"), "constant recovery predicate is not a submission boundary");
 }
+
+#[test]
+fn slice1_r2_capacity_accounts_for_installation_ledger() {
+    let h = Harness::new().unwrap();
+    let mut s = Store::new(&h).unwrap();
+    let o = owner(&s, "Snapshot");
+    let before = s.budget_from_disk().unwrap();
+    let l = Ledger::open(&h).unwrap();
+    l.put(id(), "Envelope", &envelope(id()), Some(30), Some(id()), &mut Fault::default()).unwrap();
+    let after = s.budget_from_disk().unwrap();
+    assert!(after.0 + after.1 >= before.0 + before.1 + WAL_LIMIT + 256 * MIB, "InstallationLedger WAL and terminal headroom missing from shared budget");
+    s.quota = after.0 + after.1 + 1024;
+    assert!(s.allocate(o, "Capture", "Full", 1, 0, &mut Fault::default()).is_err(), "ledger consumed shared quota but allocation was admitted");
+}
+
+#[test]
+fn slice1_r2_terminal_completion_requires_actual_reserve_release() {
+    let h = Harness::new().unwrap();
+    let mut s = Store::new(&h).unwrap();
+    let a = captured(&mut s, b"terminal capacity model");
+    s.settle().unwrap();
+    let new_owner = owner(&s, "Snapshot");
+    let before = allocated_tree(h.path()).unwrap();
+    h.volume.lock().unwrap().capacity_ceiling = Some(before + 4096);
+    // This ceiling measures real file allocation while leaving the host volume alone.
+    // dispose() must release real reserve storage before its FULL terminal commit.
+    let result = s.dispose(&a, &discard(&a), &mut Fault::default());
+    assert!(result.is_ok(), "terminal disposition must complete using physically released reserve: {result:?}");
+    let after = allocated_tree(h.path()).unwrap();
+    assert!(after + 8 * MIB < before, "terminal completion consumed no physical reserve");
+    assert_eq!(s.db.query_row("SELECT count(*) FROM v2_dispositions", [], |r| r.get::<_, u64>(0)).unwrap(), 1);
+    h.volume.lock().unwrap().capacity_ceiling = None;
+    s.gc(&a, &mut Fault::default()).unwrap();
+    assert!(s.allocate(new_owner, "Capture", "Full", 1, 0, &mut Fault::default()).is_err(), "new payload must wait for reserve refill");
+    let mut reserve = Reserve::existing(h.path()).unwrap();
+    reserve.refill().unwrap();
+    s.allocate(new_owner, "Capture", "Full", 1, 0, &mut Fault::default()).unwrap();
+}

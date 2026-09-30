@@ -71,10 +71,12 @@ impl Store {
     pub(super) fn owner(&self, owner: Id, kind: &str, body: &[u8]) -> Result<()> {
         // Metadata admission scans the volume too: do not observe another account's
         // database between pathname creation and its schema/bootstrap commit.
-        let _admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, false)?;
         let (reserved, excess) = self.budget_from_disk()?;
         ensure!(reserved + excess + DIRTY_LIMIT <= self.quota, "metadata quota");
+        let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
+        admission.space_admitted(root, (reserved + excess + DIRTY_LIMIT).saturating_sub(allocated_tree(root)?), false)?;
         let fields = records::decode(kind, body)?;
         let (account, root): (Vec<u8>, Vec<u8>) = self.db.query_row(
             "SELECT account_binding,root_token FROM v2_store WHERE singleton=1",
@@ -129,12 +131,12 @@ impl Store {
     pub(super) fn reserve_cost(payload: u64, duplicates: u64, n: u64) -> Result<u64> {
         payload
             .checked_add(payload.div_ceil(4))
-            .and_then(|x| x.checked_add(2 * MIB * n))
+            .and_then(|x| x.checked_add((2 * MIB + 128 * 1024) * n))
             .and_then(|x| x.checked_add(duplicates))
             .and_then(|x| x.checked_add(WAL_LIMIT + 256 * MIB))
             .context("reservation overflow")
     }
-    fn budget_from_disk(&self) -> Result<(u64, u64)> {
+    pub(super) fn budget_from_disk(&self) -> Result<(u64, u64)> {
         let accounts = self
             .path
             .parent()
@@ -150,15 +152,25 @@ impl Store {
             }
             let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let (payload,count):(u64,u64)=conn.query_row("SELECT coalesce(sum(payload_bytes+duplicate_bytes),0),count(*) FROM v2_reservations WHERE phase<>'Released'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            let cost = payload + if count > 0 { WAL_LIMIT } else { 0 };
+            let cost = payload + count * 128 * 1024 + if count > 0 { WAL_LIMIT } else { 0 };
             let allocated = allocated_len(&path)? + allocated_len(&wal_path(&path))?;
             reserved = reserved.checked_add(cost).context("volume reservation overflow")?;
             excess = excess
                 .checked_add(allocated.saturating_sub(cost))
                 .context("volume allocation overflow")?;
         }
+        let root = accounts.parent().context("volume root")?;
+        let ledger = root.join("installation.db");
+        if ledger.exists() {
+            let conn = Connection::open_with_flags(&ledger, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let records: u64 = conn.query_row("SELECT count(*) FROM protected_records", [], |r| r.get(0))?;
+            // Include committed ledger pages, its full WAL allowance and terminal
+            // envelopes/denials for every active operation, even before transfer.
+            let ledger_cost = allocated_len(&ledger)? + WAL_LIMIT + records * 128 * 1024;
+            reserved = reserved.checked_add(ledger_cost).context("ledger reservation overflow")?;
+        }
         if reserved > 0 {
-            reserved = reserved.checked_add(256 * MIB).context("terminal reserve overflow")?;
+            reserved = reserved.checked_add(required_emergency(root, None)?).context("terminal reserve overflow")?;
         }
         Ok((reserved, excess))
     }
@@ -217,6 +229,8 @@ impl Store {
                 hash: hash.try_into().map_err(|_| anyhow::anyhow!("digest identity"))?,
             });
         }
+        let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
+        grow_emergency(root, Some(&self.path))?;
         let (reserved, excess) = self.budget_from_disk()?;
         global.reserved = reserved;
         let active: u64 = self.db.query_row(
@@ -225,8 +239,12 @@ impl Store {
             |r| r.get(0),
         )?;
         let wal = if active == 0 { WAL_LIMIT } else { 0 };
-        let terminal = if reserved == 0 { 256 * MIB } else { 0 };
-        cost = cost - WAL_LIMIT - 256 * MIB + wal + terminal;
+        let emergency = if reserved == 0 { required_emergency(root, Some(&self.path))? } else { required_emergency(root, Some(&self.path))?.saturating_sub(required_emergency(root, None)?) };
+        let terminal = 128 * 1024;
+        cost = cost - WAL_LIMIT - 256 * MIB + wal + emergency;
+        let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
+        let physically_owned = allocated_tree(root)?;
+        global.space_admitted(root, (reserved + excess + cost).saturating_sub(physically_owned), false)?;
         ensure!(
             global.reserve(cost, self.quota.saturating_sub(excess)),
             "shared volume quota"
@@ -299,7 +317,11 @@ impl Store {
     }
     pub(super) fn chunk(&mut self, a: &Artifact, index: u64, bytes: &[u8]) -> Result<()> {
         ensure!(!bytes.is_empty() && bytes.len() <= CHUNK, "chunk bound");
+        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         self.before_write(false)?;
+        let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
+        let (reserved, excess) = self.budget_from_disk()?;
+        admission.space_admitted(root, (reserved + excess).saturating_sub(allocated_tree(root)?).max(DIRTY_LIMIT), false)?;
         let phase: String = self.db.query_row(
             "SELECT phase FROM v2_artifacts WHERE artifact_id=?1",
             [a.id.as_slice()],
@@ -392,10 +414,12 @@ impl Store {
             ensure!(old == (e.offset, e.packed, e.len), "immutable extent");
             return Ok(());
         }
-        let _admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, false)?;
         let (reserved, excess) = self.budget_from_disk()?;
         ensure!(reserved + excess + DIRTY_LIMIT <= self.quota, "metadata quota");
+        let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
+        admission.space_admitted(root, (reserved + excess + DIRTY_LIMIT).saturating_sub(allocated_tree(root)?), false)?;
         let _ = take_page_write_bytes(&self.db)?;
         let tx = self.db.unchecked_transaction()?;
         let before: u64 = tx.query_row(
@@ -783,7 +807,10 @@ impl Store {
                 "missing exact server identity"
             );
         }
+        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, true)?;
+        let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
+        admission.space_admitted(root, DIRTY_LIMIT, true)?;
         fault.point("before B5 disposition")?;
         let tx = self.db.unchecked_transaction()?;
         let existing: Option<Vec<u8>> = tx
@@ -957,11 +984,16 @@ impl Store {
 /// Physically written reserve, never sparse allocation. Fixture callers own its directory.
 pub(super) struct Reserve {
     pub(super) path: PathBuf,
-    remaining: u64,
+    pub(super) remaining: u64,
 }
 impl Reserve {
     pub(super) fn create(h: &Harness) -> Result<Self> {
         let path = h.path().join("reserve");
+        if path.exists() {
+            let existing = Self::existing(h.path())?;
+            ensure!(existing.remaining == 256 * MIB && allocated_len(&path)? >= 256 * MIB, "unverified bootstrap reserve");
+            return Ok(existing);
+        }
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
         let bytes = vec![0xA5; CHUNK];
         for _ in 0..64 {
@@ -973,13 +1005,22 @@ impl Reserve {
             remaining: 256 * MIB,
         })
     }
+    pub(super) fn existing(root: &Path) -> Result<Self> {
+        let path = root.join("reserve");
+        let remaining = fs::metadata(&path)?.len();
+        ensure!(allocated_len(&path)? >= remaining, "sparse emergency reserve");
+        Ok(Self { path, remaining })
+    }
     pub(super) fn release_terminal(&mut self) -> Result<u64> {
         ensure!(self.remaining >= 16 * MIB, "emergency reserve exhausted");
+        let before = allocated_len(&self.path)?;
         self.remaining -= 16 * MIB;
         let f = fs::OpenOptions::new().write(true).open(&self.path)?;
         f.set_len(self.remaining)?;
         f.sync_all()?;
-        Ok(16 * MIB)
+        let released = before.saturating_sub(allocated_len(&self.path)?);
+        ensure!(released >= 16 * MIB && file_len(&self.path) == self.remaining, "reserve did not physically release terminal space");
+        Ok(released)
     }
     pub(super) fn refill(&mut self) -> Result<()> {
         let mut f = fs::OpenOptions::new().append(true).open(&self.path)?;

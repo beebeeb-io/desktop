@@ -59,9 +59,6 @@ struct Admission {
     grants: std::collections::HashSet<(Id, Id, Id)>,
 }
 impl Admission {
-    fn recovered_can_submit(&self, _denied: bool) -> bool {
-        false
-    }
     fn new_action(&mut self, account: Id, store: &mut Store, snapshot: &Artifact) -> Result<Id> {
         store.verify(snapshot)?;
         let (kind,body,format):(String,Vec<u8>,String)=store.db.query_row("SELECT o.kind,o.body,a.format FROM v2_owners o JOIN v2_artifacts a ON a.allocation_owner=o.owner_id WHERE a.artifact_id=?1",[snapshot.id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
@@ -75,6 +72,15 @@ impl Admission {
         self.grants.insert((account, snapshot.id, token));
         Ok(token)
     }
+    fn submit(
+        &self, account: Id, snapshot: Id, token: Id, ledger: &Ledger,
+        operation: usize, sink: &mut impl FnMut(usize, Id),
+    ) -> Result<()> {
+        ensure!(operation < 3, "submission operation");
+        ensure!(self.permits(account, snapshot, token, ledger.deny(token)?), "submission admission denied");
+        sink(operation, token);
+        Ok(())
+    }
     fn permits(&self, account: Id, snapshot: Id, token: Id, denied: bool) -> bool {
         !denied && self.grants.contains(&(account, snapshot, token))
     }
@@ -82,8 +88,34 @@ impl Admission {
 #[derive(Default)]
 struct Budget {
     reserved: u64,
+    // A bounded-capacity storage model, never physical NTFS qualification.
+    capacity_ceiling: Option<u64>,
 }
 impl Budget {
+    fn space_admitted(&self, root: &Path, pending: u64, terminal: bool) -> Result<()> {
+        let reserve = root.join("reserve");
+        ensure!(reserve.exists(), "missing physical emergency reserve");
+        let length = file_len(&reserve);
+        ensure!(allocated_len(&reserve)? >= length && length >= 64 * MIB, "unverified physical emergency reserve");
+        let free = || -> Result<u64> {
+            let measured = available_bytes(root)?;
+            Ok(match self.capacity_ceiling {
+                Some(cap) => measured.min(cap.saturating_sub(allocated_tree(root)?)),
+                None => measured,
+            })
+        };
+        if terminal {
+            if free()? < pending {
+                let mut reserve = Reserve::existing(root)?;
+                reserve.release_terminal()?;
+            }
+            ensure!(free()? >= pending, "terminal completion lacks measured free space after reserve release");
+        } else {
+            ensure!(length >= required_emergency(root, None)?, "emergency reserve must be refilled before admission");
+            ensure!(free()? >= pending, "measured filesystem space exhausted");
+        }
+        Ok(())
+    }
     fn reserve(&mut self, bytes: u64, quota: u64) -> bool {
         let Some(total) = self.reserved.checked_add(bytes) else {
             return false;
@@ -232,10 +264,12 @@ struct Harness {
 }
 impl Harness {
     fn new() -> Result<Self> {
-        Ok(Self {
+        let harness = Self {
             dir: tempfile::tempdir()?,
             volume: Arc::new(Mutex::new(Budget::default())),
-        })
+        };
+        Reserve::create(&harness)?;
+        Ok(harness)
     }
     fn path(&self) -> &Path {
         self.dir.path()
@@ -315,4 +349,71 @@ fn take_page_write_bytes(db: &Connection) -> Result<u64> {
         "page-write instrumentation unsupported"
     );
     Ok(pages as u64 * 4096)
+}
+
+/// Measure caller-available bytes; no reservation can fence unrelated disk users.
+fn available_bytes(path: &Path) -> Result<u64> {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        ensure!(libc::statvfs(name.as_ptr(), info.as_mut_ptr()) == 0, "free-space measurement failed");
+        let info = info.assume_init();
+        (info.f_bavail as u64).checked_mul(info.f_frsize as u64).context("free-space overflow")
+    }
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "Kernel32")]
+        unsafe extern "system" {
+            fn GetDiskFreeSpaceExW(path: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+        }
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut free = 0;
+        ensure!(GetDiskFreeSpaceExW(name.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) != 0, "free-space measurement failed");
+        Ok(free)
+    }
+}
+fn allocated_tree(root: &Path) -> Result<u64> {
+    let mut bytes = 0u64;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        ensure!(!kind.is_symlink(), "unexpected allocator symlink");
+        let cost = if kind.is_dir() { allocated_tree(&entry.path())? } else { allocated_len(&entry.path())? };
+        bytes = bytes.checked_add(cost).context("allocation overflow")?;
+    }
+    Ok(bytes)
+}
+
+fn required_emergency(root: &Path, proposed: Option<&Path>) -> Result<u64> {
+    let mut participating = u64::from(root.join("installation.db").exists());
+    let accounts = root.join("accounts");
+    if accounts.exists() {
+        for entry in fs::read_dir(accounts)? {
+            let path = entry?.path().join("state-v2.db");
+            if !path.exists() { continue; }
+            let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let active: u64 = db.query_row("SELECT count(*) FROM v2_reservations WHERE phase<>'Released'", [], |r| r.get(0))?;
+            if active > 0 || proposed == Some(path.as_path()) { participating += 1; }
+        }
+    }
+    Ok((participating * 64 * MIB).max(256 * MIB))
+}
+fn grow_emergency(root: &Path, proposed: Option<&Path>) -> Result<()> {
+    let required = required_emergency(root, proposed)?;
+    let mut reserve = Reserve::existing(root)?;
+    ensure!(reserve.remaining >= 256 * MIB, "emergency reserve must be refilled before admission");
+    let extra = required.saturating_sub(reserve.remaining);
+    ensure!(available_bytes(root)? >= extra, "cannot grow physical emergency reserve");
+    let mut file = fs::OpenOptions::new().append(true).open(&reserve.path)?;
+    let bytes = vec![0xA5; CHUNK];
+    while reserve.remaining < required {
+        file.write_all(&bytes)?;
+        reserve.remaining += CHUNK as u64;
+    }
+    file.sync_all()?;
+    ensure!(allocated_len(&reserve.path)? >= required, "reserve growth was not physically allocated");
+    Ok(())
 }
