@@ -94,3 +94,31 @@ mod tests {
         assert!(should_inspect_close(false, None, 10));
     }
 }
+
+/// Durable metadata for a packed snapshot of modified CFAPI ranges. Bytes are
+/// stored separately in a flushed payload; missing ranges always use this base.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PartialWrite {
+    pub base_version: i64,
+    pub eof: u64,
+    pub ranges: Vec<(u64, u64)>,
+}
+
+impl PartialWrite {
+    pub fn assemble(&self, mut base: zeroize::Zeroizing<Vec<u8>>, patch: &[u8]) -> anyhow::Result<zeroize::Zeroizing<Vec<u8>>> {
+        base.resize(usize::try_from(self.eof)?, 0);
+        let mut consumed = 0usize;
+        let mut previous_end = 0u64;
+        for &(offset, length) in &self.ranges {
+            let end = offset.checked_add(length).ok_or_else(|| anyhow::anyhow!("partial range overflow"))?;
+            anyhow::ensure!(offset >= previous_end && end <= self.eof, "invalid partial snapshot range");
+            let next = consumed.checked_add(usize::try_from(length)?).ok_or_else(|| anyhow::anyhow!("partial length overflow"))?;
+            anyhow::ensure!(next <= patch.len(), "truncated partial snapshot");
+            base[usize::try_from(offset)?..usize::try_from(end)?].copy_from_slice(&patch[consumed..next]);
+            consumed = next;
+            previous_end = end;
+        }
+        anyhow::ensure!(consumed == patch.len(), "unexpected partial snapshot bytes");
+        Ok(base)
+    }
+}

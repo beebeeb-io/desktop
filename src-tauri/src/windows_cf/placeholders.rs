@@ -940,3 +940,6 @@ fn unix_to_filetime(modified_at: i64) -> i64 {
         .saturating_add(FILETIME_UNIX_EPOCH_OFFSET_SECS)
         .saturating_mul(10_000_000)
 }
+
+#[path = "partial_edits.rs"]
+pub(crate) mod partial_edits;

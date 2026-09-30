@@ -204,6 +204,11 @@ impl FileSM {
 
 // ── EngineBridge ──────────────────────────────────────────────────────────────
 
+struct DownloadedFile {
+    bytes: Zeroizing<Vec<u8>>,
+    version: Option<i64>,
+}
+
 pub struct EngineBridge {
     db: Arc<StateDb>,
     api: Arc<ApiClient>,
@@ -426,7 +431,10 @@ impl EngineBridge {
         };
         let operations = self.db.list_due_operations(now)?;
 
-        for op in operations {
+        for scheduled in operations {
+            // Resolution may have retired/rebased a chain since this batch was
+            // selected. Never execute a stale queued snapshot after resolution.
+            let Some(op) = self.db.list_review_operations()?.into_iter().find(|op| op.op_id == scheduled.op_id) else { continue; };
             // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
             // the queue the instant a caller asks this engine to stop,
             // rather than finishing every due operation first. `abort()`'s
@@ -445,27 +453,35 @@ impl EngineBridge {
                 prior.file_id == op.file_id && prior.op_id != op.op_id
                 && prior.kind == OperationKind::UploadVersion && prior.base_version < op.base_version
             ) { continue; }
-            let result = self.execute_operation(&op, sync_root, now).await;
+            // A queued partial snapshot survives offline/restart. Materialize
+            // only its missing base-version ranges before entering upload logic.
+            let (op, result) = match self.materialize_partial_operation(&op, sync_root).await {
+                Ok(prepared) => {
+                    let result = self.execute_operation(&prepared, sync_root, now).await;
+                    (prepared, result)
+                }
+                Err(error) => (op, Err(error)),
+            };
             match result {
                 Ok(()) => {
                     self.db.remove_operation(&op.op_id)?;
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
                     }
-                    outcome.completed_op_ids.push(op.op_id);
+                    outcome.completed_op_ids.push(op.op_id.clone());
                 }
                 Err(error) => {
                     if windows_edit && error.downcast_ref::<reqwest::Error>()
                         .and_then(|e| e.status()).is_some_and(|status| status.as_u16() == 409) {
                         self.preserve_windows_edit_conflict(&op, sync_root, now)?;
-                        outcome.paused_op_ids.push(op.op_id);
+                        outcome.paused_op_ids.push(op.op_id.clone());
                         continue;
                     }
                     let class = classify_operation_error(&error.to_string());
                     if let Some(reason) = class.pause_reason() {
                         self.db
                             .record_operation_pause(&op.op_id, reason, Some(&error.to_string()), now)?;
-                        outcome.paused_op_ids.push(op.op_id);
+                        outcome.paused_op_ids.push(op.op_id.clone());
                     } else {
                         let attempts = op.attempts.saturating_add(1);
                         let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
@@ -478,13 +494,81 @@ impl EngineBridge {
                         if attempts >= op.max_attempts {
                             self.abandon_upload_after_give_up(&op).await;
                         }
-                        outcome.retried_op_ids.push(op.op_id);
+                        outcome.retried_op_ids.push(op.op_id.clone());
                     }
                 }
             }
         }
 
         Ok(outcome)
+    }
+
+    async fn materialize_partial_operation(&self, op: &PendingOperation,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path) -> anyhow::Result<PendingOperation> {
+        let mut metadata = operation_metadata(op)?;
+        if metadata["windows_partial"].is_null() { return Ok(op.clone()); }
+        let spec: crate::windows_edits::PartialWrite = serde_json::from_value(metadata["windows_partial"].clone())?;
+        let file_id = op.file_id.as_deref().ok_or_else(|| anyhow::anyhow!("partial snapshot missing identity"))?;
+        let source = Path::new(op.payload_path.as_deref().ok_or_else(|| anyhow::anyhow!("partial snapshot missing payload"))?);
+        let patch = Zeroizing::new(std::fs::read(source)?);
+        let base = self.download_base_version(file_id, spec.base_version).await?;
+        let bytes = spec.assemble(base, &patch)?;
+        let full_path = source.with_file_name(format!("{}.assembled", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&full_path)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        std::fs::File::open(full_path.parent().unwrap())?.sync_all()?;
+        let mut full = op.clone();
+        metadata["windows_partial"] = serde_json::Value::Null;
+        metadata["windows_content_hash"] = crate::windows_edits::hash_bytes(&bytes).into();
+        full.metadata_json = Some(serde_json::to_string(&metadata)?);
+        full.payload_path = Some(full_path.to_string_lossy().into_owned());
+        // Commit new payload authority before dropping the packed snapshot.
+        self.db.enqueue_operation(&full)?;
+        #[cfg(target_os = "windows")]
+        if let Some(target) = op.target_path.as_deref() {
+            let path = local_file_path_under_sync_root(sync_root, target)?;
+            // Fill the live file only if its modified ranges still match the
+            // captured save. A later writer keeps ownership of its new bytes.
+            if let Err(error) = crate::windows_cf::placeholders::partial_edits::materialize_if_unchanged(&path, &spec, &patch, &bytes) {
+                tracing::warn!(op_id = %op.op_id, error = %error, "partial live materialization deferred; durable full snapshot retained");
+            }
+        }
+        std::fs::remove_file(source)?;
+        Ok(full)
+    }
+
+    async fn download_base_version(&self, file_id: &str, version: i64) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        let meta = self.api.get_file(file_id).await?;
+        if meta["version_number"].as_i64() == Some(version) {
+            let bytes = self.do_hydrate_with_meta(file_id, &meta).await?;
+            let after = self.api.get_file(file_id).await?;
+            anyhow::ensure!(after["version_number"] == meta["version_number"]
+                && after["current_object_version_id"] == meta["current_object_version_id"],
+                "base version changed during partial reconstruction");
+            return Ok(bytes);
+        }
+        // Immutable object_versions endpoint; never substitute current bytes for
+        // a historical base or use the server's legacy mutable-version fallback.
+        let versions = self.api.list_versions(file_id).await?;
+        let meta = versions["versions"].as_array().and_then(|items| items.iter().find(|v|
+            v["version_number"].as_i64() == Some(version) && v["object_version_id"].is_string()))
+            .ok_or_else(|| anyhow::anyhow!("partial base version unavailable; snapshot retained"))?;
+        let id = meta["object_version_id"].as_str().unwrap();
+        let chunk_size = meta["chunk_size_bytes"].as_u64().filter(|v| *v > 0)
+            .ok_or_else(|| anyhow::anyhow!("base version missing chunk layout"))?;
+        let count = meta["chunk_count"].as_u64().ok_or_else(|| anyhow::anyhow!("base version missing chunk count"))?;
+        let encrypted = self.api.download_version(file_id, id).await?;
+        let key = self.file_key_for_download(file_id).await?;
+        let width = usize::try_from(chunk_size.checked_add(28).ok_or_else(|| anyhow::anyhow!("chunk overflow"))?)?;
+        let mut bytes = Zeroizing::new(Vec::new());
+        anyhow::ensure!(encrypted.chunks(width).count() as u64 == count, "invalid immutable base layout");
+        for chunk in encrypted.chunks(width) {
+            let plain = Zeroizing::new(decrypt_downloaded_chunk(&key, chunk)?);
+            bytes.extend_from_slice(&plain);
+        }
+        Ok(bytes)
     }
 
     /// Retain the durable payload AND a visible, non-overwriting conflict copy.
@@ -1490,10 +1574,23 @@ impl EngineBridge {
             || !path.canonicalize()?.starts_with(root.canonicalize()?) {
             return Ok(Some(false));
         }
-        #[cfg(target_os = "windows")]
-        if !crate::windows_cf::placeholders::resident_for_edit(path)? { return Ok(Some(false)); }
         self.ensure_item_allows_shared_write(&entry.file_id, "modify")?;
-        let digest = crate::windows_edits::hash_file(path)?;
+        #[allow(unused_mut)]
+        let mut partial: Option<(crate::windows_edits::PartialWrite, Zeroizing<Vec<u8>>)> = None;
+        #[cfg(target_os = "windows")]
+        if !crate::windows_cf::placeholders::resident_for_edit(path)? {
+            let Some(snapshot) = crate::windows_cf::placeholders::partial_edits::capture(path)? else { return Ok(Some(false)); };
+            let contract = self.db.get_file_contract_state(&entry.file_id)?
+                .ok_or_else(|| anyhow::anyhow!("partial file has no base"))?;
+            anyhow::ensure!(contract.local_base_version > 0, "partial file has no known base version");
+            partial = Some((crate::windows_edits::PartialWrite { base_version: contract.local_base_version,
+                eof: snapshot.eof, ranges: snapshot.ranges }, snapshot.bytes));
+        }
+        let digest = if let Some((spec, bytes)) = &partial {
+            let mut identity = serde_json::to_vec(spec)?;
+            identity.extend_from_slice(bytes);
+            crate::windows_edits::hash_bytes(&identity)
+        } else { crate::windows_edits::hash_file(path)? };
         let pending = self.db.list_review_operations()?.into_iter().filter(|op|
             op.file_id.as_deref() == Some(&entry.file_id) && op.kind == OperationKind::UploadVersion
         ).collect::<Vec<_>>();
@@ -1507,7 +1604,7 @@ impl EngineBridge {
             .ok_or_else(|| anyhow::anyhow!("tracked edit has no contract"))?;
         let latest = pending.iter().max_by_key(|op| op.base_version.unwrap_or(0));
         let previous_hash = latest.and_then(|op| operation_metadata(op).ok())
-            .and_then(|m| m["windows_content_hash"].as_str().map(str::to_owned))
+            .and_then(|m| m[if partial.is_some() {"windows_snapshot_hash"} else {"windows_content_hash"}].as_str().map(str::to_owned))
             .or_else(|| contract.local_hash.clone());
         if previous_hash.as_deref() == Some(&digest) { return Ok(Some(false)); }
         // Unknown legacy baseline is preserved as an edit, never blessed clean.
@@ -1516,15 +1613,22 @@ impl EngineBridge {
         #[cfg(target_os = "windows")]
         crate::windows_cf::placeholders::mark_dirty(path)?;
         let staging = root.join(".beebeeb").join("windows-writes");
-        let staged = stage_finder_payload_with_root(&path.to_string_lossy(), staging.clone())?;
+        let staged = if let Some((_, bytes)) = &partial {
+            std::fs::create_dir_all(&staging)?;
+            let path = staging.join(uuid::Uuid::new_v4().to_string());
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+            std::io::Write::write_all(&mut file, bytes)?;
+            file.sync_all()?;
+            path.to_string_lossy().into_owned()
+        } else { stage_finder_payload_with_root(&path.to_string_lossy(), staging.clone())? };
         let staged_file = std::fs::OpenOptions::new().read(true).write(true).open(&staged)?;
         staged_file.sync_all()?;
         #[cfg(unix)]
         std::fs::File::open(&staging)?.sync_all()?;
         // If a writer raced the copy, keep the source dirty and retry; don't
         // enqueue a torn snapshot or claim its bytes as a confirmed baseline.
-        if crate::windows_edits::hash_file(Path::new(&staged))? != digest
-            || crate::windows_edits::hash_file(path)? != digest {
+        if partial.is_none() && (crate::windows_edits::hash_file(Path::new(&staged))? != digest
+            || crate::windows_edits::hash_file(path)? != digest) {
             std::fs::remove_file(&staged)?;
             anyhow::bail!("file changed while staging Windows edit");
         }
@@ -1534,14 +1638,15 @@ impl EngineBridge {
             filename, contract.content_type.as_deref())?;
         let mut metadata = serde_json::json!({
             "operation": "upload_version", "windows_edit": true,
-            "windows_content_hash": digest, "name_encrypted": encrypted,
+            "windows_content_hash": digest, "windows_snapshot_hash": digest, "name_encrypted": encrypted,
             "content_type": contract.content_type,
-            "size_bytes": staged_file.metadata()?.len(),
+            "size_bytes": partial.as_ref().map(|(p,_)| p.eof).unwrap_or(staged_file.metadata()?.len()),
+            "windows_partial": partial.as_ref().map(|(p,_)| p),
         });
         apply_shared_context(&mut metadata, Some(&contract).filter(|c| c.is_shared()));
         self.enqueue_finder_operation(OperationKind::UploadVersion, Some(entry.file_id.clone()),
             contract.parent_id, Some(rel), metadata, Some(staged), Some(base),
-            if latest.is_none() { contract.current_object_version_id } else { None })?;
+            if latest.is_none() && contract.local_base_version == contract.current_version { contract.current_object_version_id } else { None })?;
         // Queue insertion is the durable authority. Even if this status write
         // fails, every reclaim path checks the queue too.
         self.db.set_status(&entry.file_id, FileStatus::Uploading)?;
@@ -2453,7 +2558,10 @@ impl EngineBridge {
         // catch.
         self.db.set_status(file_id, FileStatus::Downloading)?;
         match self.do_hydrate(file_id).await {
-            Ok(mut buf) => {
+            Ok(download) => {
+                let hash = crate::windows_edits::hash_bytes(&download.bytes);
+                let version = download.version;
+                let mut buf = download.bytes;
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
                 // Make the destination directory if needed.
@@ -2477,6 +2585,9 @@ impl EngineBridge {
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
                 write_result?;
+                if let Some(version) = version {
+                    self.db.record_download_baseline(file_id, version, &hash)?;
+                }
 
                 self.db.set_status(file_id, FileStatus::Local)?;
                 let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
@@ -2533,21 +2644,20 @@ impl EngineBridge {
     /// the bytes live inside the CF placeholder in the sync root, not at a
     /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
     /// the real on-disk path from `path` + sync root (see state_db comment).
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", test))]
     pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         self.db.set_status(file_id, FileStatus::Downloading)?;
         match self.do_hydrate(file_id).await {
-            Ok(buf) => {
+            Ok(download) => {
+                let buf = download.bytes;
                 self.db.set_status(file_id, FileStatus::Local)?;
                 // cache_path is empty: on Windows CF the hydrated bytes live
                 // INSIDE the placeholder (the CF runtime writes them there after
                 // our CfExecute(TRANSFER_DATA) calls). There is no separate temp
                 // file. Byte count is still recorded for smart-cache accounting.
                 self.db.mark_cached(file_id, "", buf.len() as i64, now_secs())?;
-                if let Some(mut contract) = self.db.get_file_contract_state(file_id)? {
-                    contract.local_hash = Some(crate::windows_edits::hash_bytes(&buf));
-                    contract.local_base_version = contract.current_version;
-                    self.db.set_file_contract_state(&contract)?;
+                if let Some(version) = download.version {
+                    self.db.record_download_baseline(file_id, version, &crate::windows_edits::hash_bytes(&buf))?;
                 }
                 let _ = self.enforce_configured_cache_limit();
                 Ok(buf)
@@ -2630,7 +2740,7 @@ impl EngineBridge {
         }
     }
 
-    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<DownloadedFile> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -2640,7 +2750,19 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
-        self.do_hydrate_with_meta(file_id, &meta).await
+        let version = meta["version_number"].as_i64().filter(|v| *v > 0);
+        let bytes = self.do_hydrate_with_meta(file_id, &meta).await?;
+        // Current chunk endpoints are mutable. Monotonic version numbers and
+        // object identity must still match AFTER every chunk has been read.
+        // Legacy responses lacking an identity never establish a trusted baseline.
+        if version.is_some() {
+            let after = self.api.get_file(file_id).await?;
+            anyhow::ensure!(after["version_number"] == meta["version_number"]
+                && after["current_object_version_id"] == meta["current_object_version_id"]
+                && after["chunk_count"] == meta["chunk_count"],
+                "remote version changed during download; retry required");
+        }
+        Ok(DownloadedFile { bytes, version })
     }
 
     /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
@@ -2914,6 +3036,37 @@ impl EngineBridge {
         Ok(Zeroizing::new(plaintext))
     }
 
+    async fn preserve_resolution_chain(&self, file_id: &str, root: &Path) -> anyhow::Result<Vec<PendingOperation>> {
+        let queued: Vec<_> = self.db.list_review_operations()?.into_iter().filter(|op|
+            op.file_id.as_deref() == Some(file_id) && operation_metadata(op).ok()
+                .is_some_and(|m| m["windows_edit"].as_bool() == Some(true))
+        ).collect();
+        let mut operations = Vec::new();
+        for op in queued {
+            let op = self.materialize_partial_operation(&op, root).await?;
+            self.preserve_windows_edit_conflict(&op, root, now_secs())?;
+            operations.push(op);
+        }
+        Ok(operations)
+    }
+
+    fn retire_resolution_chain(&self, file_id: &str, operations: &[PendingOperation]) -> anyhow::Result<()> {
+        let ids: Vec<_> = operations.iter().map(|op| op.op_id.clone()).collect();
+        self.db.finish_windows_resolution(file_id, &ids)?;
+        for op in operations {
+            if let Some(path) = &op.payload_path {
+                // Every snapshot has a verified, fsynced visible copy already.
+                // A cleanup failure leaves an orphan that sign-out must preserve.
+                if let Err(e) = std::fs::remove_file(path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(op_id = %op.op_id, error = %e, "resolved payload cleanup failed");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Apply a "Keep Mine" resolution: stage the current local bytes and upload
     /// them as a new server version using the same chunked upload path as normal
     /// Finder writes. On success, [`Self::upload_version`] applies the regular
@@ -2924,6 +3077,7 @@ impl EngineBridge {
     /// `sync_root` is supplied by the caller because the bridge itself doesn't
     /// know it (the runner owns that).
     pub async fn resolve_keep_mine(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
+        let chain = self.preserve_resolution_chain(file_id, sync_root).await?;
         let entry = self
             .db
             .get_file(file_id)?
@@ -2952,6 +3106,7 @@ impl EngineBridge {
             "name_encrypted": name_encrypted,
             "content_type": content_type,
             "size_bytes": staged_size,
+            "windows_content_hash": crate::windows_edits::hash_file(Path::new(&staged_path))?,
             "uploaded_by": "authenticated_desktop_user",
         });
         apply_shared_context(&mut metadata, shared_contract.as_ref());
@@ -2993,6 +3148,7 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
         }
 
+        self.retire_resolution_chain(file_id, &chain)?;
         tracing::info!(file_id = %file_id, "conflict resolved: keep mine uploaded local version");
         Ok(())
     }
@@ -3009,6 +3165,7 @@ impl EngineBridge {
     /// `content_hash` is still on the row (it isn't anymore — the row
     /// was already in Conflict — but we belt-and-brace anchor anyway).
     pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
+        let chain = self.preserve_resolution_chain(file_id, sync_root).await?;
         let mut entry = self
             .db
             .get_file(file_id)?
@@ -3026,6 +3183,7 @@ impl EngineBridge {
         entry.remote_updated_at = now_secs;
         entry.modified_at = now_secs;
         self.db.upsert_file(&entry)?;
+        self.retire_resolution_chain(file_id, &chain)?;
         tracing::info!(file_id = %file_id, dest = %dest.display(), "conflict resolved: keep theirs");
         Ok(())
     }
@@ -3049,6 +3207,7 @@ impl EngineBridge {
     /// `sync_root` is supplied by the caller because the bridge
     /// itself doesn't know it (the runner owns that).
     pub async fn auto_resolve_keep_both(&self, sync_root: &Path, entry: &FileEntry) -> anyhow::Result<String> {
+        let chain = self.preserve_resolution_chain(&entry.file_id, sync_root).await?;
         let original = local_file_path_under_sync_root(sync_root, &entry.path)?;
 
         // If the local file no longer exists on disk (user deleted it
@@ -3056,6 +3215,7 @@ impl EngineBridge {
         if !original.exists() {
             self.hydrate_file(&entry.file_id, &original, &[sync_root]).await?;
             self.db.set_status(&entry.file_id, FileStatus::Local)?;
+            self.retire_resolution_chain(&entry.file_id, &chain)?;
             return Ok(entry.path.clone());
         }
 
@@ -3083,6 +3243,7 @@ impl EngineBridge {
             return Err(e);
         }
         self.db.set_status(&entry.file_id, FileStatus::Local)?;
+        self.retire_resolution_chain(&entry.file_id, &chain)?;
         Ok(conflict_name)
     }
 
@@ -5754,6 +5915,7 @@ fn process_metadata_row(
 
 #[cfg(test)]
 mod tests {
+    include!("engine_bridge_round3_tests.rs");
     use super::*;
     use base64::Engine;
     use std::io::Write as _;
@@ -8257,7 +8419,8 @@ mod tests {
         std::fs::write(&original, b"local conflict bytes").unwrap();
 
         let file_id = "bbbb0000-0000-4000-8000-000000000010";
-        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), [15u8; 32]);
+        let server = SyncMockServer::start(vec![("503 Service Unavailable".into(), serde_json::json!({"error": "offline"}))]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [15u8; 32]);
         bridge
             .db
             .upsert_file(&FileEntry {
@@ -8277,9 +8440,9 @@ mod tests {
         let err = bridge
             .auto_resolve_keep_both(&sync_root, &entry)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("error sending request") || err.contains("Connection refused"));
+            .unwrap_err();
+        let transport = err.downcast_ref::<reqwest::Error>().expect("typed HTTP failure");
+        assert_eq!(transport.status(), Some(reqwest::StatusCode::SERVICE_UNAVAILABLE));
 
         let row = bridge.db.get_file(file_id).unwrap().unwrap();
         assert_eq!(row.status, FileStatus::Error);

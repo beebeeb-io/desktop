@@ -46,3 +46,21 @@ memory (64 KiB buffer) but costs I/O proportional to resident file size; the epi
 large-tree performance rung remains necessary. Remote subtree deletion belongs
 to serialized task 1641; immutable download versions and ambiguous completion
 recovery remain the subsequent epic work.
+
+## Round 3 correction (2026-09-30, Guus task 1640 ruling)
+
+- Hydration carries its downloaded version alongside plaintext; only that pair
+  may become the confirmed baseline. Current DB metadata can advance independently.
+  Mutable chunk downloads must validate the same server identity before/after.
+- Missing ranges do not imply clean content. Native modified data and in-sync
+  state distinguish clean cloud placeholders from dirty partial files. Preserve
+  dirty ranges plus EOF in a durable snapshot/queue before network work; fill
+  missing bytes from the captured base version, never the newer remote winner.
+- Each conflict choice captures its operation chain and preserves its staged
+  saves as recoverable copies before retiring those operations after success.
+  Saves arriving during resolution stay queued, with their base reconciled to
+  the resolved version. Failures keep operations and payloads recoverable.
+- `.beebeeb/windows-writes` is reserved engine storage. Sign-out holds native
+  directory handles and only deletes these two directories after proving their
+  contents empty. Pending operations, orphan payloads, unknown children and
+  reparse points must refuse sign-out without deleting payloads.

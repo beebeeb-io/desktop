@@ -1665,6 +1665,48 @@ impl StateDb {
         Ok(revoked)
     }
 
+    /// Persist the identity of downloaded bytes without overwriting metadata that
+    /// a sync delta advanced while the network request was in flight.
+    pub fn record_download_baseline(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3,
+             current_version = MAX(current_version, ?2) WHERE file_id = ?1",
+            params![file_id, version, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Retire only the captured resolution chain. New saves retain their payloads
+    /// and are rebased in the same transaction, so restart cannot expose half a chain.
+    pub fn finish_windows_resolution(&self, file_id: &str, resolved: &[String]) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        for op_id in resolved {
+            tx.execute("DELETE FROM operation_queue WHERE op_id = ?1 AND file_id = ?2", params![op_id, file_id])?;
+        }
+        tx.execute("DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)", [])?;
+        let mut base: i64 = tx.query_row("SELECT local_base_version FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))?;
+        let successors: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT op_id FROM operation_queue WHERE file_id = ?1
+                AND kind = 'upload_version' AND json_extract(metadata_json, '$.windows_edit') = 1
+                ORDER BY base_version, created_at, op_id")?;
+            let rows = stmt.query_map(params![file_id], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        for id in &successors {
+            tx.execute("UPDATE operation_queue SET base_version = ?2, base_object_version_id = NULL,
+                attempts = 0, paused_reason = NULL, last_error = NULL, next_retry_at = 0 WHERE op_id = ?1", params![id, base])?;
+            // Any existing upload session was initialized with the old precondition.
+            tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![id])?;
+            base += 1;
+        }
+        tx.execute("UPDATE files SET status = ?2 WHERE file_id = ?1",
+            params![file_id, if successors.is_empty() {"local"} else {"uploading"}])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(

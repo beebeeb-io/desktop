@@ -81,6 +81,22 @@ fn prepare(
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         let relative = path.strip_prefix(root)?.to_string_lossy().replace('/', "\\");
+        // Reserved engine directories have no DB row. Accept only the exact
+        // two owned directories, hold them against replacement, and traverse
+        // with this same fail-closed policy. Every payload/unknown child refuses.
+        if relative == ".beebeeb" || relative == ".beebeeb\\windows-writes" {
+            let file = std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES.0 | DELETE.0)
+                .share_mode(FILE_SHARE_READ.0)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+                .open(&path)?;
+            let meta = file.metadata()?;
+            anyhow::ensure!(meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+                "Engine staging changed type; sign-out refused");
+            directories.push(file);
+            prepare(root, &path, known, handles, directories)?;
+            continue;
+        }
         let row = known.get(&relative).ok_or_else(|| anyhow::anyhow!(
             "Unsynced files remain in the sync folder. Sync them or move them outside Beebeeb, then unlock and retry sign-out."
         ))?;

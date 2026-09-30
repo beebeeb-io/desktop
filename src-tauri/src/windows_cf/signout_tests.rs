@@ -193,3 +193,27 @@ fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
     assert!(purge(&f.db, Some(&f.root)).is_err());
     assert_eq!(std::fs::read(child).unwrap(), b"new unsynced bytes");
 }
+
+#[test]
+fn regression_1640_r3_empty_upload_staging_signout() {
+    let f = Fixture::new();
+    let staging = f.root.join(".beebeeb/windows-writes");
+    std::fs::create_dir_all(&staging).unwrap();
+    // Upload completion removes its payload; these reserved directories remain.
+    let payload = staging.join("completed");
+    std::fs::write(&payload, b"uploaded bytes").unwrap();
+    std::fs::remove_file(payload).unwrap();
+    purge(&f.db, Some(&f.root)).expect("empty engine staging must not block sign-out");
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+}
+
+#[test]
+fn regression_1640_r3_orphan_staging_refuses_signout() {
+    let f = Fixture::new();
+    let staging = f.root.join(".beebeeb/windows-writes");
+    std::fs::create_dir_all(&staging).unwrap();
+    let payload = staging.join("orphan");
+    std::fs::write(&payload, b"only copy").unwrap();
+    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert_eq!(std::fs::read(payload).unwrap(), b"only copy");
+}
