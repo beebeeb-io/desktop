@@ -255,7 +255,7 @@ final class IPCFrameReader {
             if let index = found {
                 let frame = Array(buffer[0..<index])
                 buffer.removeSubrange(0...index)
-                // MUTATION B (red-proof): scannedThrough not reset after consuming a frame
+                scannedThrough = 0
                 scanner.reset()
                 scanner.feed(buffer[0..<buffer.count])
                 if IPCFrameReader.isBlank(frame) {
