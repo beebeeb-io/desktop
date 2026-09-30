@@ -64,7 +64,7 @@ enum IPCFraming {
     /// contents to copy; a folder create, a rename or a delete stays on the
     /// short metadata timeout so a wedged daemon still fails fast.
     static func writeQueueTimeoutSeconds(hasContents: Bool) -> Int {
-        return metadataTimeoutSeconds // MUTATION C (red-proof)
+        return hasContents ? stagedCopyTimeoutSeconds : metadataTimeoutSeconds
     }
 
     static let readChunkBytes = 64 * 1024
@@ -255,7 +255,7 @@ final class IPCFrameReader {
             if let index = found {
                 let frame = Array(buffer[0..<index])
                 buffer.removeSubrange(0...index)
-                scannedThrough = 0
+                // MUTATION B (red-proof): scannedThrough not reset after consuming a frame
                 scanner.reset()
                 scanner.feed(buffer[0..<buffer.count])
                 if IPCFrameReader.isBlank(frame) {
@@ -263,7 +263,7 @@ final class IPCFrameReader {
                 }
                 return Data(frame)
             }
-            // MUTATION A (red-proof): scan position never advances
+            scannedThrough = buffer.count
             // 2. Legacy peer: one complete value, no delimiter.
             if scanner.hasCompleteValue {
                 let frame = buffer
