@@ -258,17 +258,31 @@ mod tests {
         assert_eq!(FILENAME_V2, "window-state-v2.json");
     }
 
-    #[test]
-    fn the_plugin_accepts_exactly_this_configuration() {
-        // Compile-time proof that tauri-plugin-window-state 2.4 has every knob
-        // rule 8 depends on (`with_filename`, `with_filter`, `with_state_flags`,
-        // `skip_initial_state`). Building does not need a display.
-        let _plugin = tauri_plugin_window_state::Builder::default()
+    /// Type-checked, never instantiated. Do NOT call it with `tauri::Wry`: that
+    /// links the real webview runtime into the test executable, and on Windows
+    /// the lib test binary then fails to start (STATUS_ENTRYPOINT_NOT_FOUND,
+    /// 0xc0000139, a comctl32 v6 import with no manifest) - found by CI on PR #82.
+    #[allow(dead_code)]
+    fn plugin_for_macos<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+        tauri_plugin_window_state::Builder::default()
             .with_filename(FILENAME_V2)
             .with_filter(tracks_label)
             .with_state_flags(state_flags())
             .skip_initial_state(TRACKED_LABEL)
-            .build::<tauri::Wry>();
+            .build::<R>()
+    }
+
+    #[test]
+    fn the_plugin_builder_accepts_this_configuration() {
+        // The generic fn above is the compile-time proof that tauri-plugin-window-state
+        // 2.4 has every knob rule 8 depends on (`with_filename`, `with_filter`,
+        // `with_state_flags`, `skip_initial_state`). This runs the builder half,
+        // which needs no runtime, so nothing webview-shaped is linked.
+        let _builder = tauri_plugin_window_state::Builder::default()
+            .with_filename(FILENAME_V2)
+            .with_filter(tracks_label)
+            .with_state_flags(state_flags())
+            .skip_initial_state(TRACKED_LABEL);
     }
 
     #[test]
