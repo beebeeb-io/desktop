@@ -179,3 +179,21 @@ fn round7_recovery_guard_rejects_held_transition_and_missing_final_fence() {
         }
     }
 }
+
+#[test]
+fn default_native_suite_requires_opt_in_for_machine_registration() {
+    let source = include_str!("../src/windows_cf/signout_tests.rs").replace("\r\n", "\n");
+    let names = [
+        "round6_uploaded_local_identity_matches_server_and_signs_out",
+        "round6_foreign_and_dirty_placeholders_keep_bytes",
+        "round6_unregister_removes_empty_owned_hkcu_key",
+        "round6_upload_finalization_preserves_foreign_or_changed_bytes",
+        "round6_verified_upload_finalization_updates_identity",
+    ];
+    assert_eq!(source.matches("RegisteredRoot::new()").count(), 4);
+    for name in names {
+        let before = &source[..source.find(&format!("fn {name}(")).unwrap()];
+        let attributes = before.rsplit("#[test]").next().unwrap();
+        assert!(attributes.contains("#[ignore ="), "{name} must require exclusive native QA opt-in");
+    }
+}

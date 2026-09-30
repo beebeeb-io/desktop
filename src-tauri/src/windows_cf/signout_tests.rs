@@ -1,4 +1,5 @@
-//! Real Windows filesystem/CFAPI and SQLite tests; no provider registration or account.
+//! Windows filesystem/CFAPI and SQLite fixtures; no production account.
+//! Tests that register roots or touch SyncRootManager require exclusive QA opt-in (`--ignored`).
 use super::*;
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState};
 
@@ -266,6 +267,7 @@ impl Drop for RegisteredRoot {
 }
 
 #[test]
+#[ignore = "requires exclusive native QA ownership of machine registrations"]
 fn round6_uploaded_local_identity_matches_server_and_signs_out() {
     let registered = RegisteredRoot::new();
     let f = &registered.0;
@@ -281,6 +283,7 @@ fn round6_uploaded_local_identity_matches_server_and_signs_out() {
 }
 
 #[test]
+#[ignore = "requires exclusive native QA ownership of machine registrations"]
 fn round6_foreign_and_dirty_placeholders_keep_bytes() {
     for foreign in [true, false] {
         let registered = RegisteredRoot::new();
@@ -298,6 +301,7 @@ fn round6_foreign_and_dirty_placeholders_keep_bytes() {
 }
 
 #[test]
+#[ignore = "requires exclusive native QA ownership of machine registrations"]
 fn round6_unregister_removes_empty_owned_hkcu_key() {
     use windows::Win32::System::Registry::*;
     use windows::Win32::Foundation::{ERROR_SUCCESS, ERROR_FILE_NOT_FOUND};
@@ -320,6 +324,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
 }
 
 #[test]
+#[ignore = "requires exclusive native QA ownership of machine registrations"]
 fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
     for foreign in [false, true] {
         let registered = RegisteredRoot::new();
@@ -338,6 +343,7 @@ fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
 }
 
 #[test]
+#[ignore = "requires exclusive native QA ownership of machine registrations"]
 fn round6_verified_upload_finalization_updates_identity() {
     let registered = RegisteredRoot::new();
     let f = &registered.0;
