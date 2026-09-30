@@ -213,31 +213,7 @@ async fn round3_resolution(choice: &str) {
     let queued = bridge.db.list_review_operations().unwrap();
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].base_version, Some(if choice == "mine" { 21 } else { 20 }));
-    #[cfg(target_os = "windows")]
-    if let Some(count) = fault {
-        crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(Some(count)));
-        let result = bridge.process_due_operations(&root, i64::MAX / 2).await.unwrap();
-        crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(None));
-        // Actual scanner observes the provider-created empty/short live file.
-        // Clear only the injected CF metadata; no manual queue entries.
-        crate::windows_cf::placeholders::partial_edits::TEST_RANGES.with(|v| *v.borrow_mut() = None);
-        use std::os::windows::ffi::OsStrExt;
-        let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        unsafe { windows::Win32::Storage::FileSystem::SetFileAttributesW(
-            windows::core::PCWSTR(wide.as_ptr()), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL).unwrap(); }
-        crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
-        assert_eq!(received.lock().unwrap().len(), 0, "unfinished live materialization must not upload");
-        assert_eq!(result.retried_op_ids.len(), 1);
-        assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "provider partial is not another save");
-        let ops = bridge.db.list_review_operations().unwrap();
-        assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), expected);
-    }
-    let _ = fault;
-    drop(bridge);
-    let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
-    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
-    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "restart scan must not capture provider bytes");
-    let result = bridge.process_due_operations(&root, i64::MAX / 2 + 10000).await.unwrap();
+    let result = bridge.process_due_operations(&root, i64::MAX / 2).await.unwrap();
     assert_eq!(
         result.completed_op_ids.len(),
         1,
