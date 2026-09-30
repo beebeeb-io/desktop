@@ -1,11 +1,13 @@
-# Beebeeb Desktop 0.8.7 — Finder: opening a file works, and the support bundle no longer names your files
+# Beebeeb Desktop 0.8.7 — Finder: a fix for opening files, awaiting the hand test; support bundle: file names and paths redacted, one stated residual
 
 This is an alpha build. The Mac build is Apple Silicon only (Intel is not built). It follows up
 0.8.6, where opening a not-yet-downloaded file from Finder stopped failing with the "helper
 application" error but then failed with "daemon response was not valid json" after a long wait and
-with no progress shown. That is fixed here at the cause, together with a privacy fix to the support
-bundle and two smaller fixes. Windows and Linux carry the same merged source as everything else on
-`main`, but nothing in this release was written for them.
+with no progress shown. This build fixes the cause of that (see Bug Fixes / Hardening), together
+with a privacy fix to the support bundle and two smaller fixes. Whether opening a file from Finder
+now works on a real Mac is not verified yet: that hand test is what this alpha is for. Windows and
+Linux carry the same merged source as everything else on `main`, but nothing in this release was
+written for them.
 
 ### What's New
 
@@ -19,7 +21,7 @@ bundle and two smaller fixes. Windows and Linux carry the same merged source as 
 - **The support bundle says exactly what it keeps and removes (task 1685):** the Account page copy
   now states what the export contains, including the one residual described below. The button also
   now saves the bundle and reveals it; before, it showed a toast saying the file had been written
-  without writing one. <!-- lead: confirm merged before cut -->
+  without writing one.
 
 ### Bug Fixes / Hardening
 
@@ -32,14 +34,15 @@ bundle and two smaller fixes. Windows and Linux carry the same merged source as 
   the new daemon, and the new extension with the old daemon, both keep working. The daemon side
   was proven failing and then passing by tests; the Swift side is exercised only by the macOS CI
   job and by the hand test this alpha exists for.
-- **[P0] The support bundle no longer contains file names or folder paths (task 1685):** the
-  diagnostics export promised "no plaintext names", but the last error message it carried could
-  include the path of the file that failed, so a bundle sent to support could disclose file and
-  folder names. Names and paths known to the state database are replaced first, every remaining
-  path becomes `[path]`, and every other word that is not a standard error word or a number
-  becomes `[name]`. Credential tokens are still removed. The residual, stated in the app: a name
-  the state database does not know can survive if it is a common word or digits, and UUIDs and the
-  server address are kept. <!-- lead: confirm merged before cut -->
+- **[P0] The support bundle removes file names and folder paths, with one stated residual (task
+  1685):** the diagnostics export promised "no plaintext names", but the last error message it
+  carried could include the path of the file that failed, so a bundle sent to support could
+  disclose file and folder names. Names and paths known to the state database are replaced first,
+  every remaining path becomes `[path]`, and every other word that is not a standard error word or
+  a number becomes `[name]`. Credential tokens are still removed. The residual, stated in the app:
+  a name the state database does not know can survive if it is a common word or digits, and UUIDs
+  and the server address are kept. So the bundle can still contain such a name; it is no longer
+  guaranteed name-free, only much less likely to carry one.
 - **A slow Finder copy can no longer be uploaded twice (task 1684):** if copying a large file into
   Finder took longer than the extension was willing to wait, Finder retried and the daemon queued a
   second upload of the same file. The extension now sends a key derived from the file's name,
@@ -47,16 +50,19 @@ bundle and two smaller fixes. Windows and Linux carry the same merged source as 
   repeat instead of queueing again. It does not cover a retry after the daemon restarts, and
   whether Finder's real retry presents the same size and modification time is not yet confirmed on
   a device; if it does not, the behaviour is the old one (one extra upload), not worse.
-  <!-- lead: confirm merged before cut -->
 - **Error toasts are readable, and an error is shown once (task 1683, slice 5):** in the dark
   theme the error toast title had a contrast ratio of 1.10:1 against its background; all four toast
   types now take their colours from the theme and meet 4.5:1 for text and 3:1 for icons in both
   themes. A failed "Install in Finder" used to show the same message twice, as a toast and as a
-  banner that outlived it; it is now one inline error. <!-- lead: confirm merged before cut -->
+  banner that outlived it; it is now one inline error.
+- **Groundwork for the menu-bar redesign (task 1683, slice 1):** internal surface logic (window
+  anchoring, state tracking, a failure ledger), behaviour-neutral. Only a few small policy
+  functions are called by the shipping app, and they reproduce today's behaviour on every
+  platform, so this contains no visible change.
 
 ### Verification
 
-- <!-- lead: fill in on the release commit --> Test gate on the release commit: `bun test`
+- <!-- lead: fill counts on the release commit --> Test gate on the release commit: `bun test`
   pass / 0 fail, `cargo test --locked` (src-tauri) per-binary `test result: ok. N passed`,
   `bunx tsc --noEmit` exit 0.
 - Desktop CI on the release commit, including the macOS job "File Provider Swift (macOS)", which
@@ -76,5 +82,6 @@ bundle and two smaller fixes. Windows and Linux carry the same merged source as 
 Alpha channel only: this build does not touch the stable manifest, and installs on the stable
 channel will not see it. Download the `.dmg` from the `desktop-v0.8.7` GitHub release and open it by
 hand; a Developer ID signed, notarized build installs without a Gatekeeper prompt the same way
-0.8.5 and 0.8.6 did. There is no in-app update path onto the alpha channel yet, so this is a manual
-install for testing, not a rollout.
+0.8.5 and 0.8.6 did. On macOS there is no in-app update path onto the alpha channel yet, so this is
+a manual install for testing, not a rollout. (The Windows app has a release-channel picker in its
+Settings.)

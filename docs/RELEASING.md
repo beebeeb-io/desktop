@@ -122,26 +122,26 @@ scripts/release-macos-local.sh 0.8.7 alpha --dry-run            # read every com
 scripts/release-macos-local.sh 0.8.7 alpha
 ```
 
-`scripts/release-macos-local.sh <VERSION> <CHANNEL> [--dry-run] [--from-step N]` runs the 13 steps
+`scripts/release-macos-local.sh <VERSION> <CHANNEL> [--dry-run] [--from-step N] [--skip-local-sig-check]` runs the 13 steps
 below, prints a banner per step, and **stops at the first failure** with the cause, a remediation
 and the exact `--from-step N` resume command. Everything that can say "no" runs before the first
 upload (step 10); a failure before it leaves GitHub untouched, and the failure message says so.
 
 | Step | What it does | Fail-closed gate |
 | --- | --- | --- |
-| 1 | Release-state gate (always runs, also on resume) | clean tree; `HEAD` == the commit `desktop-v<VERSION>` points to on origin; the CI release exists with its Windows/Linux `.sig`s; `RELEASE_NOTES.md` names the version and has no `<!-- lead:` marker; signing identity, both profiles and the ASC key present; Apple Silicon |
-| 2 | Build (`bun install --frozen-lockfile`, version patched into `tauri.conf.json` for the build only, hardened runtime on) | `tauri.conf.json` and the tracked `dist/index.html` are restored the moment the build ends and again on any exit; the tree must be clean afterwards |
+| 1 | Release-state gate (always runs, also on resume) | clean tree; `HEAD` == the commit `desktop-v<VERSION>` points to on origin; the CI release exists with its Windows/Linux `.sig`s; `RELEASE_NOTES.md` names the version, has no `<!-- lead:` marker and carries real test counts (`<N> pass / 0 fail`, `test result: ok. <N> passed`, both non-zero); `minisign` installed (unless `--skip-local-sig-check`); signing identity, both profiles and the ASC key present; Apple Silicon |
+| 2 | Build (`bun install --frozen-lockfile`, version patched into `tauri.conf.json` for the build only, hardened runtime on) with `--bundles app` and a `--config` override turning `createUpdaterArtifacts` off, updater signing variables stripped. Records the commit it built from in `<VERSION>/build-commit` | a resume past this step (`--from-step` 3-13) is refused in step 1 unless that commit equals `HEAD`; `tauri.conf.json` and the tracked `dist/index.html` are restored the moment the build ends and again on any exit; the tree must be clean afterwards |
 | 3 | Preflight the unnotarized `.app` | `CFBundleShortVersionString == VERSION`; `macos-release-preflight.sh` (hardened runtime on the app, appex and helper, profiles, entry-point guard). The `spctl` execute assessment is skipped on this pass only (`BB_PREFLIGHT_SKIP_SPCTL_EXECUTE`) because Gatekeeper cannot accept an app Apple has not notarized yet |
 | 4 | Notarize the `.app` (`notarytool submit --wait`, ASC API key) | status must be `Accepted`; otherwise the notary log's issues are printed |
 | 5 | Staple the `.app`, then verify | `stapler validate`, `codesign --verify --deep --strict`, `spctl -a -vv` must say `source=Notarized Developer ID`, full preflight |
 | 6 | Rebuild the `.dmg` from the **stapled** app (`ditto` into a stage folder with an `/Applications` link, `hdiutil create`, `codesign --timestamp`) | the stage copy must validate as stapled; the dmg must verify and show a Developer ID authority |
 | 7 | Notarize the `.dmg` | status `Accepted` |
 | 8 | Staple the `.dmg`, then verify | `stapler validate`, `spctl -a -vv -t install` must say `source=Notarized Developer ID`, preflight (`hdiutil verify`), and the dmg is mounted read-only to prove the app inside is stapled and versioned |
-| 9 | Recreate the updater `Beebeeb.app.tar.gz` from the stapled app (Tauri wrote its own before notarization) | single top-level `Beebeeb.app`, same layout as Tauri's; the extracted app is stapled and versioned |
+| 9 | Create the updater `Beebeeb.app.tar.gz` from the stapled app (step 2 builds none: updater artifacts are off there) | single top-level `Beebeeb.app`; the extracted app is stapled and versioned |
 | 10 | `gh release upload` dmg + updater bundle to `desktop-v<VERSION>` | both are downloaded again and their sha256 must equal the local files; a stale `.sig` from an earlier attempt is deleted first |
-| 11 | Dispatch `sign-macos-updater-artifact.yml`, wait | run must succeed; `Beebeeb.app.tar.gz.sig` must exist on the release; verified with `minisign` against the baked public key when `minisign` is installed |
+| 11 | Dispatch `sign-macos-updater-artifact.yml`, wait | run must succeed; `Beebeeb.app.tar.gz.sig` must exist on the release; verified with `minisign` against the tarball and the baked public key (`BB_UPDATER_VERIFY_PUBKEY` overrides the key for a rotation transition release); fails closed without `minisign` unless `--skip-local-sig-check` |
 | 12 | Dispatch `release.yml` (`publish_existing=true`, same version/channel), wait | run must succeed |
-| 13 | Read the channel manifest from `beebeeb-io/releases` | `version == VERSION`, `darwin-aarch64` points at this release's `Beebeeb.app.tar.gz`, its signature equals the uploaded `.sig`, Linux/Windows entries still on this tag |
+| 13 | Read the channel manifest from `beebeeb-io/releases` | `version == VERSION`, `darwin-aarch64` points at this release's `Beebeeb.app.tar.gz`, its signature string equals the uploaded `.sig` (a consistency check only; step 11 is what verifies the signature), Linux/Windows entries still on this tag |
 
 Defaults, all overridable by environment (no secret is stored in the script or the repo):
 
@@ -156,7 +156,7 @@ Defaults, all overridable by environment (no secret is stored in the script or t
 
 `--dry-run` prints every command of every step and runs none (not even `git`). `--from-step N`
 resumes at step N; step 1 still runs, and each later step fails with a clear message if the
-artifacts from the earlier steps are not on disk (they live in
+artifacts from the earlier steps are not on disk or were built from another commit than `HEAD` (they live in
 `src-tauri/target/release-macos-local/<VERSION>/` and `src-tauri/target/<triple>/release/bundle/`).
 Notary submission ids, file hashes and workflow run ids are written to `release-summary.txt` there.
 
@@ -165,9 +165,9 @@ manifest unless you pass `stable`, and never replaces installing the dmg on a Ma
 it. A release is verified by `RELEASE_NOTES.md` naming the version AND the workflow runs being
 green AND the manifest resolving (step 13), and, for a Finder-facing change, by a hand test.
 
-The dmg is rebuilt with `hdiutil` rather than Tauri's `bundle_dmg.sh`: that script styles the
+Step 2 builds only the `.app` (`--bundles app`), so Tauri's `bundle_dmg.sh` never runs, and the dmg is built with `hdiutil`: that script styles the
 window through Finder AppleScript and failed with `-10006` (Automation permission) during the
-0.8.5 cut. The consequence is a plain volume (the app and an `/Applications` link) without
+0.8.5 cut. Updater artifacts are switched off for the local build because the updater private key (`TAURI_SIGNING_PRIVATE_KEY`) exists only as a CI secret since the 2026-09-25 rotation, and Tauri exits non-zero when it is asked for a signed updater bundle without it; the file keeps `createUpdaterArtifacts: true` (preflight asserts it, CI needs it) and the off switch is a CLI override. The consequence is a plain volume (the app and an `/Applications` link) without
 Tauri's icon positions; compare it with the previous dmg once and say so if that matters.
 
 `scripts/test-release-macos-local.sh` is the Linux-runnable test of this script (shims for the
@@ -194,10 +194,10 @@ for running a single step by hand.
    ```
 
    After the build, `plutil -extract CFBundleShortVersionString raw <built .app>/Contents/Info.plist` must print the same version.
-2. Build locally: `APPLE_SIGNING_IDENTITY=<Developer ID hash> MACOS_APP_PROVISION_PROFILE=… MACOS_FILE_PROVIDER_PROVISION_PROFILE=… BEEBEEB_RELEASE_VERSION=<version> BEEBEEB_MACOS_HARDENED_RUNTIME=1 bunx tauri build --target aarch64-apple-darwin -- --locked` (Apple Silicon only for now — see the matrix comment for why). `BEEBEEB_MACOS_HARDENED_RUNTIME=1` is required for a release build: it turns on hardened runtime + secure timestamps on the File Provider extension and its CTL helper, which notarization requires on every nested executable, not just the app.
+2. Build locally: `APPLE_SIGNING_IDENTITY=<Developer ID hash> MACOS_APP_PROVISION_PROFILE=… MACOS_FILE_PROVIDER_PROVISION_PROFILE=… BEEBEEB_RELEASE_VERSION=<version> BEEBEEB_MACOS_HARDENED_RUNTIME=1 bunx tauri build --target aarch64-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked` (no updater private key exists on this Mac, so updater artifacts are off and only the `.app` is built; Apple Silicon only for now — see the matrix comment for why). `BEEBEEB_MACOS_HARDENED_RUNTIME=1` is required for a release build: it turns on hardened runtime + secure timestamps on the File Provider extension and its CTL helper, which notarization requires on every nested executable, not just the app.
 3. Run `scripts/macos-release-preflight.sh <path to the built .app>` — it fails closed if hardened runtime, the provisioning profiles, or the File Provider entry-point guard (task 1524) are wrong.
 4. Notarize the `.app` (zip it first — `ditto -c -k --keepParent Beebeeb.app app.zip`), `xcrun notarytool submit --wait`, then `xcrun stapler staple` it, before building the `.dmg` from the now-stapled app — this way the ticket travels with the app inside the dmg too. Then notarize + staple the `.dmg` itself. `scripts/macos-release-preflight.sh <artifact>` re-run on each proves `spctl -a -vv` / `spctl -a -vv -t install` both say `source=Notarized Developer ID`.
-5. Upload the `.dmg` and the updater bundle (`bundle/macos/Beebeeb.app.tar.gz` — named from `productName` alone, no version/arch suffix; do not confuse it with the versioned `.dmg` filename) to the existing `desktop-v<version>` GitHub release with `gh release upload`.
+5. Upload the `.dmg` and the updater bundle (made by hand from the stapled app, `tar -czf Beebeeb.app.tar.gz Beebeeb.app` — named from `productName` alone, no version/arch suffix; do not confuse it with the versioned `.dmg` filename) to the existing `desktop-v<version>` GitHub release with `gh release upload`.
 6. The updater `.sig` needs `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD`, which since the 2026-09-25 rotation (desktop PR #62) exists only as this repo's CI secret. Run `.github/workflows/sign-macos-updater-artifact.yml` via `gh workflow run … -f release_tag=desktop-v<version>` to sign the uploaded `Beebeeb.app.tar.gz` and upload the resulting `.sig` back to the same release — this is the only CI step in the whole macOS route, and it never touches Developer ID material.
 7. Re-run `release.yml` with `publish_existing=true` for the same `version`/`channel` — the `publish-manifest` job's `fetch_optional_sig` now finds the macOS `.sig` and backfills the `darwin-aarch64` manifest entry (see that job's comments) without rebuilding or re-tagging Windows/Linux.
 
