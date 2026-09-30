@@ -265,19 +265,35 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
 /// probe just timed out with a generic message. Callers now get the real
 /// `std::io::Error` back and can log/surface it.
 fn bind_ipc_listener(path: &std::path::Path) -> std::io::Result<UnixListener> {
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
-    // Harden the socket file to owner-only (0o600) so no other user can even
-    // connect() — defense-in-depth with the per-connection peer-UID check
-    // (task 1247). Best-effort: a chmod failure is logged, not fatal. This
-    // mirrors `config.rs::DesktopConfig::save`'s 0o600 chmod precedent, but is
-    // non-fatal here since this is a fire-and-forget async server loop.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(error = %e, "failed to chmod IPC socket to 0o600");
-        }
-    }
+    bind_ipc_listener_with(path, |path| UnixListener::bind(path))
+}
+
+fn bind_ipc_listener_with<T>(
+    path: &std::path::Path,
+    bind: impl FnOnce(&std::path::Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Binding at the public endpoint exposes its umask-derived mode before
+    // chmod. Stage in a fresh owner-only directory instead; never change the
+    // process-wide umask in this multithreaded application.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let staging = tempfile::Builder::new()
+        .prefix("")
+        .rand_bytes(6)
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)?;
+    // Six directory characters + "/s" = eight bytes, matching "ipc.sock":
+    // staging also fits the macOS App Group sockaddr_un path budget.
+    let staged_path = staging.path().join("s");
+    let listener = bind(&staged_path)?;
+    // Fail closed: neither chmod nor publication failure may return a listener.
+    // TempDir removes the private socket/directory on every error path.
+    std::fs::set_permissions(&staged_path, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&staged_path, path)?;
     Ok(listener)
 }
 
@@ -294,7 +310,7 @@ pub async fn serve_ipc(
 /// they can exercise the real accept/dispatch path without touching the real
 /// production socket path (task 1247).
 ///
-/// Returns `Err` if the bind itself fails (see [`bind_ipc_listener`]) —
+/// Returns `Err` if binding, hardening or publication fails (see [`bind_ipc_listener`]) —
 /// never panics. A bind failure means the loop below never starts; the
 /// caller is responsible for logging/surfacing the error (`runner.rs` logs
 /// it and records it for `wait_for_file_provider_ipc_ready` to report
@@ -303,9 +319,24 @@ pub async fn serve_ipc_at(
     path: std::path::PathBuf,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+    cancel: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    serve_ipc_at_with_ready(path, db, bridge, cancel, None).await
+}
+
+/// Readiness means the listener is bound, hardened and published. On startup
+/// failure the sender is dropped and the server returns the original error.
+pub(crate) async fn serve_ipc_at_with_ready(
+    path: std::path::PathBuf,
+    db: std::sync::Arc<crate::state_db::StateDb>,
+    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     mut cancel: oneshot::Receiver<()>,
+    ready: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<()> {
     let listener = bind_ipc_listener(&path)?;
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
     tracing::info!("IPC socket listening at {:?}", path);
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
 
@@ -1071,6 +1102,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipc_publication_failure_does_not_signal_readiness() {
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let db = Arc::new(crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(crate::api_client::ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [7u8; 32],
+        ));
+        let bridge = Arc::new(crate::engine_bridge::EngineBridge::new(db.clone(), api));
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let result = serve_ipc_at_with_ready(
+            dir.path().join("missing/ipc.sock"),
+            db,
+            bridge,
+            cancel_rx,
+            Some(ready_tx),
+        )
+        .await;
+        assert!(result.is_err(), "startup must fail for a nonexistent parent");
+        assert!(ready_rx.await.is_err(), "startup failure must not signal readiness");
+    }
+
+    // Exercise filesystem publication separately from the OS socket call. The
+    // real-socket test below also verifies that clients can reach the listener.
+    #[test]
+    fn ipc_publication_is_private_until_hardened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("ipc.sock");
+        let mut staging_path = None;
+        bind_ipc_listener_with(&path, |bound_path| {
+            std::fs::write(bound_path, b"socket stand-in")?;
+            // Force the permissive creation mode independently of the test umask.
+            std::fs::set_permissions(bound_path, std::fs::Permissions::from_mode(0o755))?;
+            assert!(!path.exists(), "endpoint must not be published before hardening");
+            let parent = bound_path.parent().unwrap();
+            assert_eq!(std::fs::metadata(parent)?.permissions().mode() & 0o777, 0o700);
+            assert!(bound_path.as_os_str().len() <= path.as_os_str().len());
+            staging_path = Some(parent.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"socket stand-in");
+        assert!(!staging_path.unwrap().exists(), "staging directory must be cleaned");
+    }
+
+    #[test]
+    fn ipc_publication_fails_closed_when_hardening_fails() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ipc.sock");
+        // A dangling symlink makes chmod fail while rename would succeed.
+        // Ignoring the chmod error must therefore be caught by this test.
+        let result = bind_ipc_listener_with(&path, |bound_path| {
+            std::os::unix::fs::symlink(dir.path().join("missing"), bound_path)
+        });
+        assert!(result.is_err(), "chmod failure must prevent a ready listener");
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn ipc_publication_cleans_up_when_bind_or_rename_fails() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ipc.sock");
+        let result = bind_ipc_listener_with::<()>(&path, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        std::fs::create_dir(&path).unwrap(); // a directory cannot be replaced by the socket
+        let result = bind_ipc_listener_with(&path, |bound_path| std::fs::write(bound_path, b""));
+        assert!(result.is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
     async fn test_bind_ipc_listener_succeeds_and_chmods_0600_on_a_valid_path() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1082,6 +1197,15 @@ mod tests {
         let mode = std::fs::metadata(&sock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the socket file must be chmod 0o600, got {mode:o}");
 
+        // The synchronous return is the bind+harden completion barrier. Also
+        // prove the published pathname reaches the listener after its rename.
+        let client = UnixStream::connect(&sock_path).await.unwrap();
+        let (_accepted, _) = tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(client);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         drop(listener);
     }
 }

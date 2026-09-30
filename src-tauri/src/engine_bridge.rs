@@ -10081,27 +10081,38 @@ mod tests {
         let sock_path = sock_dir.path().join("perm.sock");
 
         let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
-        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [7u8; 32],
+        ));
         let bridge = Arc::new(EngineBridge::new(db.clone(), api));
 
         let sp = sock_path.clone();
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
             let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(crate::ipc_socket::serve_ipc_at(sp.clone(), db, bridge, cancel_rx));
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(crate::ipc_socket::serve_ipc_at_with_ready(
+                sp.clone(),
+                db,
+                bridge,
+                cancel_rx,
+                Some(ready_tx),
+            ));
 
-            // Wait for the socket file to appear (i.e. bind + chmod done).
-            let mut attempt = 0;
-            while !sp.exists() && attempt < 300 {
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            let ready = tokio::time::timeout(Duration::from_secs(3), ready_rx)
+                .await
+                .expect("IPC readiness timed out");
+            if ready.is_err() {
+                panic!("IPC startup failed before readiness: {:?}", server.await);
             }
-            assert!(sp.exists(), "the IPC socket file must be created by serve_ipc_at");
 
             let mode = std::fs::metadata(&sp).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "the socket file must be chmod 0o600, got {mode:o}");
 
             let _ = cancel_tx.send(());
-            let _ = server.await;
+            server.await.unwrap().unwrap();
+            assert!(!sp.exists(), "shutdown must remove the published socket");
         });
     }
 
