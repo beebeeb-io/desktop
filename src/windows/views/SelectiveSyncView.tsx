@@ -39,7 +39,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
-import { useRegionLabel } from '../useRegion'
 
 const RED = 'oklch(0.5 0.18 25)'
 
@@ -658,7 +657,6 @@ function RefreshButton({
 // ── Root view ─────────────────────────────────────────────────────────────────
 
 export default function SelectiveSyncView() {
-  const regionLabel = useRegionLabel()
   const { showToast } = useToast()
   const [state, setState] = useState<LoadState>({ phase: 'loading' })
   // Working excluded set + which folders are expanded. Re-seeded on every load.
@@ -829,7 +827,7 @@ export default function SelectiveSyncView() {
               />
             )}
             <Chip tone="amber">
-              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> {regionLabel}
+              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> Stored in the EU
             </Chip>
           </div>
         }

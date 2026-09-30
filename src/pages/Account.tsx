@@ -8,7 +8,6 @@ import {
   formatBytes,
   loadSyncStatus,
   openUrl,
-  regionCityFromCode,
   type Subscription,
   type SyncStatus,
 } from '../desktopApi'
@@ -237,7 +236,7 @@ export default function Account() {
                     <span className={`dot ${planStatusTone(plan.sub.status) === 'green' ? 'ok' : ''}`} />
                     {titleCasePlan(plan.sub.status)}
                   </span>
-                  {regionCityFromCode(plan.sub.region)}
+                  Stored in the EU
                 </div>
               </div>
               <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>

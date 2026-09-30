@@ -2,8 +2,9 @@
  * useRegion — resolve the user's storage CITY from the live `/me/region`
  * setting, the same source of truth the webapp uses.
  *
- * Brand rule: we surface the CITY only ("Falkenstein"), never the storage
- * provider. Both hooks start with the live default ("Falkenstein") so a label
+ * Legacy account-region helpers, not product or per-file copy. Product copy
+ * uses "the EU"; transparency uses loaded metadata. These hooks start with
+ * the live default ("Falkenstein") so a label
  * is never blank, then update once `fetchRegion()` (a module-cached single
  * round-trip) resolves. On error the response is null and the fallback stands.
  */

@@ -1,19 +1,46 @@
-/**
- * Guard for task 1546 finding 4: the workspace brand rule ("EU references:
- * Name the city... No flag emojis", CLAUDE.md) requires user-facing residency
- * copy to name Falkenstein, never a vague "EU servers". Every other surface in
- * this repo already does this (WindowsApp.tsx, WindowsFirstRun.tsx); the macOS
- * onboarding sidebar footer was the one holdout.
- */
+/** Product copy uses the EU; only transparency surfaces name the current city. */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const ONBOARDING_SRC = readFileSync(join(import.meta.dir, '..', 'src', 'Onboarding.tsx'), 'utf8')
+const root = join(import.meta.dir, '..')
+const read = (path: string) => readFileSync(join(root, path), 'utf8')
 
-describe('macOS onboarding residency copy', () => {
-  test('sidebar footer names Falkenstein, not a vague "EU servers"', () => {
-    expect(ONBOARDING_SRC).not.toContain('EU servers')
-    expect(ONBOARDING_SRC).toContain('Falkenstein')
+const productSurfaces = [
+  'src/Onboarding.tsx',
+  'src/WindowsFirstRun.tsx',
+  'src/WindowsApp.tsx',
+  'src/windows/KnownFolderOnboarding.tsx',
+  'src/windows/views/ActivityView.tsx',
+  'src/windows/views/InsightsView.tsx',
+  'src/windows/views/SelectiveSyncView.tsx',
+  'src/windows/views/AccountView.tsx',
+  'src/pages/Account.tsx',
+]
+
+describe('product residency copy', () => {
+  for (const file of productSurfaces) {
+    test(`${file} uses EU copy without a city lookup`, () => {
+      const source = read(file)
+      expect(source.includes('Stored in the EU')).toBe(true)
+      expect(source.match(/Falkenstein|Germany|useRegion|regionCityFromCode|EU servers/g)).toBeNull()
+    })
+  }
+  test('Explorer and Finder integration introduction uses EU copy', () => {
+    const source = read('src/windows/views/SettingsView.tsx')
+    expect(source.includes('before they leave for the EU.')).toBe(true)
+    expect(source.match(/useRegionCity|\$\{regionCity\}/g)).toBeNull()
   })
+})
+
+test('frontend, legacy Windows and native tray/menu sources never name a provider', () => {
+  function sources(directory: string): string[] {
+    return readdirSync(join(root, directory), { withFileTypes: true }).flatMap(entry => {
+      const path = join(directory, entry.name)
+      return entry.isDirectory() ? sources(path) : /\.(tsx?|rs)$/.test(entry.name) ? [path] : []
+    })
+  }
+  const files = [...sources('src'), ...sources('windows/src'), 'src-tauri/src/lib.rs']
+  expect(files.length).toBeGreaterThan(50)
+  for (const file of files) expect(read(file).match(/hetzner|ovhcloud|digitalocean/gi)).toBeNull()
 })

@@ -42,7 +42,6 @@ import {
   type DesktopNotificationPrefKey,
 } from '../notificationPreferenceMeta'
 import { T, Card, Chip, Modal, NavIcon, PageHeader, PrimaryBtn, Skeleton, useToast } from '../ui'
-import { useRegionCity } from '../useRegion'
 import {
   CACHE_LIMIT_OPTIONS,
   buildCacheLimitView,
@@ -738,8 +737,8 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
     ? 'Loading data residency…'
     : error ? undefined
     : currentRegion?.continent === 'europe'
-      ? 'Stored in the EU.'
-      : `Stored in ${currentRegion?.displayName}.`
+      ? `Stored in the EU (currently ${currentRegion.locationLabel}).`
+      : `Stored in ${currentRegion?.displayName} (currently ${currentRegion?.locationLabel}).`
 
   return (
     <SettingsSectionShell>
@@ -899,7 +898,6 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
   const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
-  const regionCity = useRegionCity()
 
   const refresh = async () => {
     if (!commands) return
@@ -976,7 +974,7 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     <SettingsSectionShell>
       <PageHeader
         title={label}
-        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for ${regionCity}.`}
+        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for the EU.`}
       />
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>

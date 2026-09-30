@@ -28,7 +28,7 @@ function renderRegion(preferredRegion: string | null, loading = false, loadError
 
 test('US preference uses its loaded display name instead of the EU default', () => {
   const html = renderRegion('us')
-  expect(html).toContain('Stored in North America.')
+  expect(html).toContain('Stored in North America (currently Ashburn, United States).')
   expect(html).not.toContain('Stored in the EU')
   expect(html).not.toContain('Never Display Storage Provider')
 })
@@ -36,7 +36,7 @@ test('US preference uses its loaded display name instead of the EU default', () 
 test('explicit EU preference and implicit EU default both claim EU residency', () => {
   for (const preferredRegion of ['europe', null]) {
     const html = renderRegion(preferredRegion)
-    expect(html).toContain('Stored in the EU.')
+    expect(html).toContain('Stored in the EU (currently Falkenstein, Germany).')
     expect(html).not.toContain('Stored in North America')
   }
 })
@@ -83,9 +83,18 @@ test('API region renders its actual city, EU copy and no provider or region-choi
     view={buildDataResidencyViewState({ regions: [region], preferredRegion: null, saving: false })} onRetry={noop} onSelect={noop} />)
   expect(html).not.toContain('Never Display Storage Provider')
   expect(html).toContain('Local')
-  expect(html).toContain('Stored in the EU.')
+  expect(html).toContain('Stored in the EU (currently Local).')
   expect(html).toContain('disabled=""')
   expect(html).not.toContain('Choose where')
   expect(html).not.toContain('More regions')
   expect(html).not.toContain('Retry')
+})
+
+// A new EU pool must be displayed from metadata, never a hardcoded default.
+test('transparency follows the current pool city', () => {
+  const html = renderRegion(null, false, null, [
+    { continent: 'europe', display_name: 'Europe', city: 'Helsinki', is_default: true },
+  ])
+  expect(html).toContain('Stored in the EU (currently Helsinki, Finland).')
+  expect(html).not.toContain('Falkenstein')
 })

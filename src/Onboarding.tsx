@@ -89,7 +89,7 @@ function OnboardingView() {
           </div>
         </div>
         <div className="sidebar-footer">
-          End-to-end encrypted | Falkenstein | Zero-knowledge
+          End-to-end encrypted | Stored in the EU | Zero-knowledge
         </div>
       </aside>
 

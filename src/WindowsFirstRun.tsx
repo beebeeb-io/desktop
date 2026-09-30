@@ -279,7 +279,7 @@ function LeftRail({ currentStep }: { currentStep: Step }) {
           letterSpacing: '0.04em',
           textTransform: 'uppercase' as const,
         }}>
-          Falkenstein · E2E encrypted
+          Stored in the EU · E2E encrypted
         </div>
       </div>
     </div>
