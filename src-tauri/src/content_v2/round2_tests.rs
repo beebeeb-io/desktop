@@ -49,9 +49,7 @@ fn slice1_r2_extent_amplification_is_reserved_before_commit() {
     assert_eq!(s.db.query_row("SELECT count(*) FROM v2_extents", [], |r| r.get::<_, u64>(0)).unwrap(), 1, "failed admission must roll back extent");
 }
 
-#[test]
-fn slice1_r2_key_publication_create_write_flush_retry_twice() {
-    for cut in 2..=4 {
+fn key_publication_cut(cut: usize) {
         let h = Harness::new().unwrap();
         let l = Ledger::open(&h).unwrap();
         let record = id();
@@ -61,6 +59,7 @@ fn slice1_r2_key_publication_create_write_flush_retry_twice() {
         assert!(l.put(record, "Envelope", &body, Some(30), Some(token), &mut fault).is_err());
         assert_eq!(fault.seen, cut, "key I/O injection must execute");
         assert_eq!(l.db.query_row("SELECT count(*) FROM protected_records", [], |r| r.get::<_, u64>(0)).unwrap(), 0);
+        assert!(!h.path().join("keyslots").join(hex(&record)).exists(), "incomplete key was published at cut={cut}");
         drop(l);
         for retry in 1..=2 {
             let l = Ledger::open(&h).unwrap();
@@ -68,8 +67,13 @@ fn slice1_r2_key_publication_create_write_flush_retry_twice() {
             assert_eq!(l.read(record).unwrap(), body);
             assert_eq!(l.keys_count().unwrap(), 1, "orphan temporary keys must be reconciled");
         }
-    }
 }
+#[test]
+fn slice1_r2_key_create_retry_twice() { key_publication_cut(2); }
+#[test]
+fn slice1_r2_key_write_retry_twice() { key_publication_cut(3); }
+#[test]
+fn slice1_r2_key_flush_retry_twice() { key_publication_cut(4); }
 
 #[test]
 fn slice1_r2_unreferenced_poisoned_key_repaired_referenced_key_preserved() {
@@ -171,4 +175,15 @@ fn slice1_r2_terminal_completion_requires_actual_reserve_release() {
     let mut reserve = Reserve::existing(h.path()).unwrap();
     reserve.refill().unwrap();
     s.allocate(new_owner, "Capture", "Full", 1, 0, &mut Fault::default()).unwrap();
+}
+
+#[test]
+fn slice1_r2_key_publication_never_clobbers_existing_slot() {
+    let h = Harness::new().unwrap();
+    let temporary = h.path().join("wrapped-key.tmp");
+    let destination = h.path().join("wrapped-key");
+    fs::write(&temporary, b"new wrapped key").unwrap();
+    fs::write(&destination, b"existing wrapped key").unwrap();
+    assert!(ledger::publish_key(&temporary, &destination).is_err(), "no-clobber publication replaced an existing key");
+    assert_eq!(fs::read(&destination).unwrap(), b"existing wrapped key");
 }

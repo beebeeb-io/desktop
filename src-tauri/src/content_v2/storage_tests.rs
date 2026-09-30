@@ -252,34 +252,40 @@ fn slice1_g1_canonical_body_unknown_fields_and_versions() {
 }
 #[test]
 fn slice1_g2_real_sql_barriers_corruption_and_reopen() {
-    // Every capture storage cutpoint: original remains outside the adapter;
-    // only complete verified/adopted artifacts can reach the fake sink.
     let original = b"original preserved bytes";
     for cut in 1..=8 {
         let h = Harness::new().unwrap();
+        let source = h.path().join("held-original");
+        fs::write(&source, original).unwrap();
         let mut s = Store::new(&h).unwrap();
         let o = owner(&s, "Snapshot");
-        let mut f = Fault {
-            cut: Some(cut),
-            seen: 0,
-        };
-        let a = s.capture(o, &mut std::io::Cursor::new(original), original.len() as u64, &mut f);
-        if let Ok(a) = a {
-            let _ = s.adopt(&a, "Snapshot", true, &mut f);
+        let mut f = Fault { cut: Some(cut), seen: 0 };
+        let attempt = (|| -> Result<()> {
+            let a = s.capture(o, &mut fs::File::open(&source)?, original.len() as u64, &mut f)?;
+            s.adopt(&a, "Snapshot", true, &mut f)?;
+            Ok(())
+        })();
+        assert!(attempt.is_err(), "cut {cut} must interrupt a real capture/adoption boundary");
+        assert_eq!(f.seen, cut);
+        let path = s.path.clone(); drop(s);
+        for restart in 1..=2 {
+            let mut recovered = Store::reopen(&h, &path).unwrap();
+            assert_eq!(fs::read(&source).unwrap(), original, "source changed cut={cut} restart={restart}");
+            let row: Option<(Vec<u8>,Vec<u8>,u64,Vec<u8>,String)> = recovered.db.query_row(
+                "SELECT a.artifact_id,a.reservation_id,a.expected_bytes,coalesce(m.content_digest,zeroblob(32)),a.phase FROM v2_artifacts a LEFT JOIN v2_manifests m USING(artifact_id) WHERE allocation_owner=?1",
+                [o.as_slice()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            ).optional().unwrap();
+            if let Some((artifact,reservation,bytes,hash,phase)) = row {
+                let a = Artifact { id: artifact.try_into().unwrap(), owner:o, reservation:reservation.try_into().unwrap(), bytes, hash:hash.try_into().unwrap() };
+                if matches!(phase.as_str(), "Ready" | "Referenced") {
+                    recovered.verify(&a).unwrap();
+                    let proof = recovered.adopt(&a, "Snapshot", true, &mut Fault::default()).unwrap();
+                    recovered.fake_sink(&a, &proof).unwrap();
+                } else {
+                    assert!(recovered.adopt(&a, "Snapshot", true, &mut Fault::default()).is_err(), "incomplete cut {cut} authorized B3");
+                }
+            } else { assert_eq!(cut, 1, "only pre-B0 cut has no allocation"); }
         }
-        let path = s.path.clone();
-        drop(s);
-        for _ in 0..2 {
-            let recovered = Store::reopen(&h, &path).unwrap();
-            assert!(
-                recovered
-                    .db
-                    .query_row("SELECT count(*) FROM v2_owners", [], |r| r.get::<_, u64>(0))
-                    .unwrap()
-                    > 0
-            );
-        }
-        assert_eq!(original, b"original preserved bytes");
     }
     let h = Harness::new().unwrap();
     let mut s = Store::new(&h).unwrap();
@@ -330,41 +336,90 @@ fn slice1_process_worker() {
 }
 #[test]
 fn slice1_g3_all_restore_variants_zero_submissions() {
-    let h = Harness::new().unwrap();
-    let mut s = Store::new(&h).unwrap();
-    let a = captured(&mut s, b"recover only");
-    let l = Ledger::open(&h).unwrap();
-    let token = id();
-    l.db.execute("INSERT INTO deny_tokens VALUES(?1,'NeverResubmit')", [token.as_slice()])
-        .unwrap();
-    let mut calls = [0; 3];
-    for _variant in [
-        "L1",
-        "valid L0",
-        "missing ledger",
-        "import",
-        "whole profile rollback",
-        "cold restart",
-        "forged account",
-    ] {
-        let admission = Admission::default();
-        if admission.recovered_can_submit(false) {
-            for n in &mut calls {
-                *n += 1;
+    let variants = ["L1", "valid L0", "missing ledger", "import", "whole profile rollback", "cold restart", "forged account"];
+    let mut restored_attempts = 0;
+    let mut fresh_submissions = 0;
+    for variant in variants {
+        let source = Harness::new().unwrap();
+        let mut s = Store::new(&source).unwrap();
+        let a = captured(&mut s, b"recover only");
+        let account: Id = s.db.query_row("SELECT account_binding FROM v2_store", [], |r| r.get::<_, Vec<u8>>(0)).unwrap().try_into().unwrap();
+        let mut original_run = Admission::default();
+        let token = original_run.new_action(account, &mut s, &a).unwrap();
+        let upload = id();
+        let mut fields = records::decode("Upload", &owner_body(&s, "Upload")).unwrap();
+        fields[3] = a.owner.to_vec(); fields[4] = token.to_vec();
+        fields[6] = if variant == "cold restart" { b"CompletingUnknown".to_vec() } else { b"Pending".to_vec() };
+        s.owner(upload, "Upload", &records::encode("Upload", &fields).unwrap()).unwrap();
+        s.settle().unwrap();
+        let account_db = fs::read(&s.path).unwrap();
+        let account_wal = fs::read(wal_path(&s.path)).unwrap();
+        let l = Ledger::open(&source).unwrap();
+        checkpoint(&l.db, &l.path, true).unwrap();
+        let old_ledger = fs::read(&l.path).unwrap();
+        let old_ledger_wal = fs::read(wal_path(&l.path)).unwrap();
+        // L1 records later disposition; restoring the old queue must not replay it.
+        l.put(id(), "Envelope", &envelope(account), Some(30), Some(token), &mut Fault::default()).unwrap();
+        checkpoint(&l.db, &l.path, true).unwrap();
+        let new_ledger = fs::read(&l.path).unwrap();
+        let new_ledger_wal = fs::read(wal_path(&l.path)).unwrap();
+        drop(l); drop(s); drop(original_run);
+        let restored = Harness::new().unwrap();
+        let target = Store::new(&restored).unwrap();
+        let path = target.path.clone(); drop(target);
+        fs::write(&path, account_db).unwrap(); fs::write(wal_path(&path), account_wal).unwrap();
+        let use_l1 = matches!(variant, "L1" | "import");
+        if variant != "missing ledger" {
+            let ledger_path = restored.path().join("installation.db");
+            fs::write(&ledger_path, if use_l1 { new_ledger } else { old_ledger }).unwrap();
+            fs::write(wal_path(&ledger_path), if use_l1 { new_ledger_wal } else { old_ledger_wal }).unwrap();
+            if use_l1 {
+                fs::create_dir_all(restored.path().join("keyslots")).unwrap();
+                for entry in fs::read_dir(source.path().join("keyslots")).unwrap() {
+                    let entry = entry.unwrap();
+                    fs::copy(entry.path(), restored.path().join("keyslots").join(entry.file_name())).unwrap();
+                }
             }
         }
+        if variant == "import" {
+            let imported = path.parent().unwrap().parent().unwrap().join("explicit-import");
+            fs::rename(path.parent().unwrap(), &imported).unwrap();
+        }
+        let path = if variant == "import" { restored.path().join("accounts/explicit-import/state-v2.db") } else { path };
+        if variant == "whole profile rollback" {
+            // Both old images and key-slot inventory are restored; no later deny survives.
+            assert_eq!(fs::read_dir(restored.path()).unwrap().filter(|e| e.as_ref().unwrap().file_name() == "keyslots").count(), 0);
+        }
+        if variant == "missing ledger" { assert!(!restored.path().join("installation.db").exists()); }
+        let caller = if variant == "forged account" { id() } else { account };
+        for restart in 1..=2 {
+            let mut s = Store::reopen(&restored, &path).unwrap();
+            let l = Ledger::open(&restored).unwrap();
+            assert_eq!(l.deny(token).unwrap(), use_l1, "ledger image {variant}");
+            let body: Vec<u8> = s.db.query_row("SELECT body FROM v2_owners WHERE owner_id=?1", [upload.as_slice()], |r| r.get(0)).unwrap();
+            let queue = records::decode("Upload", &body).unwrap();
+            assert_eq!(queue[4], token);
+            assert_eq!(queue[6], if variant == "cold restart" { b"CompletingUnknown".as_slice() } else { b"Pending".as_slice() });
+            let persisted_token: Id = queue[4].clone().try_into().unwrap();
+            let mut calls = Vec::new();
+            let mut sink = |op, token| calls.push((op, token));
+            let mut admission = Admission::default();
+            for op in 0..3 {
+                assert!(admission.submit(caller, a.id, persisted_token, &l, op, &mut sink).is_err(), "restored {variant} restart={restart} op={op} admitted");
+                restored_attempts += 1;
+            }
+            if variant == "forged account" { assert!(admission.new_action(caller, &mut s, &a).is_err()); }
+            let fresh = admission.new_action(account, &mut s, &a).unwrap();
+            for op in 0..3 { admission.submit(account, a.id, fresh, &l, op, &mut sink).unwrap(); fresh_submissions += 1; }
+            assert!(admission.submit(id(), a.id, fresh, &l, 0, &mut sink).is_err());
+            l.db.execute("INSERT INTO deny_tokens VALUES(?1,'NeverResubmit')", [fresh.as_slice()]).unwrap();
+            assert!(admission.submit(account, a.id, fresh, &l, 0, &mut sink).is_err(), "fresh denied action escaped ledger boundary");
+            assert_eq!(calls, vec![(0, fresh), (1, fresh), (2, fresh)], "submission sink {variant} restart={restart}");
+        }
     }
-    assert_eq!(calls, [0, 0, 0]);
-    let mut live = Admission::default();
-    let account: Vec<u8> =
-        s.db.query_row("SELECT account_binding FROM v2_store", [], |r| r.get(0))
-            .unwrap();
-    let account: Id = account.try_into().unwrap();
-    let fresh = live.new_action(account, &mut s, &a).unwrap();
-    assert!(live.permits(account, a.id, fresh, false));
-    assert!(!live.permits(id(), a.id, fresh, false));
-    assert!(!live.permits(account, a.id, fresh, true));
-    assert!(!Admission::default().permits(account, a.id, fresh, false));
+    assert_eq!(restored_attempts, 42);
+    assert_eq!(fresh_submissions, 42);
+    println!("restore_variants=7 reopenings=14 rejected_restored_actions=42 observed_fresh_submissions=42");
 }
 #[test]
 fn slice1_g5_pinned_reader_restart_requires_truncate() {
@@ -424,9 +479,12 @@ fn slice1_g5_real_sqlite_full_terminal_reserve() {
         s.chunk(&pending, 0, &vec![1; CHUNK]).is_err(),
         "SQLite page quota must actually report full"
     );
-    assert_eq!(reserve.release_terminal().unwrap(), 16 * MIB);
-    s.db.execute_batch(&format!("PRAGMA max_page_count={}", pages + 16 * MIB / 4096))
-        .unwrap();
+    // Tie the fixture page allowance to measured physical reserve shrink,
+    // never the byte count returned by release_terminal(). NTFS exhaustion is open.
+    let before = allocated_len(&reserve.path).unwrap();
+    reserve.release_terminal().unwrap();
+    let physically_released = before - allocated_len(&reserve.path).unwrap();
+    s.db.execute_batch(&format!("PRAGMA max_page_count={}", pages + physically_released / 4096)).unwrap();
     s.dispose(&a, &discard(&a), &mut Fault::default()).unwrap();
     s.gc(&a, &mut Fault::default()).unwrap();
     reserve.refill().unwrap();

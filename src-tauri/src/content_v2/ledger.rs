@@ -489,7 +489,7 @@ pub(super) fn transfer(
     Ok(())
 }
 
-fn publish_key(temporary: &Path, destination: &Path) -> Result<()> {
+pub(super) fn publish_key(temporary: &Path, destination: &Path) -> Result<()> {
     #[cfg(windows)] {
         use std::os::windows::ffi::OsStrExt;
         #[link(name = "Kernel32")]

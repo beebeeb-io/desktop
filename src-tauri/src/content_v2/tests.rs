@@ -26,12 +26,14 @@ fn slice1_g2_barrier_bootstrap() {
 }
 #[test]
 fn slice1_g3_recovery_admission() {
-    let admission = Admission::default();
+    let h = Harness::new().unwrap();
+    let l = Ledger::open(&h).unwrap();
+    let token = id();
     for denied in [false, true] {
-        assert!(
-            !admission.recovered_can_submit(denied),
-            "restored records cannot grant submission even with valid L0"
-        );
+        if denied { l.db.execute("INSERT INTO deny_tokens VALUES(?1,'NeverResubmit')", [token.as_slice()]).unwrap(); }
+        let mut calls = Vec::new();
+        assert!(Admission::default().submit(id(), id(), token, &l, 0, &mut |op, token| calls.push((op, token))).is_err());
+        assert_eq!(calls.len(), 0, "restored token reached submission sink");
     }
 }
 #[test]
@@ -54,12 +56,11 @@ fn slice1_g5_pinned_reader_backpressure() {
 #[test]
 fn slice1_g6_privacy_ciphertext() {
     let canary = b"unique-A-account-name-digest-canary-1640";
-    let bytes = protect_canary(canary).unwrap();
-    assert_eq!(
-        bytes.windows(canary.len()).filter(|v| *v == canary).count(),
-        0,
-        "ledger must contain zero plaintext canaries"
-    );
+    let key = id(); let record = id(); let slot = id();
+    let (nonce, bytes) = ledger::encrypt_padded(&key, &record, &slot, "Envelope", canary).unwrap();
+    assert_eq!(bytes.windows(canary.len()).filter(|v| *v == canary).count(), 0);
+    assert_eq!(ledger::decrypt_padded(&key, &record, &slot, "Envelope", &nonce, &bytes).unwrap(), canary);
+    assert!(ledger::decrypt_padded(&id(), &record, &slot, "Envelope", &nonce, &bytes).is_err());
 }
 #[test]
 fn slice1_g7_bounded_processing() {
