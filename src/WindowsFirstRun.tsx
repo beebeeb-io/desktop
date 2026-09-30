@@ -32,6 +32,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import OnboardingErrorBoundary from './OnboardingErrorBoundary'
 import { listen } from '@tauri-apps/api/event'
 import {
   command,
@@ -721,6 +722,8 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   const applyWords = (start: number, raw: string[]) => {
     const clean = raw.map((w) => w.trim()).filter(Boolean)
     if (!clean.length) return
+    // A complete phrase belongs to the whole grid, regardless of the paste target.
+    if (clean.length === RECOVERY_WORD_COUNT) start = 0
     setError(null)
     setWords((prev) => {
       const next = [...prev]
@@ -797,13 +800,21 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
                   outline: 'none',
                 }}
                 onChange={(e) => {
-                  if (/\s/.test(e.currentTarget.value)) { applyWords(idx, e.currentTarget.value.split(/\s+/)); return }
+                  // React clears currentTarget after dispatch; the updater may run later.
+                  const value = e.currentTarget.value
+                  if (/\s/.test(value)) { applyWords(idx, value.split(/\s+/)); return }
                   setError(null)
-                  setWords((prev) => prev.map((w, i) => i === idx ? e.currentTarget.value : w))
+                  setWords((prev) => prev.map((w, i) => i === idx ? value : w))
                 }}
                 onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
                   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); refs.current[Math.min(idx + 1, RECOVERY_WORD_COUNT - 1)]?.focus(); return }
-                  if (e.key === 'Backspace' && !word && idx > 0) refs.current[idx - 1]?.focus()
+                  if (e.key === 'Backspace' && !word && idx > 0) {
+                    // Cancel deletion before focus moves: WebView2 applies it to the new input.
+                    e.preventDefault()
+                    const previous = refs.current[idx - 1]
+                    previous?.focus()
+                    previous?.setSelectionRange(previous.value.length, previous.value.length)
+                  }
                 }}
                 onPaste={(e) => { e.preventDefault(); applyWords(idx, e.clipboardData.getData('text').split(/\s+/)) }}
               />
@@ -1067,6 +1078,10 @@ function ReadyStep() {
 // ── Root component ─────────────────────────────────────────────────────────
 
 export default function WindowsFirstRun() {
+  return <OnboardingErrorBoundary><WindowsFirstRunView /></OnboardingErrorBoundary>
+}
+
+function WindowsFirstRunView() {
   const [step, setStep] = useState<Step>('signin')
   const [loggedIn, setLoggedIn] = useState<boolean>(true)
 
