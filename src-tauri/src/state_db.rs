@@ -27,6 +27,19 @@ use std::sync::Mutex;
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
 
+/// Server completion is independent from native identity stamping. This journal
+/// survives queue removal, restart and failed proof unlink.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadFinalization {
+    pub op_id: String,
+    pub local_file_id: String,
+    pub server_file_id: String,
+    pub target_path: String,
+    pub payload_path: String,
+    pub stamped: bool,
+}
+
+
 /// High-level sync status for a single file. Maps 1:1 to the icon
 /// overlays rendered by the platform extensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -678,6 +691,19 @@ impl StateDb {
             -- acknowledged chunk, so a retry resumes instead of minting a
             -- second server file row. Keyed by op_id; the payload fingerprint
             -- (path + size + mtime) guards against resuming onto other bytes.
+            CREATE TABLE IF NOT EXISTS upload_finalizations (
+                op_id TEXT PRIMARY KEY,
+                local_file_id TEXT NOT NULL,
+                server_file_id TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                payload_path TEXT NOT NULL,
+                stamped INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS staged_payloads (
+                path TEXT PRIMARY KEY,
+                source_path TEXT,
+                completed INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS upload_resume (
                 op_id TEXT PRIMARY KEY,
                 payload_path TEXT NOT NULL,
@@ -695,6 +721,9 @@ impl StateDb {
             );
             ",
         )?;
+        // Upgrade inventory: old one-shot Keep Mine rows may have no queue
+        // owner. Preserve their plaintext reference before any resume purge.
+        conn.execute("INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume", [])?;
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -1168,7 +1197,7 @@ impl StateDb {
     /// 2. **Rows with a pending operation** (`file_id` present in
     ///    `operation_queue`). A locally-created-but-not-yet-uploaded file lives
     ///    in the mirror under a CLIENT-minted UUID (re-keyed to the server id by
-    ///    `finalize_local_upload_placeholder` only AFTER the upload completes),
+    ///    `defer_local_upload_finalization` only AFTER the upload completes),
     ///    and is referenced by its `operation_queue` row. That client UUID is
     ///    NOT in the server snapshot's `seen` set, so without this guard the very
     ///    next snapshot would delete the user's in-flight upload. The
@@ -1803,6 +1832,95 @@ impl StateDb {
         Ok(deleted)
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    pub fn put_upload_finalization(&self, pending: &UploadFinalization) -> Result<()> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("INSERT INTO upload_finalizations(op_id,local_file_id,server_file_id,target_path,payload_path,stamped)
+            VALUES(?1,?2,?3,?4,?5,0)", params![pending.op_id,pending.local_file_id,pending.server_file_id,pending.target_path,pending.payload_path])?;
+        tx.execute("INSERT INTO staged_payloads(path,completed) VALUES(?1,1)
+            ON CONFLICT(path) DO UPDATE SET completed=1", params![pending.payload_path])?;
+        // Once the server completed, only local finalization may be retried.
+        // Remove the upload before the next cancellable thumbnail await.
+        tx.execute("DELETE FROM operation_queue WHERE op_id=?1", params![pending.op_id])?;
+        tx.execute("DELETE FROM upload_resume WHERE op_id=?1", params![pending.op_id])?;
+        tx.commit()
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn upload_finalizations(&self) -> Result<Vec<UploadFinalization>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped FROM upload_finalizations")?;
+        stmt.query_map([], |r| Ok(UploadFinalization { op_id:r.get(0)?,local_file_id:r.get(1)?,server_file_id:r.get(2)?,target_path:r.get(3)?,payload_path:r.get(4)?,stamped:r.get(5)? }))?.collect()
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn mark_upload_finalization_stamped(&self, op_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("UPDATE upload_finalizations SET stamped=1 WHERE op_id=?1",params![op_id])?;
+        Ok(())
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn forget_upload_finalization(&self, op_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("DELETE FROM upload_finalizations WHERE op_id=?1 AND stamped=1",params![op_id])?;
+        Ok(())
+    }
+
+    /// Upload payload ownership outlives operation/resume rows and unlink errors.
+    pub fn track_staged_payload(&self, path: &str, source: Option<&str>, completed: bool) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "INSERT INTO staged_payloads(path,source_path,completed) VALUES (?1,?2,?3)
+             ON CONFLICT(path) DO UPDATE SET completed = MAX(completed, excluded.completed)",
+            params![path, source, completed],
+        )?;
+        Ok(())
+    }
+    pub fn forget_staged_payload(&self, path: &str) -> Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM staged_payloads WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+    #[cfg(any(target_os = "windows", test))]
+    pub fn staged_payloads_for_signout(&self) -> Result<Vec<(String, Option<String>, bool)>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, source_path, completed FROM staged_payloads
+             UNION ALL SELECT payload_path, NULL, 0 FROM upload_resume
+             WHERE payload_path NOT IN (SELECT path FROM staged_payloads)",
+        )?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+    }
+
+    // Windows account cleanup must not silently discard paused/exhausted writes.
+    // Portable so both Windows CI and Linux exercise the exact DB policy.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn windows_signout_preflight(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let pending: i64 = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))?;
+        let dirty: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE status IN ('uploading', 'conflict', 'error', 'trashing')",
+            [],
+            |r| r.get(0),
+        )?;
+        if pending != 0 || dirty != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn finish_windows_signout(&self) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let pending: i64 = tx.query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))?;
+        if pending != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let remaining: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)", [], |r| r.get(0))?;
+        if remaining != 0 { return Err(rusqlite::Error::InvalidQuery); }
+        tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM bandwidth_samples;")?;
+        tx.commit()
+    }
+
     /// Task 1538 findings 1+2: unconditional local-state wipe for sign-out /
     /// account switch. `operation_queue` and `files.cache_path` are both
     /// per-device (not per-account) state — see `state_paths::beebeeb_state_dir`,
@@ -1987,6 +2105,7 @@ impl StateDb {
 
     /// Persist (insert or replace) the resumable upload session for `op_id`.
     pub fn put_upload_resume(&self, resume: &UploadResume) -> Result<()> {
+        self.track_staged_payload(&resume.payload_path, None, false)?;
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
             "INSERT INTO upload_resume (
@@ -2578,6 +2697,101 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round7_finalization_survives_restart_and_blocks_unfinished_signout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        let row = UploadFinalization { op_id: "op".into(), local_file_id:"local".into(), server_file_id:"server".into(), target_path:"file".into(), payload_path:"proof".into(), stamped:false };
+        db.put_upload_finalization(&row).unwrap();
+        assert_eq!(db.upload_finalizations().unwrap(), vec![row.clone()]);
+        db.forget_upload_finalization("op").unwrap();
+        assert_eq!(db.upload_finalizations().unwrap().len(), 1, "unstamped proof must not be forgotten");
+        db.forget_staged_payload("proof").unwrap();
+        assert!(db.finish_windows_signout().is_err(), "finalization owns its proof independently of staging");
+        db.mark_upload_finalization_stamped("op").unwrap();
+        drop(db);
+        let db = StateDb::open(&path).unwrap();
+        assert!(db.upload_finalizations().unwrap()[0].stamped);
+        db.forget_upload_finalization("op").unwrap();
+        db.finish_windows_signout().unwrap();
+        assert_eq!(db.upload_finalizations().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn round5_legacy_resume_inventory_survives_operation_purge() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        // Mimic an old database: no staging journal row, no queued owner.
+        db.0.lock().unwrap().execute_batch("INSERT INTO upload_resume
+            (op_id,payload_path,payload_size,payload_mtime_ns,upload_session_id,server_file_id,object_version_id,chunk_size_bytes,chunk_count)
+            VALUES ('old','only-copy',1,0,'session','file','version',1,1)").unwrap();
+        drop(db);
+        let db = StateDb::open(&path).unwrap();
+        db.purge_all_local_state().unwrap();
+        assert!(db.get_upload_resume("old").unwrap().is_none());
+        assert_eq!(db.staged_payloads_for_signout().unwrap(), vec![("only-copy".into(), None, false)],
+            "old payload lost its only durable owner on resume purge");
+    }
+
+    #[test]
+    fn windows_signout_refuses_paused_pending_bytes_without_mutation() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        db.0.lock().unwrap().execute_batch(
+            "INSERT INTO operation_queue (op_id,kind,payload_path,paused_reason,created_at,updated_at) VALUES ('a','upload_file','only-copy','review',1,1);").unwrap();
+        assert!(db.windows_signout_preflight().is_err());
+        assert!(db.finish_windows_signout().is_err());
+        let remaining: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM operation_queue WHERE payload_path='only-copy'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn windows_signout_clears_all_account_rows_before_relogin_twice() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        for account in ["a", "b"] {
+            db.0.lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO files(file_id,path,status) VALUES (?1,?1,'cloud_only')",
+                    [account],
+                )
+                .unwrap();
+            db.0.lock()
+                .unwrap()
+                .execute("INSERT INTO sync_state(key,value) VALUES ('cursor','12')", [])
+                .unwrap();
+            db.windows_signout_preflight().unwrap();
+            db.finish_windows_signout().unwrap();
+            assert_eq!(db.list_files().unwrap().len(), 0);
+            let cursors: i64 =
+                db.0.lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM sync_state", [], |r| r.get(0))
+                    .unwrap();
+            assert_eq!(cursors, 0);
+        }
+    }
+
+    #[test]
+    fn windows_signout_refuses_conflicted_content_even_without_queue() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute("INSERT INTO files(file_id,path,status) VALUES ('a','a','conflict')", [])
+            .unwrap();
+        assert!(db.windows_signout_preflight().is_err());
+        assert_eq!(db.list_files().unwrap().len(), 1);
+    }
+
     use super::*;
     use tempfile::tempdir;
 

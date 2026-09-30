@@ -317,7 +317,7 @@ pub struct HeartbeatBody {
 ///
 /// Unlike `Session` (which derives `ZeroizeOnDrop`), this doesn't derive it
 /// — `client: reqwest::Client` isn't `Zeroize` — so [`Drop`] is implemented
-/// by hand below, wiping only `master_key`. Task 1538 Codex P1 (PR #49,
+/// by hand below, wiping `master_key` and the bearer token. Task 1538 Codex P1 (PR #49,
 /// lib.rs:1087 thread, "invalidate the session key the engine holds"): once
 /// `EngineRunner::abort` confirms the engine's task has actually terminated
 /// (not just detached — see that function's doc comment), every `Arc<Self>`
@@ -326,6 +326,10 @@ pub struct HeartbeatBody {
 /// impl is what actually erases the key from memory rather than leaving it
 /// to linger in a freed allocation.
 pub struct ApiClient {
+    // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
+    // strong count (which reaches zero before its destructor runs).
+    #[cfg(any(target_os = "windows", test))]
+    credential_lifetime: std::sync::Arc<()>,
     base_url: String,
     token: String,
     master_key: [u8; 32],
@@ -335,6 +339,7 @@ pub struct ApiClient {
 impl Drop for ApiClient {
     fn drop(&mut self) {
         self.master_key.zeroize();
+        self.token.zeroize();
     }
 }
 
@@ -348,6 +353,11 @@ impl Drop for ApiClient {
 impl zeroize::ZeroizeOnDrop for ApiClient {}
 
 impl ApiClient {
+    #[cfg(any(target_os = "windows", test))]
+    pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
+        std::sync::Arc::downgrade(&self.credential_lifetime)
+    }
+
     /// Build a new client. `base_url` should NOT have a trailing slash
     /// (e.g. `https://api.beebeeb.io`). The 30-second timeout is the
     /// upper bound for any single chunk request — bigger files arrive
@@ -355,6 +365,8 @@ impl ApiClient {
     /// download.
     pub fn new(base_url: String, token: String, master_key: [u8; 32]) -> Self {
         Self {
+            #[cfg(any(target_os = "windows", test))]
+            credential_lifetime: std::sync::Arc::new(()),
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
             master_key,

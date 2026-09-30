@@ -145,7 +145,7 @@ pub unsafe extern "system" fn fetch_data_callback(
     // placeholder exists, so a missing bridge means the daemon isn't
     // running or a logout raced this callback. Either way we can't
     // hydrate — fail the transfer so Explorer stops spinning.
-    let bridge = match super::bridge() {
+    let bridge = match super::callback_bridge(info.CallbackContext) {
         Some(b) => b,
         None => {
             tracing::warn!(file_id = %file_id, "fetch callback fired but no EngineBridge registered");
@@ -175,7 +175,13 @@ pub unsafe extern "system" fn fetch_data_callback(
     // itself; we must not leave a copy in %TEMP% or anywhere else on disk.
     // The Zeroizing wrapper ensures the buffer is wiped on drop (normal, early
     // return, or panic unwind) without any explicit scrubbing call here.
-    let buf = handle.block_on(async { bridge.hydrate_file_to_memory(&file_id).await });
+    let buf = handle.block_on(async {
+        tokio::select! {
+            biased;
+            _ = super::cancelled(&bridge) => Err(anyhow::anyhow!("vault locked")),
+            result = bridge.hydrate_file_to_memory(&file_id) => result,
+        }
+    });
     let buf = match buf {
         Ok(b) => b,
         Err(e) => {
@@ -186,6 +192,19 @@ pub unsafe extern "system" fn fetch_data_callback(
             return;
         }
     };
+
+    if bridge.is_revoked() || bridge.is_stopping() {
+        unsafe {
+            fail_transfer(
+                connection_key,
+                transfer_key,
+                request_key,
+                required_offset,
+                required_length,
+            )
+        };
+        return;
+    }
 
     // Size sanity: the decrypted plaintext length must match the size
     // Windows recorded on the placeholder (info.FileSize). A mismatch means
@@ -247,6 +266,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             transfer_key,
             request_key,
             &buf,
+            || bridge.is_revoked() || bridge.is_stopping(),
             required_offset,
             required_length,
         )
@@ -505,6 +525,9 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         return;
     }
     let info = unsafe { &*callback_info };
+    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+        return;
+    };
 
     // The close-completion params arm carries a `Flags` field; a DELETED close
     // is not a write we should upload. Defensive null-check on params.
@@ -538,6 +561,9 @@ pub unsafe extern "system" fn notify_delete_completion_callback(
         return;
     }
     let info = unsafe { &*callback_info };
+    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+        return;
+    };
     let Some(path) = notify_full_path(info) else {
         return;
     };
@@ -560,6 +586,9 @@ pub unsafe extern "system" fn notify_rename_completion_callback(
         return;
     }
     let info = unsafe { &*callback_info };
+    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+        return;
+    };
     let params = unsafe { &*callback_parameters };
 
     // NEW path: NormalizedPath (volume-relative) joined with the volume DOS name.
@@ -636,9 +665,15 @@ unsafe fn transfer_range(
     transfer_key: i64,
     request_key: i64,
     plaintext: &[u8],
+    cancelled: impl Fn() -> bool,
     required_offset: i64,
     required_length: i64,
 ) -> windows::core::Result<()> {
+    if cancelled() {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x800704C7u32 as i32,
+        )));
+    }
     let total = plaintext.len() as i64;
     // Clamp the requested range to what we actually have.
     let start = required_offset.clamp(0, total);
@@ -661,6 +696,14 @@ unsafe fn transfer_range(
 
     let mut off = start;
     while off < end {
+        // The OS callback worker owns the lease and plaintext during CfExecute.
+        // A stalled call cannot hold up the async lock response indefinitely;
+        // bounded drain reports failure and refuses reactivation.
+        if cancelled() {
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                0x800704C7u32 as i32,
+            )));
+        }
         let remaining = end - off;
         let len = remaining.min(TRANSFER_CHUNK);
         let buf_ptr = unsafe { plaintext.as_ptr().add(off as usize) } as *const core::ffi::c_void;
@@ -762,6 +805,9 @@ unsafe fn transfer_one(
         },
     };
 
+    if status == STATUS_SUCCESS && length > 0 {
+        tracing::debug!(bytes = length, "Cloud Files plaintext transfer attempt");
+    }
     unsafe { CfExecute(&op_info, &mut op_params) }
 }
 

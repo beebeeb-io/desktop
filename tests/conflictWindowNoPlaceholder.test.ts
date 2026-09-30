@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const SRC = readFileSync(join(import.meta.dir, '..', 'src', 'ConflictWindow.tsx'), 'utf8')
+const SRC = readFileSync(join(import.meta.dir, '..', 'src', 'ConflictWindow.tsx'), 'utf8').replace(/\r\n/g, '\n')
 
 describe('ConflictWindow real content', () => {
   test('no longer renders the fabricated placeholder lines', () => {

@@ -309,65 +309,57 @@ pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Resul
 ///    re-labels them as an in-sync placeholder. Dehydration (reclaiming the
 ///    bytes) is the separate `free_up_space` / smart-cache path.
 ///
-/// Best-effort and idempotent: a file that is ALREADY a placeholder returns
-/// `ERROR_NOT_A_CLOUD_FILE`-adjacent failures from `CfConvertToPlaceholder`,
-/// which we map to `Ok(())` — converting a placeholder again is a no-op.
-///
-/// SAFETY: opens a Cloud Files handle via `CfOpenFileWithOplock` (exclusive,
-/// write access — conversion mutates the file's reparse data) and always
-/// closes it via `CfCloseHandle` before returning.
+/// Existing placeholders require CfUpdatePlaceholder: conversion is a no-op
+/// for a placeholder and cannot replace its pre-upload temporary identity.
 pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> anyhow::Result<()> {
-    let path_wide: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    // FileIdentity is opaque to Windows — raw UTF-8 bytes of the file_id, the
-    // exact same encoding `create_placeholder` uses, so the fetch callback can
-    // decode it identically on a later hydration.
-    let identity: Vec<u8> = file_id.as_bytes().to_vec();
+    complete_upload_placeholder(path, file_id, None)
+}
 
-    // SAFETY: `path_wide` / `identity` live on this stack frame for the whole
-    // call. The opened handle is closed before return on every path.
+/// The uploader additionally proves ownership and that the resident bytes still
+/// equal the completed payload, while holding the same exclusive file handle.
+pub fn complete_upload_placeholder(
+    path: &std::path::Path,
+    file_id: &str,
+    uploaded: Option<(&str, &std::path::Path)>,
+) -> anyhow::Result<()> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::{HANDLE, ERROR_NOT_A_CLOUD_FILE};
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0).open(path)?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut buffer = vec![0u64; 1024];
+    let info_result = unsafe { CfGetPlaceholderInfo(handle, CF_PLACEHOLDER_INFO_STANDARD,
+        buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None) };
+    let existing = match info_result {
+        Ok(()) => Some(unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() }),
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => None,
+        Err(e) => return Err(e.into()),
+    };
+    if let Some((local_id, payload)) = uploaded {
+        if let Some(info) = existing {
+            let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
+            anyhow::ensure!(identity == local_id.as_bytes() || identity == file_id.as_bytes(),
+                "Uploaded placeholder belongs to another file");
+        }
+        // Stream both handles; do not load a large upload into memory. An edit
+        // during upload must never be marked clean merely because upload ended.
+        use sha2::{Digest, Sha256};
+        let mut current_hash = Sha256::new();
+        std::io::copy(&mut file, &mut current_hash)?;
+        let mut payload_hash = Sha256::new();
+        std::io::copy(&mut std::fs::File::open(payload)?, &mut payload_hash)?;
+        anyhow::ensure!(current_hash.finalize() == payload_hash.finalize(), "Local bytes changed during upload");
+    }
     unsafe {
-        // Exclusive + write access: converting a file to a placeholder
-        // rewrites its reparse data, so we need a writable, exclusive handle.
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert): {e}"))?;
-
-        let result = CfConvertToPlaceholder(
-            handle,
-            Some(identity.as_ptr() as *const core::ffi::c_void),
-            identity.len() as u32,
-            // MARK_IN_SYNC, no DEHYDRATE — keep the user's bytes on disk but
-            // label the file as a synced placeholder. ENABLE_ON_DEMAND_POPULATION
-            // is for directories; this is a file, so it's omitted.
-            CF_CONVERT_FLAG_MARK_IN_SYNC,
-            None,
-            None,
-        );
-
-        CfCloseHandle(handle);
-
-        if let Err(e) = result {
-            // 0x8007017C = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_ALREADY_CONNECTED)
-            // and 0x80070178 = ERROR_NOT_A_CLOUD_FILE are the "already a
-            // placeholder / nothing to convert" steady states — treat as the
-            // desired end state. Anything else is a real failure.
-            const ALREADY_A_PLACEHOLDER: windows::core::HRESULT =
-                windows::core::HRESULT(0x8007017Cu32 as i32);
-            if e.code() == ALREADY_A_PLACEHOLDER {
-                return Ok(());
-            }
-            return Err(anyhow::anyhow!("CfConvertToPlaceholder: {e}"));
+        if existing.is_some() {
+            CfUpdatePlaceholder(handle, None, Some(file_id.as_ptr().cast()), file_id.len() as u32,
+                None, CF_UPDATE_FLAG_MARK_IN_SYNC, None, None)?;
+        } else {
+            CfConvertToPlaceholder(handle, Some(file_id.as_ptr().cast()), file_id.len() as u32,
+                CF_CONVERT_FLAG_MARK_IN_SYNC, None, None)?;
         }
     }
-
-    // Zero-knowledge: log the file_id only, never the decrypted plaintext path.
-    tracing::debug!(file_id = %file_id, "converted local file to in-sync placeholder");
     Ok(())
 }
 
@@ -387,7 +379,7 @@ pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> 
 /// that were never uploaded). We pass `CF_CONVERT_FLAG_NONE`: the file becomes a
 /// placeholder that keeps its bytes on disk and is understood to be locally
 /// ahead of the cloud. Once the real `file_id` lands,
-/// [`super::super::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]
+/// [`super::super::engine_bridge::EngineBridge::defer_local_upload_finalization`]
 /// → [`convert_to_in_sync_placeholder`] re-stamps it in-sync with the server id.
 ///
 /// We use a throwaway identity here (the local op uuid would do, but we have no

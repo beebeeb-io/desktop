@@ -93,7 +93,7 @@ test('seven Rust wire fixtures distinguish install support and implemented prefe
 })
 
 test('capability IPC is registered in the shipping Rust handler', () => {
-  const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+  const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   expect(rust.slice(rust.indexOf('.invoke_handler(tauri::generate_handler!['))).toMatch(/\bdesktop_capabilities,/)
 })
 

@@ -20,6 +20,8 @@ mod account;
 mod account_dto;
 mod api_client;
 mod browser_login;
+#[cfg(any(target_os = "windows", test))]
+mod callback_gate;
 mod config;
 mod conflict;
 mod desktop_search;
@@ -55,6 +57,7 @@ mod lockfile;
 mod macos_file_provider;
 mod runner;
 mod state_db;
+mod staged_payload;
 mod state_paths;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
@@ -67,6 +70,52 @@ mod watcher;
 // so this `mod` declaration plus the conditional are belt-and-braces.
 #[cfg(target_os = "windows")]
 mod windows_cf;
+#[cfg(target_os = "windows")]
+static SESSION_TRANSITION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[cfg(any(target_os = "windows", test))]
+mod session_commands;
+#[cfg(target_os = "windows")]
+static SESSION_COMMANDS: LazyLock<session_commands::SessionCommands> =
+    LazyLock::new(session_commands::SessionCommands::new);
+
+#[cfg(any(target_os = "windows", test))]
+mod auth_attempts;
+#[cfg(target_os = "windows")]
+static AUTH_ATTEMPTS: LazyLock<auth_attempts::AuthAttempts> = LazyLock::new(auth_attempts::AuthAttempts::new);
+
+// Windows only: cancel the entire command, including independently built clients.
+// Other platforms poll the original command body directly.
+macro_rules! session_command {
+    ($work:expr) => {{
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.run($work).await
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            $work.await
+        }
+    }};
+}
+
+#[cfg(target_os = "windows")]
+async fn close_session_commands() -> Result<(), String> {
+    let revoked = SESSION_COMMANDS.close();
+    let auth_revoked = AUTH_ATTEMPTS.close();
+    let worker = tokio::task::spawn_blocking(move || {
+        if let Some(auth) = auth_revoked {
+            auth.drain(std::time::Duration::from_secs(3))?;
+        }
+        SESSION_COMMANDS.drain(revoked, std::time::Duration::from_secs(3))
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(4), worker)
+        .await
+        .map_err(|_| {
+            "Vault lock failed: commands are still stopping. The vault is not locked. Retry locking.".to_string()
+        })?
+        .map_err(|e| format!("Vault lock failed: {e}"))?
+}
+
 use config::{DesktopConfig, ReleaseChannel};
 // `platform_keychain_store_for(id)` resolves to the macOS Keychain store on
 // macOS and the Windows Credential Manager store on Windows (Linux keeps the
@@ -443,6 +492,12 @@ fn clear_keychain_session(account_id: &str) -> Result<(), String> {
 /// `NotFound`) is logged at `warn!` instead — it is unexpected but must still
 /// not block startup, since onboarding can recover.
 async fn restore_session_on_startup(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    if !SESSION_COMMANDS.startup_restore_allowed() || windows_cf::ensure_reactivation_allowed().is_err() {
+        return;
+    }
     let state = app.state::<AppState>();
     // `synthesize_single_account` runs in `setup()` before this task is
     // spawned, so the active account always resolves; bail defensively if not.
@@ -504,11 +559,28 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
         set_auth_email(&state, email);
     }
     tracing::info!("vault auto-unlocked from credential store on startup");
-    start_engine_if_possible(app.clone(), &state, token, master_key).await;
+    if let Err(error) = start_engine_if_possible(
+        app.clone(),
+        &state,
+        token,
+        master_key,
+        #[cfg(target_os = "windows")]
+        &_transition,
+    )
+    .await
+    {
+        tracing::warn!(%error, "startup engine refused");
+    }
 }
+
+// UI cache epoch, independent of the credential-bearing command lease epoch.
+static UI_SESSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn set_auth_present(state: &AppState, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
+        if *guard != present {
+            UI_SESSION_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         *guard = present;
     }
 }
@@ -520,6 +592,9 @@ fn set_auth_email(state: &AppState, email: Option<String>) {
     if let Ok(acct) = state.active_account()
         && let Ok(mut guard) = acct.auth_email.lock()
     {
+        if *guard != email {
+            UI_SESSION_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         *guard = email;
     }
 }
@@ -529,12 +604,22 @@ async fn start_engine_if_possible(
     state: &State<'_, AppState>,
     token: String,
     master_key: [u8; 32],
-) {
+    #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.open()?;
+    }
+    #[cfg(target_os = "windows")]
+    let generation = SESSION_COMMANDS.generation()?;
     if let Some(cfg) = DesktopConfig::load().ok() {
-        let Some(root) = cfg.sync_root else { return };
+        let Some(root) = cfg.sync_root else { return Ok(()) };
         // The engine + pause flag are per-account (decision 0800). No active
         // account → nothing to start.
-        let Ok(acct) = state.active_account() else { return };
+        let Ok(acct) = state.active_account() else {
+            return Ok(());
+        };
         // Rehydrate the persisted pause state before spawning so a
         // restart-while-paused stays paused (the in-memory AtomicBool
         // always defaults to false; desktop.toml is the source of truth).
@@ -549,11 +634,26 @@ async fn start_engine_if_possible(
             // gone previous task could still be touching the same state.db
             // the freshly spawned runner is about to open).
             if !prev.abort().await {
+                #[cfg(target_os = "windows")]
+                return Err("Could not stop the previous sync engine; retry locking before restarting sync.".into());
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
             }
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, master_key, pause_flag, auth_health));
+        #[cfg(target_os = "windows")]
+        {
+            windows_cf::ensure_reactivation_allowed()?;
+            SESSION_COMMANDS.validate_start(generation)?;
+        }
+        *engine_slot = Some(EngineRunner::spawn(
+            app,
+            root,
+            token,
+            master_key,
+            pause_flag,
+            auth_health,
+        ));
     }
+    Ok(())
 }
 
 // ── IPC commands: first-launch onboarding ────────────────────────────────────
@@ -641,145 +741,189 @@ struct LoginOutcome {
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
 async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<LoginOutcome, String> {
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-
-    let email = email.trim().to_lowercase();
-    if email.is_empty() || password.is_empty() {
-        return Err("Email and password are required.".to_string());
-    }
-
-    let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
-        .map_err(|e| format!("opaque login start: {e}"))?;
-    let client_message = encode_base64(&login_start.message);
-
-    let start_resp = client
-        .post(format!("{base_url}/api/v1/opaque/login-start"))
-        .json(&serde_json::json!({ "email": email, "client_message": client_message }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED || start_resp.status() == reqwest::StatusCode::NOT_FOUND
-    {
-        return Err("Invalid email or password".to_string());
-    }
-    if !start_resp.status().is_success() {
-        let status = start_resp.status();
-        let body = start_resp.text().await.unwrap_or_default();
-        return Err(format!("Login start failed ({status}): {body}"));
-    }
-
-    let start_body: serde_json::Value = start_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse login start response: {e}"))?;
-    let server_message = start_body
-        .get("server_message")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No server_message in login start response".to_string())?;
-    let server_state = start_body
-        .get("server_state")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No server_state in login start response".to_string())?;
-    // Dual-KSF login (task 0815): the server forwards the account's OPAQUE KSF
-    // version (0 = legacy Identity, 1 = Argon2id) in the login-start response.
-    // The client must finish under the matching CipherSuite, so thread it into
-    // client_login_finish — mirrors web/iOS and the server's own call shape in
-    // beebeeb-api/tests/api_integration.rs (`as u32` from the JSON number).
-    let ksf_version = start_body
-        .get("ksf_version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "No ksf_version in login start response".to_string())? as u32;
-    let server_message_bytes =
-        decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
-    let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
-        &login_start.state,
-        password.as_bytes(),
-        &server_message_bytes,
-        ksf_version,
-    )
-    .map_err(|e| format!("Invalid email or password ({e})"))?;
-
-    let finish_resp = client
-        .post(format!("{base_url}/api/v1/opaque/login-finish"))
-        .json(&serde_json::json!({
-            "email": email,
-            "client_message": encode_base64(&login_finish.message),
-            "server_state": server_state,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("Invalid email or password".to_string());
-    }
-    if !finish_resp.status().is_success() {
-        let status = finish_resp.status();
-        let body = finish_resp.text().await.unwrap_or_default();
-        return Err(format!("Login finish failed ({status}): {body}"));
-    }
-    let finish_body: serde_json::Value = finish_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse login finish response: {e}"))?;
-    if finish_body
-        .get("requires_2fa")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        // Password proven, but the account has 2FA. Capture the short-lived
-        // partial session token (+ email) so `desktop_login_2fa` can complete
-        // the sign-in once the user enters their TOTP code. The partial token is
-        // server-validated and short-lived — never log it.
-        let partial_token = finish_body
-            .get("partial_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "No partial_token in login finish response".to_string())?
-            .to_string();
+    #[cfg(target_os = "windows")]
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
         {
-            let mut guard = state
-                .pending_2fa
-                .lock()
-                .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
-            *guard = Some(Pending2fa {
-                partial_token,
-                email: email.clone(),
-            });
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
         }
-        tracing::info!("desktop login requires 2FA; awaiting TOTP code");
-        return Ok(LoginOutcome { requires_2fa: true });
-    }
-    let session_token = finish_body
-        .get("session_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No session_token in login finish response".to_string())?
-        .to_string();
+        #[cfg(target_os = "windows")]
+        if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
 
-    let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    // Resolve the active account up front so we can both cache the profile and
-    // segment the keychain write under its id (task 0800). The cache is
-    // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
-    let account_id = state.active_account()?.id.as_str().to_string();
-    if let Ok(acct) = state.active_account()
-        && let Ok(mut guard) = acct.cached_profile.lock()
+        #[cfg(target_os = "windows")]
+        drop(_transition);
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+
+        let email = email.trim().to_lowercase();
+        if email.is_empty() || password.is_empty() {
+            return Err("Email and password are required.".to_string());
+        }
+
+        let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
+            .map_err(|e| format!("opaque login start: {e}"))?;
+        let client_message = encode_base64(&login_start.message);
+
+        let start_resp = client
+            .post(format!("{base_url}/api/v1/opaque/login-start"))
+            .json(&serde_json::json!({ "email": email, "client_message": client_message }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            || start_resp.status() == reqwest::StatusCode::NOT_FOUND
+        {
+            return Err("Invalid email or password".to_string());
+        }
+        if !start_resp.status().is_success() {
+            let status = start_resp.status();
+            let body = start_resp.text().await.unwrap_or_default();
+            return Err(format!("Login start failed ({status}): {body}"));
+        }
+
+        let start_body: serde_json::Value = start_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse login start response: {e}"))?;
+        let server_message = start_body
+            .get("server_message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No server_message in login start response".to_string())?;
+        let server_state = start_body
+            .get("server_state")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No server_state in login start response".to_string())?;
+        // Dual-KSF login (task 0815): the server forwards the account's OPAQUE KSF
+        // version (0 = legacy Identity, 1 = Argon2id) in the login-start response.
+        // The client must finish under the matching CipherSuite, so thread it into
+        // client_login_finish — mirrors web/iOS and the server's own call shape in
+        // beebeeb-api/tests/api_integration.rs (`as u32` from the JSON number).
+        let ksf_version = start_body
+            .get("ksf_version")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "No ksf_version in login start response".to_string())? as u32;
+        let server_message_bytes =
+            decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
+        let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
+            &login_start.state,
+            password.as_bytes(),
+            &server_message_bytes,
+            ksf_version,
+        )
+        .map_err(|e| format!("Invalid email or password ({e})"))?;
+
+        let finish_resp = client
+            .post(format!("{base_url}/api/v1/opaque/login-finish"))
+            .json(&serde_json::json!({
+                "email": email,
+                "client_message": encode_base64(&login_finish.message),
+                "server_state": server_state,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Invalid email or password".to_string());
+        }
+        if !finish_resp.status().is_success() {
+            let status = finish_resp.status();
+            let body = finish_resp.text().await.unwrap_or_default();
+            return Err(format!("Login finish failed ({status}): {body}"));
+        }
+        let finish_body: serde_json::Value = finish_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse login finish response: {e}"))?;
+        if finish_body
+            .get("requires_2fa")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            // Password proven, but the account has 2FA. Capture the short-lived
+            // partial session token (+ email) so `desktop_login_2fa` can complete
+            // the sign-in once the user enters their TOTP code. The partial token is
+            // server-validated and short-lived — never log it.
+            #[cfg(target_os = "windows")]
+            let _transition = SESSION_TRANSITION.lock().await;
+            #[cfg(target_os = "windows")]
+            AUTH_ATTEMPTS.validate(&attempt)?;
+            let partial_token = finish_body
+                .get("partial_token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "No partial_token in login finish response".to_string())?
+                .to_string();
+            {
+                let mut guard = state
+                    .pending_2fa
+                    .lock()
+                    .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+                *guard = Some(Pending2fa {
+                    partial_token,
+                    email: email.clone(),
+                });
+            }
+            tracing::info!("desktop login requires 2FA; awaiting TOTP code");
+            return Ok(LoginOutcome { requires_2fa: true });
+        }
+        let session_token = finish_body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No session_token in login finish response".to_string())?
+            .to_string();
+
+        let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
+
+        // Resolve the active account up front so we can both cache the profile and
+        // segment the keychain write under its id (task 0800). The cache is
+        // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
+        let account_id = state.active_account()?.id.as_str().to_string();
+        if let Ok(acct) = state.active_account()
+            && let Ok(mut guard) = acct.cached_profile.lock()
+        {
+            *guard = Some(profile);
+        }
+
+        if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+            #[cfg(target_os = "windows")]
+            drop(_transition);
+            let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+            return Err(e);
+        }
+
+        set_auth_present(&state, true);
+        set_auth_email(&state, Some(email.clone()));
+        tracing::info!("desktop account session installed");
+
+        Ok(LoginOutcome { requires_2fa: false })
+    };
+    #[cfg(target_os = "windows")]
     {
-        *guard = Some(profile);
+        attempt.run(work).await
     }
-
-    if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
-        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-        return Err(e);
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
     }
-
-    set_auth_present(&state, true);
-    set_auth_email(&state, Some(email.clone()));
-    tracing::info!("desktop account session installed");
-
-    Ok(LoginOutcome { requires_2fa: false })
 }
 
 /// Complete a 2FA-gated sign-in: trade the held partial token + the user's TOTP
@@ -797,82 +941,116 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
 /// `{ user_id, session_token }`. The TOTP code is never logged.
 #[tauri::command]
 async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(), String> {
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
+    #[cfg(target_os = "windows")]
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
+        }
+        #[cfg(target_os = "windows")]
+        drop(_transition);
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
 
-    // Read (don't yet consume) the pending challenge: we only clear it on
-    // success so an invalid code stays retryable within the 5-minute window.
-    let (partial_token, email) = {
-        let guard = state
-            .pending_2fa
-            .lock()
-            .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
-        let pending = guard
-            .as_ref()
-            .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
-        (pending.partial_token.clone(), pending.email.clone())
+        // Read (don't yet consume) the pending challenge: we only clear it on
+        // success so an invalid code stays retryable within the 5-minute window.
+        let (partial_token, email) = {
+            let guard = state
+                .pending_2fa
+                .lock()
+                .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+            let pending = guard
+                .as_ref()
+                .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
+            (pending.partial_token.clone(), pending.email.clone())
+        };
+
+        let code = code.trim().to_string();
+        if code.is_empty() {
+            return Err("Enter your authentication code.".to_string());
+        }
+
+        let verify_resp = client
+            .post(format!("{base_url}/api/v1/auth/2fa/verify"))
+            .json(&serde_json::json!({ "partial_token": partial_token, "code": code }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if verify_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            // Invalid/expired code. Keep `pending_2fa` so the user can retry while
+            // the partial token is still valid.
+            return Err("Invalid authentication code".to_string());
+        }
+        if !verify_resp.status().is_success() {
+            let status = verify_resp.status();
+            let body = verify_resp.text().await.unwrap_or_default();
+            return Err(format!("Two-factor verification failed ({status}): {body}"));
+        }
+        let verify_body: serde_json::Value = verify_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse 2FA verify response: {e}"))?;
+        let session_token = verify_body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
+            .to_string();
+
+        // Same post-finish setup as `desktop_login`'s no-2FA success path. The
+        // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
+        let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
+
+        let account_id = state.active_account()?.id.as_str().to_string();
+        if let Ok(acct) = state.active_account()
+            && let Ok(mut guard) = acct.cached_profile.lock()
+        {
+            *guard = Some(profile);
+        }
+
+        if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+            #[cfg(target_os = "windows")]
+            drop(_transition);
+            let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+            return Err(e);
+        }
+
+        set_auth_present(&state, true);
+        set_auth_email(&state, Some(email));
+        // Challenge satisfied — drop the pending state so a stale partial token
+        // can't be reused.
+        if let Ok(mut guard) = state.pending_2fa.lock() {
+            *guard = None;
+        }
+        tracing::info!("desktop account session installed after 2FA");
+
+        Ok(())
     };
-
-    let code = code.trim().to_string();
-    if code.is_empty() {
-        return Err("Enter your authentication code.".to_string());
-    }
-
-    let verify_resp = client
-        .post(format!("{base_url}/api/v1/auth/2fa/verify"))
-        .json(&serde_json::json!({ "partial_token": partial_token, "code": code }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if verify_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        // Invalid/expired code. Keep `pending_2fa` so the user can retry while
-        // the partial token is still valid.
-        return Err("Invalid authentication code".to_string());
-    }
-    if !verify_resp.status().is_success() {
-        let status = verify_resp.status();
-        let body = verify_resp.text().await.unwrap_or_default();
-        return Err(format!("Two-factor verification failed ({status}): {body}"));
-    }
-    let verify_body: serde_json::Value = verify_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse 2FA verify response: {e}"))?;
-    let session_token = verify_body
-        .get("session_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
-        .to_string();
-
-    // Same post-finish setup as `desktop_login`'s no-2FA success path. The
-    // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
-    let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
-    let account_id = state.active_account()?.id.as_str().to_string();
-    if let Ok(acct) = state.active_account()
-        && let Ok(mut guard) = acct.cached_profile.lock()
+    #[cfg(target_os = "windows")]
     {
-        *guard = Some(profile);
+        attempt.run(work).await
     }
-
-    if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
-        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-        return Err(e);
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
     }
-
-    set_auth_present(&state, true);
-    set_auth_email(&state, Some(email));
-    // Challenge satisfied — drop the pending state so a stale partial token
-    // can't be reused.
-    if let Ok(mut guard) = state.pending_2fa.lock() {
-        *guard = None;
-    }
-    tracing::info!("desktop account session installed after 2FA");
-
-    Ok(())
 }
 
 /// Provision this Mac with the user's vault key after account sign-in.
@@ -887,55 +1065,99 @@ async fn desktop_unlock_with_recovery_phrase(
     state: State<'_, AppState>,
     recovery_phrase: String,
 ) -> Result<(), String> {
-    let acct = state.active_account()?;
-    let existing = acct
-        .session
-        .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?
-        .as_ref()
-        .map(|session| (session.token.clone(), session.master_key));
-    if let Some((token, master_key)) = existing {
-        start_engine_if_possible(app, &state, token, master_key).await;
-        return Ok(());
-    }
-
-    let account_id = acct.id.as_str().to_string();
-    let token = load_session_token_from_keychain(&account_id)?
-        .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
-    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-    let master_key = provision_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase, |key| {
-        persist_vault_key_to_keychain(&account_id, key)
-    })
-    .await?;
-    // `desktop_login` already persisted the email when it stored the token, but
-    // persist again here (idempotent) so the invariant "a fully-provisioned
-    // session has its email in the store" holds even if memory and store drift.
-    if let Some(email) = email.as_deref() {
-        let vault = AuthVault::new(platform_keychain_store_for(&account_id));
-        if let Err(e) = vault.store_account_email(email) {
-            // Non-fatal: the email is display metadata, not required to unlock.
-            tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
+    #[cfg(target_os = "windows")]
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
         }
-    }
+        let acct = state.active_account()?;
+        let existing = acct
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?
+            .as_ref()
+            .map(|session| (session.token.clone(), session.master_key));
+        if let Some((token, master_key)) = existing {
+            start_engine_if_possible(
+                app,
+                &state,
+                token,
+                master_key,
+                #[cfg(target_os = "windows")]
+                &_transition,
+            )
+            .await?;
+            return Ok(());
+        }
 
-    {
-        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(Session {
-            token: token.clone(),
+        let account_id = acct.id.as_str().to_string();
+        let token = load_session_token_from_keychain(&account_id)?
+            .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+        let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+        // Verification is cancellable network work. Teardown must be able to
+        // acquire the transition and revoke this attempt while it is pending.
+        #[cfg(target_os = "windows")]
+        drop(_transition);
+        let verified_key = verify_vault_key_from_phrase(&client, &base_url, &token, &recovery_phrase).await?;
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        let master_key = *verified_key;
+        persist_vault_key_to_keychain(&account_id, master_key)?;
+        // `desktop_login` already persisted the email when it stored the token, but
+        // persist again here (idempotent) so the invariant "a fully-provisioned
+        // session has its email in the store" holds even if memory and store drift.
+        if let Some(email) = email.as_deref() {
+            let vault = AuthVault::new(platform_keychain_store_for(&account_id));
+            if let Err(e) = vault.store_account_email(email) {
+                // Non-fatal: the email is display metadata, not required to unlock.
+                tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
+            }
+        }
+
+        {
+            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            *guard = Some(Session {
+                token: token.clone(),
+                master_key,
+                email,
+            });
+        }
+        set_auth_present(&state, true);
+        tracing::info!("vault provisioned from recovery phrase");
+        start_engine_if_possible(
+            app,
+            &state,
+            token,
             master_key,
-            email,
-        });
+            #[cfg(target_os = "windows")]
+            &_transition,
+        )
+        .await?;
+        Ok(())
+    };
+    #[cfg(target_os = "windows")]
+    {
+        attempt.run(work).await
     }
-    set_auth_present(&state, true);
-    tracing::info!("vault provisioned from recovery phrase");
-    start_engine_if_possible(app, &state, token, master_key).await;
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
+    }
 }
 
 const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
@@ -948,6 +1170,7 @@ const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your w
 /// keys the sync engine with a foreign key, so every upload from this device is
 /// undecryptable on every other device (flow 7 P0). Same gate as web's
 /// device-provision (`recoveredKeyMatchesAccount`, task 0874).
+#[cfg(test)]
 async fn provision_vault_key_from_phrase<P>(
     client: &reqwest::Client,
     base_url: &str,
@@ -958,6 +1181,18 @@ async fn provision_vault_key_from_phrase<P>(
 where
     P: FnOnce([u8; 32]) -> Result<(), String>,
 {
+    let master_key = verify_vault_key_from_phrase(client, base_url, session_token, recovery_phrase).await?;
+    persist(*master_key)?;
+    Ok(*master_key)
+}
+
+/// Verification has no persistent side effects; callers fence installation.
+async fn verify_vault_key_from_phrase(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    recovery_phrase: &str,
+) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
     let recovery_phrase = normalize_recovery_phrase_input(recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
         .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
@@ -965,9 +1200,7 @@ where
         // `master_key_struct` zeroizes on drop.
         return Err(INCORRECT_RECOVERY_PHRASE.to_string());
     }
-    let master_key: [u8; 32] = master_key_struct.to_bytes();
-    persist(master_key)?;
-    Ok(master_key)
+    Ok(zeroize::Zeroizing::new(master_key_struct.to_bytes()))
 }
 
 /// Ask the server whether `master_key` is the signed-in account's key by
@@ -1106,17 +1339,35 @@ pub(crate) async fn apply_session(
     token: String,
     master_key: [u8; 32],
     email: Option<String>,
+    #[cfg(target_os = "windows")] attempt: &auth_attempts::Attempt,
 ) -> Result<(), String> {
+    let token = zeroize::Zeroizing::new(token);
+    let master_key = zeroize::Zeroizing::new(master_key);
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    {
+        SESSION_COMMANDS.ensure_reactivation_allowed()?;
+        windows_cf::ensure_reactivation_allowed()?;
+    }
+    #[cfg(target_os = "windows")]
+    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+        return Err("Sign out of the current account before signing in again.".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    AUTH_ATTEMPTS.validate(attempt)?;
+
     let account_id = state.active_account()?.id.as_str().to_string();
-    persist_session_to_keychain(&account_id, &token, master_key, email.as_deref())?;
-    let token_clone = token.clone();
+    persist_session_to_keychain(&account_id, &token, *master_key, email.as_deref())?;
+    let token_clone = token.to_string();
 
     {
         let acct = state.active_account()?;
         let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
         *guard = Some(Session {
-            token,
-            master_key,
+            token: token.to_string(),
+            master_key: *master_key,
             email: email.clone(),
         });
     }
@@ -1126,7 +1377,15 @@ pub(crate) async fn apply_session(
 
     // If we already know the sync_root, kick off the engine. Otherwise
     // it'll start when the first-launch picker resolves.
-    start_engine_if_possible(app, state, token_clone, master_key).await;
+    start_engine_if_possible(
+        app,
+        state,
+        token_clone,
+        *master_key,
+        #[cfg(target_os = "windows")]
+        &_transition,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1135,7 +1394,13 @@ pub(crate) async fn apply_session(
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
 async fn clear_session_impl(state: &AppState) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    let mut _auth_reopen = None;
     let acct = state.active_account()?;
+    #[cfg(target_os = "windows")]
+    close_session_commands().await?;
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
     //
@@ -1151,7 +1416,6 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         let stopped = prev.abort().await;
-        drop(engine_slot);
         if !stopped {
             tracing::error!(
                 "sign-out refused: could not confirm the sync engine stopped; \
@@ -1164,25 +1428,65 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
             );
         }
         tracing::info!("engine aborted on logout");
-    } else {
-        drop(engine_slot);
     }
 
-    // Windows: remove the Explorer SHELL registration (nav-pane entry, Status
-    // column, overlays) on sign-out so a logged-out machine doesn't show a dead
-    // "Beebeeb" sidebar entry pointing at a folder the user is no longer signed
-    // into. The Win32 Cloud Files registration + placeholders are left in place
-    // (they re-converge on the next login via connect_root); this strips only the
-    // shell chrome. Best-effort and engine-independent: the Id is reconstructed
-    // from the persisted sync-root path, so this works after the engine is
-    // aborted above. A failure (incl. "not registered") is logged, not surfaced —
-    // logout must always appear to succeed.
+    #[cfg(not(target_os = "windows"))]
+    drop(engine_slot);
+
     #[cfg(target_os = "windows")]
     {
-        if let Some(root) = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
-            if let Err(error) = windows_cf::unregister_shell_sync_root(&root) {
-                tracing::warn!(error = %error, "Explorer shell sync-root unregister on logout failed (best-effort)");
+        windows_cf::revoke_callbacks()
+            .await
+            .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+        windows_cf::wait_for_credential_release().await?;
+        // Native/credential shutdown is now confirmed. Cleanup may refuse dirty
+        // files; allow an explicit unlock so the user can sync and retry.
+        {
+            SESSION_COMMANDS.finish_close();
+            _auth_reopen = Some(auth_attempts::ReopenOnDrop(&AUTH_ATTEMPTS));
+        }
+        let root = DesktopConfig::load()?.sync_root;
+        let db = state_db_from_app_local_state_dir()?;
+        if let Some(db) = db {
+            windows_cf::signout::purge(&db, root.as_deref()).map_err(|e| format!("Sign-out paused: {e}"))?;
+        } else if let Some(root) = root.as_ref() {
+            if std::fs::read_dir(root)
+                .map_err(|e| format!("Cannot inspect sync folder: {e}"))?
+                .next()
+                .is_some()
+            {
+                return Err("Cannot verify sync-folder ownership without its database. Restore the local state before signing out.".into());
             }
+        }
+        if let Some(root) = root {
+            // Cloud Files must release the root before WinRT removes its shell registration.
+            windows_cf::unregister_sync_root(&root).map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
+            windows_cf::unregister_shell_sync_root(&root)
+                .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
+        }
+        // Local teardown is authoritative even offline; server revocation is
+        // best effort and bounded. Never log the bearer token.
+        let token = acct
+            .session
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().map(|s| zeroize::Zeroizing::new(s.token.clone())))
+            .or_else(|| {
+                load_session_token_from_keychain(acct.id.as_str())
+                    .ok()
+                    .flatten()
+                    .map(zeroize::Zeroizing::new)
+            });
+        if let Some(token) = token {
+            let client = reqwest::Client::builder()
+                .default_headers(api_client::provenance_headers())
+                .build()
+                .map_err(|e| format!("Could not initialize logout request: {e}"))?;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                revoke_desktop_session(&client, &runner::api_base_url(), &token),
+            )
+            .await;
         }
     }
 
@@ -1208,7 +1512,9 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     // `DesktopConfig` best-effort, separately — it is used ONLY to resolve
     // Windows placeholder paths below, never to gate whether the purge runs
     // at all.
+    #[cfg(not(target_os = "windows"))]
     let cfg_sync_root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    #[cfg(not(target_os = "windows"))]
     match state_db_from_app_local_state_dir() {
         Ok(Some(db)) => match purge_local_state_files(&db, cfg_sync_root.as_deref()) {
             Ok(summary) => {
@@ -1256,6 +1562,9 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
             tracing::info!("session cleared via IPC");
         }
         Err(_) => {
+            #[cfg(target_os = "windows")]
+            return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into());
+            #[cfg(not(target_os = "windows"))]
             tracing::warn!("session mutex poisoned during clear_session");
         }
     }
@@ -1280,11 +1589,9 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Drop any cached session and abort the engine if running. Called by
-/// the WebView on logout. Returns `Ok(())` even if the session mutex
-/// was poisoned, because logout should always appear to succeed from
-/// the user's POV — the only error path Tauri requires here is for
-/// the macro's async-with-state contract.
+/// Sign out through the shared native-menu/WebView teardown. Windows returns
+/// an error while work, plaintext cleanup or root unregistration is incomplete;
+/// the UI must retain the account and display that error for recovery/retry.
 #[tauri::command]
 async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     clear_session_impl(&state).await
@@ -1296,31 +1603,68 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
 /// and upload commands stay unavailable because there is no in-memory key.
 #[tauri::command]
 async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let acct = state.active_account()?;
-    let existing = acct
-        .session
-        .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?
-        .as_ref()
-        .map(|session| (session.token.clone(), session.master_key));
-    if let Some((token, master_key)) = existing {
-        start_engine_if_possible(app, &state, token, master_key).await;
-        return Ok(());
-    }
+    #[cfg(target_os = "windows")]
+    let attempt = AUTH_ATTEMPTS.begin()?;
+    let work = async {
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        AUTH_ATTEMPTS.validate(&attempt)?;
+        #[cfg(target_os = "windows")]
+        {
+            SESSION_COMMANDS.ensure_reactivation_allowed()?;
+            windows_cf::ensure_reactivation_allowed()?;
+        }
+        let acct = state.active_account()?;
+        let existing = acct
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?
+            .as_ref()
+            .map(|session| (session.token.clone(), session.master_key));
+        if let Some((token, master_key)) = existing {
+            start_engine_if_possible(
+                app,
+                &state,
+                token,
+                master_key,
+                #[cfg(target_os = "windows")]
+                &_transition,
+            )
+            .await?;
+            return Ok(());
+        }
 
-    let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let session = load_session_from_keychain(acct.id.as_str(), email)?
-        .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
-    let token = session.token.clone();
-    let master_key = session.master_key;
+        let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
+        let session = load_session_from_keychain(acct.id.as_str(), email)?
+            .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+        let token = session.token.clone();
+        let master_key = session.master_key;
+        {
+            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            *guard = Some(session);
+        }
+        set_auth_present(&state, true);
+        tracing::info!("vault unlocked from Keychain");
+        start_engine_if_possible(
+            app,
+            &state,
+            token,
+            master_key,
+            #[cfg(target_os = "windows")]
+            &_transition,
+        )
+        .await?;
+        Ok(())
+    };
+    #[cfg(target_os = "windows")]
     {
-        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(session);
+        attempt.run(work).await
     }
-    set_auth_present(&state, true);
-    tracing::info!("vault unlocked from Keychain");
-    start_engine_if_possible(app, &state, token, master_key).await;
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        work.await
+    }
 }
 
 /// Lock clears all runtime key material and stops the sync daemon, but keeps
@@ -1328,7 +1672,11 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 /// recovery phrase.
 #[tauri::command]
 async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
     let acct = state.active_account()?;
+    #[cfg(target_os = "windows")]
+    close_session_commands().await?;
     let mut engine_slot = acct.engine.lock().await;
     if let Some(prev) = engine_slot.take() {
         // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
@@ -1339,12 +1687,24 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         // worth a loud warning rather than a silent "we waited 3s and moved
         // on".
         if !prev.abort().await {
+            #[cfg(target_os = "windows")]
+            return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
+            #[cfg(not(target_os = "windows"))]
             tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
         } else {
             tracing::info!("engine aborted on vault lock");
         }
     }
+    #[cfg(not(target_os = "windows"))]
     drop(engine_slot);
+
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::revoke_callbacks()
+            .await
+            .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+        windows_cf::wait_for_credential_release().await?;
+    }
 
     match acct.session.lock() {
         Ok(mut guard) => {
@@ -1352,6 +1712,9 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
             tracing::info!("vault locked; runtime session cleared");
         }
         Err(_) => {
+            #[cfg(target_os = "windows")]
+            return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into());
+            #[cfg(not(target_os = "windows"))]
             tracing::warn!("session mutex poisoned during lock_vault");
         }
     }
@@ -1365,6 +1728,11 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     }
     if let Ok(mut guard) = acct.engine_state.lock() {
         *guard = "stopped".to_string();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        SESSION_COMMANDS.finish_close();
+        AUTH_ATTEMPTS.finish_close();
     }
     set_auth_present(&state, keychain_session_present(acct.id.as_str()));
     Ok(())
@@ -1661,7 +2029,9 @@ fn purge_local_state_files(
                 let resolved = resolve_purge_placeholder_paths(&purge.local_placeholder_paths, root);
                 #[cfg(target_os = "windows")]
                 {
-                    purge_windows_placeholders(&resolved)
+                    // Windows production cleanup runs before metadata removal.
+                    let _ = resolved;
+                    0
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -1697,7 +2067,7 @@ fn purge_local_state_files(
 ///
 /// Pure and platform-independent on purpose: the actual
 /// `CfDehydratePlaceholder` FFI call that ACTS on this list is Windows-only
-/// ([`purge_windows_placeholders`] below); this is only the "which files,
+/// (`windows_cf::signout::purge`); this is only the "which files,
 /// which paths" decision, so it is unit-testable on any host. A candidate is
 /// silently dropped (not an error — sign-out must still succeed) when it
 /// doesn't resolve to a real file under an allowed root: an
@@ -1719,66 +2089,6 @@ fn resolve_purge_placeholder_paths(candidates: &[(String, String)], sync_root: &
             Some((file_id.clone(), canonical))
         })
         .collect()
-}
-
-/// Dehydrate (or, failing that, remove outright) every Windows Cloud Files
-/// placeholder [`resolve_purge_placeholder_paths`] resolved — task 1538
-/// Codex P1, PR #49 state_db.rs:1785 thread. Mirrors
-/// [`free_up_space_windows`]'s `dehydrate_placeholder` call, with two
-/// deliberate differences from that eviction sweep:
-///
-/// - No pin-state skip: sign-out must sweep pinned files too — the account
-///   is leaving the device, so "keep offline" no longer means anything. The
-///   OS-level pin is cleared first (`CfDehydratePlaceholder` fails with
-///   `ERROR_CLOUD_FILE_PINNED` on a still-pinned placeholder).
-/// - A failed dehydrate removes the placeholder FILE instead of leaving the
-///   row `local` for "the next sweep" to retry: `purge_all_local_state` has
-///   already flipped every one of these rows to `cloud_only` unconditionally
-///   (task 1538 finding 2), so there IS no next sweep that would find it —
-///   leaving the dehydrate half-done would orphan plaintext exactly like the
-///   bug this function fixes. A stale Explorer entry self-heals on the next
-///   `windows_cf::seed_placeholders`/reconcile pass after a later sign-in.
-///
-/// Returns the number of placeholders successfully cleared (dehydrated OR
-/// removed) for the caller's log line.
-#[cfg(target_os = "windows")]
-fn purge_windows_placeholders(candidates: &[(String, PathBuf)]) -> usize {
-    let mut cleared = 0usize;
-    for (file_id, path) in candidates {
-        if let Err(error) = crate::windows_cf::placeholders::set_pin_state(path, false, false) {
-            tracing::warn!(
-                file_id = %file_id,
-                error = %error,
-                "sign-out purge: OS unpin before dehydrate failed; attempting dehydrate anyway"
-            );
-        }
-        match crate::windows_cf::placeholders::dehydrate_placeholder(path) {
-            Ok(_freed) => {
-                cleared += 1;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    file_id = %file_id,
-                    error = %error,
-                    "sign-out purge: CfDehydratePlaceholder failed; removing the placeholder file instead"
-                );
-                match std::fs::remove_file(path) {
-                    Ok(()) => cleared += 1,
-                    Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {
-                        cleared += 1;
-                    }
-                    Err(remove_error) => {
-                        tracing::warn!(
-                            file_id = %file_id,
-                            error = %remove_error,
-                            "sign-out purge: could not remove placeholder file after a failed dehydrate"
-                        );
-                    }
-                }
-            }
-        }
-    }
-    cleared
 }
 
 #[cfg(unix)]
@@ -1803,7 +2113,13 @@ async fn persist_sync_root_and_start_engine(
     state: &State<'_, AppState>,
     cfg: &mut DesktopConfig,
     root: PathBuf,
+    #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let generation = {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.generation()?
+    };
     cfg.sync_root = Some(root.clone());
     cfg.save()?;
 
@@ -1826,8 +2142,15 @@ async fn persist_sync_root_and_start_engine(
             // gone previous task could still be touching the same state.db
             // the freshly spawned runner is about to open).
             if !prev.abort().await {
+                #[cfg(target_os = "windows")]
+                return Err("Could not stop the previous sync engine; retry locking before restarting sync.".into());
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
             }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            windows_cf::ensure_reactivation_allowed()?;
+            SESSION_COMMANDS.validate_start(generation)?;
         }
         *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag, auth_health));
     }
@@ -1839,7 +2162,13 @@ async fn start_engine_for_pending_finder_install(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
     root: PathBuf,
+    #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    let generation = {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.generation()?
+    };
     let acct = state.active_account()?;
     let session = acct
         .session
@@ -1868,6 +2197,11 @@ async fn start_engine_for_pending_finder_install(
             // error instead of just re-timing-out silently.
             (false, existing.ipc_bind_error_handle())
         } else {
+            #[cfg(target_os = "windows")]
+            {
+                windows_cf::ensure_reactivation_allowed()?;
+                SESSION_COMMANDS.validate_start(generation)?;
+            }
             let runner = EngineRunner::spawn(app, root, token, key, pause_flag, auth_health);
             let bind_error = runner.ipc_bind_error_handle();
             *engine_slot = Some(runner);
@@ -2142,6 +2476,14 @@ async fn install_finder_location(
     state: State<'_, AppState>,
     path: Option<String>,
 ) -> Result<FinderInstallState, String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.generation()?;
+    }
+
     #[cfg(target_os = "macos")]
     let root = config::default_sync_root_suggestion();
     #[cfg(not(target_os = "macos"))]
@@ -2156,7 +2498,14 @@ async fn install_finder_location(
     config::ensure_directory(&root)?;
 
     let mut cfg = DesktopConfig::load()?;
-    let started_pending_engine = start_engine_for_pending_finder_install(app.clone(), &state, root.clone()).await?;
+    let started_pending_engine = start_engine_for_pending_finder_install(
+        app.clone(),
+        &state,
+        root.clone(),
+        #[cfg(target_os = "windows")]
+        &_transition,
+    )
+    .await?;
 
     match install_file_provider_domain() {
         Err(error) => {
@@ -2175,7 +2524,16 @@ async fn install_finder_location(
         }
         Ok(FileProviderInstallOutcome::Installed) => {}
     }
-    if let Err(error) = persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await {
+    if let Err(error) = persist_sync_root_and_start_engine(
+        app,
+        &state,
+        &mut cfg,
+        root.clone(),
+        #[cfg(target_os = "windows")]
+        &_transition,
+    )
+    .await
+    {
         stop_pending_finder_install_engine(&state, started_pending_engine).await;
         let _ = remove_file_provider_domain();
         return Err(error);
@@ -2197,6 +2555,14 @@ async fn continue_without_finder_location(
     state: State<'_, AppState>,
     path: Option<String>,
 ) -> Result<FinderInstallState, String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.generation()?;
+    }
+
     let root = path
         .map(PathBuf::from)
         .unwrap_or_else(config::default_sync_root_suggestion);
@@ -2206,7 +2572,15 @@ async fn continue_without_finder_location(
     config::ensure_directory(&root)?;
 
     let mut cfg = DesktopConfig::load()?;
-    persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await?;
+    persist_sync_root_and_start_engine(
+        app,
+        &state,
+        &mut cfg,
+        root.clone(),
+        #[cfg(target_os = "windows")]
+        &_transition,
+    )
+    .await?;
     Ok(finder_install_state_from_config(&cfg, false, None))
 }
 
@@ -2256,6 +2630,14 @@ async fn install_windows_shell_integration(
     path: Option<String>,
 ) -> Result<FinderInstallState, String> {
     #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.generation()?;
+    }
+
+    #[cfg(target_os = "windows")]
     {
         let root = path
             .map(PathBuf::from)
@@ -2292,7 +2674,16 @@ async fn install_windows_shell_integration(
 
         // Persist the sync root and (re)start the engine, which will connect the
         // Cloud Files fetch callbacks and seed placeholders.
-        if let Err(error) = persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone()).await {
+        if let Err(error) = persist_sync_root_and_start_engine(
+            app,
+            &state,
+            &mut cfg,
+            root.clone(),
+            #[cfg(target_os = "windows")]
+            &_transition,
+        )
+        .await
+        {
             persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
             return Err(error);
         }
@@ -2319,6 +2710,14 @@ async fn reset_macos_integration(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<MacosIntegrationResetResult, String> {
+    #[cfg(target_os = "windows")]
+    let _transition = SESSION_TRANSITION.lock().await;
+    #[cfg(target_os = "windows")]
+    {
+        windows_cf::ensure_reactivation_allowed()?;
+        SESSION_COMMANDS.generation()?;
+    }
+
     let mut warnings = Vec::new();
     let mut cfg = DesktopConfig::load()?;
     let sync_root_preserved = cfg.sync_root.as_ref().map(|path| path.to_string_lossy().into_owned());
@@ -3092,6 +3491,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 
     Ok(serde_json::json!({
         "logged_in": logged_in,
+        "session_revision": UI_SESSION_REVISION.load(std::sync::atomic::Ordering::SeqCst),
         "auth_expired": auth_expired,
         "sync_root": sync_root,
         "engine_running": engine_running,
@@ -3133,63 +3533,65 @@ struct DesktopStorageSummary {
 /// distinguish account storage from bytes actually present on this Mac.
 #[tauri::command]
 async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopStorageSummary, String> {
-    let acct = state.active_account()?;
-    let token = {
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        guard
-            .as_ref()
-            .map(|session| session.token.clone())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
+    session_command!(async {
+        let acct = state.active_account()?;
+        let token = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            guard
+                .as_ref()
+                .map(|session| session.token.clone())
+                .ok_or_else(|| "vault is locked".to_string())?
+        };
 
-    let storage_client = reqwest::Client::builder()
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-    let usage: BillingUsageResponse = storage_client
-        .get(format!("{}/api/v1/billing/usage", runner::api_base_url()))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| format!("load storage usage: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("load storage usage: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("parse storage usage: {e}"))?;
+        let storage_client = reqwest::Client::builder()
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+        let usage: BillingUsageResponse = storage_client
+            .get(format!("{}/api/v1/billing/usage", runner::api_base_url()))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| format!("load storage usage: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("load storage usage: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("parse storage usage: {e}"))?;
 
-    let (cache_bytes, pinned_bytes) = if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_some() {
-        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-        if db_path.exists() {
-            let values = (|| {
-                let db = state_db::StateDb::open(&db_path).ok()?;
-                let pinned = db.cache_bytes_by_effective_pin(true).ok()?.max(0);
-                let unpinned = db.cache_bytes_by_effective_pin(false).ok()?.max(0);
-                Some((unpinned, pinned))
-            })();
-            values.unwrap_or((0, 0))
+        let (cache_bytes, pinned_bytes) = if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_some() {
+            let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+            if db_path.exists() {
+                let values = (|| {
+                    let db = state_db::StateDb::open(&db_path).ok()?;
+                    let pinned = db.cache_bytes_by_effective_pin(true).ok()?.max(0);
+                    let unpinned = db.cache_bytes_by_effective_pin(false).ok()?.max(0);
+                    Some((unpinned, pinned))
+                })();
+                values.unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            }
         } else {
             (0, 0)
-        }
-    } else {
-        (0, 0)
-    };
+        };
 
-    let used_bytes = usage.used_bytes.max(0);
-    let quota_bytes = usage.quota_bytes.max(0);
+        let used_bytes = usage.used_bytes.max(0);
+        let quota_bytes = usage.quota_bytes.max(0);
 
-    // Feed the Windows Explorer breadcrumb status-flyout snapshot with the same
-    // usage/quota numbers the control center shows, so the flyout's storage bar
-    // ("X GB used of Y (Z%)") stays in agreement. Cheap atomic stores; the COM
-    // `GetStatusUI` reads them without a lock. No-op on non-Windows.
-    #[cfg(target_os = "windows")]
-    windows_cf::status_ui::set_quota(used_bytes as u64, quota_bytes as u64);
+        // Feed the Windows Explorer breadcrumb status-flyout snapshot with the same
+        // usage/quota numbers the control center shows, so the flyout's storage bar
+        // ("X GB used of Y (Z%)") stays in agreement. Cheap atomic stores; the COM
+        // `GetStatusUI` reads them without a lock. No-op on non-Windows.
+        #[cfg(target_os = "windows")]
+        windows_cf::status_ui::set_quota(used_bytes as u64, quota_bytes as u64);
 
-    Ok(DesktopStorageSummary {
-        used_bytes,
-        quota_bytes,
-        cache_bytes,
-        pinned_bytes,
+        Ok(DesktopStorageSummary {
+            used_bytes,
+            quota_bytes,
+            cache_bytes,
+            pinned_bytes,
+        })
     })
 }
 
@@ -3530,18 +3932,20 @@ fn queued_restore_version_response(
 
 #[tauri::command]
 async fn list_file_versions(state: State<'_, AppState>, file_id: String) -> Result<serde_json::Value, String> {
-    let acct = state.active_account()?;
-    let (token, master_key) = {
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        match guard.as_ref() {
-            Some(s) => (s.token.clone(), s.master_key),
-            None => return Err("not signed in".into()),
-        }
-    };
+    session_command!(async {
+        let acct = state.active_account()?;
+        let (token, master_key) = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            match guard.as_ref() {
+                Some(s) => (s.token.clone(), s.master_key),
+                None => return Err("not signed in".into()),
+            }
+        };
 
-    let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
-    let body = api.list_versions(&file_id).await.map_err(|e| e.to_string())?;
-    file_versions_payload_for_frontend(body)
+        let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
+        let body = api.list_versions(&file_id).await.map_err(|e| e.to_string())?;
+        file_versions_payload_for_frontend(body)
+    })
 }
 
 #[tauri::command]
@@ -3551,37 +3955,39 @@ async fn restore_file_version(
     file_id: String,
     version_id: String,
 ) -> Result<serde_json::Value, String> {
-    let acct = state.active_account()?;
-    let (token, master_key) = {
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        match guard.as_ref() {
-            Some(s) => (s.token.clone(), s.master_key),
-            None => return Err("not signed in".into()),
-        }
-    };
+    session_command!(async {
+        let acct = state.active_account()?;
+        let (token, master_key) = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            match guard.as_ref() {
+                Some(s) => (s.token.clone(), s.master_key),
+                None => return Err("not signed in".into()),
+            }
+        };
 
-    let cfg = DesktopConfig::load()?;
-    if cfg.sync_root.is_none() {
-        return Err("no sync root configured".to_string());
-    }
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
-    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-    let bridge = engine_bridge::EngineBridge::new(db, api);
-    let op = bridge
-        .queue_restore_version(&file_id, &version_id, None)
-        .map_err(|e| format!("queue restore version: {e}"))?;
-    let body = queued_restore_version_response(&file_id, &version_id, &op);
-    let _ = app.emit(
-        "version-center-review",
-        serde_json::json!({
-            "file_id": file_id,
-            "version_id": version_id,
-            "kind": "restore",
-            "operation_id": op.op_id,
-        }),
-    );
-    Ok(body)
+        let cfg = DesktopConfig::load()?;
+        if cfg.sync_root.is_none() {
+            return Err("no sync root configured".to_string());
+        }
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+        let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+        let bridge = engine_bridge::EngineBridge::new(db, api);
+        let op = bridge
+            .queue_restore_version(&file_id, &version_id, None)
+            .map_err(|e| format!("queue restore version: {e}"))?;
+        let body = queued_restore_version_response(&file_id, &version_id, &op);
+        let _ = app.emit(
+            "version-center-review",
+            serde_json::json!({
+                "file_id": file_id,
+                "version_id": version_id,
+                "kind": "restore",
+                "operation_id": op.op_id,
+            }),
+        );
+        Ok(body)
+    })
 }
 
 // ── IPC commands: sync-root config ────────────────────────────────────────────
@@ -3639,6 +4045,14 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             return Ok(None);
         };
 
+        #[cfg(target_os = "windows")]
+        let _transition = SESSION_TRANSITION.lock().await;
+        #[cfg(target_os = "windows")]
+        let generation = {
+            windows_cf::ensure_reactivation_allowed()?;
+            SESSION_COMMANDS.generation()?
+        };
+
         if !path.is_absolute() {
             return Err(format!(
                 "picker returned a non-absolute path: {} (please report)",
@@ -3674,10 +4088,26 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
                 // Task 1538 Codex P1 — see `start_engine_if_possible`'s
                 // identical respawn guard.
                 if !prev.abort().await {
+                    #[cfg(target_os = "windows")]
+                    return Err(
+                        "Could not stop the previous sync engine; retry locking before restarting sync.".into(),
+                    );
                     tracing::warn!("previous engine did not confirm termination before respawning a new one");
                 }
             }
-            *engine_slot = Some(EngineRunner::spawn(app, path.clone(), token, key, pause_flag, auth_health));
+            #[cfg(target_os = "windows")]
+            {
+                windows_cf::ensure_reactivation_allowed()?;
+                SESSION_COMMANDS.validate_start(generation)?;
+            }
+            *engine_slot = Some(EngineRunner::spawn(
+                app,
+                path.clone(),
+                token,
+                key,
+                pause_flag,
+                auth_health,
+            ));
         }
 
         Ok(Some(path.to_string_lossy().into_owned()))
@@ -4988,96 +5418,98 @@ fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 3
 /// fallback still surfaces as an empty list, not an error banner.
 #[tauri::command]
 async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>, String> {
-    // Lift the session pieces we need without holding the mutex over any
-    // async API call.
-    let acct = state.active_account()?;
-    let creds = {
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        guard.as_ref().map(|s| (s.token.clone(), s.master_key))
-    };
-    let Some((token, master_key)) = creds else {
-        // Not signed in — surface as empty rather than an error.
-        return Ok(Vec::new());
-    };
-
-    let excluded: std::collections::HashSet<String> = DesktopConfig::load()
-        .ok()
-        .and_then(|c| c.excluded_folder_ids)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    // Primary path: build from the local, already-nested state DB.
-    if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
-        if let Ok(entries) = db.list_files() {
-            let rows: Vec<VaultEntryRow> = entries
-                .iter()
-                .map(|e| VaultEntryRow {
-                    id: e.file_id.clone(),
-                    parent_id: e.parent_id.clone(),
-                    is_folder: e.item_kind == state_db::ItemKind::Folder,
-                    name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
-                    size_bytes: e.size_bytes,
-                    on_disk: e.status == state_db::FileStatus::Local,
-                })
-                .collect();
-            let tree = build_vault_tree(&rows, &excluded);
-            if !tree.is_empty() {
-                return Ok(tree);
-            }
-            // DB present but no folders yet — fall through to the API stopgap.
-        }
-    }
-
-    // Fallback: top-level API folders, FLAT, zeroed aggregates. Only used
-    // until the first sync populates the local DB.
-    let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
-    let raw = match api.list_files(None).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "list_vault_folders: list_files fallback failed");
+    session_command!(async {
+        // Lift the session pieces we need without holding the mutex over any
+        // async API call.
+        let acct = state.active_account()?;
+        let creds = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            guard.as_ref().map(|s| (s.token.clone(), s.master_key))
+        };
+        let Some((token, master_key)) = creds else {
+            // Not signed in — surface as empty rather than an error.
             return Ok(Vec::new());
-        }
-    };
-
-    let mut out: Vec<VaultItem> = Vec::with_capacity(raw.len());
-    for f in &raw {
-        let is_folder = f.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !is_folder {
-            continue;
-        }
-        let Some(id) = f.get("id").and_then(|v| v.as_str()) else {
-            continue;
         };
 
-        // Display name: prefer the decrypted `name_encrypted` blob
-        // (the canonical zero-knowledge path), then fall back to a
-        // server-provided plaintext `path` if present (some legacy
-        // entries surface plaintext here), then to a stable, short
-        // id-based label so the user can still tell folders apart.
-        let display = try_decrypt_name(f, id, &master_key)
-            .or_else(|| {
-                let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    None
-                } else {
-                    Some(path.trim_start_matches('/').to_string())
-                }
-            })
-            .unwrap_or_else(|| folder_fallback_label(id));
+        let excluded: std::collections::HashSet<String> = DesktopConfig::load()
+            .ok()
+            .and_then(|c| c.excluded_folder_ids)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
-        out.push(VaultItem {
-            id: id.to_string(),
-            name: display,
-            is_folder: true,
-            excluded: excluded.contains(id),
-            size_bytes: 0,
-            file_count: 0,
-            on_disk_bytes: 0,
-            children: Vec::new(),
-        });
-    }
-    Ok(out)
+        // Primary path: build from the local, already-nested state DB.
+        if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
+            if let Ok(entries) = db.list_files() {
+                let rows: Vec<VaultEntryRow> = entries
+                    .iter()
+                    .map(|e| VaultEntryRow {
+                        id: e.file_id.clone(),
+                        parent_id: e.parent_id.clone(),
+                        is_folder: e.item_kind == state_db::ItemKind::Folder,
+                        name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
+                        size_bytes: e.size_bytes,
+                        on_disk: e.status == state_db::FileStatus::Local,
+                    })
+                    .collect();
+                let tree = build_vault_tree(&rows, &excluded);
+                if !tree.is_empty() {
+                    return Ok(tree);
+                }
+                // DB present but no folders yet — fall through to the API stopgap.
+            }
+        }
+
+        // Fallback: top-level API folders, FLAT, zeroed aggregates. Only used
+        // until the first sync populates the local DB.
+        let api = api_client::ApiClient::new(runner::api_base_url(), token, master_key);
+        let raw = match api.list_files(None).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "list_vault_folders: list_files fallback failed");
+                return Ok(Vec::new());
+            }
+        };
+
+        let mut out: Vec<VaultItem> = Vec::with_capacity(raw.len());
+        for f in &raw {
+            let is_folder = f.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !is_folder {
+                continue;
+            }
+            let Some(id) = f.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+
+            // Display name: prefer the decrypted `name_encrypted` blob
+            // (the canonical zero-knowledge path), then fall back to a
+            // server-provided plaintext `path` if present (some legacy
+            // entries surface plaintext here), then to a stable, short
+            // id-based label so the user can still tell folders apart.
+            let display = try_decrypt_name(f, id, &master_key)
+                .or_else(|| {
+                    let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    if path.is_empty() {
+                        None
+                    } else {
+                        Some(path.trim_start_matches('/').to_string())
+                    }
+                })
+                .unwrap_or_else(|| folder_fallback_label(id));
+
+            out.push(VaultItem {
+                id: id.to_string(),
+                name: display,
+                is_folder: true,
+                excluded: excluded.contains(id),
+                size_bytes: 0,
+                file_count: 0,
+                on_disk_bytes: 0,
+                children: Vec::new(),
+            });
+        }
+        Ok(out)
+    })
 }
 
 #[tauri::command]
@@ -5174,50 +5606,58 @@ fn api_client_from_session(state: &State<'_, AppState>) -> Result<api_client::Ap
 /// present; otherwise fetches once and caches it. Never double-fetches.
 #[tauri::command]
 async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
-    let acct = state.active_account()?;
-    {
-        let guard = acct
-            .cached_profile
-            .lock()
-            .map_err(|_| "profile mutex poisoned".to_string())?;
-        if let Some(profile) = guard.as_ref() {
-            return Ok(profile.clone());
+    session_command!(async {
+        let acct = state.active_account()?;
+        {
+            let guard = acct
+                .cached_profile
+                .lock()
+                .map_err(|_| "profile mutex poisoned".to_string())?;
+            if let Some(profile) = guard.as_ref() {
+                return Ok(profile.clone());
+            }
         }
-    }
-    let api = api_client_from_session(&state)?;
-    let profile = api.account_profile().await.map_err(|e| e.to_string())?;
-    if let Ok(mut guard) = acct.cached_profile.lock() {
-        *guard = Some(profile.clone());
-    }
-    Ok(profile)
+        let api = api_client_from_session(&state)?;
+        let profile = api.account_profile().await.map_err(|e| e.to_string())?;
+        if let Ok(mut guard) = acct.cached_profile.lock() {
+            *guard = Some(profile.clone());
+        }
+        Ok(profile)
+    })
 }
 
 /// `GET /api/v1/billing/subscription` — plan + quota + lifecycle.
 #[tauri::command]
 async fn account_subscription(state: State<'_, AppState>) -> Result<account_dto::Subscription, String> {
-    api_client_from_session(&state)?
-        .subscription()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .subscription()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/billing/usage` — used/quota bytes + percentage.
 #[tauri::command]
 async fn account_usage(state: State<'_, AppState>) -> Result<account_dto::BillingUsage, String> {
-    api_client_from_session(&state)?
-        .billing_usage()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .billing_usage()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/me/region` — preferred region + available list. The frontend
 /// resolves the effective region's CITY from this (never the provider).
 #[tauri::command]
 async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserRegionResponse, String> {
-    api_client_from_session(&state)?
-        .account_region()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .account_region()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `PUT /api/v1/me/region` — set or clear the preferred storage region.
@@ -5226,74 +5666,90 @@ async fn account_set_region(
     state: State<'_, AppState>,
     preferred_region: Option<String>,
 ) -> Result<account_dto::SetPreferredRegionResponse, String> {
-    api_client_from_session(&state)?
-        .set_preferred_region(preferred_region.as_deref())
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .set_preferred_region(preferred_region.as_deref())
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/account/activity` — recent events + security summary.
 #[tauri::command]
 async fn account_activity(state: State<'_, AppState>) -> Result<account_dto::AccountActivity, String> {
-    api_client_from_session(&state)?
-        .account_activity()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .account_activity()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/account/security-score` — numeric score + factors.
 #[tauri::command]
 async fn account_security_score(state: State<'_, AppState>) -> Result<account_dto::SecurityScore, String> {
-    api_client_from_session(&state)?
-        .security_score()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .security_score()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/account/sessions` — active account sessions.
 #[tauri::command]
 async fn account_session_list(state: State<'_, AppState>) -> Result<account_dto::AccountSessionList, String> {
-    api_client_from_session(&state)?
-        .account_sessions()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .account_sessions()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `DELETE /api/v1/account/sessions/{id}` — revoke one session.
 #[tauri::command]
 async fn account_revoke_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    api_client_from_session(&state)?
-        .revoke_account_session(&session_id)
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .revoke_account_session(&session_id)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `POST /api/v1/account/sessions/revoke-all-others` — revoke every other
 /// session; returns the count revoked.
 #[tauri::command]
 async fn account_revoke_other_sessions(state: State<'_, AppState>) -> Result<account_dto::RevokeAllResult, String> {
-    api_client_from_session(&state)?
-        .revoke_other_sessions()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .revoke_other_sessions()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/clients/devices` — registered client devices.
 #[tauri::command]
 async fn account_devices(state: State<'_, AppState>) -> Result<account_dto::ClientDeviceList, String> {
-    api_client_from_session(&state)?
-        .client_devices()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .client_devices()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/clients/sessions` — per-device sync sessions.
 #[tauri::command]
 async fn account_client_sessions(state: State<'_, AppState>) -> Result<account_dto::ClientSyncSessionList, String> {
-    api_client_from_session(&state)?
-        .client_sync_sessions()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .client_sync_sessions()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/activity` — paginated audit-log feed. `page`/`limit` are
@@ -5304,19 +5760,23 @@ async fn account_activity_feed(
     page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<account_dto::ActivityFeed, String> {
-    api_client_from_session(&state)?
-        .activity_feed(page, limit)
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .activity_feed(page, limit)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/notifications` — notification list + unread count.
 #[tauri::command]
 async fn account_notifications(state: State<'_, AppState>) -> Result<account_dto::NotificationList, String> {
-    api_client_from_session(&state)?
-        .notifications()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .notifications()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `GET /api/v1/notifications/preferences` — push-preference toggles.
@@ -5324,10 +5784,12 @@ async fn account_notifications(state: State<'_, AppState>) -> Result<account_dto
 async fn account_notification_preferences(
     state: State<'_, AppState>,
 ) -> Result<account_dto::NotificationPreferences, String> {
-    api_client_from_session(&state)?
-        .notification_preferences()
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .notification_preferences()
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `PUT /api/v1/notifications/preferences` — partial update; omitted fields
@@ -5337,10 +5799,12 @@ async fn account_update_notification_preferences(
     state: State<'_, AppState>,
     update: account_dto::NotificationPreferencesUpdate,
 ) -> Result<account_dto::NotificationPreferences, String> {
-    api_client_from_session(&state)?
-        .update_notification_preferences(&update)
-        .await
-        .map_err(|e| e.to_string())
+    session_command!(async {
+        api_client_from_session(&state)?
+            .update_notification_preferences(&update)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
@@ -5439,111 +5903,115 @@ async fn desktop_confirm_action(
     state: State<'_, AppState>,
     password: String,
 ) -> Result<account_dto::ConfirmActionResult, String> {
-    if password.is_empty() {
-        return Err("Password is required.".to_string());
-    }
-    let token = {
-        let acct = state.active_account()?;
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        guard
-            .as_ref()
-            .map(|s| s.token.clone())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-
-    let base_url = runner::api_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .default_headers(api_client::provenance_headers())
-        .build()
-        .map_err(|e| format!("reqwest build: {e}"))?;
-
-    let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
-        .map_err(|e| format!("opaque confirm start: {e}"))?;
-    let start_resp = client
-        .post(format!("{base_url}/api/v1/auth/confirm-opaque-start"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({ "client_message": encode_base64(&login_start.message) }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-
-    if start_resp.status() == reqwest::StatusCode::CONFLICT {
-        let body = start_resp.json::<serde_json::Value>().await.unwrap_or_default();
-        if body.get("opaque_unavailable").and_then(|v| v.as_bool()) == Some(true) {
-            return confirm_action_plaintext(&client, &base_url, &token, &password).await;
+    session_command!(async {
+        if password.is_empty() {
+            return Err("Password is required.".to_string());
         }
-        return Err(body
-            .get("message")
-            .or_else(|| body.get("error"))
+        let token = {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            guard
+                .as_ref()
+                .map(|s| s.token.clone())
+                .ok_or_else(|| "vault is locked".to_string())?
+        };
+
+        let base_url = runner::api_base_url();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+
+        let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
+            .map_err(|e| format!("opaque confirm start: {e}"))?;
+        let start_resp = client
+            .post(format!("{base_url}/api/v1/auth/confirm-opaque-start"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({ "client_message": encode_base64(&login_start.message) }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+
+        if start_resp.status() == reqwest::StatusCode::CONFLICT {
+            let body = start_resp.json::<serde_json::Value>().await.unwrap_or_default();
+            if body.get("opaque_unavailable").and_then(|v| v.as_bool()) == Some(true) {
+                return confirm_action_plaintext(&client, &base_url, &token, &password).await;
+            }
+            return Err(body
+                .get("message")
+                .or_else(|| body.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Confirm action failed.")
+                .to_string());
+        }
+        if !start_resp.status().is_success() {
+            let status = start_resp.status();
+            let body = start_resp.text().await.unwrap_or_default();
+            return Err(format!("Confirm action start failed ({status}): {body}"));
+        }
+
+        let start_body: serde_json::Value = start_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse confirm start response: {e}"))?;
+        let server_message = start_body
+            .get("server_message")
             .and_then(|v| v.as_str())
-            .unwrap_or("Confirm action failed.")
-            .to_string());
-    }
-    if !start_resp.status().is_success() {
-        let status = start_resp.status();
-        let body = start_resp.text().await.unwrap_or_default();
-        return Err(format!("Confirm action start failed ({status}): {body}"));
-    }
+            .ok_or_else(|| "No server_message in confirm start response".to_string())?;
+        let server_state = start_body
+            .get("server_state")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "No server_state in confirm start response".to_string())?;
+        let ksf_version = start_body
+            .get("ksf_version")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "No ksf_version in confirm start response".to_string())? as u32;
+        let server_message_bytes =
+            decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
+        let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
+            &login_start.state,
+            password.as_bytes(),
+            &server_message_bytes,
+            ksf_version,
+        )
+        .map_err(|_| "Incorrect password".to_string())?;
 
-    let start_body: serde_json::Value = start_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse confirm start response: {e}"))?;
-    let server_message = start_body
-        .get("server_message")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No server_message in confirm start response".to_string())?;
-    let server_state = start_body
-        .get("server_state")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "No server_state in confirm start response".to_string())?;
-    let ksf_version = start_body
-        .get("ksf_version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "No ksf_version in confirm start response".to_string())? as u32;
-    let server_message_bytes =
-        decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
-    let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
-        &login_start.state,
-        password.as_bytes(),
-        &server_message_bytes,
-        ksf_version,
-    )
-    .map_err(|_| "Incorrect password".to_string())?;
-
-    let finish_resp = client
-        .post(format!("{base_url}/api/v1/auth/confirm-opaque-finish"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({
-            "client_message": encode_base64(&login_finish.message),
-            "server_state": server_state,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("Incorrect password".to_string());
-    }
-    if !finish_resp.status().is_success() {
-        let status = finish_resp.status();
-        let body = finish_resp.text().await.unwrap_or_default();
-        return Err(format!("Confirm action finish failed ({status}): {body}"));
-    }
-    finish_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse confirm finish response: {e}"))
+        let finish_resp = client
+            .post(format!("{base_url}/api/v1/auth/confirm-opaque-finish"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({
+                "client_message": encode_base64(&login_finish.message),
+                "server_state": server_state,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
+        if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Incorrect password".to_string());
+        }
+        if !finish_resp.status().is_success() {
+            let status = finish_resp.status();
+            let body = finish_resp.text().await.unwrap_or_default();
+            return Err(format!("Confirm action finish failed ({status}): {body}"));
+        }
+        finish_resp
+            .json()
+            .await
+            .map_err(|e| format!("parse confirm finish response: {e}"))
+    })
 }
 
 #[tauri::command]
 async fn desktop_trash_list(state: State<'_, AppState>) -> Result<Vec<account_dto::DesktopTrashItem>, String> {
-    let api = api_client_from_session(&state)?;
-    let raw = api.list_trashed_files_all().await.map_err(|e| e.to_string())?;
-    Ok(raw
-        .iter()
-        .filter_map(|file_meta| trash_item_from_meta(file_meta, api.master_key()))
-        .collect())
+    session_command!(async {
+        let api = api_client_from_session(&state)?;
+        let raw = api.list_trashed_files_all().await.map_err(|e| e.to_string())?;
+        Ok(raw
+            .iter()
+            .filter_map(|file_meta| trash_item_from_meta(file_meta, api.master_key()))
+            .collect())
+    })
 }
 
 #[tauri::command]
@@ -5552,23 +6020,25 @@ async fn desktop_trash_restore(
     file_id: String,
     file_name: Option<String>,
 ) -> Result<(), String> {
-    let api = api_client_from_session(&state)?;
-    api.restore_file(&file_id).await.map_err(|e| e.to_string())?;
+    session_command!(async {
+        let api = api_client_from_session(&state)?;
+        api.restore_file(&file_id).await.map_err(|e| e.to_string())?;
 
-    if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
-        let _ = db.record_local_activity(state_db::LocalActivityEventInput {
-            event_type: state_db::LocalActivityKind::Restored,
-            file_id: Some(file_id.clone()),
-            file_name: file_name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| file_id.clone()),
-            rel_path: None,
-            occurred_at: now_unix_seconds(),
-        });
-        let _ = db.request_resnapshot();
-    }
+        if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
+            let _ = db.record_local_activity(state_db::LocalActivityEventInput {
+                event_type: state_db::LocalActivityKind::Restored,
+                file_id: Some(file_id.clone()),
+                file_name: file_name
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| file_id.clone()),
+                rel_path: None,
+                occurred_at: now_unix_seconds(),
+            });
+            let _ = db.request_resnapshot();
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -5577,17 +6047,19 @@ async fn desktop_trash_delete_permanently(
     file_id: String,
     confirm_token: String,
 ) -> Result<(), String> {
-    if confirm_token.trim().is_empty() {
-        return Err("Confirmation token is required.".to_string());
-    }
-    api_client_from_session(&state)?
-        .permanent_delete_file(&file_id, &confirm_token)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
-        let _ = db.request_resnapshot();
-    }
-    Ok(())
+    session_command!(async {
+        if confirm_token.trim().is_empty() {
+            return Err("Confirmation token is required.".to_string());
+        }
+        api_client_from_session(&state)?
+            .permanent_delete_file(&file_id, &confirm_token)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
+            let _ = db.request_resnapshot();
+        }
+        Ok(())
+    })
 }
 
 /// Local storage breakdown by content type (Media / Documents / Other) plus
@@ -5608,48 +6080,50 @@ async fn account_storage_breakdown(
     state: State<'_, AppState>,
     largest_limit: Option<usize>,
 ) -> Result<account_dto::StorageBreakdown, String> {
-    // Auth gate: require an unlocked session, same signal as the others.
-    {
-        let acct = state.active_account()?;
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        if guard.is_none() {
-            return Err("vault is locked".to_string());
+    session_command!(async {
+        // Auth gate: require an unlocked session, same signal as the others.
+        {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            if guard.is_none() {
+                return Err("vault is locked".to_string());
+            }
         }
-    }
 
-    let limit = largest_limit.unwrap_or(10);
+        let limit = largest_limit.unwrap_or(10);
 
-    // Resolve the state DB from app-local data once a sync root is configured.
-    // No root / no DB → empty (not an error).
-    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
-        return Ok(account_dto::compute_storage_breakdown(&[], limit));
-    }
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(account_dto::compute_storage_breakdown(&[], limit));
-    }
+        // Resolve the state DB from app-local data once a sync root is configured.
+        // No root / no DB → empty (not an error).
+        if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+            return Ok(account_dto::compute_storage_breakdown(&[], limit));
+        }
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        if !db_path.exists() {
+            return Ok(account_dto::compute_storage_breakdown(&[], limit));
+        }
 
-    // SQLite work is blocking; run it off the async executor (mirrors
-    // `free_up_space`, which uses the same `tokio::task::spawn_blocking` + `??`).
-    let breakdown = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
-        let entries = db.list_files().map_err(|e| format!("list files: {e}"))?;
-        // Folders carry no real size; exclude them from the breakdown.
-        let inputs: Vec<account_dto::BreakdownInput> = entries
-            .into_iter()
-            .filter(|e| !e.is_dir())
-            .map(|e| account_dto::BreakdownInput {
-                file_id: e.file_id,
-                path: e.path,
-                size_bytes: e.size_bytes,
-            })
-            .collect();
-        Ok(account_dto::compute_storage_breakdown(&inputs, limit))
+        // SQLite work is blocking; run it off the async executor (mirrors
+        // `free_up_space`, which uses the same `tokio::task::spawn_blocking` + `??`).
+        let breakdown = tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+            let entries = db.list_files().map_err(|e| format!("list files: {e}"))?;
+            // Folders carry no real size; exclude them from the breakdown.
+            let inputs: Vec<account_dto::BreakdownInput> = entries
+                .into_iter()
+                .filter(|e| !e.is_dir())
+                .map(|e| account_dto::BreakdownInput {
+                    file_id: e.file_id,
+                    path: e.path,
+                    size_bytes: e.size_bytes,
+                })
+                .collect();
+            Ok(account_dto::compute_storage_breakdown(&inputs, limit))
+        })
+        .await
+        .map_err(|e| format!("storage breakdown task failed: {e}"))??;
+
+        Ok(breakdown)
     })
-    .await
-    .map_err(|e| format!("storage breakdown task failed: {e}"))??;
-
-    Ok(breakdown)
 }
 
 /// Per-PC **sync-state** overview for the in-app "Files" tab — the device
@@ -5672,62 +6146,64 @@ async fn desktop_file_overview(
     state: State<'_, AppState>,
     recent_limit: Option<usize>,
 ) -> Result<account_dto::FileOverview, String> {
-    // Auth gate: require an unlocked session, same signal as the others.
-    {
-        let acct = state.active_account()?;
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        if guard.is_none() {
-            return Err("vault is locked".to_string());
+    session_command!(async {
+        // Auth gate: require an unlocked session, same signal as the others.
+        {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            if guard.is_none() {
+                return Err("vault is locked".to_string());
+            }
         }
-    }
 
-    let limit = recent_limit.unwrap_or(15);
+        let limit = recent_limit.unwrap_or(15);
 
-    // Resolve the state DB from app-local data once a sync root is configured.
-    // No root / no DB → empty (not an error).
-    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
-        return Ok(account_dto::compute_file_overview(&[], &[], limit));
-    }
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(account_dto::compute_file_overview(&[], &[], limit));
-    }
+        // Resolve the state DB from app-local data once a sync root is configured.
+        // No root / no DB → empty (not an error).
+        if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+            return Ok(account_dto::compute_file_overview(&[], &[], limit));
+        }
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        if !db_path.exists() {
+            return Ok(account_dto::compute_file_overview(&[], &[], limit));
+        }
 
-    // SQLite work is blocking; run it off the async executor (mirrors
-    // `account_storage_breakdown`).
-    let overview = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
-        let rows = db.file_overview_rows().map_err(|e| format!("list files: {e}"))?;
-        // Folders carry no real size and no sync state worth surfacing; exclude
-        // them from the overview.
-        let inputs: Vec<account_dto::FileOverviewInput> = rows
-            .into_iter()
-            .filter(|(e, _)| !e.is_dir())
-            .map(|(e, pinned)| account_dto::FileOverviewInput {
-                path: e.path,
-                size_bytes: e.size_bytes,
-                status: e.status.as_str().to_string(),
-                pinned,
-                modified_at: e.modified_at,
-            })
-            .collect();
-        let activity: Vec<account_dto::FileOverviewActivityInput> = db
-            .list_recent_local_activity(limit)
-            .map_err(|e| format!("list local activity: {e}"))?
-            .into_iter()
-            .map(|event| account_dto::FileOverviewActivityInput {
-                event_type: event.event_type.as_str().to_string(),
-                file_name: event.file_name,
-                rel_path: event.rel_path,
-                occurred_at: event.occurred_at,
-            })
-            .collect();
-        Ok(account_dto::compute_file_overview(&inputs, &activity, limit))
+        // SQLite work is blocking; run it off the async executor (mirrors
+        // `account_storage_breakdown`).
+        let overview = tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+            let rows = db.file_overview_rows().map_err(|e| format!("list files: {e}"))?;
+            // Folders carry no real size and no sync state worth surfacing; exclude
+            // them from the overview.
+            let inputs: Vec<account_dto::FileOverviewInput> = rows
+                .into_iter()
+                .filter(|(e, _)| !e.is_dir())
+                .map(|(e, pinned)| account_dto::FileOverviewInput {
+                    path: e.path,
+                    size_bytes: e.size_bytes,
+                    status: e.status.as_str().to_string(),
+                    pinned,
+                    modified_at: e.modified_at,
+                })
+                .collect();
+            let activity: Vec<account_dto::FileOverviewActivityInput> = db
+                .list_recent_local_activity(limit)
+                .map_err(|e| format!("list local activity: {e}"))?
+                .into_iter()
+                .map(|event| account_dto::FileOverviewActivityInput {
+                    event_type: event.event_type.as_str().to_string(),
+                    file_name: event.file_name,
+                    rel_path: event.rel_path,
+                    occurred_at: event.occurred_at,
+                })
+                .collect();
+            Ok(account_dto::compute_file_overview(&inputs, &activity, limit))
+        })
+        .await
+        .map_err(|e| format!("file overview task failed: {e}"))??;
+
+        Ok(overview)
     })
-    .await
-    .map_err(|e| format!("file overview task failed: {e}"))??;
-
-    Ok(overview)
 }
 
 /// Query the local desktop file-name search index.
@@ -5742,27 +6218,29 @@ async fn desktop_search_files(
     query: String,
     limit: Option<usize>,
 ) -> Result<desktop_search::DesktopSearchResponse, String> {
-    {
-        let acct = state.active_account()?;
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        if guard.is_none() {
-            return Err("vault is locked".to_string());
+    session_command!(async {
+        {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            if guard.is_none() {
+                return Err("vault is locked".to_string());
+            }
         }
-    }
 
-    let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
-        return Ok(desktop_search::syncing_response(query));
-    };
+        let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
+            return Ok(desktop_search::syncing_response(query));
+        };
 
-    let max_results = limit.unwrap_or(12).clamp(1, 50);
-    let response = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let local = desktop_search::build_local_index(&db).map_err(|e| format!("build search index: {e}"))?;
-        Ok(desktop_search::query_local_index(&local, &query, max_results))
+        let max_results = limit.unwrap_or(12).clamp(1, 50);
+        let response = tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let local = desktop_search::build_local_index(&db).map_err(|e| format!("build search index: {e}"))?;
+            Ok(desktop_search::query_local_index(&local, &query, max_results))
+        })
+        .await
+        .map_err(|e| format!("search task failed: {e}"))??;
+
+        Ok(response)
     })
-    .await
-    .map_err(|e| format!("search task failed: {e}"))??;
-
-    Ok(response)
 }
 
 // ── IPC commands: App Activity — local process resources (task 1191) ─────────
@@ -5958,60 +6436,62 @@ pub struct SpeedtestLatency {
 /// Uses the authenticated session; returns `Err("vault is locked")` when none.
 #[tauri::command]
 async fn run_speedtest(state: State<'_, AppState>) -> Result<SpeedtestResult, String> {
-    let api = api_client_from_session(&state)?;
+    session_command!(async {
+        let api = api_client_from_session(&state)?;
 
-    // Latency: 5 × GET /api/v1/health
-    let mut latencies: Vec<u64> = Vec::new();
-    for _ in 0..5 {
-        let start = std::time::Instant::now();
-        // Ignore errors — a failed ping still has a measurable RTT and counts
-        // as a data point; the best-effort spirit matches the CLI.
-        let _ = api.ping_health().await;
-        latencies.push(start.elapsed().as_millis() as u64);
-    }
-    let min_ms = *latencies.iter().min().unwrap_or(&0);
-    let max_ms = *latencies.iter().max().unwrap_or(&0);
-    let avg_ms = latencies.iter().sum::<u64>() / latencies.len().max(1) as u64;
+        // Latency: 5 × GET /api/v1/health
+        let mut latencies: Vec<u64> = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            // Ignore errors — a failed ping still has a measurable RTT and counts
+            // as a data point; the best-effort spirit matches the CLI.
+            let _ = api.ping_health().await;
+            latencies.push(start.elapsed().as_millis() as u64);
+        }
+        let min_ms = *latencies.iter().min().unwrap_or(&0);
+        let max_ms = *latencies.iter().max().unwrap_or(&0);
+        let avg_ms = latencies.iter().sum::<u64>() / latencies.len().max(1) as u64;
 
-    // Upload: 3 × 10 MB POST /api/v1/speedtest
-    let blob = vec![0u8; 10_000_000];
-    let mut up_speeds: Vec<f64> = Vec::new();
-    for _ in 0..3 {
-        let start = std::time::Instant::now();
-        if api.speedtest_upload(&blob).await.is_ok() {
-            let elapsed = start.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                up_speeds.push(blob.len() as f64 / elapsed);
+        // Upload: 3 × 10 MB POST /api/v1/speedtest
+        let blob = vec![0u8; 10_000_000];
+        let mut up_speeds: Vec<f64> = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            if api.speedtest_upload(&blob).await.is_ok() {
+                let elapsed = start.elapsed().as_secs_f64();
+                if elapsed > 0.0 {
+                    up_speeds.push(blob.len() as f64 / elapsed);
+                }
             }
         }
-    }
-    let upload_bps = if up_speeds.is_empty() {
-        0
-    } else {
-        (up_speeds.iter().sum::<f64>() / up_speeds.len() as f64) as u64
-    };
+        let upload_bps = if up_speeds.is_empty() {
+            0
+        } else {
+            (up_speeds.iter().sum::<f64>() / up_speeds.len() as f64) as u64
+        };
 
-    // Download: 3 × 10 MB GET /api/v1/speedtest?size=10000000
-    let mut dl_speeds: Vec<f64> = Vec::new();
-    for _ in 0..3 {
-        let start = std::time::Instant::now();
-        if let Ok(data) = api.speedtest_download(10_000_000).await {
-            let elapsed = start.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                dl_speeds.push(data.len() as f64 / elapsed);
+        // Download: 3 × 10 MB GET /api/v1/speedtest?size=10000000
+        let mut dl_speeds: Vec<f64> = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            if let Ok(data) = api.speedtest_download(10_000_000).await {
+                let elapsed = start.elapsed().as_secs_f64();
+                if elapsed > 0.0 {
+                    dl_speeds.push(data.len() as f64 / elapsed);
+                }
             }
         }
-    }
-    let download_bps = if dl_speeds.is_empty() {
-        0
-    } else {
-        (dl_speeds.iter().sum::<f64>() / dl_speeds.len() as f64) as u64
-    };
+        let download_bps = if dl_speeds.is_empty() {
+            0
+        } else {
+            (dl_speeds.iter().sum::<f64>() / dl_speeds.len() as f64) as u64
+        };
 
-    Ok(SpeedtestResult {
-        latency: SpeedtestLatency { min_ms, avg_ms, max_ms },
-        upload_bps,
-        download_bps,
+        Ok(SpeedtestResult {
+            latency: SpeedtestLatency { min_ms, avg_ms, max_ms },
+            upload_bps,
+            download_bps,
+        })
     })
 }
 
@@ -6025,32 +6505,34 @@ async fn get_bandwidth_history(
     state: State<'_, AppState>,
     hours: Option<u32>,
 ) -> Result<Vec<state_db::BandwidthSample>, String> {
-    // Auth gate.
-    {
-        let acct = state.active_account()?;
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        if guard.is_none() {
-            return Err("vault is locked".to_string());
+    session_command!(async {
+        // Auth gate.
+        {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            if guard.is_none() {
+                return Err("vault is locked".to_string());
+            }
         }
-    }
 
-    let window_hours = hours.unwrap_or(20);
+        let window_hours = hours.unwrap_or(20);
 
-    if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
-        return Ok(vec![]);
-    }
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(vec![]);
-    }
+        if DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root).is_none() {
+            return Ok(vec![]);
+        }
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        if !db_path.exists() {
+            return Ok(vec![]);
+        }
 
-    tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
-        db.get_bandwidth_history(window_hours)
-            .map_err(|e| format!("bandwidth history: {e}"))
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
+            db.get_bandwidth_history(window_hours)
+                .map_err(|e| format!("bandwidth history: {e}"))
+        })
+        .await
+        .map_err(|e| format!("bandwidth history task failed: {e}"))?
     })
-    .await
-    .map_err(|e| format!("bandwidth history task failed: {e}"))?
 }
 
 // ── IPC commands: Task 12 — conflict window ───────────────────────────────────
@@ -6252,76 +6734,78 @@ async fn resolve_conflict(
     file_id: String,
     choice: String,
 ) -> Result<(), String> {
-    // Validate the choice up front so a typo on the TS side fails
-    // loudly instead of silently no-opping.
-    match choice.as_str() {
-        "local" | "remote" | "both" => {}
-        _ => return Err(format!("invalid conflict choice: {choice}")),
-    }
-
-    // Pull token + master_key out of the in-memory session. We
-    // intentionally do NOT clone the entire Session struct — only
-    // what the ApiClient needs.
-    let acct = state.active_account()?;
-    let (token, master_key) = {
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        match guard.as_ref() {
-            Some(s) => (s.token.clone(), s.master_key),
-            None => return Err("not signed in".into()),
+    session_command!(async {
+        // Validate the choice up front so a typo on the TS side fails
+        // loudly instead of silently no-opping.
+        match choice.as_str() {
+            "local" | "remote" | "both" => {}
+            _ => return Err(format!("invalid conflict choice: {choice}")),
         }
-    };
 
-    // Sync root from desktop.toml — without it the daemon has no
-    // place to write the resolved file, so this is a hard error.
-    let cfg = DesktopConfig::load()?;
-    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
+        // Pull token + master_key out of the in-memory session. We
+        // intentionally do NOT clone the entire Session struct — only
+        // what the ApiClient needs.
+        let acct = state.active_account()?;
+        let (token, master_key) = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            match guard.as_ref() {
+                Some(s) => (s.token.clone(), s.master_key),
+                None => return Err("not signed in".into()),
+            }
+        };
 
-    // Build a fresh bridge over the app-local state DB (same convention as
-    // `runner::run`).
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
-    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-    let bridge = engine_bridge::EngineBridge::new(db, api);
+        // Sync root from desktop.toml — without it the daemon has no
+        // place to write the resolved file, so this is a hard error.
+        let cfg = DesktopConfig::load()?;
+        let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
 
-    let outcome: Result<(), String> = match choice.as_str() {
-        "local" => bridge
-            .resolve_keep_mine(&file_id, &sync_root)
-            .await
-            .map_err(|e| e.to_string()),
-        "remote" => bridge
-            .resolve_keep_theirs(&file_id, &sync_root)
-            .await
-            .map_err(|e| e.to_string()),
-        "both" => {
-            // auto_resolve_keep_both wants the FileEntry; look it up.
-            let entry = bridge
-                .db()
-                .get_file(&file_id)
-                .map_err(|e| format!("get_file: {e}"))?
-                .ok_or_else(|| format!("no state.db row for {file_id}"))?;
-            bridge
-                .auto_resolve_keep_both(&sync_root, &entry)
+        // Build a fresh bridge over the app-local state DB (same convention as
+        // `runner::run`).
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+        let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+        let bridge = engine_bridge::EngineBridge::new(db, api);
+
+        let outcome: Result<(), String> = match choice.as_str() {
+            "local" => bridge
+                .resolve_keep_mine(&file_id, &sync_root)
                 .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
-        // Unreachable — the validate above already caught it.
-        _ => unreachable!(),
-    };
-    outcome?;
+                .map_err(|e| e.to_string()),
+            "remote" => bridge
+                .resolve_keep_theirs(&file_id, &sync_root)
+                .await
+                .map_err(|e| e.to_string()),
+            "both" => {
+                // auto_resolve_keep_both wants the FileEntry; look it up.
+                let entry = bridge
+                    .db()
+                    .get_file(&file_id)
+                    .map_err(|e| format!("get_file: {e}"))?
+                    .ok_or_else(|| format!("no state.db row for {file_id}"))?;
+                bridge
+                    .auto_resolve_keep_both(&sync_root, &entry)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            // Unreachable — the validate above already caught it.
+            _ => unreachable!(),
+        };
+        outcome?;
 
-    // Notify the app window so it can re-poll sync_status and
-    // refresh the conflict count without waiting for the next engine
-    // tick.
-    let _ = app.emit(
-        "conflict-resolved",
-        serde_json::json!({
-            "file_id": file_id,
-            "choice": choice,
-        }),
-    );
+        // Notify the app window so it can re-poll sync_status and
+        // refresh the conflict count without waiting for the next engine
+        // tick.
+        let _ = app.emit(
+            "conflict-resolved",
+            serde_json::json!({
+                "file_id": file_id,
+                "choice": choice,
+            }),
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Real content preview for the conflict-resolution window (task 1546 finding
@@ -6336,27 +6820,29 @@ async fn conflict_content_preview(
     state: State<'_, AppState>,
     file_id: String,
 ) -> Result<engine_bridge::ConflictContentPreview, String> {
-    let acct = state.active_account()?;
-    let (token, master_key) = {
-        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        match guard.as_ref() {
-            Some(s) => (s.token.clone(), s.master_key),
-            None => return Err("not signed in".into()),
-        }
-    };
+    session_command!(async {
+        let acct = state.active_account()?;
+        let (token, master_key) = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            match guard.as_ref() {
+                Some(s) => (s.token.clone(), s.master_key),
+                None => return Err("not signed in".into()),
+            }
+        };
 
-    let cfg = DesktopConfig::load()?;
-    let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
+        let cfg = DesktopConfig::load()?;
+        let sync_root = cfg.sync_root.ok_or_else(|| "no sync root configured".to_string())?;
 
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
-    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-    let bridge = engine_bridge::EngineBridge::new(db, api);
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+        let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+        let bridge = engine_bridge::EngineBridge::new(db, api);
 
-    bridge
-        .conflict_content_preview(&file_id, &sync_root)
-        .await
-        .map_err(|e| e.to_string())
+        bridge
+            .conflict_content_preview(&file_id, &sync_root)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 // ── IPC commands: app metadata ────────────────────────────────────────────────
@@ -8004,7 +8490,13 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             let app = app.clone();
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
-                clear_session_impl(&state).await
+                let result = clear_session_impl(&state).await;
+                #[cfg(target_os = "windows")]
+                if let Err(error) = &result {
+                    app.dialog().message(error).title("Sign-out paused")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+                }
+                result
             });
         }
         DesktopMenuAction::Quit => app.exit(0),

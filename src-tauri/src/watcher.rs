@@ -50,7 +50,7 @@
 //! and the convert→queue sequence live in one place. The transfer loop then
 //! encrypts + uploads; on success a new local file becomes an in-sync
 //! placeholder (see
-//! [`crate::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]).
+//! [`crate::engine_bridge::EngineBridge::defer_local_upload_finalization`]).
 //!
 //! ## Lifecycle
 //!
@@ -686,6 +686,8 @@ fn walk_dir(
 /// — the CF NOTIFY close-completion path and the enumeration scan share the same
 /// convert→queue sequence.
 async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    crate::windows_cf::upload_finalization::retry(bridge.db(), sync_root);
     let _ = dispatch_local_create(bridge, sync_root, path, "notify");
 }
 
@@ -723,16 +725,17 @@ fn dispatch_local_create(
     // `Uploading` DB row synchronously before returning, so the very next
     // `classify_local_path` (filter 3) rejects this path → no double upload.
     match bridge.queue_finder_create(target) {
-        Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+        Ok(FinderWriteOutcome::Queued { op_id, file_id: local_id, .. }) => {
             // Windows: queue/stage FIRST, then hand the local file to Cloud Files
             // as an UNSYNCED placeholder. If staging ever fails, the file stays a
             // plain local file and a later scan can retry. Converting before the
             // row exists can poison that retry path: the next scan sees a
             // placeholder with no DB row and `classify_local_path` correctly
             // rejects it as engine-owned.
+            #[cfg(not(target_os = "windows"))]
+            let _ = &local_id;
             #[cfg(target_os = "windows")]
-            {
-                let local_id = uuid::Uuid::new_v4().to_string();
+            if let Some(local_id) = local_id {
                 if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id) {
                     tracing::warn!(
                         error = %e,
@@ -1081,4 +1084,33 @@ mod tests {
             "must not descend through a symlink, got: {found:?}"
         );
     }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn round6_real_watcher_uses_queued_file_identity() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, Storage::CloudFilters::*};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        crate::windows_cf::register_sync_root(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let path = root.join("local.txt");
+        fs::write(&path, b"watcher upload bytes").unwrap();
+        assert!(dispatch_local_create(&bridge, &root, &path, "scan"));
+        let ops = db.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(ops.len(), 1);
+        let expected = ops[0].file_id.as_ref().unwrap();
+        assert_eq!(&db.get_file_by_path("local.txt").unwrap().unwrap().file_id, expected);
+        let file = fs::File::open(&path).unwrap();
+        let mut buffer = vec![0u64; 1024];
+        unsafe { CfGetPlaceholderInfo(HANDLE(file.as_raw_handle()), CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(), (buffer.len()*8) as u32, None).unwrap(); }
+        let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+        let actual = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) }.to_vec();
+        drop(file);
+        crate::windows_cf::unregister_sync_root(&root).unwrap();
+        for op in ops.iter() { if let Some(payload) = &op.payload_path { fs::remove_file(payload).unwrap(); } }
+        assert_eq!(String::from_utf8(actual).unwrap(), *expected, "watcher identity must belong to its queued DB row");
+    }
+
 }

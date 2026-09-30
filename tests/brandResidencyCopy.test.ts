@@ -4,7 +4,8 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const root = join(import.meta.dir, '..')
-const read = (path: string) => readFileSync(join(root, path), 'utf8')
+// CRLF-tolerant: Windows checkouts (autocrlf) must scan identically to LF (task 1639).
+const read = (path: string) => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n')
 
 const productSurfaces = [
   'src/Onboarding.tsx',

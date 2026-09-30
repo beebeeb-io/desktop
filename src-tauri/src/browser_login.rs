@@ -210,7 +210,19 @@ fn signin_log(line: &str) {
 #[tauri::command]
 pub async fn start_browser_login(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     bc!("[bb-signin] start_browser_login: command entry");
-    match run_handoff(&app, &state).await {
+    #[cfg(target_os = "windows")]
+    let attempt = crate::AUTH_ATTEMPTS.begin()?;
+    let work = run_handoff(
+        &app,
+        &state,
+        #[cfg(target_os = "windows")]
+        &attempt,
+    );
+    #[cfg(target_os = "windows")]
+    let result = attempt.run(work).await;
+    #[cfg(not(target_os = "windows"))]
+    let result = work.await;
+    match result {
         Ok(()) => Ok(()),
         Err(e) => {
             tracing::error!(error = %e, "browser-login: sign-in failed");
@@ -221,7 +233,11 @@ pub async fn start_browser_login(app: tauri::AppHandle, state: State<'_, AppStat
     }
 }
 
-async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
+async fn run_handoff(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    #[cfg(target_os = "windows")] attempt: &crate::auth_attempts::Attempt,
+) -> Result<(), String> {
     // 1. Ephemeral P-256 key pair (uncompressed SEC1 point, base64).
     let secret = EphemeralSecret::random(&mut OsRng);
     let public_key = secret.public_key();
@@ -262,11 +278,9 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
                 "browser-login: connect timed out"
             );
             signin_log(&format!("connect-timeout {url} after {}s", CONNECT_TIMEOUT.as_secs()));
-            return Err(
-                "Could not reach Beebeeb to start sign-in (connection timed out). \
+            return Err("Could not reach Beebeeb to start sign-in (connection timed out). \
                  Check your internet connection and try again."
-                    .to_string(),
-            );
+                .to_string());
         }
     };
     bc!("[bb-signin] run_handoff: connected");
@@ -278,12 +292,10 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
     //    the UI on "Connecting" forever — fail fast with an actionable error.
     let init = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
     let handoff = async {
-        ws.send(Message::Text(init.to_string()))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "browser-login: failed to send public key");
-                format!("Sign-in handshake failed: {e}")
-            })?;
+        ws.send(Message::Text(init.to_string())).await.map_err(|e| {
+            tracing::error!(error = %e, "browser-login: failed to send public key");
+            format!("Sign-in handshake failed: {e}")
+        })?;
         bc!("[bb-signin] run_handoff: sent public key");
         tracing::info!("browser-login: sent public key");
         recv_text(&mut ws).await
@@ -297,18 +309,19 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
                 "browser-login: device-code handoff timed out"
             );
             signin_log(&format!("device-code-timeout after {}s", DEVICE_CODE_TIMEOUT.as_secs()));
-            return Err(
-                "Beebeeb did not respond while starting sign-in (timed out). \
+            return Err("Beebeeb did not respond while starting sign-in (timed out). \
                  Please check your connection and try again."
-                    .to_string(),
-            );
+                .to_string());
         }
     };
     let resp: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Invalid server response: {e}"))?;
     if let Some(err) = resp["error"].as_str() {
         return Err(format!("Sign-in error: {err}"));
     }
-    let user_code = resp["user_code"].as_str().ok_or("Server omitted the device code")?.to_string();
+    let user_code = resp["user_code"]
+        .as_str()
+        .ok_or("Server omitted the device code")?
+        .to_string();
     let verification_uri = resp["verification_uri"]
         .as_str()
         .ok_or("Server omitted the verification URL")?
@@ -361,30 +374,35 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
         .as_str()
         .ok_or("Missing browser public key in payload")?;
 
-    let plaintext = decrypt_payload(&secret, browser_pub_b64, nonce_b64, payload_b64)?;
-
-    // 8. Parse credentials and install the session via the shared path.
-    let creds: serde_json::Value =
-        serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
-    let session_token = creds["session_token"]
-        .as_str()
-        .ok_or("Credentials missing session_token")?
-        .to_string();
-    let master_key_b64 = creds["master_key_b64"]
-        .as_str()
-        .ok_or("Credentials missing master_key_b64")?;
-    let email = creds["email"].as_str().map(|s| s.to_string());
-
-    let master_key_vec = B64
-        .decode(master_key_b64.trim())
-        .map_err(|e| format!("Invalid master key encoding: {e}"))?;
-    if master_key_vec.len() != 32 {
-        return Err(format!("master key must be 32 bytes, got {}", master_key_vec.len()));
+    let plaintext = zeroize::Zeroizing::new(decrypt_payload(&secret, browser_pub_b64, nonce_b64, payload_b64)?);
+    #[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
+    struct Credentials {
+        session_token: String,
+        master_key_b64: String,
+        email: Option<String>,
     }
-    let mut master_key = [0u8; 32];
+    let creds: Credentials =
+        serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
+    let email = creds.email.clone();
+    let master_key_vec = zeroize::Zeroizing::new(
+        B64.decode(creds.master_key_b64.trim())
+            .map_err(|e| format!("Invalid master key encoding: {e}"))?,
+    );
+    if master_key_vec.len() != 32 {
+        return Err("master key must be 32 bytes".into());
+    }
+    let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
     master_key.copy_from_slice(&master_key_vec);
-
-    crate::apply_session(app.clone(), state, session_token, master_key, email.clone()).await?;
+    crate::apply_session(
+        app.clone(),
+        state,
+        creds.session_token.clone(),
+        *master_key,
+        email.clone(),
+        #[cfg(target_os = "windows")]
+        attempt,
+    )
+    .await?;
 
     tracing::info!("browser-login: done, session installed");
     signin_log("done session-installed");
@@ -419,11 +437,11 @@ fn decrypt_payload(
     let ciphertext = B64.decode(payload_b64).map_err(|e| format!("Invalid payload encoding: {e}"))?;
 
     let hk = Hkdf::<Sha256>::new(None, shared_bytes);
-    let mut hkdf_key = [0u8; 32];
-    hk.expand(HKDF_INFO, &mut hkdf_key)
+    let mut hkdf_key = zeroize::Zeroizing::new([0u8; 32]);
+    hk.expand(HKDF_INFO, &mut *hkdf_key)
         .expect("HKDF expand failed — 32-byte output length is always valid");
 
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&hkdf_key));
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&*hkdf_key));
     cipher
         .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
         .or_else(|_| {
