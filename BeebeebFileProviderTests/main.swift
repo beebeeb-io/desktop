@@ -407,9 +407,5 @@ check("exchange: a peer that hangs up before replying is closedBeforeReply") {
     }
 }
 
-check("DELIBERATE RED PROOF (removed in the next commit)") {
-    try expect(false, "deliberate failure to prove the count guard can go red")
-}
-
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)
