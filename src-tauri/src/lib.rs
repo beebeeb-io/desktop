@@ -37,6 +37,9 @@ mod native_parity_tests;
 mod ipc_frame;
 #[cfg(unix)]
 mod ipc_socket;
+// Idempotency table for Finder write-queue requests (task 1684).
+#[cfg(unix)]
+mod ipc_write_dedup;
 mod keychain;
 // Known-folder backup ("Manage backup", task 0797 / Model 2). The catalog +
 // pure copy-diff classifier compile everywhere (unit-tested cross-platform);

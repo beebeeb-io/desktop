@@ -344,6 +344,12 @@ final class XPCBridge {
         }
     }
 
+    /// Task 1684: the request is built by `IPCWriteRequest` (IPCFraming.swift),
+    /// which derives a STABLE `request_id` from the operation's inputs and the
+    /// staged file's size + mtime, so the system's retry of a createItem that
+    /// timed out here is recognised by the daemon instead of queueing the same
+    /// upload again. Do not hand-build this payload: scripts/check-ipc-
+    /// timeouts.py fails if this call site stops going through the builder.
     func queueCreateItem(
         parentIdentifier: NSFileProviderItemIdentifier,
         filename: String,
@@ -351,23 +357,23 @@ final class XPCBridge {
         contentsURL: URL?,
         contentType: String?
     ) throws -> WriteQueueResult {
-        var payload: [String: Any] = [
-            "parent_id": parentIdentifier.rawValue,
-            "filename": filename,
-            "kind": kind.rawValue,
-        ]
-        if let contentsURL {
-            payload["contents_path"] = contentsURL.path
-        }
-        if let contentType {
-            payload["content_type"] = contentType
-        }
+        let request = IPCWriteRequest.create(
+            parentIdentifier: parentIdentifier.rawValue,
+            filename: filename,
+            kind: kind.rawValue,
+            contentsPath: contentsURL?.path,
+            contentType: contentType,
+            contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
+        )
+        Self.logRequestID(of: request, operation: "create")
         return try decodeWriteResponse(sendRequest(
-            ["QueueFinderCreate": payload],
+            request,
             timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
         ))
     }
 
+    /// Task 1684: see `queueCreateItem`; the modify key also folds in the base
+    /// version and the changed-fields mask.
     func queueModifyItem(
         itemIdentifier: NSFileProviderItemIdentifier,
         parentIdentifier: NSFileProviderItemIdentifier,
@@ -375,27 +381,36 @@ final class XPCBridge {
         kind: BeebeebItemKind,
         contentsURL: URL?,
         contentType: String?,
-        baseVersionIdentifier: String?
+        baseVersionIdentifier: String?,
+        changedFields: NSFileProviderItemFields
     ) throws -> WriteQueueResult {
-        var payload: [String: Any] = [
-            "file_id": itemIdentifier.rawValue,
-            "parent_id": parentIdentifier.rawValue,
-            "filename": filename,
-            "kind": kind.rawValue,
-        ]
-        if let contentsURL {
-            payload["contents_path"] = contentsURL.path
-        }
-        if let contentType {
-            payload["content_type"] = contentType
-        }
-        if let baseVersionIdentifier {
-            payload["base_version_identifier"] = baseVersionIdentifier
-        }
+        let request = IPCWriteRequest.modify(
+            itemIdentifier: itemIdentifier.rawValue,
+            parentIdentifier: parentIdentifier.rawValue,
+            filename: filename,
+            kind: kind.rawValue,
+            contentsPath: contentsURL?.path,
+            contentType: contentType,
+            baseVersionIdentifier: baseVersionIdentifier,
+            changedFields: UInt64(truncatingIfNeeded: changedFields.rawValue),
+            contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
+        )
+        Self.logRequestID(of: request, operation: "modify")
         return try decodeWriteResponse(sendRequest(
-            ["QueueFinderModify": payload],
+            request,
             timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
         ))
+    }
+
+    /// Task 1684 device rung: log the first 12 characters of the write key (a
+    /// SHA-256, not secret, no file name) so the unified log shows whether the
+    /// system's retry of a timed-out write recomputed the SAME key.
+    private static func logRequestID(of request: [String: Any], operation: String) {
+        for payload in request.values {
+            if let fields = payload as? [String: Any], let id = fields["request_id"] as? String {
+                NSLog("BeebeebFileProvider: \(operation) request_id=\(id.prefix(12))")
+            }
+        }
     }
 
     func queueDeleteItem(

@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::ipc_frame::{FrameError, FrameReader, MAX_REQUEST_BYTES, write_frame};
+use crate::ipc_write_dedup::{MAX_KEY_BYTES, WriteDedup};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -38,6 +39,12 @@ pub enum IpcRequest {
         kind: String,
         contents_path: Option<String>,
         content_type: Option<String>,
+        /// Idempotency key (task 1684), stable across the system's retries of
+        /// the same logical `createItem`. Absent from an old extension, which
+        /// then gets exactly the pre-1684 behaviour. See `crate::ipc_write_dedup`
+        /// and docs/IPC_PROTOCOL.md.
+        #[serde(default)]
+        request_id: Option<String>,
     },
     QueueFinderModify {
         file_id: String,
@@ -47,6 +54,9 @@ pub enum IpcRequest {
         contents_path: Option<String>,
         content_type: Option<String>,
         base_version_identifier: Option<String>,
+        /// Idempotency key (task 1684); see `QueueFinderCreate::request_id`.
+        #[serde(default)]
+        request_id: Option<String>,
     },
     QueueFinderDelete {
         file_id: String,
@@ -68,7 +78,7 @@ pub enum IpcRequest {
     GetSyncSummary,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IpcResponse {
     FileStatus(FileProviderItemPayload),
     FileProviderItems {
@@ -110,7 +120,7 @@ pub enum IpcResponse {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileProviderItemPayload {
     pub identifier: String,
     pub parent_identifier: String,
@@ -681,6 +691,9 @@ pub(crate) async fn serve_ipc_at_with_ready(
     }
     tracing::info!("IPC socket listening at {:?}", path);
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
+    // One table per daemon process, shared by every connection: a retry arrives
+    // on a NEW connection (task 1684). It is deliberately in-memory only.
+    let write_dedup = WriteDedup::<IpcResponse>::new();
 
     loop {
         connections.retain(|handle| !handle.is_finished());
@@ -691,7 +704,8 @@ pub(crate) async fn serve_ipc_at_with_ready(
                 Ok((stream, _)) => {
                     let db = db.clone();
                     let bridge = bridge.clone();
-                    connections.push(tokio::spawn(handle_connection(stream, db, bridge)));
+                    let write_dedup = write_dedup.clone();
+                    connections.push(tokio::spawn(handle_connection(stream, db, bridge, write_dedup)));
                 }
                 Err(e) => tracing::warn!("IPC accept error: {e}"),
             }
@@ -776,6 +790,7 @@ async fn handle_connection(
     stream: UnixStream,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+    write_dedup: std::sync::Arc<WriteDedup<IpcResponse>>,
 ) {
     // Authenticate the peer BEFORE reading or dispatching anything. The daemon
     // holds vault keys in memory and `hydrate_file` is a decrypt oracle, so a
@@ -860,6 +875,7 @@ async fn handle_connection(
                 kind,
                 contents_path,
                 content_type,
+                request_id,
             } => {
                 if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
                     // Answer and keep serving the connection (this used to
@@ -891,7 +907,17 @@ async fn handle_connection(
                     content_type,
                     base_version_identifier: None,
                 };
-                write_outcome_response(&db, bridge.queue_finder_create(target))
+                let fingerprint = format!(
+                    "create|{}|{}|{}",
+                    target.parent_id.as_deref().unwrap_or(""),
+                    target.filename,
+                    parse_write_kind_name(&target.kind)
+                );
+                let (work_db, work_bridge) = (db.clone(), bridge.clone());
+                dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
+                    write_outcome_response(&work_db, work_bridge.queue_finder_create(target))
+                })
+                .await
             }
             IpcRequest::QueueFinderModify {
                 file_id,
@@ -901,6 +927,7 @@ async fn handle_connection(
                 contents_path,
                 content_type,
                 base_version_identifier,
+                request_id,
             } => {
                 let target = crate::engine_bridge::FinderWriteTarget {
                     file_id: Some(file_id),
@@ -913,7 +940,17 @@ async fn handle_connection(
                     content_type,
                     base_version_identifier,
                 };
-                write_outcome_response(&db, bridge.queue_finder_modify(target))
+                let fingerprint = format!(
+                    "modify|{}|{}|{}",
+                    target.file_id.as_deref().unwrap_or(""),
+                    target.filename,
+                    parse_write_kind_name(&target.kind)
+                );
+                let (work_db, work_bridge) = (db.clone(), bridge.clone());
+                dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
+                    write_outcome_response(&work_db, work_bridge.queue_finder_modify(target))
+                })
+                .await
             }
             IpcRequest::QueueFinderDelete {
                 file_id,
@@ -1119,6 +1156,64 @@ fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
     } else {
         crate::engine_bridge::FinderWriteItemKind::File
     }
+}
+
+fn parse_write_kind_name(kind: &crate::engine_bridge::FinderWriteItemKind) -> &'static str {
+    match kind {
+        crate::engine_bridge::FinderWriteItemKind::Folder => "folder",
+        crate::engine_bridge::FinderWriteItemKind::File => "file",
+    }
+}
+
+/// Run a write-queue request, deduplicated by `request_id` when the extension
+/// sent one (task 1684). Without a key this is exactly the pre-1684 behaviour:
+/// `work` runs inline on this connection's task.
+///
+/// With a key, `work` runs at most once per key within the TTL: a repeat while
+/// the first is still copying waits for and returns its reply, and a repeat
+/// after it finished returns the stored reply if the row it created still exists
+/// under the same name (otherwise the user deleted or renamed it since, and the
+/// repeat is a new operation). Only queued results are remembered; an error is
+/// handed to whoever was already waiting but a later retry runs again.
+async fn dedup_write(
+    dedup: &std::sync::Arc<WriteDedup<IpcResponse>>,
+    db: &std::sync::Arc<crate::state_db::StateDb>,
+    request_id: Option<String>,
+    fingerprint: String,
+    work: impl FnOnce() -> IpcResponse + Send + 'static,
+) -> IpcResponse {
+    let Some(key) = request_id else {
+        return work();
+    };
+    if key.is_empty() || key.len() > MAX_KEY_BYTES || key.chars().any(|c| c.is_control()) {
+        return IpcResponse::Error {
+            message: format!("request_id must be 1 to {MAX_KEY_BYTES} printable bytes"),
+        };
+    }
+    let validate_db = db.clone();
+    dedup
+        .run(
+            &key,
+            &fingerprint,
+            std::time::Instant::now,
+            move |cached: &IpcResponse| match cached {
+                IpcResponse::WriteQueued { item: Some(item), .. } => match validate_db.get_file(&item.identifier) {
+                    Ok(Some(entry)) => {
+                        file_entry_payload_for_db(&validate_db, &entry, NAMESPACE_MY_FILES).filename == item.filename
+                    }
+                    Ok(None) => false,
+                    // Cannot tell: prefer returning the stored result over queueing twice.
+                    Err(_) => true,
+                },
+                _ => true,
+            },
+            |resp: &IpcResponse| matches!(resp, IpcResponse::WriteQueued { .. }),
+            work,
+            IpcResponse::Error {
+                message: "the Finder write did not complete; try again".into(),
+            },
+        )
+        .await
 }
 
 fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {

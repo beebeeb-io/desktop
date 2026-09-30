@@ -15,6 +15,21 @@ call sites still use them:
 Each op must appear in exactly one sendRequest call (a renamed/duplicated call
 site is RED, not silently unchecked).
 
+Task 1684 adds the write-queue idempotency key. The key must be STABLE across
+the system's retries (a random UUID per call dedups nothing), so it is derived
+inside IPCWriteRequest / IPCWriteKey (IPCFraming.swift, unit-tested by
+BeebeebFileProviderTests). What the Swift tests cannot see is whether
+XPCBridge.swift still goes through that builder, so this script also requires,
+inside queueCreateItem / queueModifyItem:
+
+  * exactly one IPCWriteRequest.create( / .modify( call, given the staged file's
+    path AND its fingerprint (`IPCContentFingerprint.ofFile(at:)`), and for a
+    modify the changed-fields mask -- the inputs the key is derived from;
+  * the request built from it is what sendRequest sends;
+  * no hand-built `"QueueFinderCreate"` / `"QueueFinderModify"` dictionary
+    anywhere in the file, no `"request_id"` literal and no `UUID()` in those
+    functions (each would bypass or randomise the key).
+
 Truth line: `ipc-timeout guard: N/N call sites correct` and exit 0. Anything
 else, or a non-zero exit, is RED.
 
@@ -34,49 +49,131 @@ EXPECTED = {
     "HydrateFile": "IPCFraming.hydrateTimeoutSeconds",
 }
 
+# Write-queue call sites: function -> (op, builder, argument patterns the builder call must contain).
+FINGERPRINT_ARG = r"contents:\s*contentsURL\.flatMap\s*\{\s*IPCContentFingerprint\.ofFile\(at:\s*\$0\)\s*\}"
+PATH_ARG = r"contentsPath:\s*contentsURL\?\.path"
+WRITE_SITES = {
+    "queueCreateItem": ("QueueFinderCreate", "IPCWriteRequest.create", [PATH_ARG, FINGERPRINT_ARG]),
+    "queueModifyItem": (
+        "QueueFinderModify",
+        "IPCWriteRequest.modify",
+        [PATH_ARG, FINGERPRINT_ARG, r"changedFields:\s*UInt64\(truncatingIfNeeded:\s*changedFields\.rawValue\)"],
+    ),
+}
+
+
+def matching_close(src, open_idx, open_ch, close_ch):
+    """Index just past the delimiter closing the one at `open_idx` (strings skipped)."""
+    depth, i, in_str = 0, open_idx, False
+    while i < len(src):
+        c = src[i]
+        if in_str:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == open_ch:
+            depth += 1
+        elif c == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def function_body(src, name):
+    """Text of `func <name>(...) ... { body }`, or None."""
+    m = re.search(r"\bfunc\s+" + re.escape(name) + r"\(", src)
+    if not m:
+        return None
+    params_end = matching_close(src, m.end() - 1, "(", ")")
+    if params_end is None:
+        return None
+    brace = src.find("{", params_end)
+    if brace < 0:
+        return None
+    end = matching_close(src, brace, "{", "}")
+    return src[brace:end] if end else None
+
 
 def call_spans(src):
     """Yield the argument text of every `sendRequest(...)` call (not the func decl)."""
     for m in re.finditer(r"\bsendRequest\(", src):
         if re.search(r"\bfunc\s+$", src[: m.start()]):
             continue
-        depth, i, in_str = 1, m.end(), False
-        while i < len(src) and depth:
-            c = src[i]
-            if in_str:
-                if c == "\\":
-                    i += 1
-                elif c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-            i += 1
-        yield src[m.end() : i - 1]
+        end = matching_close(src, m.end() - 1, "(", ")")
+        if end is None:
+            continue
+        yield src[m.end() : end - 1]
+
+
+def timeout_of(args):
+    got = re.search(r"timeoutSeconds:\s*(.+?)\s*(?:,\s*\w+:|$)", args, re.S)
+    return got.group(1).strip() if got else None
 
 
 def check(src):
     """Return (ok_count, problems)."""
-    seen = {op: [] for op in EXPECTED}
+    problems, ok = [], 0
+    ok_ops = set()
+
+    # Hydrate: the literal-dictionary call site, as before.
+    hydrate = []
     for args in call_spans(src):
         op = re.search(r'\[\s*"(\w+)"\s*:', args)
-        if op and op.group(1) in EXPECTED:
-            seen[op.group(1)].append(args)
-    problems, ok = [], 0
-    for op, want in EXPECTED.items():
-        calls = seen[op]
-        if len(calls) != 1:
-            problems.append(f"{op}: expected exactly 1 sendRequest call, found {len(calls)}")
-            continue
-        got = re.search(r"timeoutSeconds:\s*(.+?)\s*(?:,\s*\w+:|$)", calls[0], re.S)
-        got = got.group(1).strip() if got else None
-        if got != want:
-            problems.append(f"{op}: timeoutSeconds is {got!r}, expected {want!r}")
+        if op and op.group(1) == "HydrateFile":
+            hydrate.append(args)
+    if len(hydrate) != 1:
+        problems.append(f"HydrateFile: expected exactly 1 sendRequest call, found {len(hydrate)}")
+    else:
+        got = timeout_of(hydrate[0])
+        if got != EXPECTED["HydrateFile"]:
+            problems.append(f"HydrateFile: timeoutSeconds is {got!r}, expected {EXPECTED['HydrateFile']!r}")
         else:
-            ok += 1
+            ok_ops.add("HydrateFile")
+
+    # Write-queue sites: built by IPCWriteRequest, sent with the long timeout.
+    for func, (op, builder, arg_patterns) in WRITE_SITES.items():
+        before = len(problems)
+        body = function_body(src, func)
+        if body is None:
+            problems.append(f"{op}: func {func} not found")
+            continue
+        builds = re.findall(re.escape(builder) + r"\(", body)
+        if len(builds) != 1:
+            problems.append(f"{op}: {func} must build its request with exactly one {builder}( call, found {len(builds)}")
+        else:
+            build_args = body[body.index(builder + "(") :]
+            end = matching_close(build_args, build_args.index("("), "(", ")")
+            build_args = build_args[:end] if end else build_args
+            for pattern in arg_patterns:
+                if not re.search(pattern, build_args):
+                    problems.append(f"{op}: the {builder}( call no longer passes {pattern!r} (the request_id inputs)")
+        if re.search(r"\bUUID\(\)", body):
+            problems.append(f"{op}: {func} uses UUID(); a random id per call cannot dedup a retry")
+        if '"request_id"' in body:
+            problems.append(f"{op}: {func} sets request_id by hand; it must come from {builder}")
+        sends = list(call_spans(body))
+        if len(sends) != 1:
+            problems.append(f"{op}: {func} must contain exactly 1 sendRequest call, found {len(sends)}")
+        else:
+            if not re.match(r"\s*request\s*,", sends[0]):
+                problems.append(f"{op}: {func} must send the request built by {builder}, found {sends[0].split(',')[0].strip()!r}")
+            got = timeout_of(sends[0])
+            if got != EXPECTED[op]:
+                problems.append(f"{op}: timeoutSeconds is {got!r}, expected {EXPECTED[op]!r}")
+        if len(problems) == before:
+            ok_ops.add(op)
+
+    # A hand-built request dictionary anywhere bypasses the builder (and its key).
+    for op in ("QueueFinderCreate", "QueueFinderModify"):
+        if re.search(r'\[\s*"' + op + r'"\s*:', src):
+            problems.append(f"{op}: hand-built request dictionary found; requests must come from IPCWriteRequest")
+
+    ok = len(ok_ops)
     return ok, problems
 
 
@@ -97,22 +194,43 @@ def self_test(src):
         return 1
     w = "timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)"
     h = "timeoutSeconds: IPCFraming.hydrateTimeoutSeconds"
+    fp = "contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }"
     assert src.count(w) == 2 and src.count(h) == 1, "self-test: expected call-site text not found"
+    assert src.count(fp) == 2, "self-test: expected fingerprint argument not found"
+    assert src.count("IPCWriteRequest.create(") == 1 and src.count("IPCWriteRequest.modify(") == 1
 
     def first(s, old, new):
         return s.replace(old, new, 1)
 
+    def last(s, old, new):
+        return s[::-1].replace(old[::-1], new[::-1], 1)[::-1]
+
     mutants = {
-        "Create call site reverted to the default timeout": first(
-            src, '["QueueFinderCreate": payload],\n            ' + w, '["QueueFinderCreate": payload]'),
-        "Modify call site reverted to the default timeout": first(
-            src, '["QueueFinderModify": payload],\n            ' + w, '["QueueFinderModify": payload]'),
+        "Create call site reverted to the default timeout": first(src, "            request,\n            " + w, "            request"),
+        "Modify call site reverted to the default timeout": last(src, ",\n            " + w, ""),
         "Hydrate call site reverted to the default timeout": first(
             src, '["HydrateFile": payload],\n            ' + h + ",\n", '["HydrateFile": payload],\n'),
-        "Modify hasContents hard-coded false": src[::-1].replace(
-            w[::-1], w.replace("contentsURL != nil", "false")[::-1], 1)[::-1],
+        "Modify hasContents hard-coded false": last(src, w, w.replace("contentsURL != nil", "false")),
         "Hydrate uses the metadata timeout": first(src, h, "timeoutSeconds: IPCFraming.metadataTimeoutSeconds"),
-        "Create call site renamed (unchecked)": first(src, '"QueueFinderCreate"', '"QueueFinderCreateV2"'),
+        "Create call site renamed (unchecked)": first(src, "func queueCreateItem(", "func queueCreateItemV2("),
+        "Create no longer passes the staged file fingerprint": first(src, fp, "contents: nil"),
+        "Modify no longer passes the staged file fingerprint": last(src, fp, "contents: nil"),
+        "Modify no longer passes the changed-fields mask": first(
+            src, "changedFields: UInt64(truncatingIfNeeded: changedFields.rawValue)", "changedFields: 0"),
+        "Create request_id replaced by a random UUID": first(
+            src, "        let request = IPCWriteRequest.create(",
+            '        var request = IPCWriteRequest.create('
+        ).replace(
+            "        return try decodeWriteResponse(sendRequest(\n            request,",
+            '        _ = UUID().uuidString\n        return try decodeWriteResponse(sendRequest(\n            request,', 1),
+        "Create request_id set by hand": first(
+            src, "        return try decodeWriteResponse(sendRequest(\n            request,",
+            '        request["request_id"] = "x"\n        return try decodeWriteResponse(sendRequest(\n            request,'),
+        "Create request hand-built instead of via IPCWriteRequest": first(
+            src, "IPCWriteRequest.create(", '["QueueFinderCreate": payload] ?? IPCWriteRequest.create('),
+        "Modify builder call removed": first(src, "IPCWriteRequest.modify(", "IPCWriteRequestModifyRemoved("),
+        "Modify sends something other than the built request": last(
+            src, "sendRequest(\n            request,", "sendRequest(\n            [:],"),
     }
     bad = 0
     for name, mutated in mutants.items():

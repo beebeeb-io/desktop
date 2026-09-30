@@ -25,6 +25,7 @@ const READ_DEADLINE: Duration = Duration::from_secs(5);
 struct IpcFixture {
     rt: tokio::runtime::Runtime,
     sock: std::path::PathBuf,
+    db: Arc<StateDb>,
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     _state_dir: tempfile::TempDir,
@@ -46,7 +47,7 @@ impl IpcFixture {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server = rt.spawn(crate::ipc_socket::serve_ipc_at_with_ready(
             sock.clone(),
-            db,
+            db.clone(),
             bridge,
             cancel_rx,
             Some(ready_tx),
@@ -60,6 +61,7 @@ impl IpcFixture {
         Self {
             rt,
             sock,
+            db,
             cancel: Some(cancel_tx),
             server: Some(server),
             _state_dir: state_dir,
@@ -333,4 +335,255 @@ fn a_rejected_write_keeps_the_connection_open_for_the_next_request() {
         let next = parse(&lines.next_line().await);
         assert!(next.get("SyncSummary").is_some(), "connection must still be usable: {next}");
     });
+}
+
+// ---------------------------------------------------------------------------
+// Task 1684: write-queue request-id dedup, over the real socket, counting the
+// REAL queued operations in the state DB (not a mock).
+// ---------------------------------------------------------------------------
+
+fn queued_operation_count(fx: &IpcFixture) -> usize {
+    fx.db.list_due_operations(i64::MAX).unwrap().len()
+}
+
+fn source_file(dir: &tempfile::TempDir, name: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, b"finder file contents").unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn create_request(filename: &str, contents_path: &str, request_id: Option<&str>) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "parent_id": null,
+        "filename": filename,
+        "kind": "file",
+        "contents_path": contents_path,
+        "content_type": null,
+    });
+    if let Some(id) = request_id {
+        body["request_id"] = serde_json::json!(id);
+    }
+    let mut line = serde_json::to_vec(&serde_json::json!({ "QueueFinderCreate": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+fn modify_request(file_id: &str, filename: &str, contents_path: &str, request_id: Option<&str>) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "file_id": file_id,
+        "parent_id": null,
+        "filename": filename,
+        "kind": "file",
+        "contents_path": contents_path,
+        "content_type": null,
+        "base_version_identifier": null,
+    });
+    if let Some(id) = request_id {
+        body["request_id"] = serde_json::json!(id);
+    }
+    let mut line = serde_json::to_vec(&serde_json::json!({ "QueueFinderModify": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+async fn send_one(fx: &IpcFixture, request: Vec<u8>) -> serde_json::Value {
+    let mut client = fx.connect().await;
+    client.write_all(&request).await.unwrap();
+    parse(&read_line(&mut client).await)
+}
+
+fn assert_write_queued(reply: &serde_json::Value) {
+    assert!(reply.get("WriteQueued").is_some(), "expected WriteQueued, got {reply}");
+    assert!(
+        reply["WriteQueued"]["item"]["identifier"].as_str().is_some(),
+        "a queued create must report the item it created: {reply}"
+    );
+}
+
+#[test]
+fn concurrent_creates_with_one_request_id_queue_exactly_one_upload() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "big.bin");
+    let replies: Vec<serde_json::Value> = fx.rt.block_on(async {
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let request = create_request("big.bin", &path, Some("key-concurrent"));
+            let mut client = fx.connect().await;
+            tasks.push(tokio::spawn(async move {
+                client.write_all(&request).await.unwrap();
+                parse(&read_line(&mut client).await)
+            }));
+        }
+        let mut out = Vec::new();
+        for t in tasks {
+            out.push(t.await.unwrap());
+        }
+        out
+    });
+    assert_eq!(replies.len(), 8);
+    for r in &replies {
+        assert_write_queued(r);
+        assert_eq!(r, &replies[0], "every repeat must get the SAME WriteQueued reply");
+    }
+    assert_eq!(queued_operation_count(&fx), 1, "one logical create must queue exactly one upload");
+}
+
+#[test]
+fn a_repeat_after_completion_returns_the_cached_reply_without_queueing() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("a.bin", &path, Some("key-after"))).await;
+        assert_write_queued(&first);
+        assert_eq!(queued_operation_count(&fx), 1);
+        // The retry comes on a NEW connection, well after the first finished.
+        let retry = send_one(&fx, create_request("a.bin", &path, Some("key-after"))).await;
+        assert_eq!(retry, first);
+    });
+    assert_eq!(queued_operation_count(&fx), 1, "the retry must not queue a second upload");
+}
+
+#[test]
+fn different_request_ids_each_queue_their_own_upload() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let one = send_one(&fx, create_request("a.bin", &path, Some("key-one"))).await;
+        let two = send_one(&fx, create_request("a.bin", &path, Some("key-two"))).await;
+        assert_write_queued(&one);
+        assert_write_queued(&two);
+        assert_ne!(
+            one["WriteQueued"]["item"]["identifier"], two["WriteQueued"]["item"]["identifier"],
+            "two different keys are two different creates"
+        );
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn a_request_without_a_request_id_behaves_exactly_as_before() {
+    // Version skew: the 0.8.6 extension sends no key. Two identical key-less
+    // requests are two creates, as they always were.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let one = send_one(&fx, create_request("a.bin", &path, None)).await;
+        let two = send_one(&fx, create_request("a.bin", &path, None)).await;
+        assert_write_queued(&one);
+        assert_write_queued(&two);
+        assert_ne!(one, two);
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn a_cached_create_is_not_returned_once_its_row_is_gone() {
+    // The false-dedup guard: the same key arriving after the user deleted the
+    // file is a NEW create, not a retry.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let first = send_one(&fx, create_request("a.bin", &path, Some("key-gone"))).await;
+        assert_write_queued(&first);
+        let id = first["WriteQueued"]["item"]["identifier"].as_str().unwrap().to_string();
+        fx.db.delete_file(&id).unwrap();
+        let again = send_one(&fx, create_request("a.bin", &path, Some("key-gone"))).await;
+        assert_write_queued(&again);
+        assert_ne!(again["WriteQueued"]["item"]["identifier"], first["WriteQueued"]["item"]["identifier"]);
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn a_request_id_reused_for_another_file_name_is_not_merged() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        let a = send_one(&fx, create_request("a.bin", &path, Some("key-collide"))).await;
+        let b = send_one(&fx, create_request("b.bin", &path, Some("key-collide"))).await;
+        assert_write_queued(&a);
+        assert_write_queued(&b);
+        assert_ne!(a["WriteQueued"]["item"]["identifier"], b["WriteQueued"]["item"]["identifier"]);
+    });
+    assert_eq!(queued_operation_count(&fx), 2);
+}
+
+#[test]
+fn concurrent_modifies_with_one_request_id_queue_exactly_one_version() {
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: "00000000-0000-0000-0000-00000000aaaa".into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "doc.txt");
+    let replies: Vec<serde_json::Value> = fx.rt.block_on(async {
+        let mut tasks = Vec::new();
+        for _ in 0..6 {
+            let request = modify_request("00000000-0000-0000-0000-00000000aaaa", "doc.txt", &path, Some("key-modify"));
+            let mut client = fx.connect().await;
+            tasks.push(tokio::spawn(async move {
+                client.write_all(&request).await.unwrap();
+                parse(&read_line(&mut client).await)
+            }));
+        }
+        let mut out = Vec::new();
+        for t in tasks {
+            out.push(t.await.unwrap());
+        }
+        out
+    });
+    for r in &replies {
+        assert!(r.get("WriteQueued").is_some(), "expected WriteQueued, got {r}");
+        assert_eq!(r, &replies[0]);
+    }
+    assert_eq!(queued_operation_count(&fx), 1, "one logical modify must queue exactly one version");
+}
+
+#[test]
+fn an_unusable_request_id_is_refused_not_ignored() {
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "a.bin");
+    fx.rt.block_on(async {
+        for bad in ["".to_string(), "x".repeat(129), "line\nbreak".to_string()] {
+            let reply = send_one(&fx, create_request("a.bin", &path, Some(&bad))).await;
+            let message = reply["Error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains("request_id"), "a bad key must be refused, got {reply}");
+        }
+    });
+    assert_eq!(queued_operation_count(&fx), 0, "a refused request must queue nothing");
+}
+
+#[test]
+fn a_failed_create_is_not_remembered_so_the_retry_actually_runs() {
+    // The first attempt fails (its source file is unreadable), which must not
+    // poison the key: the system's retry, now with a readable file, has to queue.
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let good = source_file(&src, "a.bin");
+    let missing = src.path().join("does-not-exist.bin").to_string_lossy().into_owned();
+    fx.rt.block_on(async {
+        let failed = send_one(&fx, create_request("a.bin", &missing, Some("key-fail"))).await;
+        assert!(failed.get("Error").is_some(), "the first attempt must fail, got {failed}");
+        assert_eq!(queued_operation_count(&fx), 0);
+        let retried = send_one(&fx, create_request("a.bin", &good, Some("key-fail"))).await;
+        assert_write_queued(&retried);
+    });
+    assert_eq!(queued_operation_count(&fx), 1);
 }
