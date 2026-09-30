@@ -1111,10 +1111,16 @@ impl Reserve {
         let f = fs::OpenOptions::new().write(true).open(&self.path)?;
         f.set_len(self.remaining)?;
         f.sync_all()?;
-        let released = before.saturating_sub(allocated_len(&self.path)?);
+        // NTFS may keep AllocationSize until the truncating handle closes.
+        // A shorter EOF alone is not emergency headroom.
+        drop(f);
+        let after = allocated_len(&self.path)?;
+        let released = before.saturating_sub(after);
         ensure!(
             released >= 16 * MIB && file_len(&self.path) == self.remaining,
-            "reserve did not physically release terminal space"
+            "reserve did not physically release terminal space: before={before} after={after} length={} expected={}",
+            file_len(&self.path),
+            self.remaining
         );
         Ok(released)
     }
