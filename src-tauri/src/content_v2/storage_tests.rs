@@ -1208,3 +1208,47 @@ fn available_bytes(path: &Path) -> u64 {
         available
     }
 }
+
+#[test]
+fn slice1_g2_disposition_gc_cuts_reclaim_after_terminal_commit() {
+    for cut in 1..=8 {
+        let h = Harness::new().unwrap();
+        let mut s = Store::new(&h).unwrap();
+        let a = captured(&mut s, &vec![0x29; CHUNK * 2]);
+        let path = s.path.clone();
+        let mut fault = Fault {
+            cut: Some(cut),
+            seen: 0,
+        };
+        let attempt = (|| -> Result<()> {
+            s.dispose(&a, &discard(&a), &mut fault)?;
+            s.gc(&a, &mut fault)
+        })();
+        assert!(attempt.is_err(), "cut {cut} must execute");
+        assert_eq!(fault.seen, cut);
+        drop(s);
+        for restart in 1..=2 {
+            let mut s = Store::reopen(&h, &path).unwrap();
+            s.dispose(&a, &discard(&a), &mut Fault::default()).unwrap();
+            s.gc(&a, &mut Fault::default()).unwrap();
+            for table in ["v2_chunks", "v2_manifests", "v2_refs"] {
+                let count: u64 =
+                    s.db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                        .unwrap();
+                assert_eq!(count, 0, "{table} cut={cut} restart={restart}");
+            }
+            let dispositions: u64 =
+                s.db.query_row("SELECT count(*) FROM v2_dispositions", [], |r| r.get(0))
+                    .unwrap();
+            assert_eq!(dispositions, 1);
+            assert_eq!(h.volume.lock().unwrap().reserved, 0);
+            let free: u64 = s.db.query_row("PRAGMA freelist_count", [], |r| r.get(0)).unwrap();
+            assert_eq!(
+                free, 0,
+                "GC terminal commit must resume physical reclamation: cut={cut} restart={restart}"
+            );
+            assert!(allocated_len(&wal_path(&s.path)).unwrap() <= 64 * MIB);
+        }
+    }
+    println!("gc_disposition_cutpoints=8 recovery_opens=16");
+}

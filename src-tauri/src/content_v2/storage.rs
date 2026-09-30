@@ -846,7 +846,11 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             if phase == "Removed" {
-                return Ok(());
+                // A crash may follow the terminal commit but precede vacuum/TRUNCATE.
+                // Replay must finish the physical work even though logical deletion is done.
+                drop(tx);
+                self.reconstruct_reservations()?;
+                return self.settle();
             }
             let n = tx.execute(
                 "DELETE FROM v2_chunks WHERE artifact_id=?1 AND chunk_index=?2",
