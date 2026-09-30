@@ -54,7 +54,7 @@ import {
   buildDataResidencyViewState,
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
-import { finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../../finderInstallCard'
+import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../../finderInstallCard'
 import { setDesktopThemePreference } from '../theme'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
 
@@ -937,25 +937,55 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     return () => { cancelled = true }
   }, [showToast, midSentenceLabel, commands])
 
-  // D1 (task 1683 slice 5): a failed install GATES the row's action, so it is ONE inline error
-  // under the row (`state.last_error`), never also a toast. The backend saves the failure and
-  // returns it as a state; a rejected command (never saved, or the Windows twin) is folded into
-  // the same state by finderInstallStateAfterAttempt. A new attempt clears the old failure.
+  // D1 (task 1683 slice 5), macOS only (spec section 11: "no toast for gating failures" is macOS
+  // only; Windows is unchanged). On macOS a failed install GATES the row's action, so it is ONE
+  // inline banner (`finderInstallNotice`), never also a toast: the backend saves the failure and
+  // returns it as a state, a rejected command (never saved) is folded into the same state by
+  // finderInstallStateAfterAttempt, and a new attempt clears the old failure.
+  // Windows/Linux keep the pre-slice-5 behaviour exactly: a failed enable is a toast and nothing
+  // is painted from the saved `finder_install_last_error` (the Windows first-run flow saves one
+  // that Settings has never shown).
   const enable = async () => {
     if (!commands) return
     setBusy(true)
-    setState(finderInstallStateWhileAttempting)
+    const inline = platform === 'macos'
+    if (inline) setState(finderInstallStateWhileAttempting)
     // macOS ignores `path` and always installs at the default sync root
     // (src-tauri/src/lib.rs `install_finder_location`), same as Onboarding.tsx.
-    const args = platform === 'macos' ? { path: null } : undefined
+    const args = inline ? { path: null } : undefined
     const r = await command<ShellIntegrationState>(commands.install, args)
     setBusy(false)
-    setState((previous) => finderInstallStateAfterAttempt(r, previous, commandUnavailableLabel(commands.install)))
-    if (r.ok && r.value.installed) void refresh()
+    if (inline) {
+      setState((previous) => finderInstallStateAfterAttempt(r, previous, commandUnavailableLabel(commands.install)))
+      if (r.ok && r.value.installed) void refresh()
+      return
+    }
+    if (r.ok) {
+      setState(r.value)
+      void refresh()
+      return
+    }
+    showToast({
+      variant: 'error',
+      title: `Couldn’t ${actionVerb.toLowerCase()} ${midSentenceLabel}`,
+      message: r.unsupported ? commandUnavailableLabel(commands.install) : r.reason,
+    })
+  }
+
+  // Transient action failure that gates nothing: toast.
+  const openSystemSettings = async () => {
+    const r = await command<void>('open_login_items_and_extensions_settings')
+    if (!r.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open System Settings',
+        message: r.unsupported ? commandUnavailableLabel('open_login_items_and_extensions_settings') : r.reason,
+      })
+    }
   }
 
   const active = state?.installed === true
-  const installError = !active ? state?.last_error?.trim() : undefined
+  const notice = platform === 'macos' && !active ? finderInstallNotice(state) : null
   const deviceNoun = platform ? thisDeviceNoun(platform) : 'this device'
   const statusText = !resolved
     ? 'Checking...'
@@ -994,7 +1024,7 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
         {commands && !checking && active && <Chip tone="green">Active</Chip>}
       </Card>
 
-      {commands && !checking && installError && (
+      {commands && !checking && notice?.kind === 'error' && (
         <div
           role="alert"
           data-error-surface="finder-install"
@@ -1010,7 +1040,52 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
             overflowWrap: 'anywhere',
           }}
         >
-          {installError}
+          {notice.message}
+        </div>
+      )}
+
+      {/* The fixable state, not a failure: the user turned Beebeeb off in System Settings. Neutral
+          surface, role="status", with the same action Onboarding offers. */}
+      {commands && !checking && notice?.kind === 'user_disabled' && (
+        <div
+          role="status"
+          data-finder-state="user_disabled"
+          style={{
+            marginTop: 10,
+            padding: '10px 12px',
+            background: T.paper2,
+            border: `1px solid ${T.line2}`,
+            borderRadius: 8,
+            color: T.ink,
+            fontSize: 12,
+            lineHeight: 1.5,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+          }}
+        >
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{notice.message}</span>
+          <button
+            type="button"
+            onClick={() => void openSystemSettings()}
+            disabled={busy}
+            style={{
+              height: 30,
+              padding: '0 11px',
+              fontSize: 11.5,
+              fontFamily: T.fontSans,
+              fontWeight: 600,
+              borderRadius: 6,
+              border: `1px solid ${T.line2}`,
+              background: T.paper,
+              color: T.ink2,
+              cursor: busy ? 'not-allowed' : 'pointer',
+              whiteSpace: 'nowrap' as const,
+            }}
+          >
+            Open Login Items &amp; Extensions
+          </button>
         </div>
       )}
     </SettingsSectionShell>

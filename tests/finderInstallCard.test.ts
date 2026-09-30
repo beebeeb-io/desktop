@@ -22,6 +22,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import {
+  finderInstallNotice,
   classifyFinderInstallResult,
   finderInstallStateAfterAttempt,
   finderInstallStateWhileAttempting,
@@ -167,5 +168,25 @@ describe('finderInstallCard one-inline-error helpers (task 1683 slice 5, decisio
   test('starting a new attempt does not rewrite a non-error status, and tolerates no state yet', () => {
     expect(finderInstallStateWhileAttempting(installState({ status: 'installed', installed: true }))?.status).toBe('installed')
     expect(finderInstallStateWhileAttempting(null)).toBeNull()
+  })
+})
+
+describe('finderInstallNotice (task 1683 slice 5, review round): one classifier for the inline surface', () => {
+  const base = { installed: false, path: null, status: 'error', last_error: null, last_attempt_at: 1, reason_category: null }
+
+  test('nothing to show for null, installed, or a state without a saved failure', () => {
+    expect(finderInstallNotice(null)).toBeNull()
+    expect(finderInstallNotice({ ...base, installed: true, last_error: 'stale' })).toBeNull()
+    expect(finderInstallNotice({ ...base, status: 'missing' })).toBeNull()
+    expect(finderInstallNotice({ ...base, last_error: '   ' })).toBeNull()
+  })
+
+  test('a user-disabled extension is the fixable kind, never the error kind', () => {
+    expect(finderInstallNotice({ ...base, last_error: 'Turned off.', reason_category: 'user_disabled' })).toEqual({ kind: 'user_disabled', message: 'Turned off.' })
+  })
+
+  test('any other saved failure is the error kind with the trimmed message', () => {
+    expect(finderInstallNotice({ ...base, last_error: ' boom ', reason_category: 'timeout' })).toEqual({ kind: 'error', message: 'boom' })
+    expect(finderInstallNotice({ ...base, last_error: 'boom' })).toEqual({ kind: 'error', message: 'boom' })
   })
 })

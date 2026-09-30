@@ -20,13 +20,15 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import * as desktopApi from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
 import { T } from '../src/windows/ui'
-import { mount, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
+import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
 
 const TIMEOUT = 'Timed out waiting for the Beebeeb File Provider domain to become available'
 const OTHER = 'Finder location must be absolute: relative/path'
 
 const missing = { installed: false, path: null, status: 'missing', last_error: null, last_attempt_at: null, reason_category: null }
 const failed = (message: string) => ({ installed: false, path: null, status: 'error', last_error: message, last_attempt_at: 2, reason_category: 'timeout' })
+const userDisabledMessage = 'Beebeeb is turned off in System Settings. Open Login Items & Extensions, turn on Beebeeb under File Providers, then try again.'
+const userDisabled = { installed: false, path: null, status: 'error', last_error: userDisabledMessage, last_attempt_at: 4, reason_category: 'user_disabled' }
 const installedState = { installed: true, path: 'Beebeeb in Finder', status: 'installed', last_error: null, last_attempt_at: 3, reason_category: null }
 
 /**
@@ -36,7 +38,7 @@ const installedState = { installed: true, path: 'Beebeeb in Finder', status: 'in
  *  - 'unsaved'  a failure before anything is persisted (validation), returned as a rejected command
  *  - 'success'  the install works
  */
-type Shape = 'err' | 'state' | 'unsaved' | 'success'
+type Shape = 'err' | 'state' | 'unsaved' | 'success' | 'user_disabled'
 
 function finderBackend(shape: Shape, persistedBefore: string | null, gate?: { release: Promise<void> }) {
   let persisted: any = persistedBefore ? failed(persistedBefore) : missing
@@ -45,10 +47,12 @@ function finderBackend(shape: Shape, persistedBefore: string | null, gate?: { re
     sync_status: () => ({ logged_in: true, engine: 'running', sync_root: '/Users/fixture/Library/CloudStorage/Beebeeb', syncing: 0, cloud_only: 0, conflicts: 0 }),
     finder_location_state: () => persisted,
     install_windows_shell_integration: () => { throw new Error('windows-only command called on macOS') },
+    open_login_items_and_extensions_settings: () => undefined,
     install_finder_location: async () => {
       if (gate) await gate.release
       if (shape === 'success') { persisted = installedState; return installedState }
       if (shape === 'unsaved') throw new Error(OTHER)
+      if (shape === 'user_disabled') { persisted = userDisabled; return userDisabled }
       persisted = failed(TIMEOUT)
       if (shape === 'err') throw new Error(TIMEOUT)
       return persisted
@@ -121,6 +125,26 @@ describe('SyncFolder (Finder location pane)', () => {
     expect(m.elements().some((el) => el.type === 'button' && /Open in Finder/.test(String(el.props.children)))).toBe(true)
   })
 
+  test('the inline banner is a live region, so a screen reader is told the install failed (the removed toast was role=alert)', async () => {
+    const m = await openFinderPane('state', null)
+    await m.click('Install in Finder')
+    const banner = m.elements().filter((el) => el.props['data-error-surface'] === 'finder-install')
+    expect(banner.map((el) => el.props.role)).toEqual(['alert'])
+  })
+
+  test('a user-disabled extension is ONE distinct, fixable notice (not a red error) with a System Settings action', async () => {
+    const m = await openFinderPane('user_disabled', null)
+    await m.click('Install in Finder')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    expect(m.toasts).toEqual([])
+    const notices = m.elements().filter((el) => el.props['data-finder-state'] === 'user_disabled')
+    expect(notices.length).toBe(1)
+    expect(textOf(notices[0].props.children)).toContain(userDisabledMessage)
+    expect(notices[0].props.role).toBe('status')
+    await m.click('Open Login Items & Extensions')
+    expect(m.calls.filter((c) => c.name === 'open_login_items_and_extensions_settings').length).toBe(1)
+  })
+
   test('a transient failure that gates nothing still toasts: the folder picker on the non-macOS pane', async () => {
     const w = mount('pages/SyncFolder.tsx', 'SyncFolder', {
       backend: { ...finderBackend('success', null), desktop_platform: () => 'windows', pick_sync_root: () => { throw new Error('picker crashed') } },
@@ -134,21 +158,24 @@ describe('SyncFolder (Finder location pane)', () => {
   })
 })
 
-describe('Settings panel (ExplorerIntegrationPanel), same action, same rule', () => {
-  async function openPanel(platform: 'macos' | 'windows', installBehaviour: 'err' | 'state' | 'success') {
+describe('Settings panel (ExplorerIntegrationPanel), same action, same rule on macOS; Windows is unchanged', () => {
+  type PanelBehaviour = 'err' | 'state' | 'success' | 'user_disabled'
+  async function openPanel(platform: 'macos' | 'windows', installBehaviour: PanelBehaviour, persistedBefore: string | null = null) {
     const windows = platform === 'windows'
     const installName = windows ? 'install_windows_shell_integration' : 'install_finder_location'
     const stateName = windows ? 'windows_shell_integration_state' : 'finder_location_state'
-    let persisted: any = missing
+    let persisted: any = persistedBefore ? failed(persistedBefore) : missing
     const m = mount('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel', {
       backend: {
         [stateName]: () => persisted,
         [installName]: () => {
           if (installBehaviour === 'success') { persisted = installedState; return installedState }
+          if (installBehaviour === 'user_disabled') { persisted = userDisabled; return userDisabled }
           persisted = failed(TIMEOUT)
           if (installBehaviour === 'err') throw new Error(TIMEOUT)
           return persisted
         },
+        open_login_items_and_extensions_settings: () => undefined,
       },
       bindings: {
         ...desktopApi,
@@ -167,25 +194,63 @@ describe('Settings panel (ExplorerIntegrationPanel), same action, same rule', ()
     return m
   }
 
-  for (const platform of ['macos', 'windows'] as const) {
-    const verb = platform === 'macos' ? 'Install' : 'Enable'
-    test(`${platform}: a failed ${verb.toLowerCase()} returned as an error is one inline surface, not a toast`, async () => {
-      const m = await openPanel(platform, 'err')
-      await m.click(verb)
+  describe('macOS: a failed install gates the row, so it is one inline banner', () => {
+    test('a failed install returned as an error is one inline surface, not a toast', async () => {
+      const m = await openPanel('macos', 'err')
+      await m.click('Install')
       expect(visibleErrorSurfaces(m)).toEqual([`inline: ${TIMEOUT}`])
       expect(m.toasts).toEqual([])
     })
-    test(`${platform}: a failed ${verb.toLowerCase()} returned as a state is one inline surface, not a silent nothing`, async () => {
-      const m = await openPanel(platform, 'state')
-      await m.click(verb)
+    test('a failed install returned as a state is one inline surface, not a silent nothing', async () => {
+      const m = await openPanel('macos', 'state')
+      await m.click('Install')
       expect(visibleErrorSurfaces(m)).toEqual([`inline: ${TIMEOUT}`])
       expect(m.toasts).toEqual([])
     })
-    test(`${platform}: success shows no error surface`, async () => {
-      const m = await openPanel(platform, 'success')
-      await m.click(verb)
+    test('the banner is a live region (role=alert)', async () => {
+      const m = await openPanel('macos', 'state')
+      await m.click('Install')
+      expect(m.elements().filter((el) => el.props['data-error-surface'] === 'finder-install').map((el) => el.props.role)).toEqual(['alert'])
+    })
+    test('success shows no error surface', async () => {
+      const m = await openPanel('macos', 'success', TIMEOUT)
+      await m.click('Install')
       expect(visibleErrorSurfaces(m)).toEqual([])
       expect(m.toasts).toEqual([])
     })
-  }
+    test('a user-disabled extension is one distinct notice with a System Settings action, not a red error', async () => {
+      const m = await openPanel('macos', 'user_disabled')
+      await m.click('Install')
+      expect(visibleErrorSurfaces(m)).toEqual([])
+      expect(m.toasts).toEqual([])
+      const notices = m.elements().filter((el) => el.props['data-finder-state'] === 'user_disabled')
+      expect(notices.length).toBe(1)
+      expect(textOf(notices[0].props.children)).toContain(userDisabledMessage)
+      expect(notices[0].props.role).toBe('status')
+      await m.click('Open Login Items & Extensions')
+      expect(m.calls.filter((c) => c.name === 'open_login_items_and_extensions_settings').length).toBe(1)
+    })
+  })
+
+  describe('Windows: spec section 11 says the toast rule is macOS only, so the panel is unchanged', () => {
+    test('a failed enable is one toast and NO inline banner', async () => {
+      const m = await openPanel('windows', 'err')
+      await m.click('Enable')
+      expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t enable Explorer integration'])
+      expect(visibleErrorSurfaces(m)).toEqual([`toast: Couldn’t enable Explorer integration — ${TIMEOUT}`])
+      expect(m.elements().filter((el) => el.props['data-error-surface'] != null)).toEqual([])
+    })
+    test('a failure saved by the first-run flow is NOT replayed as a banner every time Settings opens', async () => {
+      const m = await openPanel('windows', 'success', TIMEOUT)
+      expect(visibleErrorSurfaces(m)).toEqual([])
+      expect(m.elements().filter((el) => el.props.role === 'alert')).toEqual([])
+      expect(m.toasts).toEqual([])
+    })
+    test('success shows no error surface', async () => {
+      const m = await openPanel('windows', 'success')
+      await m.click('Enable')
+      expect(visibleErrorSurfaces(m)).toEqual([])
+      expect(m.toasts).toEqual([])
+    })
+  })
 })

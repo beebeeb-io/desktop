@@ -119,3 +119,22 @@ export function finderInstallStateWhileAttempting(previous: FinderInstallState |
     reason_category: null,
   }
 }
+
+/**
+ * What the inline Finder-install surface shows for a state (task 1683 slice 5, review round).
+ *
+ * Two different things used to collapse into one red banner: a real failure, and the fixable
+ * condition "the user turned Beebeeb off in System Settings" (`reason_category ===
+ * "user_disabled"`), which Onboarding already presents with an "open System Settings" action.
+ * One classifier for every pane keeps them apart: `error` is a red `role="alert"` banner,
+ * `user_disabled` is a neutral `role="status"` notice with the action. `null` = show nothing
+ * (installed, or no saved failure).
+ */
+export type FinderInstallNotice = { kind: 'error' | 'user_disabled'; message: string }
+
+export function finderInstallNotice(state: FinderInstallState | null): FinderInstallNotice | null {
+  if (!state || state.installed) return null
+  const message = state.last_error?.trim()
+  if (!message) return null
+  return { kind: state.reason_category === 'user_disabled' ? 'user_disabled' : 'error', message }
+}

@@ -8,7 +8,7 @@ import {
   type MacosIntegrationResetResult,
   type SyncStatus,
 } from '../desktopApi'
-import { finderInstallStateAfterAttempt, finderInstallStateWhileAttempting, finderLocationButtonPlan } from '../finderInstallCard'
+import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting, finderLocationButtonPlan } from '../finderInstallCard'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -94,6 +94,18 @@ export default function SyncFolder() {
     )
   }
 
+  // A transient action failure that gates nothing: toast (house rule, decision D1).
+  const openSystemSettings = async () => {
+    const result = await command<void>('open_login_items_and_extensions_settings')
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t open System Settings',
+        message: result.unsupported ? commandUnavailableLabel('open_login_items_and_extensions_settings') : result.reason,
+      })
+    }
+  }
+
   const openFinder = async () => {
     setBusy(true)
     const current = platform === 'macos' ? null : await loadSyncStatus()
@@ -146,7 +158,7 @@ export default function SyncFolder() {
   }
 
   const installed = installState?.installed ?? false
-  const finderLastError = installState?.last_error?.trim()
+  const finderNotice = finderInstallNotice(installState)
   const isMacos = platform === 'macos'
   // Task 1670: on macOS the pane must be truthful about install state — only
   // one of "Install in Finder" / "Open in Finder" at a time. Windows/Linux
@@ -171,9 +183,22 @@ export default function SyncFolder() {
       </div>
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
-      {finderLastError && (
-        <div className="notice error" data-error-surface="finder-install" style={{ marginBottom: 14 }}>
-          {finderLastError}
+      {/* role="alert": the toast this banner replaced was a live region (windows/ui.tsx Toast), so a
+          screen-reader user must still be told an install failed. A user-disabled extension is not a
+          failure but a fixable state: neutral, role="status", with the System Settings action. */}
+      {finderNotice?.kind === 'error' && (
+        <div className="notice error" role="alert" data-error-surface="finder-install" style={{ marginBottom: 14 }}>
+          {finderNotice.message}
+        </div>
+      )}
+      {finderNotice?.kind === 'user_disabled' && (
+        <div className="notice" role="status" data-finder-state="user_disabled" style={{ marginBottom: 14 }}>
+          <div>{finderNotice.message}</div>
+          <div className="button-row" style={{ marginTop: 10 }}>
+            <button className="button" onClick={() => void openSystemSettings()} disabled={busy}>
+              Open Login Items &amp; Extensions
+            </button>
+          </div>
         </div>
       )}
 

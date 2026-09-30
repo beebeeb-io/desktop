@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
 import ts from 'typescript'
 import { command, loadSyncStatus, type SyncStatus } from '../src/desktopApi'
+import * as finderInstallCard from '../src/finderInstallCard'
 
 // Execute the production component declarations/handlers with controlled hooks.
 // This does not claim browser layout, React scheduling, or native Explorer proof.
@@ -61,7 +62,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
   }
   globalThis.window = fakeWindow as any
   const View = component(file, name, {
-    React: { createElement, Fragment }, T: {}, command, loadSyncStatus,
+    React: { createElement, Fragment }, T: {}, command, loadSyncStatus, ...finderInstallCard,
     useState(initial: any) {
       const index = cursor++
       if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial

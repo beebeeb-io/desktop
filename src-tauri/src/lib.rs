@@ -1897,6 +1897,32 @@ fn finder_install_failure_state(cfg: &mut DesktopConfig, error: String) -> Finde
     finder_install_state_from_config(cfg, false, None)
 }
 
+/// Spec section 7: the saved install error "is cleared when a new attempt starts". An attempt can
+/// wait many seconds on the File Provider domain; until it ends, the previous attempt's error is
+/// no longer true of anything, yet the status page and the popover read it from this config.
+/// Clears the failure fields (an `error` status becomes `missing`, like the frontend's
+/// `finderInstallStateWhileAttempting`); an `installed` status and the last attempt time are
+/// left alone. Returns whether anything changed, so an attempt with nothing to clear writes nothing.
+fn clear_finder_install_failure(cfg: &mut DesktopConfig) -> bool {
+    let had_failure = cfg.finder_install_status.as_deref() == Some("error")
+        || cfg.finder_install_last_error.is_some()
+        || cfg.finder_install_reason_category.is_some();
+    if cfg.finder_install_status.as_deref() == Some("error") {
+        cfg.finder_install_status = Some("missing".to_string());
+    }
+    cfg.finder_install_last_error = None;
+    cfg.finder_install_reason_category = None;
+    had_failure
+}
+
+/// Start of an install attempt: drop the previous attempt's failure from the saved state.
+fn begin_finder_install_attempt(cfg: &mut DesktopConfig) -> Result<(), String> {
+    if clear_finder_install_failure(cfg) {
+        cfg.save()?;
+    }
+    Ok(())
+}
+
 /// Save a failed Finder install and return it as an `Ok` state (see
 /// [`finder_install_failure_state`]). Only a failure to save the config itself is an `Err`.
 fn finder_install_failed(cfg: &mut DesktopConfig, error: String) -> Result<FinderInstallState, String> {
@@ -2589,6 +2615,8 @@ async fn install_finder_location(
     config::ensure_directory(&root)?;
 
     let mut cfg = DesktopConfig::load()?;
+    // Spec section 7: the previous attempt's saved failure is cleared when a new attempt starts.
+    begin_finder_install_attempt(&mut cfg)?;
     let started_pending_engine = start_engine_for_pending_finder_install(
         app.clone(),
         &state,
@@ -9178,7 +9206,7 @@ mod tests {
         UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
         classify_finder_install_error, clear_cached_profile, compact_menu_page_for_view,
         desktop_manifest_path_for_channel, desktop_menu_specs, disposable_cache_roots, finder_install_state_from_config,
-        finder_install_failure_state, folder_leaf_name, free_up_space_allowed_roots,
+        clear_finder_install_failure, finder_install_failure_state, folder_leaf_name, free_up_space_allowed_roots,
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target,
         file_versions_payload_for_frontend, newly_excluded_ids, next_menu_zoom_scale,
@@ -9648,11 +9676,8 @@ mod tests {
         assert_eq!(cfg.finder_install_last_error, None);
     }
 
-    #[test]
-    fn install_finder_location_never_saves_a_failure_and_also_returns_it_as_an_error() {
-        // Wiring check on the command itself (the helper tests above cannot see which arm calls
-        // what): inside `install_finder_location`, every failure that is saved goes through
-        // `finder_install_failed` (saved + Ok state), and no `return Err(error)` remains.
+    /// The text of `install_finder_location`, for the structural wiring tests below.
+    fn install_finder_location_source() -> &'static str {
         let source = include_str!("lib.rs");
         let start = source
             .find("async fn install_finder_location(")
@@ -9661,21 +9686,82 @@ mod tests {
             + source[start..]
                 .find("async fn continue_without_finder_location(")
                 .expect("next command exists");
-        let body = &source[start..end];
+        &source[start..end]
+    }
+
+    #[test]
+    fn install_finder_location_never_saves_a_failure_and_also_returns_it_as_an_error() {
+        // Structural wiring check on the command itself (the helper tests above cannot see which
+        // arm calls what). The invariant is "a failure is saved OR returned as an error, never
+        // both", so it is asserted on SHAPE, not on variable names: once the config has been
+        // loaded (the first point where anything can be saved), the command has no way to
+        // return `Err` by hand, and the only hand-written save of a failure is the user-disabled
+        // state, which is returned as `Ok`.
+        let body = install_finder_location_source();
+        let after_load = &body[body.find("DesktopConfig::load()").expect("the command loads the config")..];
+
+        // 1. No hand-written Err after the config is loaded: neither `return Err(..)` nor an
+        //    `=> Err(..)` match arm. (`?` before the load is fine: nothing was saved yet.)
+        assert_eq!(after_load.matches("return Err(").count(), 0, "a failure after the load must not be returned as Err");
+        assert_eq!(after_load.matches("=> Err(").count(), 0, "a match arm must not evaluate to Err after the load");
+
+        // 2. Every failure goes through the D1 helper, and always as the returned value.
+        let helper_calls = after_load.matches("finder_install_failed(").count();
+        assert_eq!(helper_calls, 2, "both failure arms use the D1 helper");
         assert_eq!(
-            body.matches("finder_install_failed(&mut cfg, error)").count(),
-            2,
-            "both failure arms use the D1 helper"
+            after_load.matches("return finder_install_failed(").count(),
+            helper_calls,
+            "the helper's result is what the command returns"
         );
+
+        // 3. The only hand-written failure save is the user-disabled state, and its result is an Ok.
+        let hand_saves = after_load.matches("persist_finder_install_result(&mut cfg, false").count();
         assert_eq!(
-            body.matches("return Err(error);").count(),
-            0,
-            "no saved failure is also returned as Err"
+            after_load
+                .matches("persist_finder_install_result(&mut cfg, false, Some(FINDER_USER_DISABLED_MESSAGE.to_string()))?;\n            return Ok(")
+                .count(),
+            hand_saves,
+            "a hand-written failure save must be the user-disabled state followed by `return Ok(`"
         );
-        assert!(
-            !body.contains("persist_finder_install_result(&mut cfg, false, Some(error"),
-            "a failure must not be persisted by hand and then returned as Err"
-        );
+
+        // 4. The in-memory recorder is an implementation detail of the helpers, never called here.
+        assert_eq!(after_load.matches("record_finder_install_result(").count(), 0);
+    }
+
+    #[test]
+    fn install_finder_location_clears_the_previous_failure_before_the_new_attempt_starts() {
+        // Spec section 7: the saved error "is cleared when a new attempt starts", so the status
+        // page and the popover never show the last attempt's error as the current one while the
+        // new attempt waits on the File Provider domain. Order matters, so assert the ORDER.
+        let body = install_finder_location_source();
+        let clear = body.find("begin_finder_install_attempt(&mut cfg)?").expect("the attempt clears the old failure");
+        let load = body.find("DesktopConfig::load()").expect("loads the config");
+        let engine = body
+            .find("start_engine_for_pending_finder_install(")
+            .expect("starts the pending engine");
+        let domain = body.find("install_file_provider_domain()").expect("installs the domain");
+        assert!(load < clear && clear < engine && engine < domain, "load, then clear, then the slow work");
+    }
+
+    #[test]
+    fn starting_an_attempt_clears_the_saved_failure_but_not_an_installed_state() {
+        let mut cfg = DesktopConfig::default();
+        let _ = finder_install_failure_state(&mut cfg, "Timed out waiting for the domain".to_string());
+        assert_eq!(cfg.finder_install_status.as_deref(), Some("error"));
+
+        assert!(clear_finder_install_failure(&mut cfg), "a saved failure is a change");
+
+        let state = finder_install_state_from_config(&cfg, false, None);
+        assert_eq!(state.status, "missing");
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.reason_category, None);
+        assert!(state.last_attempt_at.is_some(), "the previous attempt time is history, not an error");
+        assert!(!clear_finder_install_failure(&mut cfg), "nothing left to clear: no change, no write");
+
+        let mut installed = DesktopConfig::default();
+        record_finder_install_result(&mut installed, true, None);
+        assert!(!clear_finder_install_failure(&mut installed));
+        assert_eq!(installed.finder_install_status.as_deref(), Some("installed"));
     }
 
     #[test]
