@@ -162,8 +162,8 @@ shared by all connections, bounded to 4096 entries and a 30 minute TTL.
 | --- | --- |
 | K unknown | runs the work (on the blocking pool, detached from the connection, so the copy finishes and is recorded even though the client hung up) |
 | K `InFlight` | waits for the first run and returns **its** reply; never enqueues a second upload |
-| K `Done` within the TTL and the result is still true | returns the stored reply without enqueueing |
-| K `Done`, but the row it created is gone or renamed | treats it as a NEW operation (see below) and runs it |
+| K `Done` within the TTL and the result is still true | returns the stored reply without enqueueing, **refreshed from the row as it is now** (current `version_identifier` and `status`, see below) |
+| K `Done`, but the row it created is gone, renamed, parked `Trashing`, or has a queued `TrashFile` op; or the user deleted that item through this socket since | treats it as a NEW operation (see below) and runs it |
 | K `Done` past the TTL | forgets it and runs the work |
 | K was used for a different (operation, parent or item, filename, kind) | does not merge them; runs the work and leaves the original entry alone |
 | the first run panicked | the waiters are released and one of them runs its own work |
@@ -183,10 +183,32 @@ poison the key).
 2. **The same inputs recurring as a genuinely new operation inside the TTL:** create `a.txt`,
    delete it (here or on another device), copy the identical file back with its mtime preserved.
    Without a guard the second create would be answered with the first, and the file would
-   silently never upload. The daemon therefore validates a stored create/modify reply before
-   returning it: the row it reports must still exist **and still have the same filename**;
-   otherwise the entry is dropped and the request runs. `a_cached_create_is_not_returned_once_its_row_is_gone`
-   pins this.
+   silently never upload. **A Finder delete does not remove the `files` row** (the IPC delete
+   queues a `TrashFile` op and leaves the row in place; after the server trash succeeds the op is
+   dropped and the row stays until the snapshot prune or the op echo removes it), so "the row
+   still exists" alone proves nothing. The daemon guards this in three independent layers:
+   1. `QueueFinderDelete` **forgets every stored reply describing that item** before it queues the
+      trash, so a create carrying the same key after a delete through this socket always runs
+      (`a_create_after_the_trash_op_finished_still_uploads_the_new_file` pins this against the
+      state after the trash op finished, where nothing else in the row or queue says "deleted").
+   2. A stored reply is refused while its row has a queued `TrashFile` op (any retry state) or is
+      parked `Trashing` (the watcher's delete path), which covers a delete that did not come
+      through this socket (`a_cached_create_is_not_returned_while_a_trash_op_is_pending_for_its_row`,
+      `a_cached_create_is_not_returned_for_a_row_parked_trashing`).
+   3. A stored reply is refused when its row is gone or has a different filename (another device
+      trashed it and the row was pruned, or the user renamed it).
+
+   `a_real_finder_delete_then_the_same_create_uploads_the_new_file` drives the real
+   `QueueFinderDelete` request end to end. (The earlier test that faked a delete with
+   `delete_file` exercised a state the real delete path never produces.) A remote trash from
+   another device leaves a row that is either pruned (layer 3) or has no queued op and a normal
+   status until the `file_trash` echo deletes it; in the short window between a remote trash and
+   its echo a same-key retry can still be answered with the stored reply. That window needs the
+   same file to be copied back within seconds of a delete on another device and is unmeasured.
+   A stored reply that passes is **refreshed**: it is rebuilt from the current row rather than
+   served as first built, because finalizing the upload changes the item's `version_identifier`
+   and `status`, and handing the system the old pair would make the next edit send a stale base
+   version (`a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was`).
 3. **Accepted residual risk:** if the user renames the created item and a timed-out create of
    the same name is retried afterwards inside the TTL, the validation sees a renamed row, calls
    the stored reply stale and runs the retry as a new create (one duplicate, the pre-1684
@@ -222,6 +244,6 @@ the same `request_id=<12 hex>` on both attempts and exactly one queued upload.
 | Hydrate progress + cancellation | `engine_bridge.rs` tests `ipc_hydrate_*` | `cargo test` counts |
 | Swift framing + exchange over a real `socketpair` | `BeebeebFileProviderTests/main.swift` via `scripts/test-ipc-framing.sh` (macOS CI job "File Provider Swift (macOS)") | `ipc-framing: N passed, 0 failed`, N asserted |
 | Swift key derivation (same inputs same key, any input differs, pinned vectors), request shape (`request_id` on BOTH create and modify, absent without contents) and file fingerprint | same file (10 tests of the 35) | same |
-| Daemon table: concurrent same key runs once, repeat after completion, different keys, TTL expiry, key reused for another request shape, stale result, failed result not remembered, panicking leader, capacity | `ipc_write_dedup_tests.rs` | `cargo test` counts |
-| Daemon over the real socket, counting REAL queued operations in the state DB | `ipc_socket_framing_tests.rs` (`concurrent_creates_with_one_request_id_...`, `a_repeat_after_completion_...`, `different_request_ids_...`, `a_request_without_a_request_id_...`, `a_cached_create_is_not_returned_...`, `concurrent_modifies_...`, ...) | `cargo test` counts |
+| Daemon table: concurrent same key runs once, repeat after completion, different keys, TTL expiry, key reused for another request shape, stale result, refreshed cache hit, `forget_where`, failed result not remembered, panicking leader, capacity | `ipc_write_dedup_tests.rs` | `cargo test` counts |
+| Daemon over the real socket, counting REAL queued operations in the state DB | `ipc_socket_framing_tests.rs` (`concurrent_creates_with_one_request_id_...`, `a_repeat_after_completion_...`, `different_request_ids_...`, `a_request_without_a_request_id_...`, `a_cached_create_is_not_returned_...`, `concurrent_modifies_...`, real-delete-then-recreate, trash op finished, trash op pending, `Trashing` row, refreshed reply). The two concurrency tests hold the state DB lock so the leader is parked and every request provably overlaps it; with a tiny source file they would otherwise finish serially and exercise the cached path instead of the in-flight wait | `cargo test` counts |
 | XPCBridge call sites still use the builder and pass the key inputs (XPCBridge is not compiled into the Swift harness) | `scripts/check-ipc-timeouts.py` (+ `--self-test`, 14 mutations) | `ipc-timeout guard: 3/3 call sites correct` |

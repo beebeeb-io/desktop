@@ -50,7 +50,7 @@ async fn call(
             key,
             fingerprint,
             clock.reader(),
-            |_| true,
+            Some,
             |v: &String| !v.starts_with("error"),
             move || {
                 runs.fetch_add(1, Ordering::SeqCst);
@@ -84,7 +84,7 @@ fn two_concurrent_requests_with_one_key_run_the_work_exactly_once() {
                         "k",
                         "create|a.txt",
                         clock.reader(),
-                        |_| true,
+                        Some,
                         |_: &String| true,
                         move || {
                             runs.fetch_add(1, Ordering::SeqCst);
@@ -218,7 +218,7 @@ fn a_stored_result_that_fails_validation_is_dropped_and_the_work_runs_again() {
                 "k",
                 "fp",
                 clock.reader(),
-                |cached: &String| cached != "old", // the world moved on: "old" is stale
+                |cached: String| (cached != "old").then_some(cached), // the world moved on: "old" is stale
                 |_: &String| true,
                 move || {
                     runs2.fetch_add(1, Ordering::SeqCst);
@@ -270,7 +270,7 @@ fn a_waiter_takes_over_when_the_leader_panics() {
                         "k",
                         "fp",
                         clock.reader(),
-                        |_| true,
+                        Some,
                         |_: &String| true,
                         move || -> String {
                             runs.fetch_add(1, Ordering::SeqCst);
@@ -343,7 +343,7 @@ fn a_table_full_of_in_flight_work_fails_open_instead_of_refusing_the_write() {
                         "busy",
                         "fp",
                         clock.reader(),
-                        |_| true,
+                        Some,
                         |_: &String| true,
                         move || {
                             runs.fetch_add(1, Ordering::SeqCst);
@@ -367,4 +367,99 @@ fn a_table_full_of_in_flight_work_fails_open_instead_of_refusing_the_write() {
         assert_eq!(parked.await.unwrap(), "busy-done");
     });
     assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_cache_hit_is_refreshed_on_every_serve_but_the_stored_copy_is_left_as_built() {
+    // Task 1684 fix round: a finished upload changes the item's version and
+    // status after the first reply was built, so each hit is refreshed.
+    let rt = rt();
+    let dedup: Dedup = WriteDedup::new();
+    let clock = Clock::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    rt.block_on(async {
+        assert_eq!(call(&dedup, &clock, "k", "fp", &runs, "v1").await, "v1");
+        for generation in ["v2", "v3"] {
+            let runs2 = Arc::clone(&runs);
+            let served = dedup
+                .run(
+                    "k",
+                    "fp",
+                    clock.reader(),
+                    move |cached: String| Some(format!("{cached}->{generation}")),
+                    |_: &String| true,
+                    move || {
+                        runs2.fetch_add(1, Ordering::SeqCst);
+                        "never".to_string()
+                    },
+                    "panic".to_string(),
+                )
+                .await;
+            assert_eq!(served, format!("v1->{generation}"), "hit must be the refreshed value");
+        }
+    });
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "refreshing is not running the work");
+}
+
+#[test]
+fn forget_where_drops_only_the_matching_finished_entries() {
+    let rt = rt();
+    let dedup: Dedup = WriteDedup::new();
+    let clock = Clock::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    rt.block_on(async {
+        call(&dedup, &clock, "k-a", "fp", &runs, "item-a").await;
+        call(&dedup, &clock, "k-b", "fp", &runs, "item-b").await;
+        assert_eq!(dedup.forget_where(|v| v == "item-a"), 1);
+        assert_eq!(dedup.len(), 1);
+        assert_eq!(dedup.forget_where(|v| v == "item-a"), 0, "nothing left to forget");
+        // k-a runs again; k-b is still served from the table.
+        assert_eq!(call(&dedup, &clock, "k-a", "fp", &runs, "item-a-2").await, "item-a-2");
+        assert_eq!(call(&dedup, &clock, "k-b", "fp", &runs, "unused").await, "item-b");
+    });
+    assert_eq!(runs.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn forget_where_leaves_in_flight_work_alone() {
+    let rt = rt();
+    let dedup: Dedup = WriteDedup::new();
+    let clock = Clock::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    rt.block_on(async {
+        let leader = {
+            let dedup = dedup.clone();
+            let clock = clock.clone();
+            let runs = Arc::clone(&runs);
+            let release_rx = Arc::clone(&release_rx);
+            tokio::spawn(async move {
+                dedup
+                    .run(
+                        "k",
+                        "fp",
+                        clock.reader(),
+                        Some,
+                        |_: &String| true,
+                        move || {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            release_rx.lock().unwrap().recv().unwrap();
+                            "done".to_string()
+                        },
+                        "panic".to_string(),
+                    )
+                    .await
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runs.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "leader never started");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(dedup.forget_where(|_| true), 0, "an in-flight entry has no result to match");
+        assert_eq!(dedup.len(), 1, "the in-flight entry must survive");
+        release_tx.send(()).unwrap();
+        assert_eq!(leader.await.unwrap(), "done");
+    });
 }

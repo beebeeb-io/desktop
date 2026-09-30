@@ -955,7 +955,16 @@ async fn handle_connection(
             IpcRequest::QueueFinderDelete {
                 file_id,
                 base_version_identifier,
-            } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
+            } => {
+                // The user is deleting this item: no remembered create may hand
+                // it back to a later request that happens to carry the same key
+                // (same file copied in again). Forget BEFORE queueing, so a
+                // create that arrives while the trash is being queued is a new
+                // create. The row stays in place until the server trash
+                // converges, so the row alone cannot say "deleted" (task 1684).
+                forget_dedup_for_item(&write_dedup, &file_id);
+                write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier))
+            }
             IpcRequest::SetRecursivePin { file_id, pinned } => {
                 // `set_recursive_pin` takes `sync_root` for the Windows pin-state
                 // path; this module is `#![cfg(unix)]`, so it is never compiled on
@@ -1171,10 +1180,68 @@ fn parse_write_kind_name(kind: &crate::engine_bridge::FinderWriteItemKind) -> &'
 ///
 /// With a key, `work` runs at most once per key within the TTL: a repeat while
 /// the first is still copying waits for and returns its reply, and a repeat
-/// after it finished returns the stored reply if the row it created still exists
-/// under the same name (otherwise the user deleted or renamed it since, and the
-/// repeat is a new operation). Only queued results are remembered; an error is
+/// after it finished returns the stored reply (refreshed from the current row)
+/// if the row it created still exists under the same name and is not being
+/// trashed (otherwise the user deleted or renamed it since, and the repeat is a
+/// new operation; a delete through this socket also forgets the stored reply). Only queued results are remembered; an error is
 /// handed to whoever was already waiting but a later retry runs again.
+/// Drop every remembered write reply that describes `file_id`.
+fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcResponse>>, file_id: &str) {
+    dedup.forget_where(|cached| {
+        matches!(cached, IpcResponse::WriteQueued { item: Some(item), .. } if item.identifier == file_id)
+    });
+}
+
+/// Decide whether a remembered write reply still describes reality, and bring it
+/// up to date. `None` means the item it created is gone, renamed, or on its way
+/// to the trash, so the repeat is a NEW operation and must run.
+///
+/// "Up to date" matters: the reply was built when the first attempt finished,
+/// and finalizing the upload since then changed the item's version and status.
+/// Serving the old `version_identifier` would hand the system a stale base
+/// version for the user's next edit, so the item is rebuilt from the current row.
+fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> Option<IpcResponse> {
+    let IpcResponse::WriteQueued {
+        item: Some(item),
+        ignored,
+        message,
+    } = cached
+    else {
+        return Some(cached);
+    };
+    let entry = match db.get_file(&item.identifier) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return None,
+        // Cannot tell: prefer returning the stored result over queueing twice.
+        Err(_) => {
+            return Some(IpcResponse::WriteQueued {
+                item: Some(item),
+                ignored,
+                message,
+            });
+        }
+    };
+    if entry.status == crate::state_db::FileStatus::Trashing {
+        return None;
+    }
+    // A failed lookup of the trash queue falls through to "not deleted": the
+    // alternative (re-queueing) is only ever a duplicate, never a lost file, but
+    // a lookup that cannot run also cannot prove a delete, and the delete path
+    // forgets the entry itself.
+    if db.has_pending_trash(&item.identifier).unwrap_or(false) {
+        return None;
+    }
+    let fresh = file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES);
+    if fresh.filename != item.filename {
+        return None;
+    }
+    Some(IpcResponse::WriteQueued {
+        item: Some(fresh),
+        ignored,
+        message,
+    })
+}
+
 async fn dedup_write(
     dedup: &std::sync::Arc<WriteDedup<IpcResponse>>,
     db: &std::sync::Arc<crate::state_db::StateDb>,
@@ -1196,17 +1263,7 @@ async fn dedup_write(
             &key,
             &fingerprint,
             std::time::Instant::now,
-            move |cached: &IpcResponse| match cached {
-                IpcResponse::WriteQueued { item: Some(item), .. } => match validate_db.get_file(&item.identifier) {
-                    Ok(Some(entry)) => {
-                        file_entry_payload_for_db(&validate_db, &entry, NAMESPACE_MY_FILES).filename == item.filename
-                    }
-                    Ok(None) => false,
-                    // Cannot tell: prefer returning the stored result over queueing twice.
-                    Err(_) => true,
-                },
-                _ => true,
-            },
+            move |cached: IpcResponse| refresh_cached_write(&validate_db, cached),
             |resp: &IpcResponse| matches!(resp, IpcResponse::WriteQueued { .. }),
             work,
             IpcResponse::Error {

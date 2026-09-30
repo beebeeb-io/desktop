@@ -16,7 +16,9 @@
 //! * `InFlight`  -> the caller waits for the leader and returns the leader's result
 //!                  (the work is never run twice);
 //! * `Done`      -> within the TTL the stored result is returned, after the caller's
-//!                  `validate` closure confirms it still describes reality;
+//!                  `refresh` closure confirms it still describes reality and
+//!                  brings it up to date (a finished upload changes the item's
+//!                  version and status after the first reply was built);
 //! * a key that belongs to a different request shape (see `fingerprint`), or a
 //!   table that is full of in-flight work, runs the work without deduplication
 //!   (it fails open to the pre-1684 behaviour rather than refusing a user write).
@@ -247,7 +249,22 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
         })
     }
 
-    /// Forget a finished entry (used when `validate` says it is stale).
+    /// Forget every finished entry whose stored result satisfies `matches`
+    /// (in-flight entries are left alone: they have no result yet). Returns how
+    /// many were dropped. The socket calls this when the user deletes an item,
+    /// so a later create carrying the same key is a new create, not a retry of
+    /// the one whose item was just trashed.
+    pub fn forget_where(&self, matches: impl Fn(&T) -> bool) -> usize {
+        let mut state = self.lock();
+        let before = state.map.len();
+        state.map.retain(|_, entry| match entry {
+            Entry::Done { value, .. } => !matches(value),
+            Entry::InFlight { .. } => true,
+        });
+        before - state.map.len()
+    }
+
+    /// Forget a finished entry (used when `refresh` says it is stale).
     fn forget_done(&self, key: &str, fingerprint: &str) {
         let mut state = self.lock();
         if matches!(
@@ -262,9 +279,11 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
     ///
     /// * `fingerprint` describes the request's semantic shape; a repeat of a key
     ///   with a different fingerprint is a different request and is not merged.
-    /// * `validate` is asked whether a remembered result still describes reality
-    ///   (for a create: the row it created still exists under that name). A stale
-    ///   result is dropped and the work runs again.
+    /// * `refresh` is handed a remembered result and returns it brought up to
+    ///   date, or `None` when it no longer describes reality (for a create: the
+    ///   row it created is gone, renamed, or being trashed). A stale result is
+    ///   dropped and the work runs again. The stored copy is left as first built;
+    ///   every cache hit is refreshed again, so it never serves a stale snapshot.
     /// * `remember` decides whether a finished result is kept for later repeats;
     ///   waiters that were already attached get the result either way. A failure
     ///   is not remembered, so a retry after a failed attempt runs again.
@@ -274,14 +293,14 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
         key: &str,
         fingerprint: &str,
         now: N,
-        validate: V,
+        refresh: V,
         remember: R,
         work: W,
         on_panic: T,
     ) -> T
     where
         W: FnOnce() -> T + Send + 'static,
-        V: Fn(&T) -> bool,
+        V: Fn(T) -> Option<T>,
         R: Fn(&T) -> bool + Send + 'static,
         N: Fn() -> Instant + Send + Sync + 'static,
     {
@@ -290,8 +309,8 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
         loop {
             match self.claim(key, fingerprint, now()) {
                 Claim::Cached(value) => {
-                    if validate(&value) {
-                        return value;
+                    if let Some(fresh) = refresh(value) {
+                        return fresh;
                     }
                     self.forget_done(key, fingerprint);
                 }

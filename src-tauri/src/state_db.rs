@@ -2096,6 +2096,30 @@ impl StateDb {
         })
     }
 
+    /// Test hook: hold the database lock so a test can park every writer behind
+    /// it and force two requests to overlap deterministically (task 1684).
+    #[cfg(test)]
+    pub(crate) fn hold_lock_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().expect("state_db mutex poisoned")
+    }
+
+    /// True while a `TrashFile` operation for `file_id` is still in the queue,
+    /// whatever its retry state (due, backing off, paused, or out of attempts).
+    /// A queued trash means the user deleted the item; the `files` row stays in
+    /// place until the server trash converges, so the row alone does not say so
+    /// (task 1684 fix round: the write-dedup guard needs this).
+    pub fn has_pending_trash(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM operation_queue WHERE file_id = ?1 AND kind = 'trash_file' LIMIT 1",
+                params![file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
@@ -4551,5 +4575,36 @@ mod tests {
             db.get_upload_resume("normal-1").unwrap().is_none(),
             "sign-out must purge every persisted upload session"
         );
+    }
+
+    #[test]
+    fn has_pending_trash_sees_only_a_queued_trash_for_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let op = |op_id: &str, kind: OperationKind, file_id: &str| PendingOperation {
+            op_id: op_id.into(),
+            kind,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 25,
+            max_attempts: 25, // out of attempts: still a queued delete
+            next_retry_at: i64::MAX,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        db.enqueue_operation(&op("t1", OperationKind::TrashFile, "trashed")).unwrap();
+        db.enqueue_operation(&op("u1", OperationKind::UploadVersion, "uploaded")).unwrap();
+        assert!(db.has_pending_trash("trashed").unwrap(), "a queued trash, even out of retries");
+        assert!(!db.has_pending_trash("uploaded").unwrap(), "another kind of op is not a delete");
+        assert!(!db.has_pending_trash("never-seen").unwrap());
+        db.remove_operation("t1").unwrap();
+        assert!(!db.has_pending_trash("trashed").unwrap(), "gone once the op is removed");
     }
 }
