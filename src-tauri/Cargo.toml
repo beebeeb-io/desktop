@@ -128,7 +128,12 @@ webpki-roots = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 p256 = { version = "0.13", features = ["ecdh"] }
-aes-gcm = "0.10"
+# Wipe expanded AES keys, GCM setup temporaries and GHASH/POLYVAL state.
+# aes-gcm's zeroize feature alone does not enable the inner cipher/hash features.
+aes = { version = "0.8", features = ["zeroize"] }
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+ghash = { version = "0.5", features = ["zeroize"] }
+polyval = { version = "0.6", features = ["zeroize"] }
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
