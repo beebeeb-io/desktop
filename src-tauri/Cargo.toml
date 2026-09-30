@@ -149,6 +149,8 @@ beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
 # conservative "always alive" — see lockfile.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Private staging directory for atomic owner-only IPC socket publication.
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # 0.16 is the minimum version patched for RUSTSEC-2021-0154 (fuser passed a
