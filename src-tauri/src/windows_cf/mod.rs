@@ -331,7 +331,8 @@ pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
     let result = unsafe { CfGetSyncRootInfoByPath(PCWSTR(wide.as_ptr()), CF_SYNC_ROOT_INFO_BASIC,
         buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None) };
     match result {
-        Err(error) if [378u32, 376, 405].iter().any(|code| error.code() == HRESULT::from_win32(*code)) => Ok(()),
+        Err(error) if error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+            || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) => Ok(()),
         Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
         Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
     }
