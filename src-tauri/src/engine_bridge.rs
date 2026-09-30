@@ -10432,7 +10432,17 @@ mod tests {
             // Existence proves bind only. Await one served request to establish
             // that the listener completed chmod and entered its accept loop.
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut client = tokio::net::UnixStream::connect(&sp).await.unwrap();
+            let mut client = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match tokio::net::UnixStream::connect(&sp).await {
+                        Ok(client) => break client,
+                        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(error) => panic!("IPC readiness connection failed: {error}"),
+                    }
+                }
+            }).await.expect("IPC listener must become ready");
             let request = serde_json::to_vec(&crate::ipc_socket::IpcRequest::GetFileStatus {
                 file_id: "permission-probe".into(),
             }).unwrap();
