@@ -250,16 +250,40 @@ pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
 /// .copyToSystemTemporaryDirectory(stagedAt:)`'s doc comment for the full
 /// mechanism.
 ///
-/// That makes this TTL/sweep a **crash backstop again, not the primary
+/// That makes this TTL/sweep a **crash backstop, not the primary
 /// mechanism**: with round 4's fix, the ONLY thing that can be left behind
 /// in this directory past the per-request delete is staging orphaned by a
 /// crash between the decrypt and the copy-then-delete (a force-quit
 /// mid-fetch, the extension being killed) — never a file the system is
 /// still relying on, because we now never hand a file in THIS directory to
-/// the system in the first place. 2 minutes stays generous for that
-/// narrower job (a crash window, not a clone-timing guess); kept rather
-/// than shortened further because there is no benefit to being more
-/// aggressive against orphaned staging that nothing else is reading.
+/// the system in the first place.
+///
+/// **Round 5 (Codex P1 on PR #75, review thread PRRT_kwDOSLX6Xs6ndhN1):
+/// round 4's "never a file the system is still relying on" claim had a real
+/// gap.** This TTL/sweep is purely mtime-based and has no cross-process
+/// signal for "the extension is still mid-copy" — Codex's finding: if the
+/// extension is suspended by the system between `ipc.hydrateFile` finishing
+/// and `copyToSystemTemporaryDirectory` actually running `copyItem`, or if
+/// `copyItem` itself takes longer than this TTL for a very large file, the
+/// sweep can delete a file the extension is STILL actively copying,
+/// reopening this task's original bug. Fixed on the Swift side —
+/// `copyToSystemTemporaryDirectory` (`FileProviderExtension.swift`) now
+/// touches the source file's mtime immediately before starting the copy, so
+/// a slow `copyItem` (Codex's second trigger, now fully covered regardless
+/// of file size) always gets the FULL TTL below as headroom. That does NOT
+/// theoretically close the first trigger (suspension landing in the much
+/// narrower window before that touch runs) — see that function's doc
+/// comment for the honest accounting of what remains open and why closing
+/// it fully would need a lease/heartbeat protocol, out of scope here.
+///
+/// Raised from 2 to **10 minutes** this round as a second, independent
+/// mitigation for that residual window: still a crash-only backstop
+/// (sign-out/lock/daemon-startup purge is the real bound on ordinary
+/// plaintext exposure, unchanged since round 2), but with an order of
+/// magnitude more headroom against any realistic suspension duration this
+/// Mac might impose on a File Provider extension process, at negligible
+/// security cost — this directory is owner-only (`0700`) and backup-excluded
+/// regardless of TTL.
 ///
 /// Swept periodically (`MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`, `runner.rs`,
 /// every 60s on the daemon's existing tick loop — not a new timer/thread)
@@ -267,7 +291,7 @@ pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
 /// below, catches anything the next periodic tick hasn't reached yet in a
 /// hydration-heavy session).
 #[cfg(target_os = "macos")]
-pub(crate) const MACOS_HYDRATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+pub(crate) const MACOS_HYDRATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Task 1670 round 2: reject a raw File Provider item identifier BEFORE it is
 /// used as a path component — either here or in its Swift mirror,

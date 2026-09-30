@@ -131,9 +131,29 @@ describe('FileProviderExtension.fetchContents (task 1670 round 4)', () => {
   })
 })
 
-describe('FileProviderExtension.copyToSystemTemporaryDirectory (task 1670 round 4)', () => {
+describe('FileProviderExtension.copyToSystemTemporaryDirectory (task 1670 round 4/5)', () => {
   const source = readFileSync(SWIFT_PATH, 'utf8')
   const fnBody = extractFunctionBody(source, 'private func copyToSystemTemporaryDirectory(')
+
+  // The two do/catch blocks in this function, extracted unambiguously by
+  // anchoring on their distinguishing calls rather than "the next `catch {`
+  // after some substring" (round 4's version of this test used
+  // `fnBody.indexOf('setAttributes')` as that anchor, which round 5's new
+  // mtime-touch `setAttributes` call — issued before either `do` block —
+  // would have shifted onto the WRONG catch block).
+  const copyDoIndex = fnBody.indexOf('do {\n            try FileManager.default.copyItem(')
+  if (copyDoIndex === -1) throw new Error('could not find the copyItem do block')
+  const copyDoBlock = extractBalancedBlock(fnBody, fnBody.indexOf('{', copyDoIndex))
+  const copyCatchIndex = fnBody.indexOf('catch {', copyDoIndex + copyDoBlock.length)
+  if (copyCatchIndex === -1) throw new Error('could not find the copyItem catch block')
+  const copyCatchBlock = extractBalancedBlock(fnBody, fnBody.indexOf('{', copyCatchIndex))
+
+  const permsDoIndex = fnBody.indexOf('do {\n            // Owner-only')
+  if (permsDoIndex === -1) throw new Error('could not find the permissions-fixup do block')
+  const permsDoBlock = extractBalancedBlock(fnBody, fnBody.indexOf('{', permsDoIndex))
+  const permsCatchIndex = fnBody.indexOf('catch {', permsDoIndex + permsDoBlock.length)
+  if (permsCatchIndex === -1) throw new Error('could not find the permissions-fixup catch block')
+  const permsCatchBlock = extractBalancedBlock(fnBody, fnBody.indexOf('{', permsCatchIndex))
 
   test('resolves the domain-scoped NSFileProviderManager and its system temporaryDirectoryURL()', () => {
     expect(fnBody).toContain('NSFileProviderManager(for: domain)')
@@ -141,22 +161,37 @@ describe('FileProviderExtension.copyToSystemTemporaryDirectory (task 1670 round 
   })
 
   test('copies the staged file rather than deleting/moving the original', () => {
-    expect(fnBody).toContain('FileManager.default.copyItem(at: sourceURL, to: destinationURL)')
+    expect(copyDoBlock).toContain('FileManager.default.copyItem(at: sourceURL, to: destinationURL)')
   })
 
   test('forces owner-only permissions on the copy', () => {
-    expect(fnBody).toContain('0o600')
+    expect(permsDoBlock).toContain('0o600')
   })
 
-  test('cleans up its own partial copy before rethrowing on a post-copy failure', () => {
-    // The permission-fixup catch block is the only place a partial copy can
-    // exist when this function fails (the copy itself succeeded, a later
-    // step didn't) — it must remove that copy before propagating the error.
-    const setAttributesIndex = fnBody.indexOf('setAttributes')
-    const catchAfterIndex = fnBody.indexOf('catch {', setAttributesIndex)
-    expect(setAttributesIndex).toBeGreaterThan(-1)
-    expect(catchAfterIndex).toBeGreaterThan(-1)
-    const catchBlock = extractBalancedBlock(fnBody, fnBody.indexOf('{', catchAfterIndex))
-    expect(catchBlock).toContain('removeItem(at: destinationURL)')
+  test('cleans up a partial copy if the copy itself fails partway (task 1670 round 5, Codex P2)', () => {
+    // ENOSPC / an I/O error can create `destinationURL` and then fail the
+    // copy partway — nothing else ever cleans the SYSTEM's temp directory,
+    // so a leftover partial copy would linger indefinitely otherwise.
+    expect(copyCatchBlock).toContain('removeItem(at: destinationURL)')
+  })
+
+  test('cleans up its own copy if the post-copy permissions fix-up fails', () => {
+    expect(permsCatchBlock).toContain('removeItem(at: destinationURL)')
+  })
+
+  test('touches the source mtime immediately before starting the copy (task 1670 round 5, Codex P1)', () => {
+    // Codex's finding: the daemon's TTL sweep is purely mtime-based with no
+    // cross-process "still in use" signal, so a copy slower than the TTL (a
+    // very large file) can race the sweep. Refreshing the source's mtime
+    // right before the copy starts gives a slow copy the FULL TTL as
+    // headroom, regardless of file size.
+    const touchStatement =
+      'try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: sourceURL.path)'
+    const touchIndex = fnBody.indexOf(touchStatement)
+    // Best-effort (`try?`): a failed touch must never block the real copy —
+    // asserted by requiring the exact `try?`-prefixed statement, not just
+    // the call, to exist before the copy starts.
+    expect(touchIndex).toBeGreaterThan(-1)
+    expect(touchIndex).toBeLessThan(copyDoIndex)
   })
 })

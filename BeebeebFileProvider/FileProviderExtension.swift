@@ -174,6 +174,29 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// `CustomNSError` conformance above) — a proper, supported
     /// `NSFileProviderError`, not the ad-hoc unsupported-domain error this
     /// whole task started from.
+    ///
+    /// **Round 5 (Codex P1 on PR #75, review thread `PRRT_kwDOSLX6Xs6ndhN1`
+    /// on `ipc_socket.rs:468`): touches `sourceURL`'s mtime immediately
+    /// before the copy, narrowing (not eliminating — see below) a real race
+    /// with the daemon's mtime-based TTL sweep.** The daemon's sweep
+    /// (`crate::ipc_socket::macos_sweep_stale_hydrate_cache_entries`) has no
+    /// cross-process signal for "this file is mid-handoff" — it only ever
+    /// looks at mtime. Codex's finding: if this extension is suspended by
+    /// the system between `ipc.hydrateFile` finishing and this function
+    /// actually running `copyItem`, or if `copyItem` itself takes longer
+    /// than the TTL for a very large file, the daemon's sweep can delete
+    /// `sourceURL` out from under an in-flight copy, reopening this task's
+    /// original bug. Touching the mtime right here means a SLOW `copyItem`
+    /// (Codex's second, fully-addressed trigger) gets the FULL TTL as
+    /// headroom regardless of file size, and narrows the FIRST trigger
+    /// (suspension before this line runs) to the width of ordinary thread
+    /// scheduling between `ipc.hydrateFile`/`ipc.item` returning and this
+    /// statement — not the width of an entire `copyItem` call. It does NOT
+    /// theoretically eliminate an unboundedly long OS suspension landing in
+    /// that narrower window; closing that completely would need a
+    /// lease/heartbeat protocol between this extension and the daemon
+    /// (flagged as a follow-up, out of scope for this patch). `try?`:
+    /// best-effort — a failed touch should not block the real copy below.
     private func copyToSystemTemporaryDirectory(stagedAt sourceURL: URL) throws -> URL {
         guard let manager = NSFileProviderManager(for: domain) else {
             throw BeebeebIPCError.daemonUnavailable
@@ -195,9 +218,23 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         // completionHandler contract.
         let destinationURL = systemTempDir.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: false)
 
+        // Round 5: see this function's doc comment above — refresh the
+        // source's mtime immediately before the copy so the daemon's TTL
+        // sweep measures age from "copy about to start", not "originally
+        // decrypted", giving a slow copy the full TTL as headroom.
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: sourceURL.path)
+
         do {
             try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
         } catch {
+            // Round 5 (Codex P2 on PR #75, review thread `PRRT_kwDOSLX6Xs6ndhN-`
+            // on this file): `copyItem` can create `destinationURL` and THEN
+            // fail partway (ENOSPC, an I/O error mid-copy) — nothing else
+            // ever cleans the SYSTEM's temp directory (the daemon's purge/
+            // sweep only ever touches the App-Group hydrate-cache dir), so a
+            // partial copy left here would linger indefinitely. Remove it,
+            // exactly as the permissions-fixup catch below already does.
+            try? FileManager.default.removeItem(at: destinationURL)
             throw BeebeebIPCError.invalidResponse("could not stage file for Finder: \(error.localizedDescription)")
         }
 
