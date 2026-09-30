@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -577,6 +577,9 @@ impl Server {
             while !worker_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Winsock accept inherits the listener's nonblocking mode.
+                        // Our bounded synchronous parser must wait for request bytes.
+                        stream.set_nonblocking(false)?;
                         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                         let response = match read_request(&mut stream) {
@@ -585,7 +588,9 @@ impl Server {
                                 .unwrap()
                                 .dispatch(&method, &path, &token, &body)
                                 .unwrap_or_else(|_| Response::json(400, json!({"error":"invalid fixture request"}))),
-                            Err(_) => Response::json(400, json!({"error":"invalid fixture HTTP framing"})),
+                            // An idle/partial request is not a complete HTTP message.
+                            // In particular, never send unsolicited bytes to an idle client.
+                            Err(_) => continue,
                         };
                         // A disconnected client is a normal interruption; don't log its headers.
                         let _ = write!(
@@ -594,7 +599,8 @@ impl Server {
                             response.status,
                             response.body.len()
                         )
-                        .and_then(|_| stream.write_all(&response.body));
+                        .and_then(|_| stream.write_all(&response.body))
+                        .and_then(|_| stream.shutdown(Shutdown::Write));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
                     Err(e) => return Err(e.into()),
@@ -672,4 +678,81 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String, Zeroizing<Str
         offset += n;
     }
     Ok((method, path, token, bytes[header_end..].to_vec()))
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn http_idle_connection_closes_without_unsolicited_response() {
+        let mut fixture = Fixture::setup().unwrap();
+        let url = fixture.start_http().unwrap();
+        let mut stream = TcpStream::connect(url.strip_prefix("http://").unwrap()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            stream.read(&mut byte).unwrap(),
+            0,
+            "idle connection must close without response bytes"
+        );
+        assert_eq!(fixture.counts().requests, 0);
+        drop(stream);
+        assert_eq!(fixture.cleanup().unwrap().remaining_listeners, 0);
+    }
+
+    #[test]
+    fn http_reads_fragmented_body_before_response_and_eof() {
+        let mut fixture = Fixture::setup().unwrap();
+        let url = fixture.start_http().unwrap();
+        let (token, _) = fixture.credentials("alice");
+        let mut stream = TcpStream::connect(url.strip_prefix("http://").unwrap()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = vec![b'x'; 128 * 1024];
+        stream
+            .write_all(b"POST /unsupported HTTP/1.1\r\nHost: localhost\r\n")
+            .unwrap();
+        write!(
+            stream,
+            "Authorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+            token.as_str(),
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body[..17]).unwrap();
+        let mut byte = [0];
+        let error = stream.read(&mut byte).expect_err("response arrived before full body");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert_eq!(fixture.counts().requests, 0);
+        for chunk in body[17..].chunks(997) {
+            stream.write_all(chunk).unwrap();
+        }
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("complete response followed by orderly EOF");
+        let response = String::from_utf8(response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 404 "));
+        assert!(headers.contains("\r\nConnection: close"));
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(length, body.len());
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            json!({"error":"unsupported fixture route"})
+        );
+        assert_eq!(fixture.counts().requests, 1);
+        drop(stream);
+        assert_eq!(fixture.cleanup().unwrap().remaining_listeners, 0);
+    }
 }

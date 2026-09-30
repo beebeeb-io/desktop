@@ -142,3 +142,23 @@ initializations, accepted chunks and committed versions. Reports contain no
 request headers/bodies or credentials. The fixture only binds `127.0.0.1:0`,
 limits headers/body/timeouts, and joins its single worker on teardown. It never
 contacts a production API or registers an OS sync root.
+
+HTTP flake follow-up design (2026-09-30): Windows `accept` inherits the
+nonblocking listener's socket properties. The bounded synchronous parser must
+explicitly put every accepted stream in blocking mode before applying its
+read/write timeouts. Otherwise a scheduling gap yields WouldBlock, which the
+old worker mistakes for malformed HTTP and answers with 400 before the request
+arrives/completes. Baseline native stress reproduced 27/50 failing iterations,
+including Hyper's unexpected-message error. See the [Winsock accept contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept).
+
+Keep the existing full Content-Length reader and limits. For incomplete/idle
+or malformed requests close without unsolicited response bytes. For a complete
+request send `Connection: close` and the complete body, then explicitly shut
+down the write half. No buffering refactor is needed for this fix. Keep the
+production client and pooling policy unchanged; no dependency/lockfile update.
+Regression coverage holds back part of a 128 KiB body and checks no early
+response, complete response bytes followed by EOF, and idle expiry without
+response bytes. Both new assertions must fail against the old Windows server.
+Verification: 50 iterations of `cargo test --locked native_parity --
+--test-threads=8` per platform, clean committed gate clones (Windows CRLF via
+git bundle), and full locked Cargo suites with the existing count guard.
