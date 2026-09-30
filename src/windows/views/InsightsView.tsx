@@ -12,7 +12,7 @@
  *
  * Brand: amber only for encryption/quota state + the by-type bars; Inter for
  * human text, JetBrains Mono for every machine value (bytes, counts, paths,
- * percentages, file ids); say "the EU" in product copy, never the storage provider; honest voice; no emojis.
+ * percentages, file ids); use the effective continent in product copy, never the storage provider; honest voice; no emojis.
  *
  * Data wrappers (desktopApi.ts → src-tauri account commands):
  *   accountUsage()             → BillingUsage  { used_bytes, quota_bytes, percentage }
@@ -23,6 +23,8 @@
  * layout shape), error (calm "Not available in this build" for unsupported, else
  * "Couldn't load" + reason + Retry), empty, and loaded.
  */
+
+import { useRegionLabel } from '../useRegion'
 
 import { useEffect, useState } from 'react'
 import {
@@ -371,6 +373,7 @@ function EmptyState() {
 // ── Root component ───────────────────────────────────────────────────────────
 
 export default function InsightsView() {
+  const regionLabel = useRegionLabel()
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<ErrState | null>(null)
   const [usage, setUsage] = useState<BillingUsage | null>(null)
@@ -428,7 +431,7 @@ export default function InsightsView() {
         subtitle="Where your storage goes — by content type and your largest files. Everything here is computed from what’s already encrypted on this PC."
         aside={
           <Chip tone="amber">
-            <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> Stored in the EU
+            <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> {regionLabel}
           </Chip>
         }
       />

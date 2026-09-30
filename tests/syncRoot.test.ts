@@ -80,7 +80,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     desktopFileOverview: async () => ({ ok: true, value: { total_files: 0, total_bytes: 0, recent: [] } }),
     commandUnavailableLabel: () => 'Unavailable',
     usePlatformName: () => 'windows',
-    usePlatform: () => ({ name: 'windows', resolved: true }), useRegionCity: () => 'Falkenstein',
+    usePlatform: () => ({ name: 'windows', resolved: true }), useRegionLabel: () => 'End-to-end encrypted',
     shellIntegrationLabel: () => 'Explorer integration', thisDeviceNoun: () => 'this PC',
     shellIntegrationCommandsFor: () => ({ state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }),
     SettingsSectionShell: 'section', Chip: 'chip',

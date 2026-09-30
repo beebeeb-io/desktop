@@ -1,3 +1,4 @@
+import { useRegionLabel } from '../windows/useRegion'
 import { useEffect, useState } from 'react'
 import { useToast } from '../windows/ui'
 import {
@@ -26,6 +27,7 @@ type PlanState =
   | { phase: 'loaded'; sub: Subscription }
 
 export default function Account() {
+  const regionLabel = useRegionLabel()
   const { showToast } = useToast()
   const [email, setEmail] = useState<string | null>(null)
   const [status, setStatus] = useState<SyncStatus | null>(null)
@@ -236,7 +238,7 @@ export default function Account() {
                     <span className={`dot ${planStatusTone(plan.sub.status) === 'green' ? 'ok' : ''}`} />
                     {titleCasePlan(plan.sub.status)}
                   </span>
-                  Stored in the EU
+                  {regionLabel}
                 </div>
               </div>
               <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>

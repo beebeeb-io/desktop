@@ -1,4 +1,4 @@
-/** Product copy uses the EU; only transparency surfaces name the current city. */
+/** Product copy follows the effective continent; transparency may name the city. */
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -18,19 +18,24 @@ const productSurfaces = [
   'src/pages/Account.tsx',
 ]
 
-describe('product residency copy', () => {
-  for (const file of productSurfaces) {
-    test(`${file} uses EU copy without a city lookup`, () => {
+describe('product residency copy wiring', () => {
+  for (const file of [...productSurfaces, 'src/windows/views/SettingsView.tsx']) {
+    test(`${file} derives every product location claim from the shared hook`, () => {
       const source = read(file)
-      expect(source.includes('Stored in the EU')).toBe(true)
-      expect(source.match(/Falkenstein|Germany|useRegion|regionCityFromCode|EU servers/g)).toBeNull()
+      const product = file.endsWith('SettingsView.tsx')
+        ? source.slice(source.indexOf('function ExplorerIntegrationPanel'), source.indexOf('export function UpdatesPanel'))
+        : source
+      expect(/useRegionLabel\((?:step|currentStep)?\)/.test(product)).toBe(true)
+      expect(product.includes('{regionLabel}')).toBe(true)
+      expect(product.match(/Stored in the EU|before they leave for the EU|Falkenstein|Germany|regionCityFromCode|useRegionCity|EU servers/g)).toBeNull()
     })
   }
-  test('Explorer and Finder integration introduction uses EU copy', () => {
-    const source = read('src/windows/views/SettingsView.tsx')
-    expect(source.includes('before they leave for the EU.')).toBe(true)
-    expect(source.match(/useRegionCity|\$\{regionCity\}/g)).toBeNull()
-  })
+  for (const file of ['DevicesView', 'SecurityView']) {
+    test(`${file} retains residency-neutral copy`, () => {
+      const source = read(`src/windows/views/${file}.tsx`)
+      expect(source.match(/Stored in|the EU|Falkenstein|Germany|regionCity|useRegion/g)).toBeNull()
+    })
+  }
 })
 
 test('frontend, legacy Windows and native tray/menu sources never name a provider', () => {

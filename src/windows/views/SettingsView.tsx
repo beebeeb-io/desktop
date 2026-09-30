@@ -1,3 +1,4 @@
+import { useRegionLabel } from '../useRegion'
 import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate } from '../../capabilities'
 import { CapabilityNotice } from '../../CapabilityNotice'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
@@ -874,6 +875,7 @@ function shellIntegrationCommandsFor(platform: PlatformName): { state: string; i
 }
 
 function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
+  const regionLabel = useRegionLabel()
   // Gate everything below on `resolved`: `platform` starts `null` and only
   // becomes a real value once `desktop_platform` answers. Deriving `commands`
   // from `resolved ? platform : null` means `commands` itself is the single
@@ -974,7 +976,7 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     <SettingsSectionShell>
       <PageHeader
         title={label}
-        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for the EU.`}
+        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave. ${regionLabel}.`}
       />
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>

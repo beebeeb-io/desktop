@@ -19,8 +19,10 @@
  *
  * Brand: amber only for the encryption state line + unread dot + active tab +
  * the live switch knob; Inter for human text, JetBrains Mono for every machine
- * value (ids, timestamps, ip/device, counts, percentages); say "the EU" in product copy, never the storage provider; honest voice; no emojis.
+ * value (ids, timestamps, ip/device, counts, percentages); use the effective continent in product copy, never the storage provider; honest voice; no emojis.
  */
+
+import { useRegionLabel } from '../useRegion'
 
 import { useEffect, useState } from 'react'
 import {
@@ -498,6 +500,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 // ── Root ─────────────────────────────────────────────────────────────────────
 
 export default function ActivityView() {
+  const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
 
   return (
@@ -508,7 +511,7 @@ export default function ActivityView() {
         aside={
           <Chip tone="amber">
             <NavIcon name="shield" size={11} color={T.amberDeep} />
-            Stored in the EU
+            {regionLabel}
           </Chip>
         }
       />

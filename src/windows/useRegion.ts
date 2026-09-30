@@ -1,43 +1,29 @@
 /**
- * useRegion — resolve the user's storage CITY from the live `/me/region`
- * setting, the same source of truth the webapp uses.
- *
- * Legacy account-region helpers, not product or per-file copy. Product copy
- * uses "the EU"; transparency uses loaded metadata. These hooks start with
- * the live default ("Falkenstein") so a label
- * is never blank, then update once `fetchRegion()` (a module-cached single
- * round-trip) resolves. On error the response is null and the fallback stands.
+ * Task 1663 review ruling (Guus, 2026-09-30): product copy follows the
+ * account's effective continent; unknown/loading/error makes no location claim.
+ * City metadata belongs only in the separate Data residency transparency view.
  */
-
 import { useEffect, useState } from 'react'
-import { fetchRegion, regionCity, regionLabel } from '../desktopApi'
+import { fetchRegion, type UserRegionResponse } from '../desktopApi'
 
-/** The effective region's city, e.g. "Falkenstein". */
-export function useRegionCity(): string {
-  const [city, setCity] = useState<string>(() => regionCity(null))
-  useEffect(() => {
-    let cancelled = false
-    void fetchRegion().then(resp => {
-      if (!cancelled) setCity(regionCity(resp))
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-  return city
+export function productRegionLabel(response: UserRegionResponse | null | undefined): string {
+  const effective = response?.preferred_region
+    ?? response?.regions.find(region => region.is_default)?.continent
+  const region = response?.regions.find(region => region.continent === effective)
+  if (region?.continent === 'europe') return 'Stored in the EU'
+  if (region?.continent === 'us') return 'Stored in North America'
+  return 'End-to-end encrypted'
 }
 
-/** "City, Country" for the effective region, e.g. "Falkenstein, Germany". */
-export function useRegionLabel(): string {
-  const [label, setLabel] = useState<string>(() => regionLabel(null))
+/** Refresh on onboarding transitions, including successful sign-in. */
+export function useRegionLabel(refreshKey?: string): string {
+  const [state, setState] = useState<{ key: string | undefined; response: UserRegionResponse | null } | null>(null)
   useEffect(() => {
     let cancelled = false
-    void fetchRegion().then(resp => {
-      if (!cancelled) setLabel(regionLabel(resp))
+    void fetchRegion().then(response => {
+      if (!cancelled) setState({ key: refreshKey, response })
     })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-  return label
+    return () => { cancelled = true }
+  }, [refreshKey])
+  return productRegionLabel(state?.key === refreshKey ? state?.response : null)
 }

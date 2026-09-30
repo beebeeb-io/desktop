@@ -22,6 +22,8 @@
  *   NEW (WS1): set_sync_mode (arg: mode: 'everything' | 'smart' | 'custom' | 'online_only')
  */
 
+import { useRegionLabel } from './windows/useRegion'
+
 import { useCapabilities } from './capabilities'
 import {
   useCallback,
@@ -175,6 +177,7 @@ function Notice({ children, kind = 'warn' }: { children: React.ReactNode; kind?:
 // ── Left rail ─────────────────────────────────────────────────────────────
 
 function LeftRail({ currentStep }: { currentStep: Step }) {
+  const regionLabel = useRegionLabel(currentStep)
   const currentIdx = STEPS.findIndex((s) => s.id === currentStep)
   return (
     <div style={{
@@ -279,7 +282,7 @@ function LeftRail({ currentStep }: { currentStep: Step }) {
           letterSpacing: '0.04em',
           textTransform: 'uppercase' as const,
         }}>
-          Stored in the EU · E2E encrypted
+          {regionLabel} · Zero-knowledge
         </div>
       </div>
     </div>

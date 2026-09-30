@@ -36,6 +36,8 @@
  * Sibling idiom: DevicesView.tsx + InsightsView.tsx + BandwidthView.tsx.
  */
 
+import { useRegionLabel } from '../useRegion'
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
@@ -657,6 +659,7 @@ function RefreshButton({
 // ── Root view ─────────────────────────────────────────────────────────────────
 
 export default function SelectiveSyncView() {
+  const regionLabel = useRegionLabel()
   const { showToast } = useToast()
   const [state, setState] = useState<LoadState>({ phase: 'loading' })
   // Working excluded set + which folders are expanded. Re-seeded on every load.
@@ -827,7 +830,7 @@ export default function SelectiveSyncView() {
               />
             )}
             <Chip tone="amber">
-              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> Stored in the EU
+              <NavIcon name="lock" size={10} color="oklch(0.4 0.08 72)" /> {regionLabel}
             </Chip>
           </div>
         }

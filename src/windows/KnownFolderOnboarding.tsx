@@ -17,9 +17,11 @@
  * single "Back up these folders" CTA. Everything else is neutral ink. Inter for
  * humans, JetBrains Mono for paths/counts. Honest voice (what's copied, that
  * originals stay put so it coexists with OneDrive, that backed-up folders are
- * kept on this PC). EU product copy, never the storage provider. No
+ * kept on this PC). Continent-aware product copy, never the storage provider. No
  * emojis.
  */
+
+import { useRegionLabel } from './useRegion'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -153,7 +155,7 @@ export default function KnownFolderOnboarding({
   forced?: boolean
   onClose: (enabledAny: boolean) => void
 }) {
-
+  const regionLabel = useRegionLabel()
   // null = still loading; [] = no Windows known folders here (non-Windows) →
   // never show. Otherwise the resolvable rows.
   const [folders, setFolders] = useState<KnownFolderStatus[] | null>(null)
@@ -381,7 +383,7 @@ export default function KnownFolderOnboarding({
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14 }}>
             <NavIcon name="lock" size={11} color={T.ink3} />
             <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3 }}>
-              Encrypted before it leaves this PC · Stored in the EU
+              Encrypted before it leaves this PC · {regionLabel}
             </span>
           </div>
 
