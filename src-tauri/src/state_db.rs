@@ -19,6 +19,10 @@
 //! WAL journal mode so reads from the OS extension don't block the
 //! daemon's writes.
 
+use crate::diagnostic_redaction::{
+    allowed_label, classify_error_code, redact_for_export, redact_secrets_only, DiagnosticErrorCode, KnownNames,
+    PAUSE_REASON_LABELS, QUEUE_KIND_LABELS,
+};
 use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -549,7 +553,15 @@ pub struct QueueDiagnostics {
     pub paused: i64,
     pub by_kind: BTreeMap<String, i64>,
     pub paused_by_reason: BTreeMap<String, i64>,
+    /// Last queue error with secrets, paths and known file/folder names removed
+    /// (task 1685). A name the state DB does not know survives only if it is a
+    /// standard error word or digits. See [`crate::diagnostic_redaction`].
     pub last_error: Option<String>,
+    /// Closed-enum classification of `last_error`; cannot carry a name.
+    pub last_error_code: Option<DiagnosticErrorCode>,
+    /// Number of placeholders (`[path]`, `[name]`, `[redacted]`) written into
+    /// `last_error`. `0` with a non-null `last_error` means nothing was removed.
+    pub last_error_redactions: u32,
     pub last_error_class: Option<String>,
 }
 
@@ -2057,7 +2069,15 @@ impl StateDb {
         Ok(())
     }
 
+    /// Queue counts and the last error, redacted for the support bundle.
+    /// Names known to the state DB are scrubbed from the error text.
     pub fn queue_diagnostics(&self, now: i64) -> Result<QueueDiagnostics> {
+        self.queue_diagnostics_with_paths(now, &[])
+    }
+
+    /// Like [`Self::queue_diagnostics`], additionally treating every component
+    /// of `extra_paths` (for example the sync root) as a name to scrub.
+    pub fn queue_diagnostics_with_paths(&self, now: i64, extra_paths: &[String]) -> Result<QueueDiagnostics> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let queued = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))?;
         let due = conn.query_row(
@@ -2071,8 +2091,9 @@ impl StateDb {
             |row| row.get(0),
         )?;
 
-        let by_kind = count_queue_groups(&conn, "kind")?;
-        let paused_by_reason = count_queue_groups(&conn, "paused_reason")?;
+        let by_kind = allowed_group_labels(count_queue_groups(&conn, "kind")?, QUEUE_KIND_LABELS);
+        let paused_by_reason =
+            allowed_group_labels(count_queue_groups(&conn, "paused_reason")?, PAUSE_REASON_LABELS);
         let (last_error, last_error_class) = conn
             .query_row(
                 "SELECT last_error, last_error_class
@@ -2085,14 +2106,27 @@ impl StateDb {
             )
             .unwrap_or((None, None));
 
+        let (last_error, last_error_code, last_error_redactions) = match last_error.as_deref() {
+            Some(raw) => {
+                let names = collect_known_names(&conn, extra_paths)?;
+                let redacted = redact_for_export(raw, &names);
+                (Some(redacted.text), Some(classify_error_code(raw)), redacted.redactions)
+            }
+            None => (None, None, 0),
+        };
+
         Ok(QueueDiagnostics {
             queued,
             due,
             paused,
             by_kind,
             paused_by_reason,
-            last_error: last_error.as_deref().map(redact_diagnostic_error),
-            last_error_class,
+            last_error,
+            last_error_code,
+            last_error_redactions,
+            last_error_class: last_error_class
+                .as_deref()
+                .map(|class| allowed_label(class, PAUSE_REASON_LABELS)),
         })
     }
 
@@ -2659,33 +2693,42 @@ fn count_queue_groups(conn: &Connection, column: &str) -> Result<BTreeMap<String
     rows.collect()
 }
 
+/// Credential-token stripping for error text persisted in the state DB. The
+/// privacy boundary for names and paths is the export pass
+/// ([`crate::diagnostic_redaction::redact_for_export`]), not this.
 fn redact_diagnostic_error(error: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut skip_next = false;
-    for part in error.split_whitespace() {
-        if skip_next {
-            out.push("[redacted]".into());
-            skip_next = false;
-            continue;
-        }
-        let lower = part.to_ascii_lowercase();
-        if lower == "bearer" || lower == "token" || lower == "authorization:" || lower == "session" {
-            out.push(part.into());
-            skip_next = true;
-        } else if lower.starts_with("bearer=")
-            || lower.starts_with("token=")
-            || lower.starts_with("session_token=")
-            || lower.starts_with("authorization=")
-        {
-            let key = part.split_once('=').map(|(k, _)| k).unwrap_or(part);
-            out.push(format!("{key}=[redacted]"));
-        } else if part.len() > 96 {
-            out.push("[redacted]".into());
-        } else {
-            out.push(part.into());
+    redact_secrets_only(error)
+}
+
+fn allowed_group_labels(groups: BTreeMap<String, i64>, allowed: &[&str]) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for (label, count) in groups {
+        *out.entry(allowed_label(&label, allowed)).or_insert(0) += count;
+    }
+    out
+}
+
+/// Every plaintext name the daemon knows locally: synced paths, queued
+/// targets and staged payload leaves, recent activity, plus `extra_paths`.
+fn collect_known_names(conn: &Connection, extra_paths: &[String]) -> Result<KnownNames> {
+    let mut names = KnownNames::new();
+    for path in extra_paths {
+        names.add_path(path);
+    }
+    for sql in [
+        "SELECT path FROM files",
+        "SELECT target_path FROM operation_queue WHERE target_path IS NOT NULL",
+        "SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL",
+        "SELECT file_name FROM local_activity",
+        "SELECT rel_path FROM local_activity WHERE rel_path IS NOT NULL",
+    ] {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for path in rows {
+            names.add_path(&path?);
         }
     }
-    out.join(" ")
+    Ok(names.finish())
 }
 
 #[cfg(test)]
@@ -3469,6 +3512,133 @@ mod tests {
         assert!(last_error.contains("session_token=[redacted]"));
         assert!(!last_error.contains("abc.def.ghi"));
         assert!(!last_error.contains("super-secret"));
+    }
+
+    /// Task 1685 (RED-FIRST): the support bundle promised "without secrets or
+    /// plaintext names", but only tokens were redacted. A real upload failure
+    /// carries the local path and the (possibly multi-word) folder/file names.
+    #[test]
+    fn diagnostics_export_never_contains_paths_or_known_names() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "f-tax", "Tax 2025/aangifte.pdf", None, FileStatus::Local, 10);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("f-tax".into()),
+            parent_id: None,
+            target_path: Some("Tax 2025/aangifte.pdf".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        db.record_operation_attempt(
+            "op-1",
+            1,
+            130,
+            Some("/Users/guus/Library/CloudStorage/Beebeeb-Drive/Tax 2025/aangifte.pdf failed"),
+        )
+        .unwrap();
+
+        let diagnostics = db.queue_diagnostics(200).unwrap();
+        let exported = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!exported.contains("/Users/guus"), "path leaked: {exported}");
+        assert!(!exported.contains("CloudStorage"), "path leaked: {exported}");
+        assert!(!exported.contains("Tax 2025"), "known folder name leaked: {exported}");
+        assert!(!exported.contains("aangifte"), "known file name leaked: {exported}");
+        // The failure itself is still reported, and the removal is counted.
+        assert!(diagnostics.last_error.as_deref().unwrap().contains("failed"), "{exported}");
+        assert!(diagnostics.last_error_redactions >= 1, "{exported}");
+        assert_eq!(diagnostics.last_error_code, Some(DiagnosticErrorCode::Other), "{exported}");
+    }
+
+    /// Task 1685: a name that exists only in a queued op's staged payload path
+    /// (not in `files`) is still known to the daemon and must be scrubbed. `2026`
+    /// is a bare number the allow-list keeps, so only the name scan can remove it.
+    #[test]
+    fn diagnostics_scrubs_names_known_only_from_a_staged_payload_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadFile,
+            file_id: None,
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: Some("/staging/ab12/Q3 2026".into()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+        db.record_operation_attempt("op-1", 1, 10, Some("copy of Q3 2026 failed")).unwrap();
+        let exported = serde_json::to_string(&db.queue_diagnostics(200).unwrap()).unwrap();
+        assert!(!exported.contains("2026"), "{exported}");
+        assert!(!exported.contains("Q3"), "{exported}");
+        assert!(exported.contains("failed"), "{exported}");
+    }
+
+    /// Task 1685: group labels are an allow-list, so a stray DB value (a name in
+    /// `kind` or `paused_reason`) can never become a key in the export.
+    #[test]
+    fn diagnostics_group_labels_outside_the_allow_list_become_other() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for id in ["op-a", "op-b"] {
+            db.enqueue_operation(&PendingOperation {
+                op_id: id.into(),
+                kind: OperationKind::UploadVersion,
+                file_id: None,
+                parent_id: None,
+                target_path: None,
+                metadata_json: None,
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+        }
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute("UPDATE operation_queue SET kind = 'Tax 2025' WHERE op_id = 'op-a'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE operation_queue SET paused_reason = '/Users/guus/Tax 2025', last_error_class = 'aangifte.pdf' WHERE op_id = 'op-b'",
+                [],
+            )
+            .unwrap();
+        }
+        let diagnostics = db.queue_diagnostics(200).unwrap();
+        let exported = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!exported.contains("Tax"), "{exported}");
+        assert!(!exported.contains("guus"), "{exported}");
+        assert!(!exported.contains("aangifte"), "{exported}");
+        assert_eq!(diagnostics.by_kind.get("other"), Some(&1), "{exported}");
+        assert_eq!(diagnostics.by_kind.get("upload_version"), Some(&1), "{exported}");
+        assert_eq!(diagnostics.paused_by_reason.get("other"), Some(&1), "{exported}");
     }
 
     #[test]
