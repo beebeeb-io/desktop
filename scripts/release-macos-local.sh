@@ -9,12 +9,19 @@
 # nothing is published unless the notarized, stapled artifacts were verified.
 #
 # Usage (from the repo root of a release worktree, on an Apple Silicon Mac):
-#   scripts/release-macos-local.sh <VERSION> <CHANNEL> [--dry-run] [--from-step N]
+#   scripts/release-macos-local.sh <VERSION> <CHANNEL> [--dry-run] [--from-step N] [--skip-local-sig-check]
 #     VERSION  plain semver, e.g. 0.8.7 (no -alpha/-beta suffix)
 #     CHANNEL  alpha | beta | stable   (the manifest the release is published to)
 #     --dry-run      print every command of every step, run none
 #     --from-step N  resume at step N (1-13). Step 1 (the release-state gate:
 #                    clean tree, HEAD == tag commit, release exists) ALWAYS runs.
+#                    A resume past step 2 also requires the artifacts on disk to have been
+#                    built from HEAD (step 2 records the commit).
+#     --skip-local-sig-check  do not require minisign and do not verify the updater signature
+#                    against the tarball in step 11. Explicit opt-out: the default is fail
+#                    closed (no minisign = no release). Step 13 is only a CONSISTENCY check
+#                    (manifest signature string == uploaded .sig), not proof that the
+#                    signature verifies the tarball: only step 11 proves that.
 #
 # Preconditions: release.yml already ran for this VERSION (it creates the
 # desktop-v<VERSION> tag + release with the Windows/Linux assets), and this
@@ -30,6 +37,13 @@
 #   BB_NOTARY_ISSUER        App Store Connect issuer id         [8cacf7df-c877-47db-aab2-7c9f1f9f5fda]
 #   BB_NOTARY_KEY_PATH      the .p8 key file   [~/.private_keys/AuthKey_<key id>.p8]
 #   BB_NOTARY_TIMEOUT       notarytool --timeout per submission [45m]
+#   BB_MINISIGN             the minisign binary (REQUIRED unless --skip-local-sig-check: step 11
+#                           verifies the updater signature before anything is published) [minisign]
+#   BB_UPDATER_VERIFY_PUBKEY  the bare minisign public key (RW...) step 11 verifies the
+#                           updater signature against. Default: the key baked into
+#                           tauri.conf.json. Set it ONLY for a key-rotation transition
+#                           release (docs/RELEASING.md), where CI still signs with the
+#                           OLD key while the new one is already baked in.
 #   BB_RELEASE_REPO         [beebeeb-io/desktop]   BB_RELEASES_REPO [beebeeb-io/releases]
 #   BB_WORKFLOW_REF         ref the two workflows are dispatched on [main]
 #   BB_POLL_INTERVAL        seconds between workflow polls [15]
@@ -61,6 +75,7 @@ readonly STEP_NAMES=(
 # ---------------------------------------------------------------- arguments
 DRY=0
 FROM_STEP=1
+SKIP_SIG_CHECK=0
 VERSION=""
 CHANNEL=""
 
@@ -71,6 +86,7 @@ usage() {
 while (($#)); do
   case "$1" in
     --dry-run) DRY=1 ;;
+    --skip-local-sig-check) SKIP_SIG_CHECK=1 ;;
     --from-step)
       shift
       [[ $# -gt 0 ]] || { echo "--from-step needs a number (1-$TOTAL_STEPS)" >&2; exit 2; }
@@ -119,14 +135,19 @@ NOTARY_ISSUER="${BB_NOTARY_ISSUER:-8cacf7df-c877-47db-aab2-7c9f1f9f5fda}"
 NOTARY_KEY_PATH="${BB_NOTARY_KEY_PATH:-$HOME/.private_keys/AuthKey_${NOTARY_KEY_ID}.p8}"
 NOTARY_TIMEOUT="${BB_NOTARY_TIMEOUT:-45m}"
 
+MINISIGN="${BB_MINISIGN:-minisign}"
+VERIFY_PUBKEY_OVERRIDE="${BB_UPDATER_VERIFY_PUBKEY:-}"
+
 CONF="src-tauri/tauri.conf.json"
 TARGET_TRIPLE="aarch64-apple-darwin"
 BUNDLE_DIR="src-tauri/target/$TARGET_TRIPLE/release/bundle"
 APP="$BUNDLE_DIR/macos/Beebeeb.app"
-TAURI_TARBALL="$BUNDLE_DIR/macos/Beebeeb.app.tar.gz"
 WORK="$ROOT_DIR/src-tauri/target/release-macos-local/$VERSION"
 DMG_NAME="Beebeeb_${VERSION}_${TARGET_TRIPLE%%-*}.dmg"
 DMG="$WORK/$DMG_NAME"
+# The commit step 2 built from. A resume (--from-step N > 2) reuses those artifacts and
+# step 1 refuses it unless this equals HEAD (the tag may have been re-cut since).
+BUILD_STAMP="$WORK/build-commit"
 TARBALL="$WORK/Beebeeb.app.tar.gz"
 SIG_NAME="Beebeeb.app.tar.gz.sig"
 PREFLIGHT="scripts/macos-release-preflight.sh"
@@ -367,10 +388,18 @@ dispatch_and_wait() {
 }
 # ---------------------------------------------------------------- steps
 step_1_verify_release_state() {
-  local head="" refs="" peeled="" direct="" tag_sha="" notes_bad="" rel="" missing="" t
+  local head="" refs="" peeled="" direct="" tag_sha="" notes_bad="" rel="" missing="" t built_commit="" flat=""
 
-  HINT="Install/sign in the missing tool or provide the missing file, then re-run."
+  HINT="Install/sign in the missing tool (minisign: brew install minisign) or provide the missing file, then re-run."
   for t in git gh jq bun bunx xcrun codesign spctl hdiutil ditto plutil security tar; do need_cmd "$t"; done
+  if ((SKIP_SIG_CHECK)); then
+    say "WARNING: --skip-local-sig-check: the updater signature will NOT be verified against the tarball before publishing (step 13 only compares strings)"
+  else
+    need_cmd "$MINISIGN"
+  fi
+  if [[ -n "$VERIFY_PUBKEY_OVERRIDE" ]] && ! [[ "$VERIFY_PUBKEY_OVERRIDE" =~ ^RW[A-Za-z0-9+/]+={0,2}$ ]]; then
+    fail "BB_UPDATER_VERIFY_PUBKEY is not a minisign public key (expected the bare base64 key starting RW, the second line of the .pub file)"
+  fi
   if is_dry; then
     say "would require: Darwin arm64 (Apple Silicon only; Intel is not built)"
   else
@@ -409,15 +438,41 @@ $(printf '%s\n' "$t" | head -20 | sed 's/^/      /')"
     RELEASE_COMMIT="$head"
   fi
 
-  HINT="RELEASE_NOTES.md at the release commit must name $VERSION and carry no '<!-- lead:' markers (the lead resolves them before the release commit is cut). Fix on main, re-cut the release, then build from the new tag."
+  # A resume past step 2 reuses the app/dmg/tarball on disk, which are keyed by VERSION only.
+  # If the tag was re-cut since they were built, they come from another commit than the one
+  # CI built; nothing else would notice (the version string is the same).
+  HINT="The artifacts under $WORK do not come from HEAD. Rebuild from the current commit: scripts/release-macos-local.sh $VERSION $CHANNEL (a full run, or --from-step 2). Do not resume past step 2 after the tag moved."
+  if ((FROM_STEP > 2)); then
+    if is_dry; then
+      say "would require $BUILD_STAMP to exist and equal HEAD (--from-step $FROM_STEP reuses the artifacts step 2 built)"
+    else
+      [[ -f "$BUILD_STAMP" ]] ||
+        fail "--from-step $FROM_STEP reuses the artifacts of step 2, but $BUILD_STAMP (the commit they were built from) does not exist"
+      built_commit="$(<"$BUILD_STAMP")"
+      [[ "$built_commit" == "$head" ]] ||
+        fail "the artifacts under $WORK were built from commit $built_commit, but HEAD is $head (the tag was re-cut or this is another checkout); resuming would upload a build of the wrong commit"
+      say "artifacts on disk were built from $built_commit == HEAD"
+    fi
+  fi
+
+  HINT="RELEASE_NOTES.md at the release commit must name $VERSION, carry no '<!-- lead:' markers, and its Verification section must carry real test counts ('<N> pass / 0 fail' for bun test, 'test result: ok. <N> passed' for cargo test). The lead resolves all of that before the release commit is cut. Fix on main, re-cut the release, then build from the new tag."
   if is_dry; then
-    say "would require RELEASE_NOTES.md to mention $VERSION and contain no '<!-- lead:' marker"
+    say "would require RELEASE_NOTES.md to mention $VERSION, contain no '<!-- lead:' marker, and carry real test counts ('<N> pass / 0 fail', 'test result: ok. <N> passed')"
   else
     [[ -f RELEASE_NOTES.md ]] || fail "RELEASE_NOTES.md is missing"
     grep -qF -- "$VERSION" RELEASE_NOTES.md || fail "RELEASE_NOTES.md does not mention $VERSION"
     notes_bad="$(grep -n '<!-- lead:' RELEASE_NOTES.md || true)"
     [[ -z "$notes_bad" ]] || fail "RELEASE_NOTES.md still has unresolved lead markers:
 $(printf '%s\n' "$notes_bad" | sed 's/^/      /')"
+    # The marker is only a reminder; the counts are what it stands for. Reading the normalised
+    # text (line breaks and runs of blanks collapsed) keeps a hard-wrapped bullet valid, and a
+    # zero count is rejected: a run that executed nothing is not a green.
+    flat="$(tr '\n' ' ' <RELEASE_NOTES.md | tr -s ' ')"
+    grep -qE '(^|[^0-9])[1-9][0-9]* pass / 0 fail' <<<"$flat" ||
+      fail "RELEASE_NOTES.md Verification section carries no test counts: no '<N> pass / 0 fail' for bun test (a placeholder such as 'pass / 0 fail' without the number is not a count)"
+    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<<"$flat" ||
+      fail "RELEASE_NOTES.md Verification section carries no test counts: no 'test result: ok. <N> passed' for cargo test (a literal 'N passed' is not a count)"
+    say "RELEASE_NOTES.md names $VERSION, has no lead markers, and carries test counts"
   fi
 
   HINT="The CI run must have created the release with the Windows/Linux assets before the Mac part starts. Run release.yml first."
@@ -438,6 +493,11 @@ step_2_build() {
   HINT="Fix the build error above, then resume with --from-step 2. tauri.conf.json is restored automatically."
   run bun install --frozen-lockfile
 
+  # Nothing of an earlier attempt may survive into this build: a stale .app (or a stamp that
+  # vouches for one) is how a resume would upload a build of the wrong commit.
+  run rm -f "$BUILD_STAMP"
+  run rm -rf "$BUNDLE_DIR"
+
   say "patching $CONF version -> $VERSION (build only, restored on exit, never committed)"
   if ! is_dry; then
     need_file "$WORK" "work dir"
@@ -455,21 +515,37 @@ step_2_build() {
     say "$CONF .version = $(jq -r .version "$CONF")"
   fi
 
+  # Only the .app is built here, and updater artifacts are switched off for this build by a CLI
+  # override (the file keeps createUpdaterArtifacts true: macos-release-preflight.sh asserts it,
+  # and the Windows/Linux CI build needs it).
+  #   - Why off: with createUpdaterArtifacts on and a pubkey configured, Tauri 2 builds the .app
+  #     and the .tar.gz and then exits non-zero ("A public key has been found, but no private
+  #     key") because TAURI_SIGNING_PRIVATE_KEY is a CI-only secret since the 2026-09-25 rotation
+  #     (workspace evidence: task 1524 gate 63, tasks 0341-0354). Step 9 recreates the tarball
+  #     from the stapled app and the sign workflow signs it in CI, so nothing is lost.
+  #   - Why --bundles app: the default ("all") also runs Tauri's bundle_dmg.sh, which drives
+  #     Finder over AppleScript and failed with -10006 (task 1608). Step 6 builds the dmg with
+  #     hdiutil from the stapled app; Tauri's dmg would be discarded anyway.
+  # The updater signing variables are stripped so the private key can never reach this build.
   run env \
     -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH \
     -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD \
+    -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u TAURI_SIGNING_PRIVATE_KEY_PATH \
     "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" \
     "MACOS_APP_PROVISION_PROFILE=$APP_PROFILE" \
     "MACOS_FILE_PROVIDER_PROVISION_PROFILE=$EXT_PROFILE" \
     "BEEBEEB_RELEASE_VERSION=$VERSION" \
     "BEEBEEB_MACOS_HARDENED_RUNTIME=1" \
-    bunx tauri build --target "$TARGET_TRIPLE" -- --locked
+    bunx tauri build --target "$TARGET_TRIPLE" --bundles app \
+    --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
 
   if ! is_dry; then
     restore_tracked
     git diff --quiet || fail "the working tree is not back to the committed content after the build: $(git status --porcelain | head -5 | tr '\n' ' ')"
     say "$CONF and dist/index.html restored; working tree clean"
     [[ -d "$APP" ]] || fail "the build did not produce $APP"
+    git rev-parse HEAD >"$BUILD_STAMP"
+    say "artifacts built from $(<"$BUILD_STAMP") (recorded in $BUILD_STAMP; a resume past this step requires it to equal HEAD)"
   fi
 }
 
@@ -564,25 +640,21 @@ step_8_staple_verify_dmg() {
 }
 
 step_9_updater_bundle() {
-  local orig_tops="" new_tops="" extract="$WORK/updater-verify" listing=""
+  local new_tops="" extract="$WORK/updater-verify" listing=""
   need_file "$APP" "built app (run step 2 first)"
-  HINT="The updater bundle could not be recreated or does not match the layout Tauri's updater expects (a single top-level Beebeeb.app). Inspect it with 'tar -tzf $TARBALL | head' and compare to $TAURI_TARBALL."
+  HINT="The updater bundle could not be recreated or does not have the layout Tauri's updater expects (a single top-level Beebeeb.app). Inspect it with 'tar -tzf $TARBALL | head'."
   run rm -f "$TARBALL"
-  # Tauri wrote its Beebeeb.app.tar.gz BEFORE notarization, so it holds the unstapled app.
-  # The same layout (one top-level Beebeeb.app directory) is recreated from the stapled app.
+  # Step 2 builds with updater artifacts off (no private key on this Mac), so Tauri wrote no
+  # tarball; this is the only one. One top-level Beebeeb.app directory, made from the STAPLED
+  # app, is the layout Tauri's own updater bundle has and the updater extracts.
   run env COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$(dirname "$APP")" Beebeeb.app
   capture listing tar -tzf "$TARBALL"
   if is_dry; then
-    say "(dry-run) would require every entry to sit under Beebeeb.app/, the same top level as Tauri's own tarball, and the extracted app to be stapled with version $VERSION"
+    say "(dry-run) would require every entry to sit under a single top-level Beebeeb.app/, and the extracted app to be stapled with version $VERSION"
     return 0
   fi
   new_tops="$(cut -d/ -f1 <<<"$listing" | sort -u)"
   [[ "$new_tops" == "Beebeeb.app" ]] || fail "updater bundle has unexpected top-level entries: $new_tops"
-  if [[ -f "$TAURI_TARBALL" ]]; then
-    orig_tops="$(tar -tzf "$TAURI_TARBALL" | cut -d/ -f1 | sort -u)"
-    [[ "$orig_tops" == "$new_tops" ]] ||
-      fail "layout differs from Tauri's own updater bundle (Tauri: '$orig_tops', ours: '$new_tops')"
-  fi
   rm -rf "$extract"
   mkdir -p "$extract"
   tar -xzf "$TARBALL" -C "$extract"
@@ -619,15 +691,19 @@ step_10_upload() {
 }
 
 step_11_sign_updater_bundle() {
-  local sig_file="$WORK/readback/$SIG_NAME" rel="" pub="" key=""
-  HINT="The signing workflow failed or did not attach $SIG_NAME. Check the run above (the secrets TAURI_SIGNING_PRIVATE_KEY/_PASSWORD live only in the repo's CI), then resume with --from-step 11."
+  local sig_file="$WORK/readback/$SIG_NAME" rel="" pub="" key="" pub_from=""
+  HINT="The signing workflow failed or did not attach $SIG_NAME, or the signature does not verify. Check the run above (the secrets TAURI_SIGNING_PRIVATE_KEY/_PASSWORD live only in the repo's CI), then resume with --from-step 11."
   dispatch_and_wait sign-macos-updater-artifact.yml -f "release_tag=$TAG"
   SIGN_RUN_ID="$LAST_RUN_ID"
   run rm -rf "$WORK/readback"
   run mkdir -p "$WORK/readback"
   capture rel gh release view "$TAG" --repo "$REPO" --json assets
   if is_dry; then
-    say "(dry-run) would require $SIG_NAME among the release assets, download it, and verify it with minisign when installed"
+    if ((SKIP_SIG_CHECK)); then
+      say "(dry-run) would require $SIG_NAME among the release assets and download it; local signature check SKIPPED (--skip-local-sig-check)"
+    else
+      say "(dry-run) would require $SIG_NAME among the release assets, download it, and verify it against the tarball with minisign ($MINISIGN, required) before anything is published"
+    fi
     run gh release download "$TAG" --repo "$REPO" --pattern "$SIG_NAME" --dir "$WORK/readback" --clobber
     return 0
   fi
@@ -635,15 +711,27 @@ step_11_sign_updater_bundle() {
     fail "the signing run succeeded but the release has no $SIG_NAME asset; not publishing a manifest without a signature"
   run gh release download "$TAG" --repo "$REPO" --pattern "$SIG_NAME" --dir "$WORK/readback" --clobber
   [[ -s "$sig_file" ]] || fail "$SIG_NAME downloaded from the release is empty"
-  if command -v minisign >/dev/null 2>&1; then
-    pub="$(jq -r .plugins.updater.pubkey "$CONF" | base64 --decode | sed -n 2p)"
-    key="$WORK/readback/tarball.minisig"
-    base64 --decode <"$sig_file" >"$key" || fail "$SIG_NAME is not valid base64 (a Tauri updater signature is the base64 of a minisign file)"
-    run minisign -Vm "$TARBALL" -x "$key" -P "$pub"
-    say "signature verified against the pubkey baked into $CONF"
-  else
-    say "minisign is not installed: signature not verified locally (install it to verify before publishing)"
+  if ((SKIP_SIG_CHECK)); then
+    say "--skip-local-sig-check: signature NOT verified against the tarball; step 13 will only show the manifest carries the uploaded $SIG_NAME (consistency, not validity)"
+    return 0
   fi
+  # Step 10 proved the uploaded tarball is byte-identical to $TARBALL, so verifying the local file
+  # verifies what users will download. The check is a hard requirement (step 1 needs minisign
+  # unless --skip-local-sig-check): comparing the manifest string with the .sig in step 13 only
+  # shows consistency, not validity.
+  if [[ -n "$VERIFY_PUBKEY_OVERRIDE" ]]; then
+    pub="$VERIFY_PUBKEY_OVERRIDE"
+    pub_from="BB_UPDATER_VERIFY_PUBKEY (NOT the key baked into $CONF; correct only for a key-rotation transition release, where CI still signs with the old key)"
+  else
+    pub="$(jq -r .plugins.updater.pubkey "$CONF" | base64 --decode | sed -n 2p)"
+    pub_from="the pubkey baked into $CONF"
+  fi
+  [[ -n "$pub" ]] || fail "could not read the updater public key from $CONF (and BB_UPDATER_VERIFY_PUBKEY is not set)"
+  key="$WORK/readback/tarball.minisig"
+  base64 --decode <"$sig_file" >"$key" || fail "$SIG_NAME is not valid base64 (a Tauri updater signature is the base64 of a minisign file)"
+  say "verifying against $pub_from"
+  run "$MINISIGN" -Vm "$TARBALL" -x "$key" -P "$pub"
+  say "signature verified against $pub_from"
 }
 
 step_12_publish_manifest() {
@@ -662,7 +750,7 @@ step_13_assert_manifest() {
   run gh release download "$TAG" --repo "$REPO" --pattern "$SIG_NAME" --dir "$sigdir" --clobber
   capture manifest gh api -H "Accept: application/vnd.github.raw+json" "repos/$RELEASES_REPO/contents/desktop/$MANIFEST_FILE"
   if is_dry; then
-    say "(dry-run) would require version == $VERSION, platforms.darwin-aarch64.url == $want_url, its signature == the uploaded $SIG_NAME, and the linux/windows entries on $TAG"
+    say "(dry-run) would require version == $VERSION, platforms.darwin-aarch64.url == $want_url, its signature string == the uploaded $SIG_NAME (a consistency check; step 11 is the one that verifies the signature), and the linux/windows entries on $TAG"
     return 0
   fi
   ((CAPTURE_RC == 0)) || fail "could not read desktop/$MANIFEST_FILE from $RELEASES_REPO"
@@ -675,7 +763,7 @@ step_13_assert_manifest() {
   [[ -n "$msig" && "$msig" == "$sig" ]] || fail "darwin-aarch64 signature in the manifest is not the signature that was uploaded to the release"
   jq -e --arg tag "$TAG" '[.platforms["linux-x86_64"].url, .platforms["windows-x86_64-nsis"].url] | all(contains($tag))' <<<"$manifest" >/dev/null ||
     fail "the linux/windows manifest entries do not point at $TAG"
-  say "desktop/$MANIFEST_FILE: version $VERSION, darwin-aarch64 -> $want_url, signature matches the uploaded $SIG_NAME"
+  say "desktop/$MANIFEST_FILE: version $VERSION, darwin-aarch64 -> $want_url, signature string equals the uploaded $SIG_NAME (consistency check only; validity is step 11's minisign check)"
 }
 
 write_summary() {

@@ -24,10 +24,11 @@
 #   scripts/test-release-macos-local.sh              # run every scenario
 #   scripts/test-release-macos-local.sh --self-test  # red-proof of the count guard
 
+# shellcheck disable=SC2016  # notes fixtures hold literal backticks
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=273
+EXPECTED_CHECKS=382
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -97,7 +98,10 @@ for tool in git tar jq sha256sum; do
 done
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# BB_TEST_KEEP_TMP=1 keeps every scenario's repo, state, call log (calls.log) and script output
+# (out.log) so a failing check can be re-read instead of guessed at.
+cleanup_tmp() { if [[ "${BB_TEST_KEEP_TMP:-}" == 1 ]]; then echo "kept scenario files in $TMP" >&2; else rm -rf "$TMP"; fi; }
+trap cleanup_tmp EXIT
 PASSED=0
 FAILED=0
 TOTAL_STEPS=13
@@ -137,9 +141,9 @@ STUB
   chmod +x "$REPO/scripts/macos-release-preflight.sh"
   printf 'untrusted comment: minisign public key\nRWSfixturepubkey\n' >"$FX/pub.txt"
   jq -n --arg pk "$(base64 <"$FX/pub.txt" | tr -d '\n')" \
-    '{productName:"Beebeeb",version:"0.1.0",identifier:"io.beebeeb.app",plugins:{updater:{pubkey:$pk}}}' >"$REPO/src-tauri/tauri.conf.json"
+    '{productName:"Beebeeb",version:"0.1.0",identifier:"io.beebeeb.app",bundle:{targets:"all",createUpdaterArtifacts:true},plugins:{updater:{pubkey:$pk}}}' >"$REPO/src-tauri/tauri.conf.json"
   echo '<!doctype html><html></html>' >"$REPO/dist/index.html"
-  printf '# Beebeeb Desktop 0.8.7 - fixture\n\nNotes.\n' >"$REPO/RELEASE_NOTES.md"
+  write_notes "$REPO/RELEASE_NOTES.md"
   printf 'src-tauri/target/\n' >"$REPO/.gitignore"
   echo fixture >"$HOME_FX/.private_keys/AuthKey_5KRWK96245.p8"
   echo profile >"$HOME_FX/.private_keys/macos-developer-id-profiles/BeebeebApp.provisionprofile"
@@ -164,12 +168,25 @@ STUB
   ) >/dev/null 2>&1
 }
 
+# The fixture notes carry real counts, one of them wrapped over a line break (the gate must
+# read them wrap-proof), as the lead fills them in on the release commit.
+NOTES_GOOD_GATE='- Test gate: `bun test` 12 pass /
+  0 fail, `cargo test --locked` per-binary `test result: ok.
+  7 passed`.'
+write_notes() { # path [the Verification gate bullet(s)]
+  {
+    printf '# Beebeeb Desktop 0.8.7 - fixture\n\nNotes.\n\n### Verification\n\n'
+    printf '%s\n' "${2:-$NOTES_GOOD_GATE}"
+  } >"$1"
+}
+
 # run_release <args...>: run the script inside the fixture repo with shims first on PATH.
 run_release() {
   RC=0
   (
     cd "$REPO" || exit 99
-    env PATH="$SHIMS:$PATH" HOME="$HOME_FX" BB_TEST_STATE="$STATE" BB_TEST_LOG="$LOGF" \
+    env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u TAURI_SIGNING_PRIVATE_KEY_PATH \
+      PATH="$SHIMS:$PATH" HOME="$HOME_FX" BB_TEST_STATE="$STATE" BB_TEST_LOG="$LOGF" \
       BB_POLL_INTERVAL=0 ${SCEN_ENV[@]+"${SCEN_ENV[@]}"} \
       scripts/release-macos-local.sh "$@"
   ) >"$OUT" 2>&1 || RC=$?
@@ -251,7 +268,16 @@ check "the dmg is preflighted" log_has '^preflight .*\.dmg '
 check "spctl checked the app (execute) and the dmg (-t install)" bash -c "grep -qE '^spctl -a -vv .*Beebeeb\.app$' '$LOGF' && grep -qE '^spctl -a -vv -t install .*\.dmg$' '$LOGF'"
 check "the build ran with hardened runtime, the release version, both profiles and the identity" \
   log_has '^shim: build env identity=Developer ID Application: Devidee B\.V\. \(R8352WDJJR\) version=0\.8\.7 hardened=1 profiles=.*BeebeebApp\.provisionprofile,.*BeebeebFileProvider\.provisionprofile$'
-check "the build was told to target aarch64-apple-darwin with --locked" log_has '^bunx tauri build --target aarch64-apple-darwin -- --locked$'
+check "the build targets aarch64-apple-darwin, bundles ONLY the app, turns updater artifacts off by CLI override, --locked" \
+  log_has '^bunx tauri build --target aarch64-apple-darwin --bundles app --config \{"bundle":\{"createUpdaterArtifacts":false\}\} -- --locked$'
+check "the build saw updater artifacts off, no dmg bundling (bundle_dmg.sh/Finder never runs) and NO updater signing key" \
+  log_has '^shim: tauri bundles=app updater=false dmg_bundling=0 signing_key=unset$'
+check "tauri.conf.json itself still says createUpdaterArtifacts true (the preflight asserts it; the off switch is a CLI override)" \
+  bash -c "[[ \$(jq -r .bundle.createUpdaterArtifacts '$REPO/src-tauri/tauri.conf.json') == true ]]"
+check "the build left no Tauri updater tarball and no Tauri dmg behind" \
+  bash -c "[[ ! -e '$REPO/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz' && ! -d '$REPO/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg' ]]"
+check "the commit the artifacts were built from is recorded and is HEAD" \
+  bash -c "[[ \$(cat '$REPO/src-tauri/target/release-macos-local/0.8.7/build-commit') == \$('$REAL_GIT' -C '$REPO' rev-parse HEAD) ]]"
 check "the updater signature was verified locally with minisign before publishing" log_has '^minisign -Vm '
 check "the build ran with the version patched (app reports 0.8.7)" \
   grep -q '^CFBundleShortVersionString=0.8.7$' "$REPO/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app/Contents/Info.plist"
@@ -265,7 +291,6 @@ check "the uploaded dmg carries a signature and a ticket" bash -c "grep -aq SIGN
 check "the uploaded updater bundle contains the stapled app" bash -c "'$REAL_TAR' -tzf '$STATE/release/Beebeeb.app.tar.gz' | grep -q '^Beebeeb.app/Contents/_stapled$'"
 check "the uploaded updater bundle has the single top-level Beebeeb.app" \
   bash -c "[[ \$('$REAL_TAR' -tzf '$STATE/release/Beebeeb.app.tar.gz' | cut -d/ -f1 | sort -u) == Beebeeb.app ]]"
-check "the updater bundle is NOT Tauri's unstapled one" bash -c "! cmp -s '$STATE/release/Beebeeb.app.tar.gz' '$REPO/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz'"
 check "the manifest (alpha) points darwin-aarch64 at the release" \
   bash -c "jq -e '.platforms[\"darwin-aarch64\"].url == \"https://github.com/beebeeb-io/desktop/releases/download/desktop-v0.8.7/Beebeeb.app.tar.gz\"' '$STATE/manifest-alpha.json'"
 check "a summary with both notarization ids was written" \
@@ -519,6 +544,162 @@ run_release 0.8.7 alpha
 check "fails closed: exit code 1" rc_is 1
 check "stops at step 13/13" out_has "FAILED at step 13/$TOTAL_STEPS"
 check "names the wrong url" out_has "darwin-aarch64 url is"
+
+echo "== scenario: the model of the Tauri build is honest (the shim itself can go red) =="
+new_fixture model
+TAURI_OVERRIDE='{"bundle":{"createUpdaterArtifacts":false}}'
+# model_build [ENV=v ...] -- <bunx args...>: the shim's bunx run directly inside the fixture repo, no signing key.
+model_build() {
+  local envs=()
+  while [[ "${1:-}" != "--" ]]; do envs+=("$1"); shift; done
+  shift
+  ( cd "$REPO" && env -u TAURI_SIGNING_PRIVATE_KEY PATH="$SHIMS:$PATH" BB_TEST_STATE="$STATE" BB_TEST_LOG="$LOGF" \
+      BEEBEEB_MACOS_HARDENED_RUNTIME=1 ${envs[@]+"${envs[@]}"} bunx "$@" ) >"$FX/model.out" 2>&1
+}
+model_fails() { ! model_build "$@"; }
+check "the OLD invocation (no override, no --bundles) fails like Tauri did: updater on, pubkey set, no private key" \
+  model_fails -- tauri build --target aarch64-apple-darwin -- --locked
+check "  ...and says why (public key found, no private key)" grep -q 'A public key has been found, but no private key' "$FX/model.out"
+check "the NEW invocation builds without the key" \
+  model_build -- tauri build --target aarch64-apple-darwin --bundles app --config "$TAURI_OVERRIDE" -- --locked
+check "a default-bundles build with Finder automation denied fails with -10006 (bundle_dmg.sh)" \
+  model_fails BB_SHIM_FINDER_DENIED=1 -- tauri build --target aarch64-apple-darwin --config "$TAURI_OVERRIDE" -- --locked
+check "  ...and says -10006" grep -q -- '-10006' "$FX/model.out"
+
+echo "== scenario: Finder automation is denied (-10006) and the release does not care =="
+new_fixture finder
+SCEN_ENV=(BB_SHIM_FINDER_DENIED=1)
+run_release 0.8.7 alpha
+check "a release run with bundle_dmg.sh broken exits 0 (Tauri's dmg is never built)" rc_is 0
+check "prints DONE" out_has "DONE: macOS 0.8.7 is published on the alpha channel"
+check "the uploaded dmg is ours (contains the stapled app), not Tauri's" \
+  bash -c "'$REAL_TAR' -tf '$STATE/release/Beebeeb_0.8.7_aarch64.dmg' | grep -q 'Beebeeb.app/Contents/_stapled'"
+
+echo "== scenario: a TAURI_SIGNING_PRIVATE_KEY in the operator's shell never reaches the build =="
+new_fixture signkeyleak
+SCEN_ENV=(TAURI_SIGNING_PRIVATE_KEY=dummy-not-a-key TAURI_SIGNING_PRIVATE_KEY_PASSWORD=dummy)
+run_release 0.8.7 alpha
+check "the run exits 0" rc_is 0
+check "the build saw NO updater signing key" log_has '^shim: tauri bundles=app updater=false dmg_bundling=0 signing_key=unset$'
+check "the key value is not echoed anywhere" bash -c "! grep -q 'dummy-not-a-key' '$OUT' '$LOGF'"
+
+echo "== scenario: the tag was re-cut after a failed run; --from-step N must not reuse the old commit's artifacts (step 1) =="
+new_fixture recut
+SCEN_ENV=(BB_SHIM_NOTARY_INVALID=dmg)
+run_release 0.8.7 alpha
+expect_stop 7 "notarization of the dmg was not Accepted" pre-upload
+check "the failed run recorded the commit its artifacts came from" test -s "$REPO/src-tauri/target/release-macos-local/0.8.7/build-commit"
+NOTARIZE_BEFORE="$(log_count '^xcrun notarytool submit ')"
+(
+  cd "$REPO" || exit 1
+  echo '- a note added when the release was re-cut' >>RELEASE_NOTES.md
+  "$REAL_GIT" commit -q -am "re-cut: notes fixed"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+SCEN_ENV=()
+run_release 0.8.7 alpha --from-step 7
+expect_stop 1 "were built from commit" pre-upload
+check "names both commits and says to rebuild" bash -c "grep -q 'but HEAD is' '$OUT' && grep -qi 'Remediation:.*rebuild' '$OUT'"
+check "nothing new was submitted to Apple on the refused resume" bash -c "[[ \$(grep -cE '^xcrun notarytool submit ' '$LOGF') -eq $NOTARIZE_BEFORE ]]"
+run_release 0.8.7 alpha --from-step 2
+check "resuming at step 2 (a rebuild from the new commit) is allowed and finishes" rc_is 0
+check "  ...and re-stamps the artifacts with the new HEAD" \
+  bash -c "[[ \$(cat '$REPO/src-tauri/target/release-macos-local/0.8.7/build-commit') == \$('$REAL_GIT' -C '$REPO' rev-parse HEAD) ]]"
+
+echo "== scenario: the build-commit stamp is missing on a resume (step 1) =="
+new_fixture nostamp
+SCEN_ENV=(BB_SHIM_NOTARY_INVALID=dmg)
+run_release 0.8.7 alpha
+expect_stop 7 "notarization of the dmg was not Accepted" pre-upload
+rm -f "$REPO/src-tauri/target/release-macos-local/0.8.7/build-commit"
+SCEN_ENV=()
+run_release 0.8.7 alpha --from-step 7
+expect_stop 1 "build-commit (the commit they were built from) does not exist" pre-upload
+
+echo "== scenario: a failed rebuild leaves no stamp and no stale app behind (step 2) =="
+new_fixture stalebuild
+run_release 0.8.7 alpha
+check "first run exits 0" rc_is 0
+SCEN_ENV=(BB_SHIM_BUILD_FAIL=1)
+run_release 0.8.7 alpha --from-step 2
+check "the failed rebuild stops at step 2 with exit 1" bash -c "[[ $RC -eq 1 ]] && grep -q 'FAILED at step 2/13' '$OUT'"
+check "the old stamp was removed before the build started" test ! -e "$REPO/src-tauri/target/release-macos-local/0.8.7/build-commit"
+SCEN_ENV=()
+run_release 0.8.7 alpha --from-step 3
+check "fails closed at step 1 (a stale app cannot be resumed from)" rc_is 1
+check "names the missing stamp" out_has "build-commit (the commit they were built from) does not exist"
+check "no further notarization happened after the failed rebuild" bash -c "[[ \$(grep -cE '^xcrun notarytool submit ' '$LOGF') -eq 2 ]]"
+check "no second upload happened after the failed rebuild" bash -c "[[ \$(grep -cE '^gh release upload ' '$LOGF') -eq 1 ]]"
+
+echo "== scenario: RELEASE_NOTES.md has no lead marker but the Verification counts were never filled in (step 1) =="
+new_fixture nocounts
+(
+  cd "$REPO" || exit 1
+  write_notes RELEASE_NOTES.md '- Test gate: `bun test` pass / 0 fail, `cargo test --locked` per-binary `test result: ok. N passed`.'
+  "$REAL_GIT" commit -q -am "notes with placeholder counts"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+expect_stop 1 "Verification section carries no test counts" pre-upload
+check "no build was attempted" log_lacks '^bunx '
+
+echo "== scenario: only one of the two counts is filled in (step 1) =="
+new_fixture onecount
+(
+  cd "$REPO" || exit 1
+  write_notes RELEASE_NOTES.md '- Test gate: `bun test` 512 pass / 0 fail, `cargo test --locked` per-binary `test result: ok. N passed`.'
+  "$REAL_GIT" commit -q -am "notes with one count"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+expect_stop 1 "Verification section carries no test counts" pre-upload
+check "names which count is missing" out_has "cargo test"
+
+echo "== scenario: the Verification counts are zero (step 1) =="
+new_fixture zerocounts
+(
+  cd "$REPO" || exit 1
+  write_notes RELEASE_NOTES.md '- Test gate: `bun test` 0 pass / 0 fail, `cargo test --locked` per-binary `test result: ok. 0 passed`.'
+  "$REAL_GIT" commit -q -am "notes with zero counts"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+expect_stop 1 "Verification section carries no test counts" pre-upload
+
+echo "== scenario: minisign is required up front (step 1) =="
+new_fixture nominisign
+SCEN_ENV=(BB_MINISIGN=minisign-not-installed-xyz)
+run_release 0.8.7 alpha
+expect_stop 1 "missing required command: minisign-not-installed-xyz" pre-upload
+check "no build was attempted" log_lacks '^bunx '
+
+echo "== scenario: --skip-local-sig-check is the explicit opt-out from the minisign requirement =="
+new_fixture skipsig
+SCEN_ENV=(BB_MINISIGN=minisign-not-installed-xyz)
+run_release 0.8.7 alpha --skip-local-sig-check
+check "the run exits 0 without minisign" rc_is 0
+check "no minisign call was made" log_lacks '^minisign '
+check "the warning says the signature is NOT verified against the tarball" bash -c "grep -q 'WARNING: --skip-local-sig-check' '$OUT' && grep -q 'NOT verified against the tarball' '$OUT'"
+check "step 13 still ran and says it is a consistency check" out_has "consistency check only"
+
+echo "== scenario: BB_UPDATER_VERIFY_PUBKEY overrides the key for a transition release (step 11) =="
+new_fixture pubkeyoverride
+SCEN_ENV=(BB_UPDATER_VERIFY_PUBKEY=RWSoverrideOldKeyAAAA1234)
+run_release 0.8.7 alpha
+check "the run exits 0" rc_is 0
+check "minisign verified against the override, not the baked key" log_has '^minisign -Vm .* -x .* -P RWSoverrideOldKeyAAAA1234$'
+check "the baked fixture key was NOT used" log_lacks '-P RWSfixturepubkey'
+check "the output says the override was used, and why that is only for a transition release" bash -c "grep -q 'BB_UPDATER_VERIFY_PUBKEY' '$OUT' && grep -qi 'transition' '$OUT'"
+
+echo "== scenario: a malformed BB_UPDATER_VERIFY_PUBKEY is refused up front (step 1) =="
+new_fixture pubkeybad
+SCEN_ENV=("BB_UPDATER_VERIFY_PUBKEY=not a key")
+run_release 0.8.7 alpha
+expect_stop 1 "BB_UPDATER_VERIFY_PUBKEY is not a minisign public key" pre-upload
 
 echo "== scenario: hygiene =="
 check "the script holds no private key block" bash -c "! grep -qE 'BEGIN (EC |RSA |OPENSSH )?PRIVATE KEY' '$SUT'"

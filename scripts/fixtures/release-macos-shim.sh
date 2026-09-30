@@ -17,7 +17,8 @@
 #   BB_SHIM_SPCTL_SOURCE=<text>, BB_SHIM_BUILD_VERSION=<v>, BB_SHIM_APP_UNSIGNED=1,
 #   BB_SHIM_DMG_NOT_SIGNED=1, BB_SHIM_NO_RELEASE=1, BB_SHIM_CORRUPT_UPLOAD=1,
 #   BB_SHIM_SIGN_RUN_FAIL=1, BB_SHIM_NO_SIG=1, BB_SHIM_MINISIGN_FAIL=1,
-#   BB_SHIM_PUBLISH_RUN_FAIL=1, BB_SHIM_MANIFEST_VERSION=<v>, BB_SHIM_MANIFEST_TAG=<tag>.
+#   BB_SHIM_PUBLISH_RUN_FAIL=1, BB_SHIM_MANIFEST_VERSION=<v>, BB_SHIM_MANIFEST_TAG=<tag>,
+#   BB_SHIM_FINDER_DENIED=1 (bundle_dmg.sh fails with -10006 whenever a dmg is bundled).
 
 set -uo pipefail
 
@@ -55,22 +56,66 @@ case "$name" in
   bun) exit 0 ;;
 
   bunx)
-    # bunx tauri build --target aarch64-apple-darwin -- --locked
+    # bunx tauri build --target aarch64-apple-darwin [--bundles app] [--config JSON] -- --locked
     [[ "${1:-}" == tauri && "${2:-}" == build ]] || exit 0
     [[ "${BEEBEEB_MACOS_HARDENED_RUNTIME:-}" == 1 ]] || { echo "shim: hardened runtime not requested" >&2; exit 1; }
+    # Model of the Tauri CLI facts the release script depends on (workspace evidence,
+    # tasks 0341-0354 and 1524 gate 63): with bundle.createUpdaterArtifacts on and a
+    # pubkey configured, the build writes the .app and the updater tarball and then
+    # exits 1 unless TAURI_SIGNING_PRIVATE_KEY is set; and a default (targets "all")
+    # build also runs bundle_dmg.sh, which drives Finder over AppleScript.
+    bundles="" cfg="" cur=""
+    shift 2
+    while (($#)); do
+      case "$1" in
+        --) break ;;
+        --bundles) cur=bundles ;;
+        --config) cur=config ;;
+        --*) cur="" ;;
+        *)
+          [[ "$cur" == bundles ]] && bundles="$bundles $1"
+          [[ "$cur" == config ]] && cfg="$1"
+          ;;
+      esac
+      shift
+    done
+    conf_updater="$(jq -r 'if (.bundle // {} | has("createUpdaterArtifacts")) then (.bundle.createUpdaterArtifacts | tostring) else "false" end' src-tauri/tauri.conf.json)"
+    cfg_updater=""
+    if [[ -n "$cfg" ]]; then
+      cfg_updater="$(jq -r 'if (.bundle // {} | has("createUpdaterArtifacts")) then (.bundle.createUpdaterArtifacts | tostring) else "" end' <<<"$cfg")" ||
+        { echo "shim: --config is not valid JSON" >&2; exit 1; }
+    fi
+    updater="${cfg_updater:-$conf_updater}"
+    pubkey="$(jq -r '.plugins.updater.pubkey // empty' src-tauri/tauri.conf.json)"
+    want_dmg=1
+    [[ -z "${bundles// /}" ]] || { has dmg "$bundles" && want_dmg=1 || want_dmg=0; }
     ver="$(jq -r .version src-tauri/tauri.conf.json)"
     ver="${BB_SHIM_BUILD_VERSION:-$ver}"
     bdir="src-tauri/target/aarch64-apple-darwin/release/bundle"
     rm -rf "$bdir"
-    mkdir -p "$bdir/macos/Beebeeb.app/Contents/MacOS" "$bdir/dmg"
+    mkdir -p "$bdir/macos/Beebeeb.app/Contents/MacOS"
     printf 'CFBundleShortVersionString=%s\n' "$ver" >"$bdir/macos/Beebeeb.app/Contents/Info.plist"
     echo binary >"$bdir/macos/Beebeeb.app/Contents/MacOS/Beebeeb"
-    "$REAL_TAR" -czf "$bdir/macos/Beebeeb.app.tar.gz" -C "$bdir/macos" Beebeeb.app
-    echo "unnotarized tauri dmg" >"$bdir/dmg/Beebeeb_${ver}_aarch64.dmg"
     # vite build rewrites the tracked dist/index.html
     echo "<!-- rebuilt -->" >>dist/index.html
     echo "shim: build env identity=${APPLE_SIGNING_IDENTITY:-} version=${BEEBEEB_RELEASE_VERSION:-} hardened=${BEEBEEB_MACOS_HARDENED_RUNTIME:-} profiles=${MACOS_APP_PROVISION_PROFILE:-},${MACOS_FILE_PROVIDER_PROVISION_PROFILE:-}" >>"$LOG"
+    echo "shim: tauri bundles=${bundles# } updater=$updater dmg_bundling=$want_dmg signing_key=$([[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] && echo set || echo unset)" >>"$LOG"
     [[ "${BB_SHIM_BUILD_FAIL:-}" != 1 ]] || { echo "shim: build failed" >&2; exit 1; }
+    if ((want_dmg)); then
+      mkdir -p "$bdir/dmg"
+      if [[ "${BB_SHIM_FINDER_DENIED:-}" == 1 ]]; then
+        echo "shim: bundle_dmg.sh failed: Finder got an error: AppleEvent handler failed (-10006)" >&2
+        exit 1
+      fi
+      echo "unnotarized tauri dmg" >"$bdir/dmg/Beebeeb_${ver}_aarch64.dmg"
+    fi
+    if [[ "$updater" == true ]]; then
+      "$REAL_TAR" -czf "$bdir/macos/Beebeeb.app.tar.gz" -C "$bdir/macos" Beebeeb.app
+      if [[ -n "$pubkey" && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+        echo "Error A public key has been found, but no private key. Make sure to set TAURI_SIGNING_PRIVATE_KEY environment variable." >&2
+        exit 1
+      fi
+    fi
     ;;
 
   plutil)
