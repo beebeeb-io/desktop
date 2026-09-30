@@ -62,9 +62,14 @@ written for them.
 
 ### Verification
 
-- <!-- lead: fill counts on the release commit --> Test gate on the release commit: `bun test`
-  pass / 0 fail, `cargo test --locked` (src-tauri) per-binary `test result: ok. N passed`,
-  `bunx tsc --noEmit` exit 0.
+- Test gate on the release source (lead, Linux, fresh tree at 9119239 = desktop main f79fab3 plus
+  the release tooling): `bun test` 419 pass / 0 fail across 36 files; `cargo test --locked`
+  (src-tauri) per binary: lib `test result: ok. 652 passed` (2 ignored), keychain
+  `test result: ok. 20 passed`, windows_session_wiring `test result: ok. 8 passed`,
+  windows_signout_cleanup `test result: ok. 3 passed`, all 0 failed, 683 tests executed, count
+  guard exit 0;
+  `bunx tsc --noEmit` exit 0. The release workflow re-runs `bun test` and `cargo test --locked`
+  as its own gate before any installer is built.
 - Desktop CI on the release commit, including the macOS job "File Provider Swift (macOS)", which
   compiles the Finder extension and runs the framing tests with a counted result.
 - The macOS build is notarized and stapled by `scripts/release-macos-local.sh`, which refuses to
