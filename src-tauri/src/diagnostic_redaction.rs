@@ -15,7 +15,9 @@
 //!    included, longest first), every path-like token becomes `[path]`, and
 //!    every remaining word that is not a standard error word or a number
 //!    becomes `[name]`. A name we have never seen therefore cannot survive
-//!    unless it is itself an ordinary error word or a bare number.
+//!    unless it is itself an ordinary error word (a name like `letter` or
+//!    `data` that the state DB does not know) or a bare number. UUIDs and the
+//!    `scheme://host:port` of a URL are kept on purpose.
 //!
 //! [`RedactedError::redactions`] counts the placeholders written, so a bundle
 //! reader can tell a clean message from a heavily filtered one.
@@ -417,8 +419,15 @@ fn boundary_ok(s: &str, start: usize, end: usize) -> bool {
 /// reason phrases and OS error text are built from. Kept lowercase and sorted
 /// is not required, but every entry must be lowercase ASCII (unit-tested).
 /// A word NOT in this list is replaced in the export, so adding a word is a
-/// privacy decision: only ordinary error words belong here, never anything a
-/// user could plausibly have named a file.
+/// privacy decision. The list already contains ordinary words a user could
+/// also have named a file or folder ("letter", "payment", "data", "vault",
+/// "message", "drive", "storage", "trash", "share", "input"), because real
+/// error text needs them ("402 Payment Required", "drive letter", "vault
+/// locked"). That is safe ONLY because the known-name scan runs first: a name
+/// the state DB knows is replaced before this list is consulted. A name the DB
+/// does not know and that is also on this list, or is digits only, survives.
+/// Extend the list only with words our own messages, reqwest, HTTP reason
+/// phrases or OS errors actually produce; never to make a test string pass.
 const STANDARD_WORDS: &[&str] = &[
     // grammar
     "a",
@@ -992,6 +1001,23 @@ mod tests {
     fn a_forged_name_marker_in_input_is_stripped() {
         let out = redact_for_export("failed \u{E000}\u{E000} ok", &KnownNames::new());
         assert!(!out.text.contains('\u{E000}'), "{:?}", out.text);
+    }
+
+    /// Pins the documented residual (docs/CAPABILITIES.md, the Account copy): a
+    /// name the state DB does not know survives when it is a standard word, and
+    /// is removed the moment the DB does know it.
+    #[test]
+    fn residual_unknown_standard_word_name_survives_but_a_known_one_does_not() {
+        let unknown = redact_for_export("rename Payment to Letter failed", &KnownNames::new().finish());
+        assert!(unknown.text.contains("Letter"), "documented residual: {}", unknown.text);
+        let known = redact_for_export("rename Payment to Letter failed", &names(&["Payment", "Letter"]));
+        assert!(!known.text.contains("Payment") && !known.text.contains("Letter"), "{}", known.text);
+        assert!(known.redactions >= 2, "{known:?}");
+        // Digits-only names and opaque ids are kept on purpose.
+        let id = "0b9d5a52-7f0e-4c9e-8a6f-1f2f3a4b5c6d";
+        let kept = redact_for_export(&format!("op {id} at http://127.0.0.1:8080/x/y failed"), &KnownNames::new().finish());
+        assert!(kept.text.contains(id) && kept.text.contains("http://127.0.0.1:8080"), "{}", kept.text);
+        assert!(!kept.text.contains("/x/y"), "{}", kept.text);
     }
 
     #[test]

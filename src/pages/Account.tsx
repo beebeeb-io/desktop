@@ -17,6 +17,7 @@ import {
   SUPPORT_BUNDLE_SAVED_TITLE,
   SUPPORT_BUNDLE_TITLE,
   supportBundleSavedMessage,
+  type ProblemReportResult,
 } from '../diagnosticsCopy'
 import { planRenewalCopy, planStatusTone, quotaPercent, titleCasePlan } from '../planPresentation'
 
@@ -154,7 +155,7 @@ export default function Account() {
   // only returns the JSON to the webview, so calling it here saved nothing.
   const diagnostics = async () => {
     setBusy('report_problem')
-    const result = await command<string>('report_problem')
+    const result = await command<ProblemReportResult>('report_problem')
     setBusy(null)
     if (!result.ok) {
       showToast({
@@ -164,10 +165,11 @@ export default function Account() {
       })
       return
     }
+    // The bundle is on disk either way; a failed email draft is a warning, not a failed save.
     showToast({
-      variant: 'success',
+      variant: result.value.email_opened ? 'success' : 'warning',
       title: SUPPORT_BUNDLE_SAVED_TITLE,
-      message: supportBundleSavedMessage(result.value),
+      message: supportBundleSavedMessage(result.value.path, result.value.email_opened),
     })
   }
 

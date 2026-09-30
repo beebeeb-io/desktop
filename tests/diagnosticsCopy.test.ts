@@ -51,7 +51,10 @@ describe('support bundle copy (task 1685)', () => {
     expect(SUPPORT_BUNDLE_DETAIL).toContain('queue counts')
     expect(SUPPORT_BUNDLE_DETAIL).toContain('error code')
     expect(SUPPORT_BUNDLE_DETAIL).toContain('Paths, file and folder names and sign-in tokens are removed')
-    expect(SUPPORT_BUNDLE_DETAIL).toContain('only standard error words and numbers are kept')
+    // Everything the export keeps is named: ids and the server address too, and the residual.
+    expect(SUPPORT_BUNDLE_DETAIL).toContain('Standard error words, numbers, opaque ids and the server address are kept')
+    expect(SUPPORT_BUNDLE_DETAIL).toContain('a name the app does not recognise can stay only if it is itself a standard word or a number')
+    expect(SUPPORT_BUNDLE_DETAIL).not.toContain('only standard error words and numbers are kept')
     // Brand voice: no reassurance words.
     expect(SUPPORT_BUNDLE_DETAIL).not.toMatch(/\b(secure|safe|bank-grade|anonymi[sz]ed|100%)\b/i)
   })
@@ -61,6 +64,16 @@ describe('support bundle copy (task 1685)', () => {
     expect(SUPPORT_BUNDLE_SAVED_TITLE).toBe('Support bundle saved')
     expect(message).toContain('/tmp/beebeeb-diagnostics-1.json')
     expect(message).toContain('attach the file yourself')
+  })
+
+  it('a failed email draft is reported as a saved bundle, not a failed save', () => {
+    const failed = supportBundleSavedMessage('/tmp/b.json', false)
+    expect(failed).toContain('/tmp/b.json')
+    expect(failed).toContain('send the file to support@beebeeb.io yourself')
+    expect(failed).not.toContain('is opening')
+    const account = readFileSync(join(SRC, 'pages', 'Account.tsx'), 'utf8')
+    expect(account).toContain('result.value.email_opened')
+    expect(account).toContain("'warning'")
   })
 
   it('the Account button calls report_problem (which writes the bundle), not export_diagnostics', () => {

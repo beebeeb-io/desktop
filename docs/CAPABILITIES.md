@@ -198,7 +198,7 @@ WebView shortcuts.
 | Files (Ctrl+1); Activity (Ctrl+2); Trash (Ctrl+4) | `open_menu_view` | Correct page, including already-open window |
 | Zoom in (Ctrl+=); out (Ctrl+-); Actual size (Ctrl+0) | WebView zoom | Visible zoom and reset |
 | Documentation; Keyboard shortcuts (Ctrl+/); Service status | external constants in lib.rs | Correct reachable page |
-| Report a problem | diagnostics export + support URL | Bundle holds queue counts, an error code and an allow-list-filtered last error (no paths, no file or folder names; task 1685); email draft opens without the local bundle path |
+| Report a problem | diagnostics export + support URL | Bundle holds queue counts, an error code and an allow-list-filtered last error (paths and every file or folder name the state DB knows are removed; a name the DB does not know survives only if it is a standard error word or digits, and UUIDs and the server address are kept; task 1685); email draft opens without the local bundle path |
 | Cut/Copy/Paste/Select all | Tauri predefined edit menu | WebView text selection/editing |
 | About Beebeeb | Tauri predefined about dialog | Version/product identity |
 

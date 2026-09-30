@@ -553,8 +553,9 @@ pub struct QueueDiagnostics {
     pub paused: i64,
     pub by_kind: BTreeMap<String, i64>,
     pub paused_by_reason: BTreeMap<String, i64>,
-    /// Last queue error with secrets, paths and file/folder names removed
-    /// (task 1685). See [`crate::diagnostic_redaction`].
+    /// Last queue error with secrets, paths and known file/folder names removed
+    /// (task 1685). A name the state DB does not know survives only if it is a
+    /// standard error word or digits. See [`crate::diagnostic_redaction`].
     pub last_error: Option<String>,
     /// Closed-enum classification of `last_error`; cannot carry a name.
     pub last_error_code: Option<DiagnosticErrorCode>,

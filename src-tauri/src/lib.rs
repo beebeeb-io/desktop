@@ -3936,11 +3936,13 @@ fn free_up_space_unix(
 }
 
 /// Version of the support-bundle shape. 2 = task 1685: `queue.last_error` is an
-/// allow-list-filtered message plus `last_error_code` and `last_error_redactions`;
-/// it never carries file paths or file/folder names.
+/// allow-list-filtered message plus `last_error_code` and `last_error_redactions`.
+/// Paths and every file/folder name the state DB knows are removed. Residual: a
+/// name the DB does not know that is a standard error word or digits only is
+/// kept, and UUIDs and the URL scheme/host/port are kept on purpose.
 const DIAGNOSTICS_FORMAT: u32 = 2;
 
-#[tauri::command]
+#[tauri::command(async)]
 fn export_diagnostics() -> Result<serde_json::Value, String> {
     let cfg = DesktopConfig::load()?;
     match cfg.sync_root {
@@ -4100,6 +4102,47 @@ mod diagnostics_export_tests {
         for leaked in ["guus", "Users", "Application Support", "io.beebeeb.app"] {
             assert!(!body.contains(leaked), "{leaked:?} in {body}");
         }
+    }
+
+    /// Task 1685 review: the bundle is written before the mail draft is tried,
+    /// so a mail failure must still hand the saved path back to the UI.
+    #[test]
+    fn mail_failure_is_a_partial_success_that_keeps_the_saved_path() {
+        let path = Path::new("/tmp/beebeeb-diagnostics-7.json");
+        let failed = problem_report_outcome(path, Err::<(), _>("no mail handler registered"));
+        assert_eq!(
+            failed,
+            ProblemReport { path: "/tmp/beebeeb-diagnostics-7.json".into(), email_opened: false }
+        );
+        let opened = problem_report_outcome(path, Ok::<(), String>(()));
+        assert_eq!(
+            opened,
+            ProblemReport { path: "/tmp/beebeeb-diagnostics-7.json".into(), email_opened: true }
+        );
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json["path"], "/tmp/beebeeb-diagnostics-7.json");
+        assert_eq!(json["email_opened"], false);
+    }
+
+    /// Task 1685 review: both commands build the bundle by reading every known
+    /// name from the state DB. A plain `#[tauri::command]` fn runs on the main
+    /// thread in Tauri v2, so they must be `(async)`. Source-level guard,
+    /// because the thread a command runs on is not observable in a unit test.
+    #[test]
+    fn bundle_commands_run_off_the_main_thread() {
+        let src = include_str!("lib.rs");
+        for name in ["report_problem", "export_diagnostics"] {
+            let needle = format!("fn {name}(");
+            let at = src.find(&needle).unwrap_or_else(|| panic!("{name} not found"));
+            let head = &src[..at];
+            let attr = head.lines().rev().find(|l| l.trim_start().starts_with("#[tauri::command")).unwrap();
+            assert_eq!(attr.trim(), "#[tauri::command(async)]", "{name} must not run on the main thread");
+        }
+        // The native menu path must not call the blocking impl inline either.
+        assert!(
+            !src.contains(concat!("log_menu_result(spec.id, ", "report_problem_impl(")),
+            "menu ReportProblem must go through spawn_menu_task"
+        );
     }
 
     #[test]
@@ -4633,10 +4676,20 @@ fn create_folder_in_sync_root(app: tauri::AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-fn report_problem(app: tauri::AppHandle) -> Result<String, String> {
-    let path = report_problem_impl(&app)?;
-    Ok(path.to_string_lossy().into_owned())
+/// Result of `report_problem` for the Account page. The bundle is written
+/// before the email draft is attempted, so a failed mail open is a partial
+/// success, not a failed save (task 1685).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ProblemReport {
+    path: String,
+    email_opened: bool,
+}
+
+/// `async` so Tauri runs it off the main thread: building the bundle reads every
+/// known file name from the state DB and must not stall the window.
+#[tauri::command(async)]
+fn report_problem(app: tauri::AppHandle) -> Result<ProblemReport, String> {
+    report_problem_impl(&app)
 }
 
 fn sync_root_for_menu_file_action() -> Result<PathBuf, String> {
@@ -4723,7 +4776,19 @@ fn problem_report_email_body(bundle_path: &Path) -> String {
     )
 }
 
-fn report_problem_impl(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// Turns the outcome of opening the mail draft into the report. Called after the
+/// bundle has been written, so a mail error never hides the saved bundle.
+fn problem_report_outcome<E: std::fmt::Display>(path: &Path, mail: Result<(), E>) -> ProblemReport {
+    if let Err(error) = &mail {
+        tracing::warn!(%error, "support bundle saved but the email draft could not be opened");
+    }
+    ProblemReport {
+        path: path.to_string_lossy().into_owned(),
+        email_opened: mail.is_ok(),
+    }
+}
+
+fn report_problem_impl(app: &tauri::AppHandle) -> Result<ProblemReport, String> {
     let diagnostics = export_diagnostics()?;
     let path = diagnostics_bundle_path()?;
     let body = serde_json::to_vec_pretty(&diagnostics).map_err(|e| format!("serialize diagnostics: {e}"))?;
@@ -4733,13 +4798,11 @@ fn report_problem_impl(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let subject = urlencoding::encode("Beebeeb desktop problem report");
     let body_text = problem_report_email_body(&path);
     let body = urlencoding::encode(&body_text);
-    app.opener()
-        .open_url(
-            format!("mailto:support@beebeeb.io?subject={subject}&body={body}"),
-            None::<&str>,
-        )
-        .map_err(|e| format!("open problem report email: {e}"))?;
-    Ok(path)
+    let mail = app.opener().open_url(
+        format!("mailto:support@beebeeb.io?subject={subject}&body={body}"),
+        None::<&str>,
+    );
+    Ok(problem_report_outcome(&path, mail))
 }
 
 fn unused_child_path(parent: &Path, preferred_name: &str) -> Result<PathBuf, String> {
@@ -8744,7 +8807,11 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         DesktopMenuAction::OpenView(view) => log_menu_result(spec.id, open_menu_view(app, view)),
         DesktopMenuAction::Zoom(action) => log_menu_result(spec.id, apply_menu_zoom(app, action)),
         DesktopMenuAction::OpenExternal(url) => log_menu_result(spec.id, open_external_url(app, url)),
-        DesktopMenuAction::ReportProblem => log_menu_result(spec.id, report_problem_impl(app).map(|_| ())),
+        DesktopMenuAction::ReportProblem => {
+            // Off the main thread: the bundle build scans every known name.
+            let app = app.clone();
+            spawn_menu_task(spec.id, async move { report_problem_impl(&app).map(|_| ()) });
+        }
     }
 }
 
