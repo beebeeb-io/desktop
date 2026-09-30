@@ -417,3 +417,13 @@ fn grow_emergency(root: &Path, proposed: Option<&Path>) -> Result<()> {
     ensure!(allocated_len(&reserve.path)? >= required, "reserve growth was not physically allocated");
     Ok(())
 }
+
+fn managed_allocated(root: &Path) -> Result<u64> {
+    let mut bytes = 0u64;
+    for name in ["accounts", "keyslots", "installation.db", "installation.db-wal", "reserve"] {
+        let path = root.join(name);
+        if path.is_dir() { bytes = bytes.checked_add(allocated_tree(&path)?).context("managed allocation overflow")?; }
+        else if path.exists() { bytes = bytes.checked_add(allocated_len(&path)?).context("managed allocation overflow")?; }
+    }
+    Ok(bytes)
+}

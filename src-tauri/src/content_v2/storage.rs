@@ -74,9 +74,10 @@ impl Store {
         let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, false)?;
         let (reserved, excess) = self.budget_from_disk()?;
-        ensure!(reserved + excess + DIRTY_LIMIT <= self.quota, "metadata quota");
+        let new_terminal = if matches!(kind, "Upload" | "RootRetirement") { 128 * 1024 } else { 0 };
+        ensure!(reserved + excess + DIRTY_LIMIT + new_terminal <= self.quota, "metadata quota");
         let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
-        admission.space_admitted(root, (reserved + excess + DIRTY_LIMIT).saturating_sub(allocated_tree(root)?), false)?;
+        admission.space_admitted(root, (reserved + excess + DIRTY_LIMIT + new_terminal).saturating_sub(managed_allocated(root)?), false)?;
         let fields = records::decode(kind, body)?;
         let (account, root): (Vec<u8>, Vec<u8>) = self.db.query_row(
             "SELECT account_binding,root_token FROM v2_store WHERE singleton=1",
@@ -150,9 +151,14 @@ impl Store {
             if !path.exists() {
                 continue;
             }
-            let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let other;
+            let conn = if path == self.path { &self.db } else {
+                other = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                &other
+            };
             let (payload,count):(u64,u64)=conn.query_row("SELECT coalesce(sum(payload_bytes+duplicate_bytes),0),count(*) FROM v2_reservations WHERE phase<>'Released'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            let cost = payload + count * 128 * 1024 + if count > 0 { WAL_LIMIT } else { 0 };
+            let terminal_owners: u64 = conn.query_row("SELECT count(*) FROM v2_owners WHERE kind IN ('Upload','RootRetirement') AND terminal_disposition IS NULL", [], |r| r.get(0))?;
+            let cost = payload + (count + terminal_owners) * 128 * 1024 + if count > 0 || terminal_owners > 0 { WAL_LIMIT } else { 0 };
             let allocated = allocated_len(&path)? + allocated_len(&wal_path(&path))?;
             reserved = reserved.checked_add(cost).context("volume reservation overflow")?;
             excess = excess
@@ -243,7 +249,7 @@ impl Store {
         let terminal = 128 * 1024;
         cost = cost - WAL_LIMIT - 256 * MIB + wal + emergency;
         let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
-        let physically_owned = allocated_tree(root)?;
+        let physically_owned = managed_allocated(root)?;
         global.space_admitted(root, (reserved + excess + cost).saturating_sub(physically_owned), false)?;
         ensure!(
             global.reserve(cost, self.quota.saturating_sub(excess)),
@@ -321,7 +327,7 @@ impl Store {
         self.before_write(false)?;
         let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
         let (reserved, excess) = self.budget_from_disk()?;
-        admission.space_admitted(root, (reserved + excess).saturating_sub(allocated_tree(root)?).max(DIRTY_LIMIT), false)?;
+        admission.space_admitted(root, (reserved + excess).saturating_sub(managed_allocated(root)?).max(DIRTY_LIMIT), false)?;
         let phase: String = self.db.query_row(
             "SELECT phase FROM v2_artifacts WHERE artifact_id=?1",
             [a.id.as_slice()],
@@ -419,7 +425,7 @@ impl Store {
         let (reserved, excess) = self.budget_from_disk()?;
         ensure!(reserved + excess + DIRTY_LIMIT <= self.quota, "metadata quota");
         let root = self.path.parent().and_then(Path::parent).and_then(Path::parent).context("volume root")?;
-        admission.space_admitted(root, (reserved + excess + DIRTY_LIMIT).saturating_sub(allocated_tree(root)?), false)?;
+        admission.space_admitted(root, (reserved + excess + DIRTY_LIMIT).saturating_sub(managed_allocated(root)?), false)?;
         let _ = take_page_write_bytes(&self.db)?;
         let tx = self.db.unchecked_transaction()?;
         let before: u64 = tx.query_row(
