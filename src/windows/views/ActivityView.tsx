@@ -27,6 +27,8 @@ import { useRegionLabel } from '../useRegion'
 import { useEffect, useState } from 'react'
 import {
   accountActivityFeed,
+  command,
+  type VersionConflictEntry,
   accountNotifications,
   type ActivityFeed,
   type ActivityFeedEvent,
@@ -499,6 +501,33 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 
 // ── Root ─────────────────────────────────────────────────────────────────────
 
+function LocalSyncActivity() {
+  const [items, setItems] = useState<VersionConflictEntry[]>([])
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let active = true
+    const refresh = async () => {
+      const result = await command<VersionConflictEntry[]>('list_version_conflict_center')
+      if (!active) return
+      if (result.ok) {
+        setItems(result.value)
+        setError(null)
+      } else { setError(result.reason) }
+    }
+    void refresh()
+    const timer = setInterval(() => { void refresh() }, 5000)
+    return () => { active = false; clearInterval(timer) }
+  }, [])
+  if (!error && items.length === 0) return null
+  return <Card style={{ padding: 16, marginBottom: 16 }}>
+    <div style={{ fontWeight: 600 }}>Local sync issues</div>
+    {error && <p role="status">Could not load local sync status: {error}</p>}
+    {items.map((entry) => <div key={entry.id} style={{ marginTop: 12 }}>
+      <div>{entry.file_name}</div><div role="status">{entry.detail}</div>
+    </div>)}
+  </Card>
+}
+
 export default function ActivityView() {
   const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
@@ -516,6 +545,7 @@ export default function ActivityView() {
         }
       />
 
+      <LocalSyncActivity />
       <TabBar active={tab} onChange={setTab} />
 
       {/* Each section self-fetches on mount; remounting on tab change keeps the

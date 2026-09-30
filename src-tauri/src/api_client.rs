@@ -920,6 +920,25 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// Local namespace intent includes an explicit root move (`parent_id: null`).
+    pub async fn update_namespace(
+        &self,
+        file_id: &str,
+        name: Option<&str>,
+        parent: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        Ok(self
+            .client
+            .patch(self.file_url(file_id))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&serde_json::json!({"name_encrypted":name,"parent_id":parent}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
     pub async fn create_folder(
         &self,
         name_encrypted: &str,

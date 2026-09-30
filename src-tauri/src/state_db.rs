@@ -39,7 +39,6 @@ pub struct UploadFinalization {
     pub stamped: bool,
 }
 
-
 /// High-level sync status for a single file. Maps 1:1 to the icon
 /// overlays rendered by the platform extensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +244,7 @@ pub enum OperationKind {
     RenameFile,
     MoveFile,
     TrashFile,
+    ReconcileDelete,
     RestoreFile,
     RestoreVersion,
 }
@@ -260,6 +260,7 @@ impl OperationKind {
             OperationKind::RenameFile => "rename_file",
             OperationKind::MoveFile => "move_file",
             OperationKind::TrashFile => "trash_file",
+            OperationKind::ReconcileDelete => "reconcile_delete",
             OperationKind::RestoreFile => "restore_file",
             OperationKind::RestoreVersion => "restore_version",
         }
@@ -274,6 +275,7 @@ impl OperationKind {
             "rename_file" => OperationKind::RenameFile,
             "move_file" => OperationKind::MoveFile,
             "trash_file" => OperationKind::TrashFile,
+            "reconcile_delete" => OperationKind::ReconcileDelete,
             "restore_file" => OperationKind::RestoreFile,
             "restore_version" => OperationKind::RestoreVersion,
             _ => OperationKind::UploadFile,
@@ -735,7 +737,9 @@ impl StateDb {
             "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(file_id) DO UPDATE SET
-               path=excluded.path, status=excluded.status,
+               path=CASE WHEN EXISTS(SELECT 1 FROM operation_queue WHERE file_id=excluded.file_id
+                   AND json_extract(metadata_json,'$.local_path') IS NOT NULL) THEN files.path ELSE excluded.path END,
+               status=CASE WHEN files.status='trashing' THEN files.status ELSE excluded.status END,
                size_bytes=excluded.size_bytes, modified_at=excluded.modified_at,
                content_hash=excluded.content_hash,
                remote_updated_at=excluded.remote_updated_at",
@@ -1455,7 +1459,10 @@ impl StateDb {
         let mut stmt = conn.prepare(
             "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
                     parent_id, item_kind
-             FROM files WHERE status = ?1",
+             FROM files WHERE status = ?1 AND NOT EXISTS (
+                SELECT 1 FROM operation_queue o WHERE o.kind='reconcile_delete'
+                AND (o.file_id=files.file_id OR o.target_path=ltrim(files.path,'/')
+                  OR substr(ltrim(files.path,'/'),1,length(o.target_path)+1)=o.target_path || '/'))",
         )?;
         let rows = stmt.query_map(params![status.as_str()], |row| {
             Ok(FileEntry {
@@ -1548,7 +1555,8 @@ impl StateDb {
         conn.execute(
             "UPDATE files SET
                namespace = ?2,
-               parent_id = ?3,
+               parent_id = CASE WHEN EXISTS(SELECT 1 FROM operation_queue WHERE file_id=?1
+                   AND json_extract(metadata_json,'$.local_path') IS NOT NULL) THEN parent_id ELSE ?3 END,
                shared_root_id = ?4,
                share_id = ?5,
                permission_bits = ?6,
@@ -1695,7 +1703,96 @@ impl StateDb {
     }
 
     pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut guard = self.0.lock().expect("state_db mutex poisoned");
+        let conn = guard.transaction()?;
+        let metadata: serde_json::Value = op
+            .metadata_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if op.kind == OperationKind::TrashFile {
+            if let Some(path) = metadata["delete_path"].as_str() {
+                let matches: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM files
+                    WHERE file_id=?1 AND ltrim(path,'/')=?2)
+                    AND NOT EXISTS(SELECT 1 FROM files WHERE ltrim(path,'/')=?2 AND file_id != ?1)",
+                    params![op.file_id, path],
+                    |r| r.get(0),
+                )?;
+                if !matches {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
+            let duplicate: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE file_id=?1 AND status='trashing' AND ?2)
+                 OR EXISTS(SELECT 1 FROM operation_queue WHERE file_id=?1 AND kind='trash_file')",
+                params![op.file_id, metadata["local_delete"].as_bool().unwrap_or(false)],
+                |r| r.get(0),
+            )?;
+            if duplicate {
+                return Ok(());
+            }
+            let unfinished: bool = conn.query_row("WITH RECURSIVE subtree(id) AS (
+                SELECT file_id FROM files WHERE file_id=?1 UNION SELECT f.file_id FROM files f JOIN subtree s ON f.parent_id=s.id)
+                SELECT EXISTS(SELECT 1 FROM upload_finalizations WHERE local_file_id IN subtree OR server_file_id IN subtree)
+                OR EXISTS(SELECT 1 FROM files WHERE file_id IN subtree AND status='uploading')",
+                params![op.file_id], |r| r.get(0))?;
+            if unfinished {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            conn.execute("WITH RECURSIVE subtree(id) AS (
+                SELECT file_id FROM files WHERE file_id=?1 UNION SELECT f.file_id FROM files f JOIN subtree s ON f.parent_id=s.id)
+                DELETE FROM operation_queue WHERE file_id IN subtree AND (kind IN ('rename_file','move_file') OR (kind='trash_file' AND file_id != ?1))", params![op.file_id])?;
+            // One transaction owns the root and its entire local subtree. No
+            // descendant may be seeded while the recursive server trash waits.
+            conn.execute(
+                "WITH RECURSIVE subtree(id) AS (
+                SELECT file_id FROM files WHERE file_id=?1
+                UNION SELECT f.file_id FROM files f JOIN subtree s ON f.parent_id=s.id)
+                UPDATE files SET status='trashing' WHERE file_id IN subtree",
+                params![op.file_id],
+            )?;
+        }
+        if let (Some(source), Some(target)) = (metadata["local_source"].as_str(), metadata["local_path"].as_str()) {
+            let current: String =
+                conn.query_row("SELECT path FROM files WHERE file_id=?1", params![op.file_id], |r| {
+                    r.get(0)
+                })?;
+            if current.trim_start_matches('/') != source {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let occupied: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE ltrim(path,'/')=?1 AND file_id != ?2)",
+                params![target, op.file_id],
+                |r| r.get(0),
+            )?;
+            if occupied {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            // Only the latest namespace intent owns this identity. An in-flight
+            // predecessor may finish, but cannot acknowledge/remove this new row.
+            conn.execute(
+                "DELETE FROM operation_queue WHERE file_id=?1
+                AND json_extract(metadata_json,'$.local_path') IS NOT NULL",
+                params![op.file_id],
+            )?;
+            conn.execute(
+                "UPDATE operation_queue SET metadata_json=json_set(metadata_json,'$.local_path',
+                ?2 || substr(json_extract(metadata_json,'$.local_path'),length(?1)+1))
+                WHERE substr(json_extract(metadata_json,'$.local_path'),1,length(?1)+1)=?1 || '/'",
+                params![source, target],
+            )?;
+            // Prefix slicing is literal, never LIKE (names can contain %/_).
+            conn.execute(
+                "UPDATE files SET path=?2 || substr(ltrim(path,'/'),length(?1)+1)
+                WHERE ltrim(path,'/')=?1 OR substr(ltrim(path,'/'),1,length(?1)+1)=?1 || '/'",
+                params![source, target],
+            )?;
+            conn.execute(
+                "UPDATE files SET parent_id=?2 WHERE file_id=?1",
+                params![op.file_id, op.parent_id],
+            )?;
+        }
         conn.execute(
             "INSERT INTO operation_queue (
                 op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
@@ -1738,7 +1835,105 @@ impl StateDb {
                 op.updated_at
             ],
         )?;
+        conn.commit()?;
         Ok(())
+    }
+
+    /// A successful PATCH is not the namespace echo. Retain its existing
+    /// queue owner until metadata confirms the published binding.
+    pub fn acknowledge_namespace(&self, op_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue SET metadata_json=json_set(metadata_json,'$.namespace_ack',1),
+            paused_reason='namespace_echo', last_error=NULL WHERE op_id=?1",
+            params![op_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn namespace_pending(&self, file_id: &str, remote_path: &str) -> Result<bool> {
+        let mut guard = self.0.lock().expect("state_db mutex poisoned");
+        let conn = guard.transaction()?;
+        conn.execute(
+            "DELETE FROM operation_queue WHERE file_id=?1
+            AND json_extract(metadata_json,'$.namespace_ack')=1
+            AND json_extract(metadata_json,'$.local_path')=?2",
+            params![file_id, remote_path],
+        )?;
+        let pending = conn.query_row(
+            "WITH RECURSIVE ancestors(id,parent_id) AS (
+            SELECT file_id,parent_id FROM files WHERE file_id=?1
+            UNION SELECT f.file_id,f.parent_id FROM files f JOIN ancestors a ON f.file_id=a.parent_id)
+            SELECT EXISTS(SELECT 1 FROM operation_queue o JOIN ancestors a ON o.file_id=a.id
+                WHERE json_extract(o.metadata_json,'$.local_path') IS NOT NULL)",
+            params![file_id],
+            |r| r.get(0),
+        )?;
+        conn.commit()?;
+        Ok(pending)
+    }
+
+    /// Durable unresolved notifications reuse the queue, never a second journal.
+    /// An unknown identity is deliberately NOT resolved by a future path occupant.
+    pub fn defer_delete(&self, path: &str, identity: Option<&str>, reason: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO operation_queue(op_id,kind,file_id,target_path,metadata_json,
+            paused_reason,last_error,created_at,updated_at)
+            SELECT ?1,'reconcile_delete',?2,?3,'{}','delete_identity',?4,?5,?5
+            WHERE NOT EXISTS(SELECT 1 FROM operation_queue WHERE kind='reconcile_delete'
+                AND target_path=?3 AND file_id IS ?2)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                identity,
+                path,
+                reason,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_observation_blocks(&self, file_id: &str, path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE kind='reconcile_delete'
+            AND (file_id=?1 OR target_path=ltrim(?2,'/')
+                OR substr(ltrim(?2,'/'),1,length(target_path)+1)=target_path || '/'))
+            OR EXISTS(SELECT 1 FROM files WHERE status='trashing' AND
+                (file_id=?1 OR substr(ltrim(?2,'/'),1,length(ltrim(path,'/'))+1)=ltrim(path,'/') || '/'))",
+            params![file_id, path],
+            |r| r.get(0),
+        )
+    }
+
+    /// A confirmed remote restore may release completed local trash, but never
+    /// erase a newer local queue owner. Fresh metadata recreates the subtree.
+    pub fn release_restored_tombstones(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("WITH RECURSIVE subtree(id) AS (
+            SELECT file_id FROM files WHERE file_id=?1
+            UNION SELECT f.file_id FROM files f JOIN subtree s ON f.parent_id=s.id),
+            ancestors(id,parent_id) AS (
+            SELECT file_id,parent_id FROM files WHERE file_id=?1
+            UNION SELECT f.file_id,f.parent_id FROM files f JOIN ancestors a ON f.file_id=a.parent_id)
+            DELETE FROM files WHERE file_id IN subtree AND status='trashing'
+            AND NOT EXISTS(SELECT 1 FROM operation_queue WHERE file_id IN subtree OR file_id IN (SELECT id FROM ancestors))",
+            params![file_id])?;
+        Ok(())
+    }
+
+    /// A watcher may coalesce intent after a worker has read its batch.
+    pub fn operation_is_pending(&self, op_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE op_id=?1)",
+            params![op_id],
+            |r| r.get(0),
+        )
     }
 
     pub fn list_due_operations(&self, now: i64) -> Result<Vec<PendingOperation>> {
@@ -1846,7 +2041,6 @@ impl StateDb {
         tx.execute("DELETE FROM upload_resume WHERE op_id=?1", params![pending.op_id])?;
         tx.commit()
     }
-    #[cfg(any(target_os = "windows", test))]
     pub fn upload_finalizations(&self) -> Result<Vec<UploadFinalization>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare("SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped FROM upload_finalizations")?;

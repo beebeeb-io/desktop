@@ -113,44 +113,30 @@ use tokio::sync::mpsc;
 // `TrashFile` op. That would be wrong (the server ALREADY trashed it) and is a
 // feedback loop.
 //
-// The PRIMARY guard is ordering: the engine removes the DB ROW *before* the
-// placeholder, so `handle_delete`'s `get_file_by_path` returns `Ok(None)` and
-// queues nothing. This set is the DETERMINISTIC second guard for the window where
-// the row may not be observable yet (and to drop the event before `handle_delete`
-// runs at all): the engine registers each path it is about to delete via
-// [`suppress_engine_delete`], and the debounce loop consults [`take_engine_delete_suppressed`]
-// on every `Delete` event — a hit means "engine-originated, do not propagate".
-//
-// Mirrors the existing `in_flight` CREATE-suppression set (scan_loop) and the
-// `windows_cf::NOTIFY_TX` static: an `extern "system"` callback / a deep engine
-// call site can't thread a handle, so a process-global is the simplest hop. The
-// set is small (only paths mid-delete) and self-draining (entries are consumed on
-// the matching Delete event, or swept by [`prune_stale_engine_suppressions`]).
-static ENGINE_DELETE_SUPPRESS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+// The engine removes DB bindings before removing placeholders. Match BOTH the
+// removed identity and path, and suppress repeats only while the binding is gone.
+// A restored identity or new path occupant must receive a fresh delete decision.
+// This remains a transient echo filter; StateDb owns namespace/delete intent.
+static ENGINE_DELETE_SUPPRESS: OnceLock<Mutex<HashMap<(PathBuf, String), Instant>>> = OnceLock::new();
 
-fn engine_delete_suppress() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+fn engine_delete_suppress() -> &'static Mutex<HashMap<(PathBuf, String), Instant>> {
     ENGINE_DELETE_SUPPRESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register `path` as an ENGINE-ORIGINATED delete so the watcher drops the
-/// `NOTIFY_DELETE_COMPLETION` it will fire instead of queuing a redundant server
-/// trash. Call this IMMEDIATELY BEFORE `windows_cf::delete_placeholder` on the
-/// remote-deletion reconcile path (task 0806). Idempotent; refreshes the timer.
-pub fn suppress_engine_delete(path: &Path) {
+/// Call immediately before removing a placeholder whose DB binding was removed.
+pub fn suppress_engine_delete(path: &Path, file_id: &str) {
     if let Ok(mut set) = engine_delete_suppress().lock() {
-        set.insert(path.to_path_buf(), Instant::now());
+        set.insert((path.to_path_buf(), file_id.to_owned()), Instant::now());
     }
 }
 
-/// If `path` was registered by [`suppress_engine_delete`], CONSUME the entry and
-/// return `true` (the delete is engine-originated → the watcher must NOT queue a
-/// server trash). Returns `false` for a genuine user delete. Consuming on read
-/// keeps the set self-draining so a later user delete of the same path is honoured.
-fn take_engine_delete_suppressed(path: &Path) -> bool {
-    match engine_delete_suppress().lock() {
-        Ok(mut set) => set.remove(path).is_some(),
-        Err(_) => false,
-    }
+/// Both delete-completion and deleted-close can echo the same engine removal.
+fn engine_delete_suppressed(path: &Path, file_id: &str) -> bool {
+    engine_delete_suppress()
+        .lock()
+        .ok()
+        .and_then(|set| set.get(&(path.to_path_buf(), file_id.to_owned())).copied())
+        .is_some_and(|registered| registered.elapsed() < ENGINE_SUPPRESS_TTL)
 }
 
 /// Drop suppression entries older than this. A registered engine delete whose
@@ -228,11 +214,20 @@ pub enum NotifyEvent {
     CloseCompletion(PathBuf),
     /// A file/dir was deleted (`NOTIFY_DELETE_COMPLETION`). Point-in-time — the
     /// op already happened, so no debounce: dispatched immediately.
-    Delete(PathBuf),
+    Delete {
+        path: Option<PathBuf>,
+        file_id: Option<String>,
+        generation: u64,
+    },
     /// A file/dir was renamed or moved (`NOTIFY_RENAME_COMPLETION`). `source`
     /// is the old absolute path, `target` the new absolute path. Point-in-time,
     /// dispatched immediately.
-    Rename { source: PathBuf, target: PathBuf },
+    Rename {
+        source: PathBuf,
+        target: PathBuf,
+        file_id: Option<String>,
+        generation: u64,
+    },
 }
 
 /// Owned handle to the running upload driver. Dropping it signals BOTH the
@@ -321,28 +316,41 @@ async fn debounce_loop(
                         // Debounce: record/refresh the settle timer for this path.
                         pending.insert(path, Instant::now());
                     }
-                    Some(NotifyEvent::Delete(path)) => {
-                        // The file is already gone — handle immediately. Drop any
-                        // pending close-completion for the same path so a stale
-                        // settle doesn't try to upload a now-deleted file.
-                        pending.remove(&path);
-                        // task 0806: if the ENGINE just removed this placeholder to
-                        // reconcile a REMOTE deletion, this NOTIFY is an echo of OUR
-                        // own delete — drop it (consuming the suppression entry) so we
-                        // never queue a redundant server trash. A genuine user delete
-                        // has no entry and falls through to handle_delete as before.
-                        if take_engine_delete_suppressed(&path) {
-                            tracing::debug!("upload driver: dropping engine-originated delete (remote-deletion reconcile)");
+                    Some(NotifyEvent::Delete { path, file_id, generation }) => {
+                        #[cfg(target_os = "windows")]
+                        let Some(owner) = crate::windows_cf::callback_bridge(generation as usize as *mut _) else { continue; };
+                        #[cfg(target_os = "windows")]
+                        if !std::ptr::eq(&*owner, bridge.as_ref()) { continue; }
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = generation;
+                        let path = path.or_else(|| file_id.as_deref().and_then(|id| bridge.db().get_file(id).ok().flatten())
+                            .and_then(|f| crate::engine_bridge::local_file_path_under_sync_root(&sync_root,&f.path).ok()));
+                        if let Some(path) = path {
+                            pending.remove(&path);
+                            handle_identity_delete(&bridge,&sync_root,&path,file_id.as_deref());
                         } else {
-                            handle_delete(&bridge, &sync_root, &path).await;
+                            tracing::warn!("delete callback has no resolvable path; retained for review");
+                            if let Err(error) = bridge.db().defer_delete("",file_id.as_deref(),"Delete callback has no resolvable path or identity") {
+                                tracing::error!(%error,"cannot persist unresolved callback");
+                            }
                         }
                     }
-                    Some(NotifyEvent::Rename { source, target }) => {
-                        // A rename invalidates a pending close-completion for the
-                        // OLD path; the NEW path's close (if any) will arrive on
-                        // its own event.
+                    Some(NotifyEvent::Rename { source, target, file_id, generation }) => {
+                        #[cfg(target_os = "windows")]
+                        let Some(owner) = crate::windows_cf::callback_bridge(generation as usize as *mut _) else { continue; };
+                        #[cfg(target_os = "windows")]
+                        if !std::ptr::eq(&*owner, bridge.as_ref()) { continue; }
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = generation;
                         pending.remove(&source);
-                        handle_rename(&bridge, &sync_root, &source, &target).await;
+                        let matched = file_id.as_deref().and_then(|id| bridge.db().get_file(id).ok().flatten())
+                            .is_some_and(|f| crate::engine_bridge::relative_db_path(&sync_root,&source).as_deref() == Some(f.path.trim_start_matches('/')));
+                        if matched {
+                            handle_rename(&bridge, &sync_root, &source, &target).await;
+                        } else {
+                            tracing::warn!("rename callback identity does not match source binding; requesting reconciliation");
+                            if let Err(error) = bridge.db().request_resnapshot() { tracing::error!(%error,"cannot request rename reconciliation"); }
+                        }
                     }
                     // Sender dropped (handle gone) — exit.
                     None => break,
@@ -442,7 +450,12 @@ async fn scan_loop(
 /// every genuinely-new file for upload, and keep `in_flight` in sync with disk
 /// reality (add dispatched paths, prune vanished ones). Synchronous — called
 /// inside [`tokio::task::spawn_blocking`] from [`scan_loop`].
-fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &mut std::collections::HashSet<PathBuf>) {
+fn run_one_scan(
+    bridge: &EngineBridge,
+    sync_root: &std::path::Path,
+    in_flight: &mut std::collections::HashSet<PathBuf>,
+) {
+    reconcile_delete_observations(bridge, sync_root);
     let mut seen_on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut dispatched = 0usize;
     tracing::debug!(
@@ -758,41 +771,106 @@ fn dispatch_local_create(
 }
 
 /// A local delete fired. If the path maps to a known server file, enqueue the
-/// existing trash op so the server deletes it too. If there is no DB row, the
-/// delete was of an untracked local file (or an engine-internal file) — nothing
-/// to propagate.
-async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
-    // Engine-internal deletes (state.db churn, lock file) must never propagate.
-    if crate::engine_bridge::path_is_engine_internal(sync_root, path) {
+/// existing trash op so the server deletes it too. Test adapter for the former
+/// path-only ingress; native dispatch always supplies the callback identity.
+#[cfg(test)]
+async fn handle_delete(bridge: &EngineBridge, sync_root: &Path, path: &Path) {
+    // Portable/path-based callers already resolved their event at ingress.
+    let identity = crate::engine_bridge::relative_db_path(sync_root, path)
+        .and_then(|rel| bridge.db().get_file_by_path(&rel).ok().flatten())
+        .map(|e| e.file_id);
+    handle_identity_delete(bridge, sync_root, path, identity.as_deref());
+}
+
+fn handle_identity_delete(bridge: &EngineBridge, sync_root: &Path, path: &Path, identity: Option<&str>) {
+    if bridge.is_stopping() || crate::engine_bridge::path_is_engine_internal(sync_root, path) {
         return;
     }
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
-    match bridge.db().get_file_by_path(&rel) {
-        Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
-            Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
-                // CRITICAL (task 0802): mark the row `Trashing` so the Windows
-                // placeholder seeder (`populate_placeholders`, which only mints
-                // for `CloudOnly`) does NOT re-create the on-disk placeholder
-                // the user just deleted before the queued TrashFile op
-                // round-trips. The TrashFile op deletes this row on success; a
-                // permanent trash failure leaves it `Trashing` (recoverable —
-                // the file still exists on the server) rather than reappearing.
-                if let Err(e) = bridge.db().set_status(&entry.file_id, crate::state_db::FileStatus::Trashing) {
-                    tracing::warn!(error = %e, "upload driver: could not mark row trashing after local delete");
-                }
-                tracing::info!(op_id = %op_id, "upload driver: queued server delete for locally-removed file");
-            }
-            Ok(FinderWriteOutcome::Ignored { .. }) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "upload driver: failed to queue server delete");
-            }
-        },
-        Ok(None) => { /* untracked local file removed — nothing to propagate */ }
-        Err(e) => {
-            tracing::warn!(error = %e, "upload driver: delete DB lookup failed; skipping");
+    let result = (|| -> anyhow::Result<()> {
+        let id = identity.ok_or_else(|| anyhow::anyhow!("Delete has no known identity; review required"))?;
+        if engine_delete_suppressed(path, id) && bridge.db().get_file(id)?.is_none() {
+            return Ok(());
         }
+        let entry = bridge
+            .db()
+            .get_file(id)?
+            .ok_or_else(|| anyhow::anyhow!("Delete identity is not tracked; awaiting reconciliation"))?;
+        if entry.path.trim_start_matches('/') != rel {
+            anyhow::bail!("Delete binding changed; awaiting reconciliation");
+        }
+        if bridge
+            .db()
+            .get_file_by_path(&rel)?
+            .is_some_and(|other| other.file_id != id)
+        {
+            anyhow::bail!("Delete path has a different owner; review required");
+        }
+        if entry.status == crate::state_db::FileStatus::Trashing {
+            return Ok(());
+        }
+        // A delayed callback must not delete a reused name; absence alone is
+        // never enough, it is checked only after the admitted identity above.
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => anyhow::bail!("Delete path is occupied; review required"),
+            Err(e) => return Err(e.into()),
+        }
+        std::fs::read_dir(sync_root)?;
+        if bridge
+            .db()
+            .upload_finalizations()?
+            .iter()
+            .any(|f| f.local_file_id == id || f.server_file_id == id)
+        {
+            anyhow::bail!("Delete awaits upload finalization identity; preserved for review");
+        }
+        if entry.status == crate::state_db::FileStatus::Uploading {
+            anyhow::bail!("Delete awaits upload identity; preserved for review");
+        }
+        bridge.queue_watcher_delete(id, &rel)?;
+        tracing::info!(
+            file_id = id,
+            "upload driver: queued server delete for locally-removed file"
+        );
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(error=%error, "upload driver: unresolved delete retained for reconciliation");
+        if let Err(db_error) = bridge.db().defer_delete(&rel, identity, &error.to_string()) {
+            tracing::error!(error=%db_error,"upload driver: cannot persist delete observation");
+        }
+    }
+}
+
+fn reconcile_delete_observations(bridge: &EngineBridge, root: &Path) {
+    let result = (|| -> anyhow::Result<()> {
+        for op in bridge.db().list_review_operations()? {
+            if op.kind != crate::state_db::OperationKind::ReconcileDelete {
+                continue;
+            }
+            let Some(id) = op.file_id.as_deref() else {
+                continue;
+            };
+            let Some(path) = op.target_path.as_deref() else {
+                continue;
+            };
+            let absolute = crate::engine_bridge::local_file_path_under_sync_root(root, path)?;
+            handle_identity_delete(bridge, root, &absolute, Some(id));
+            if bridge
+                .db()
+                .get_file(id)?
+                .is_some_and(|f| f.status == crate::state_db::FileStatus::Trashing)
+            {
+                bridge.db().remove_operation(&op.op_id)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%error,"delete reconciliation failed");
     }
 }
 
@@ -845,16 +923,19 @@ async fn handle_rename(
     // right server parent; `None` means moved to (or kept at) the root. We pass
     // it through verbatim — `queue_finder_modify` treats `Some(parent)` as a
     // move and `None` as a rename-in-place.
+    let Some(target_rel) = crate::engine_bridge::relative_db_path(sync_root, target) else {
+        // Recycle Bin / move out of this root is a local deletion.
+        handle_identity_delete(bridge, sync_root, source, Some(&existing.file_id));
+        return;
+    };
     let new_parent_id = bridge.resolve_parent_id_for(sync_root, target);
 
     let modify = crate::engine_bridge::FinderWriteTarget {
         file_id: Some(existing.file_id.clone()),
         parent_id: new_parent_id,
         filename: new_name,
-        // A metadata-only move/rename: the server path is derived from
-        // parent_id + name, and the local row's path is re-keyed by the next
-        // sync_tick. No new-file path key to carry here.
-        rel_path: None,
+        // Publish the local binding in the same transaction as metadata intent.
+        rel_path: Some(target_rel),
         kind: crate::engine_bridge::FinderWriteItemKind::File,
         // No new bytes — this is a metadata-only move/rename.
         contents_path: None,
@@ -882,53 +963,587 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    #[test]
-    fn engine_delete_suppression_is_consumed_once() {
-        // task 0806: an engine-originated delete is registered, then the FIRST
-        // matching Delete event consumes the entry (returns true → drop it). A
-        // SECOND event for the same path is a genuine user delete (false →
-        // propagate). Use unique paths so the process-global static can't collide
-        // with another test.
-        let p = std::path::Path::new("/sync/engine-deleted-0806-unique-a.txt");
-        assert!(!take_engine_delete_suppressed(p), "unregistered path is not suppressed");
-
-        suppress_engine_delete(p);
-        assert!(take_engine_delete_suppressed(p), "first event after register is suppressed");
-        assert!(
-            !take_engine_delete_suppressed(p),
-            "suppression is consumed once — a later user delete of the same path propagates"
-        );
+    fn seed_delete_file(db: &StateDb, id: &str, path: &str) {
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: id.into(),
+            path: path.into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
     }
 
-    #[test]
-    fn engine_delete_suppression_distinguishes_paths() {
-        // Registering one path must not suppress a delete of a DIFFERENT path.
-        let registered = std::path::Path::new("/sync/engine-deleted-0806-unique-b.txt");
-        let user = std::path::Path::new("/sync/user-deleted-0806-unique-c.txt");
-        suppress_engine_delete(registered);
-        assert!(
-            !take_engine_delete_suppressed(user),
-            "a genuine user delete of an unregistered path must NOT be suppressed"
-        );
-        // The registered entry is still there (untouched by the miss above).
-        assert!(take_engine_delete_suppressed(registered));
+    // Real HTTP transport; bounded nonblocking accept avoids a hanging red test.
+    fn delete_http_server(
+        responses: Vec<(u16, serde_json::Value)>,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (stop, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut responses = std::collections::VecDeque::from(responses);
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline && matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                        let mut bytes = Vec::new();
+                        let mut buf = [0; 4096];
+                        loop {
+                            let n = socket.read(&mut buf).unwrap();
+                            if n == 0 {
+                                break;
+                            }
+                            bytes.extend_from_slice(&buf[..n]);
+                            if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let headers = String::from_utf8_lossy(&bytes[..end]);
+                                let len = headers
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.to_lowercase()
+                                            .strip_prefix("content-length: ")
+                                            .and_then(|v| v.parse::<usize>().ok())
+                                    })
+                                    .unwrap_or(0);
+                                if bytes.len() >= end + 4 + len {
+                                    break;
+                                }
+                            }
+                        }
+                        captured
+                            .lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&bytes).into_owned());
+                        let (status, body) = responses.pop_front().unwrap_or((200, serde_json::json!({})));
+                        let body = body.to_string();
+                        write!(socket,"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            }
+        });
+        (url, requests, stop, thread)
     }
 
-    #[test]
-    fn engine_delete_suppression_prunes_stale_entries() {
-        // A registered delete whose NOTIFY never arrives must eventually be swept
-        // so it can't shadow a later user delete. Force-insert with an OLD instant
-        // and confirm the prune evicts it.
-        let p = std::path::Path::new("/sync/engine-deleted-0806-unique-d.txt");
-        {
-            let mut set = engine_delete_suppress().lock().unwrap();
-            set.insert(p.to_path_buf(), Instant::now() - ENGINE_SUPPRESS_TTL - Duration::from_secs(1));
+    async fn rename_delete_case(patch_first: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (url, requests, stop, thread) = delete_http_server(vec![]);
+        let db = Arc::new(StateDb::open(temp.path().join("state.db")).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        let id = "16720000-0000-4000-8000-000000000001";
+        seed_delete_file(&db, id, "before.txt");
+        fs::write(root.join("before.txt"), b"abc").unwrap();
+        fs::rename(root.join("before.txt"), root.join("after.txt")).unwrap();
+        handle_rename(&bridge, &root, &root.join("before.txt"), &root.join("after.txt")).await;
+        if patch_first {
+            bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
         }
+        fs::remove_file(root.join("after.txt")).unwrap();
+        handle_delete(&bridge, &root, &root.join("after.txt")).await;
+        let trash = db
+            .list_due_operations(i64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.kind == OperationKind::TrashFile)
+            .collect::<Vec<_>>();
+        assert_eq!(trash.len(), 1, "one durable TrashFile after rename/delete");
+        assert_eq!(trash[0].file_id.as_deref(), Some(id));
+        handle_delete(&bridge, &root, &root.join("after.txt")).await;
+        assert_eq!(
+            db.list_due_operations(i64::MAX)
+                .unwrap()
+                .iter()
+                .filter(|o| o.kind == OperationKind::TrashFile)
+                .count(),
+            1,
+            "duplicate callback must not enqueue"
+        );
+        assert_eq!(db.get_file(id).unwrap().unwrap().status, FileStatus::Trashing);
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.iter().filter(|r| r.starts_with("DELETE ")).count(),
+            1,
+            "one server DELETE: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.starts_with(&format!("DELETE /api/v1/files/{id} HTTP/1.1")))
+        );
+    }
+
+    #[tokio::test]
+    async fn task1672_delete_before_patch() {
+        rename_delete_case(false).await;
+    }
+    #[tokio::test]
+    async fn task1672_delete_after_patch_before_echo() {
+        rename_delete_case(true).await;
+    }
+
+    fn seed_delete_folder(db: &StateDb, id: &str, path: &str, parent: Option<&str>) {
+        seed_delete_file(db, id, path);
+        let mut contract = db.get_file_contract_state(id).unwrap().unwrap();
+        contract.item_kind = crate::state_db::ItemKind::Folder;
+        contract.parent_id = parent.map(str::to_owned);
+        db.set_file_contract_state(&contract).unwrap();
+    }
+
+    fn trash_count(db: &StateDb) -> usize {
+        db.list_due_operations(i64::MAX)
+            .unwrap()
+            .iter()
+            .filter(|o| o.kind == OperationKind::TrashFile)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn task1672_folder_move_restart_subtree_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("old/child")).unwrap();
+        let state = temp.path().join("state.db");
+        let (url, requests, stop, thread) = delete_http_server(vec![]);
+        let db = Arc::new(StateDb::open(&state).unwrap());
+        let bridge = EngineBridge::new(
+            db.clone(),
+            Arc::new(ApiClient::new(url.clone(), "fixture".into(), [17; 32])),
+        );
+        seed_delete_folder(&db, "folder", "old", None);
+        seed_delete_folder(&db, "child", "old/child", Some("folder"));
+        seed_delete_file(&db, "file", "old/child/a.txt");
+        let mut contract = db.get_file_contract_state("file").unwrap().unwrap();
+        contract.parent_id = Some("child".into());
+        db.set_file_contract_state(&contract).unwrap();
+        fs::rename(root.join("old"), root.join("new")).unwrap();
+        handle_rename(&bridge, &root, &root.join("old"), &root.join("new")).await;
+        assert_eq!(db.get_file("file").unwrap().unwrap().path, "new/child/a.txt");
+        drop(bridge);
+        drop(db);
+        let db = Arc::new(StateDb::open(&state).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        fs::remove_dir_all(root.join("new")).unwrap();
+        handle_delete(&bridge, &root, &root.join("new")).await;
+        handle_delete(&bridge, &root, &root.join("new/child/a.txt")).await;
+        assert_eq!(trash_count(&db), 1);
+        assert_eq!(db.list_by_status(FileStatus::Trashing).unwrap().len(), 3);
+        run_one_scan(&bridge, &root, &mut HashSet::new());
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        assert_eq!(db.list_by_status(FileStatus::CloudOnly).unwrap().len(), 0);
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.starts_with("DELETE /api/v1/files/folder "))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn task1672_move_to_root_explicit_parent_and_delete_after_echo() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("dir")).unwrap();
+        let (url, requests, stop, thread) = delete_http_server(vec![]);
+        let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        seed_delete_folder(&db, "parent", "dir", None);
+        seed_delete_file(&db, "file", "dir/a.txt");
+        let mut c = db.get_file_contract_state("file").unwrap().unwrap();
+        c.parent_id = Some("parent".into());
+        db.set_file_contract_state(&c).unwrap();
+        fs::write(root.join("dir/a.txt"), b"abc").unwrap();
+        fs::rename(root.join("dir/a.txt"), root.join("b.txt")).unwrap();
+        handle_rename(&bridge, &root, &root.join("dir/a.txt"), &root.join("b.txt")).await;
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        assert!(db.namespace_pending("file", "dir/a.txt").unwrap());
+        assert_eq!(db.get_file("file").unwrap().unwrap().path, "b.txt");
+        assert!(!db.namespace_pending("file", "b.txt").unwrap());
+        fs::remove_file(root.join("b.txt")).unwrap();
+        handle_delete(&bridge, &root, &root.join("b.txt")).await;
+        assert_eq!(trash_count(&db), 1);
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("PATCH ") && r.contains("\"parent_id\":null"))
+                .count(),
+            1
+        );
+        assert_eq!(requests.iter().filter(|r| r.starts_with("DELETE ")).count(), 1);
+    }
+
+    #[test]
+    fn task1672_unknown_identity_path_reuse_remote_echo_and_inaccessible_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("db"));
+        seed_delete_file(&db, "original", "gone.txt");
+        handle_identity_delete(&bridge, &root, &root.join("gone.txt"), Some("unknown"));
+        handle_identity_delete(&bridge, &root, &root.join("untracked.txt"), None);
+        seed_delete_file(&db, "replacement", "untracked.txt");
+        fs::write(root.join("gone.txt"), b"replacement bytes").unwrap();
+        handle_identity_delete(&bridge, &root, &root.join("gone.txt"), Some("original"));
+        assert_eq!(trash_count(&db), 0);
+        assert_eq!(
+            crate::engine_bridge::version_conflict_feed_from_db(&db)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "delete")
+                .count(),
+            3
+        );
+        assert!(db.delete_observation_blocks("replacement", "untracked.txt").unwrap());
+        reconcile_delete_observations(&bridge, &root);
+        assert_eq!(trash_count(&db), 0);
+        suppress_engine_delete(&root.join("echo.txt"), "remote");
+        handle_identity_delete(&bridge, &root, &root.join("echo.txt"), Some("remote"));
+        assert_eq!(trash_count(&db), 0);
+        let absent_root = temp.path().join("unmounted");
+        seed_delete_file(&db, "absent", "missing.txt");
+        handle_identity_delete(&bridge, &absent_root, &absent_root.join("missing.txt"), Some("absent"));
+        assert_eq!(trash_count(&db), 0);
+    }
+
+    #[test]
+    fn task1672_pending_finalization_defers_then_scan_reconciles_original_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("db"));
+        seed_delete_file(&db, "server", "gone.txt");
+        db.put_upload_finalization(&crate::state_db::UploadFinalization {
+            op_id: "upload".into(),
+            local_file_id: "local".into(),
+            server_file_id: "server".into(),
+            target_path: "gone.txt".into(),
+            payload_path: "preserved-proof".into(),
+            stamped: false,
+        })
+        .unwrap();
+        handle_identity_delete(&bridge, &root, &root.join("gone.txt"), Some("server"));
+        assert_eq!(trash_count(&db), 0);
+        assert_eq!(db.upload_finalizations().unwrap().len(), 1);
+        assert_eq!(db.list_review_operations().unwrap().len(), 1);
+        // Simulate the owning finalizer's completion; scan consumes only the
+        // admitted delete, never infers one from the target's absence.
+        db.mark_upload_finalization_stamped("upload").unwrap();
+        db.forget_upload_finalization("upload").unwrap();
+        run_one_scan(&bridge, &root, &mut HashSet::new());
+        assert_eq!(trash_count(&db), 1);
+        assert_eq!(
+            db.list_review_operations()
+                .unwrap()
+                .iter()
+                .filter(|o| o.kind == OperationKind::ReconcileDelete)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn task1672_trash_transaction_failure_rolls_back_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let state = temp.path().join("db");
+        let (db, bridge) = test_bridge(&state);
+        seed_delete_file(&db, "file", "gone.txt");
+        let connection = rusqlite::Connection::open(&state).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_trash BEFORE INSERT ON operation_queue WHEN NEW.kind='trash_file' BEGIN SELECT RAISE(ABORT,'injected queue failure'); END;").unwrap();
+        handle_identity_delete(&bridge, &root, &root.join("gone.txt"), Some("file"));
+        assert_eq!(trash_count(&db), 0);
+        assert_eq!(db.get_file("file").unwrap().unwrap().status, FileStatus::CloudOnly);
+        assert_eq!(db.list_review_operations().unwrap().len(), 1);
+        connection.execute_batch("DROP TRIGGER fail_trash").unwrap();
+        run_one_scan(&bridge, &root, &mut HashSet::new());
+        assert_eq!(trash_count(&db), 1);
+    }
+
+    #[tokio::test]
+    async fn task1672_http_failure_is_visible_and_retries_same_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (url, requests, stop, thread) = delete_http_server(vec![
+            (500, serde_json::json!({"error":"injected"})),
+            (200, serde_json::json!({})),
+        ]);
+        let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        seed_delete_file(&db, "file", "gone.txt");
+        handle_delete(&bridge, &root, &root.join("gone.txt")).await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let first = bridge.process_due_operations(&root, now + 5).await.unwrap();
+        assert_eq!(first.retried_op_ids.len(), 1);
+        let reviews = crate::engine_bridge::version_conflict_feed_from_db(&db).unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].kind, "delete");
+        assert!(reviews[0].detail.contains("500"));
+        assert_eq!(db.get_file("file").unwrap().unwrap().status, FileStatus::Trashing);
+        let second = bridge.process_due_operations(&root, now + 1000).await.unwrap();
+        assert_eq!(second.completed_op_ids, first.retried_op_ids);
+        assert_eq!(trash_count(&db), 0);
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.starts_with("DELETE "))
+                .count(),
+            2,
+            "one rejected attempt and one successful DELETE"
+        );
+    }
+
+    #[tokio::test]
+    async fn task1672_stale_snapshot_cannot_revert_binding_or_resurrect_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let id = "16720000-0000-4000-8000-000000000003";
+        let node = |name: &str| serde_json::json!({"id":id,"name_encrypted":beebeeb_core::encrypt::encrypt_name(&beebeeb_core::kdf::MasterKey::from_bytes([17;32]),id,name,None).unwrap(),"parent_id":null,"size_bytes":3,"is_folder":false,"updated_at":2,"version_number":1});
+        let old = serde_json::json!({"seq_id":10,"nodes":[node("before.txt")]});
+        let (url, requests, stop, thread) = delete_http_server(vec![
+            (200, serde_json::json!({})),
+            (200, old.clone()),
+            (200, serde_json::json!({})),
+            (200, old),
+        ]);
+        let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        seed_delete_file(&db, id, "before.txt");
+        fs::write(root.join("after.txt"), b"abc").unwrap();
+        handle_rename(&bridge, &root, &root.join("before.txt"), &root.join("after.txt")).await;
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        crate::engine_bridge::sync_tick(&bridge, &root).await.unwrap();
+        assert_eq!(db.get_file(id).unwrap().unwrap().path, "after.txt");
+        fs::remove_file(root.join("after.txt")).unwrap();
+        handle_delete(&bridge, &root, &root.join("after.txt")).await;
+        assert_eq!(trash_count(&db), 1);
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        db.request_resnapshot().unwrap();
+        crate::engine_bridge::sync_tick(&bridge, &root).await.unwrap();
+        assert_eq!(db.get_file(id).unwrap().unwrap().status, FileStatus::Trashing);
+        assert_eq!(db.list_by_status(FileStatus::CloudOnly).unwrap().len(), 0);
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn task1672_child_then_folder_delete_coalesces_pending_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (url, requests, stop, thread) = delete_http_server(vec![]);
+        let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        seed_delete_folder(&db, "parent", "dir", None);
+        seed_delete_file(&db, "child", "dir/a.txt");
+        let mut c = db.get_file_contract_state("child").unwrap().unwrap();
+        c.parent_id = Some("parent".into());
+        db.set_file_contract_state(&c).unwrap();
+        handle_delete(&bridge, &root, &root.join("dir/a.txt")).await;
+        assert_eq!(trash_count(&db), 1);
+        handle_delete(&bridge, &root, &root.join("dir")).await;
+        assert_eq!(trash_count(&db), 1);
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        let req = requests.lock().unwrap();
+        assert_eq!(req.len(), 1);
+        assert!(req[0].starts_with("DELETE /api/v1/files/parent "));
+    }
+
+    #[tokio::test]
+    async fn task1672_rename_then_move_out_queues_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("db"));
+        seed_delete_file(&db, "file", "a.txt");
+        handle_rename(&bridge, &root, &root.join("a.txt"), &root.join("b.txt")).await;
+        handle_rename(&bridge, &root, &root.join("b.txt"), &temp.path().join("recycled.txt")).await;
+        assert_eq!(trash_count(&db), 1);
+        assert_eq!(db.get_file("file").unwrap().unwrap().status, FileStatus::Trashing);
+    }
+
+    #[tokio::test]
+    async fn task1672_consecutive_renames_coalesce_and_release_latest_echo() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("db"));
+        seed_delete_file(&db, "file", "a.txt");
+        handle_rename(&bridge, &root, &root.join("a.txt"), &root.join("b.txt")).await;
+        let old = db.list_due_operations(i64::MAX).unwrap()[0].op_id.clone();
+        handle_rename(&bridge, &root, &root.join("b.txt"), &root.join("c.txt")).await;
+        assert!(!db.operation_is_pending(&old).unwrap());
+        let ops = db.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(ops.len(), 1, "only latest namespace intent remains");
+        db.acknowledge_namespace(&old).unwrap();
+        assert!(db.namespace_pending("file", "b.txt").unwrap());
+        db.acknowledge_namespace(&ops[0].op_id).unwrap();
+        assert!(!db.namespace_pending("file", "c.txt").unwrap());
+        assert_eq!(db.get_file("file").unwrap().unwrap().path, "c.txt");
+    }
+
+    #[test]
+    fn task1672_queue_binding_check_and_duplicate_after_ack_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("db");
+        let (db, bridge) = test_bridge(&state);
+        seed_delete_file(&db, "file", "new.txt");
+        assert!(bridge.queue_watcher_delete("file", "old.txt").is_err());
+        assert_eq!(trash_count(&db), 0);
+        bridge.queue_watcher_delete("file", "new.txt").unwrap();
+        bridge.queue_watcher_delete("file", "new.txt").unwrap();
+        assert_eq!(trash_count(&db), 1, "transaction deduplicates independent callers");
+        let op = db.list_due_operations(i64::MAX).unwrap().remove(0);
+        db.remove_operation(&op.op_id).unwrap(); // acknowledged server DELETE
+        drop(bridge);
+        drop(db);
+        let (db, bridge) = test_bridge(&state);
+        bridge.queue_watcher_delete("file", "new.txt").unwrap();
+        assert_eq!(trash_count(&db), 0, "acknowledged tombstone survives process restart");
+    }
+
+    #[test]
+    fn task1672_unknown_folder_identity_fences_existing_and_future_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("db"));
+        seed_delete_folder(&db, "folder", "gone", None);
+        seed_delete_file(&db, "child", "gone/a.txt");
+        handle_identity_delete(&bridge, &root, &root.join("gone"), Some("unknown"));
+        assert_eq!(trash_count(&db), 0);
+        assert_eq!(
+            db.list_by_status(FileStatus::CloudOnly).unwrap().len(),
+            0,
+            "unknown identity must still fence the observed namespace"
+        );
+        assert!(db.delete_observation_blocks("future", "gone/new/a.txt").unwrap());
+        run_one_scan(&bridge, &root, &mut HashSet::new());
+        assert_eq!(trash_count(&db), 0, "scan never adopts a path occupant");
+    }
+
+    #[tokio::test]
+    async fn task1672_restore_releases_only_acknowledged_tombstones_via_remote_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let id = "16720000-0000-4000-8000-000000000009";
+        let node = serde_json::json!({"id":id,"name_encrypted":beebeeb_core::encrypt::encrypt_name(
+            &beebeeb_core::kdf::MasterKey::from_bytes([17;32]),id,"restored.txt",None).unwrap(),
+            "parent_id":null,"size_bytes":3,"updated_at":2,"is_folder":false});
+        let (url, requests, stop, thread) = delete_http_server(vec![
+            (200, serde_json::json!({})),
+            (
+                200,
+                serde_json::json!({"ops":[{"seq_id":11,"op_type":"file_restore","payload":{"id":id}}]}),
+            ),
+            (200, serde_json::json!({"seq_id":11,"nodes":[node]})),
+        ]);
+        let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+        let bridge = EngineBridge::new(db.clone(), Arc::new(ApiClient::new(url, "fixture".into(), [17; 32])));
+        seed_delete_file(&db, id, "gone.txt");
+        handle_identity_delete(&bridge, &root, &root.join("gone.txt"), Some(id));
+        db.release_restored_tombstones(id).unwrap();
+        assert_eq!(
+            db.get_file(id).unwrap().unwrap().status,
+            FileStatus::Trashing,
+            "stale restore cannot erase pending local delete"
+        );
+        bridge.process_due_operations(&root, i64::MAX - 100).await.unwrap();
+        db.set_sync_cursor(10).unwrap();
+        crate::engine_bridge::sync_tick(&bridge, &root).await.unwrap();
+        crate::engine_bridge::sync_tick(&bridge, &root).await.unwrap();
+        let restored = db.get_file(id).unwrap().unwrap();
+        assert_eq!(restored.path, "restored.txt");
+        assert_eq!(restored.status, FileStatus::CloudOnly);
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn engine_delete_suppression_matches_identity_and_expires() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("echo.txt");
+        assert!(!engine_delete_suppressed(&path, "old"));
+        suppress_engine_delete(&path, "old");
+        assert!(engine_delete_suppressed(&path, "old"));
+        assert!(
+            engine_delete_suppressed(&path, "old"),
+            "duplicate echo remains suppressed"
+        );
+        assert!(!engine_delete_suppressed(&path, "new"), "new identity never matches");
+        assert!(!engine_delete_suppressed(&temp.path().join("other.txt"), "old"));
+        engine_delete_suppress().lock().unwrap().insert(
+            (path.clone(), "old".into()),
+            Instant::now() - ENGINE_SUPPRESS_TTL - Duration::from_secs(1),
+        );
+        assert!(!engine_delete_suppressed(&path, "old"));
         prune_stale_engine_suppressions();
         assert!(
-            !take_engine_delete_suppressed(p),
-            "a stale suppression entry must be pruned so a later user delete propagates"
+            !engine_delete_suppress()
+                .lock()
+                .unwrap()
+                .contains_key(&(path, "old".into()))
         );
+    }
+
+    #[test]
+    fn task1672_remote_duplicate_echo_and_restored_identity_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("db"));
+        let path = root.join("echo.txt");
+        suppress_engine_delete(&path, "file");
+        handle_identity_delete(&bridge, &root, &path, Some("file"));
+        handle_identity_delete(&bridge, &root, &path, Some("file"));
+        assert_eq!(db.list_review_operations().unwrap().len(), 0);
+        seed_delete_file(&db, "file", "echo.txt");
+        handle_identity_delete(&bridge, &root, &path, Some("file"));
+        assert_eq!(trash_count(&db), 1, "restored binding authorizes fresh user delete");
     }
 
     /// Collect every regular file the enumeration scan's [`walk_dir`] visits,
@@ -1112,5 +1727,4 @@ mod tests {
         for op in ops.iter() { if let Some(payload) = &op.payload_path { fs::remove_file(payload).unwrap(); } }
         assert_eq!(String::from_utf8(actual).unwrap(), *expected, "watcher identity must belong to its queued DB row");
     }
-
 }
