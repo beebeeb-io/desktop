@@ -172,3 +172,65 @@ jobs:
             ${{ runner.temp }}/cargo-check.exit
             ${{ runner.temp }}/cargo-test.log
             ${{ runner.temp }}/cargo-test.exit
+
+  fileprovider-swift:
+    # Task 1670 issue 3: until this job existed, NO CI step compiled the File
+    # Provider extension's Swift (rust-check only runs `cargo check`; the
+    # extension was first built at release time, on a developer's Mac). It now
+    # compiles on every PR, unsigned and without secrets, and runs the pure
+    # Foundation framing tests with a COUNTED truth line.
+    name: File Provider Swift (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Swift toolchain
+        run: |
+          xcrun swiftc --version
+          xcodebuild -version
+
+      - name: Framing test count guard self-test
+        run: bash scripts/test-ipc-framing.sh --self-test
+
+      # XPCBridge.swift is not compiled into the swiftc test harness, so the
+      # Swift tests cannot see a call site reverted to the default 30 s IPC
+      # timeout. This source-level check does (and its self-test proves it can
+      # go red).
+      - name: IPC timeout call-site guard self-test
+        run: python3 scripts/check-ipc-timeouts.py --self-test
+
+      - name: IPC timeout call-site guard
+        run: python3 scripts/check-ipc-timeouts.py
+
+      - name: IPC framing tests (swiftc, pure Foundation)
+        env:
+          IPC_FRAMING_TEST_OUT: ${{ runner.temp }}/ipc-framing-tests
+        run: bash scripts/test-ipc-framing.sh
+
+      # `!cancelled()` so a red test step still lets the compile step report
+      # its own verdict (they are independent failures).
+      - name: Compile the File Provider extension (unsigned, ad-hoc codesign)
+        if: ${{ !cancelled() }}
+        env:
+          # No signing identity, no provisioning profile, no secrets: the
+          # script falls back to an ad-hoc signature.
+          APPLE_SIGNING_IDENTITY: ""
+        run: |
+          set -o pipefail
+          bash scripts/build-fileprovider-extension.sh \
+            --out "$RUNNER_TEMP/fileprovider/BeebeebFileProvider.appex" \
+            --helper-out "$RUNNER_TEMP/fileprovider/BeebeebFileProviderCtl" 2>&1 | tee "$RUNNER_TEMP/fileprovider-build.log"
+
+      - name: Upload File Provider Swift evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fileprovider-swift
+          path: |
+            ${{ runner.temp }}/ipc-framing-tests/run.log
+            ${{ runner.temp }}/ipc-framing-tests/run.exit
+            ${{ runner.temp }}/fileprovider-build.log

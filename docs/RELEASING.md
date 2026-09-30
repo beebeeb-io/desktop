@@ -111,12 +111,26 @@ happens on a Mac that holds the `Developer ID Application: Devidee B.V. (R8352WD
 identity, never via an exported `.p12` CI secret. The sequence for a macOS release, once Windows
 and Linux have already been built and the GitHub release created by the normal workflow run:
 
-1. Build locally: `APPLE_SIGNING_IDENTITY=<Developer ID hash> MACOS_APP_PROVISION_PROFILE=… MACOS_FILE_PROVIDER_PROVISION_PROFILE=… BEEBEEB_RELEASE_VERSION=<version> BEEBEEB_MACOS_HARDENED_RUNTIME=1 bunx tauri build --target aarch64-apple-darwin -- --locked` (Apple Silicon only for now — see the matrix comment for why). `BEEBEEB_MACOS_HARDENED_RUNTIME=1` is required for a release build: it turns on hardened runtime + secure timestamps on the File Provider extension and its CTL helper, which notarization requires on every nested executable, not just the app.
-2. Run `scripts/macos-release-preflight.sh <path to the built .app>` — it fails closed if hardened runtime, the provisioning profiles, or the File Provider entry-point guard (task 1524) are wrong.
-3. Notarize the `.app` (zip it first — `ditto -c -k --keepParent Beebeeb.app app.zip`), `xcrun notarytool submit --wait`, then `xcrun stapler staple` it, before building the `.dmg` from the now-stapled app — this way the ticket travels with the app inside the dmg too. Then notarize + staple the `.dmg` itself. `scripts/macos-release-preflight.sh <artifact>` re-run on each proves `spctl -a -vv` / `spctl -a -vv -t install` both say `source=Notarized Developer ID`.
-4. Upload the `.dmg` and the updater bundle (`bundle/macos/Beebeeb.app.tar.gz` — named from `productName` alone, no version/arch suffix; do not confuse it with the versioned `.dmg` filename) to the existing `desktop-v<version>` GitHub release with `gh release upload`.
-5. The updater `.sig` needs `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD`, which since the 2026-09-25 rotation (desktop PR #62) exists only as this repo's CI secret. Run `.github/workflows/sign-macos-updater-artifact.yml` via `gh workflow run … -f release_tag=desktop-v<version>` to sign the uploaded `Beebeeb.app.tar.gz` and upload the resulting `.sig` back to the same release — this is the only CI step in the whole macOS route, and it never touches Developer ID material.
-6. Re-run `release.yml` with `publish_existing=true` for the same `version`/`channel` — the `publish-manifest` job's `fetch_optional_sig` now finds the macOS `.sig` and backfills the `darwin-aarch64` manifest entry (see that job's comments) without rebuilding or re-tagging Windows/Linux.
+1. **Set the app version first** (task 1670 issue 3: this step was missing, and a local bundle built without it is versioned `0.1.0`, the placeholder in `src-tauri/tauri.conf.json`, because Tauri names the bundle and reports `CFBundleShortVersionString` from that file's own `version`). It mirrors the `Set app version for this release` step in `.github/workflows/release.yml` (the `jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json` line, ~L238). Run it in the release worktree, on plain semver only, and never commit the result. Edit `VERSION` to the release version (plain semver, no `-alpha`/`-beta` suffix) and paste the block into your interactive shell. It carries no comments on purpose: macOS's default interactive zsh has `interactive_comments` off, so a trailing `# ...` on the `VERSION=` line is parsed as a command and `VERSION` is never set. It uses if/else, not `|| exit 1`, because `exit` in a pasted block would close your terminal. It works in both zsh and bash. Afterwards `jq -r .version` must print `VERSION`, not `0.1.0`; a bad `VERSION` prints the "plain semver only" line and changes nothing.
+
+   ```sh
+   VERSION=0.8.7
+   if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+     jq --arg version "$VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp \
+       && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+     jq -r .version src-tauri/tauri.conf.json
+   else
+     echo "plain semver only: got '$VERSION'" >&2
+   fi
+   ```
+
+   After the build, `plutil -extract CFBundleShortVersionString raw <built .app>/Contents/Info.plist` must print the same version.
+2. Build locally: `APPLE_SIGNING_IDENTITY=<Developer ID hash> MACOS_APP_PROVISION_PROFILE=… MACOS_FILE_PROVIDER_PROVISION_PROFILE=… BEEBEEB_RELEASE_VERSION=<version> BEEBEEB_MACOS_HARDENED_RUNTIME=1 bunx tauri build --target aarch64-apple-darwin -- --locked` (Apple Silicon only for now — see the matrix comment for why). `BEEBEEB_MACOS_HARDENED_RUNTIME=1` is required for a release build: it turns on hardened runtime + secure timestamps on the File Provider extension and its CTL helper, which notarization requires on every nested executable, not just the app.
+3. Run `scripts/macos-release-preflight.sh <path to the built .app>` — it fails closed if hardened runtime, the provisioning profiles, or the File Provider entry-point guard (task 1524) are wrong.
+4. Notarize the `.app` (zip it first — `ditto -c -k --keepParent Beebeeb.app app.zip`), `xcrun notarytool submit --wait`, then `xcrun stapler staple` it, before building the `.dmg` from the now-stapled app — this way the ticket travels with the app inside the dmg too. Then notarize + staple the `.dmg` itself. `scripts/macos-release-preflight.sh <artifact>` re-run on each proves `spctl -a -vv` / `spctl -a -vv -t install` both say `source=Notarized Developer ID`.
+5. Upload the `.dmg` and the updater bundle (`bundle/macos/Beebeeb.app.tar.gz` — named from `productName` alone, no version/arch suffix; do not confuse it with the versioned `.dmg` filename) to the existing `desktop-v<version>` GitHub release with `gh release upload`.
+6. The updater `.sig` needs `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD`, which since the 2026-09-25 rotation (desktop PR #62) exists only as this repo's CI secret. Run `.github/workflows/sign-macos-updater-artifact.yml` via `gh workflow run … -f release_tag=desktop-v<version>` to sign the uploaded `Beebeeb.app.tar.gz` and upload the resulting `.sig` back to the same release — this is the only CI step in the whole macOS route, and it never touches Developer ID material.
+7. Re-run `release.yml` with `publish_existing=true` for the same `version`/`channel` — the `publish-manifest` job's `fetch_optional_sig` now finds the macOS `.sig` and backfills the `darwin-aarch64` manifest entry (see that job's comments) without rebuilding or re-tagging Windows/Linux.
 
 ## Build Once, Promote By Manifest
 

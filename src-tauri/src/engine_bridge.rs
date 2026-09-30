@@ -2318,6 +2318,23 @@ impl EngineBridge {
     /// instead** — that variant never writes plaintext to disk, satisfying the
     /// zero-knowledge requirement for on-demand CF hydration.
     pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path, allowed_roots: &[&Path]) -> anyhow::Result<()> {
+        self.hydrate_file_with_progress(file_id, dest_path, allowed_roots, None).await
+    }
+
+    /// [`Self::hydrate_file`] plus an optional `progress(done_bytes,
+    /// total_bytes)` callback, invoked synchronously from the download loop
+    /// (task 1670 issue 3 — the macOS IPC handler forwards it to Finder).
+    ///
+    /// Cancel-safe: if this future is dropped while the download is in
+    /// flight (the IPC client hung up), the row's status is restored instead
+    /// of being left on `Downloading` forever.
+    pub async fn hydrate_file_with_progress(
+        &self,
+        file_id: &str,
+        dest_path: &Path,
+        allowed_roots: &[&Path],
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<()> {
         // Task 1247 self-defense: validate `dest_path` against the caller's
         // trusted root(s) BEFORE any directory creation or plaintext write.
         // `dest_path` reaches the one untrusted caller (the IPC socket handler)
@@ -2337,8 +2354,13 @@ impl EngineBridge {
         // leave the file in `Error`, not `Downloading`. We do that by
         // wrapping the body in an inner async fn whose Err branch we
         // catch.
+        let mut downloading_guard = DownloadingStatusGuard::arm(&self.db, file_id);
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate(file_id).await {
+        let hydrated = self.do_hydrate(file_id, progress).await;
+        // Past the only cancellation point (the download await): every path
+        // below sets the final status itself.
+        downloading_guard.disarm();
+        match hydrated {
             Ok(mut buf) => {
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
@@ -2458,7 +2480,7 @@ impl EngineBridge {
     #[cfg(target_os = "windows")]
     pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate(file_id).await {
+        match self.do_hydrate(file_id, None).await {
             Ok(buf) => {
                 self.db.set_status(file_id, FileStatus::Local)?;
                 // cache_path is empty: on Windows CF the hydrated bytes live
@@ -2547,7 +2569,7 @@ impl EngineBridge {
         }
     }
 
-    async fn do_hydrate(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    async fn do_hydrate(&self, file_id: &str, progress: Option<&HydrateProgressFn>) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -2557,7 +2579,7 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
-        self.do_hydrate_with_meta(file_id, &meta).await
+        self.do_hydrate_with_meta(file_id, &meta, progress).await
     }
 
     /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
@@ -2575,6 +2597,7 @@ impl EngineBridge {
         &self,
         file_id: &str,
         meta: &serde_json::Value,
+        progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let chunk_count = meta
             .get("chunk_count")
@@ -2595,8 +2618,15 @@ impl EngineBridge {
         // decrypt error) the partial plaintext is still wiped.
         let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-        self.download_and_decrypt_chunk_range(file_id, &file_key, 0..chunk_count, download_kbps_limit, approx_size)
-            .await
+        self.download_and_decrypt_chunk_range(
+            file_id,
+            &file_key,
+            0..chunk_count,
+            download_kbps_limit,
+            approx_size,
+            progress,
+        )
+        .await
     }
 
     /// Download + decrypt chunk indices `[range.start, range.end)` for
@@ -2615,8 +2645,18 @@ impl EngineBridge {
         range: std::ops::Range<u32>,
         download_kbps_limit: u64,
         approx_size_hint: usize,
+        progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
+        // Task 1670 issue 3: tell the caller (the macOS IPC handler, which
+        // forwards it to Finder's progress bar) how far along we are. `total`
+        // is the size hint (server's plaintext size); the initial 0/total
+        // report lets the UI switch from indeterminate to determinate before
+        // the first chunk lands.
+        let total = approx_size_hint as u64;
+        if let Some(report) = progress {
+            report(0, total);
+        }
 
         for i in range {
             let chunk_start = std::time::Instant::now();
@@ -2629,6 +2669,9 @@ impl EngineBridge {
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
+            if let Some(report) = progress {
+                report(acc.len() as u64, total);
+            }
 
             // P1 — wire-byte counter: count raw wire bytes received.
             self.wire.download_bytes.fetch_add(wire_len, Ordering::Relaxed);
@@ -2737,6 +2780,7 @@ impl EngineBridge {
                 plan.first_chunk..plan.last_chunk_exclusive,
                 download_kbps_limit,
                 plan.covering_span_hint,
+                None,
             )
             .await
         {
@@ -3149,7 +3193,7 @@ impl EngineBridge {
             };
         }
 
-        match self.do_hydrate_with_meta(file_id, &meta).await {
+        match self.do_hydrate_with_meta(file_id, &meta, None).await {
             Ok(mut bytes) => {
                 // Move the plaintext out instead of `bytes.to_vec()` — a
                 // clone would briefly hold two live copies of the remote
@@ -3808,6 +3852,51 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+}
+
+/// `progress(done_bytes, total_bytes)` callback for [`EngineBridge::hydrate_file_with_progress`].
+/// Called synchronously from the download loop, so it must be cheap and must
+/// not block (the IPC handler just pushes onto a channel).
+pub(crate) type HydrateProgressFn = dyn Fn(u64, u64) + Send + Sync;
+
+/// Restores a row's status if [`EngineBridge::hydrate_file_with_progress`] is
+/// dropped mid-download (the IPC client hung up and the future was cancelled).
+/// Without it a cancelled hydrate leaves the row on `Downloading` forever,
+/// which the overlay renders as a permanent spinner. Restores the status the
+/// row had before hydration started; a stale `Downloading` (or a missing row)
+/// falls back to `CloudOnly`, the state hydration is meant to leave.
+struct DownloadingStatusGuard<'a> {
+    db: &'a StateDb,
+    file_id: &'a str,
+    restore: FileStatus,
+    armed: bool,
+}
+
+impl<'a> DownloadingStatusGuard<'a> {
+    fn arm(db: &'a StateDb, file_id: &'a str) -> Self {
+        let restore = match db.get_file(file_id).ok().flatten().map(|entry| entry.status) {
+            Some(FileStatus::Downloading) | None => FileStatus::CloudOnly,
+            Some(previous) => previous,
+        };
+        Self {
+            db,
+            file_id,
+            restore,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DownloadingStatusGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.db.set_status(self.file_id, self.restore.clone());
+        }
+    }
 }
 
 /// Task 1247: is `dest_path` a safe hydration target — i.e. inside (or about to
@@ -6125,6 +6214,35 @@ mod tests {
             self.handle.join().unwrap();
             Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
         }
+    }
+
+    /// Headers-only variant for bodiless GETs that treats a peer hang-up before
+    /// the headers arrive as `None` instead of a panic (task 1670 issue 3: the
+    /// cancelled-hydrate test hangs the daemon up while it is connecting, and on
+    /// a busy CI runner that can land before the request line is sent).
+    #[cfg(unix)]
+    fn read_http_request_or_hangup(stream: &mut std::net::TcpStream) -> Option<RecordedRequest> {
+        let mut buffer = Vec::new();
+        let mut temp = [0u8; 4096];
+        loop {
+            let read = std::io::Read::read(stream, &mut temp).ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&temp[..read]);
+            if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&buffer).to_string();
+        let mut parts = head.lines().next()?.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        Some(RecordedRequest {
+            method,
+            path,
+            body: Vec::new(),
+        })
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> RecordedRequest {
@@ -10341,6 +10459,19 @@ mod tests {
     #[cfg(unix)]
     impl IpcHydrationMock {
         fn start(file_key: beebeeb_core::kdf::FileKey, chunks: Vec<Vec<u8>>) -> Self {
+            Self::start_with_chunk_delay(file_key, chunks, Duration::ZERO)
+        }
+
+        /// Like [`Self::start`], but every chunk response is held back for
+        /// `chunk_delay` (task 1670 issue 3: lets a test hang the IPC client
+        /// up while the daemon is provably mid-download). With a non-zero delay
+        /// a failed write to the (hung-up) daemon is tolerated instead of
+        /// panicking the mock thread.
+        fn start_with_chunk_delay(
+            file_key: beebeeb_core::kdf::FileKey,
+            chunks: Vec<Vec<u8>>,
+            chunk_delay: Duration,
+        ) -> Self {
             use std::sync::atomic::{AtomicBool, AtomicUsize};
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -10360,7 +10491,15 @@ mod tests {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             stream.set_nonblocking(false).unwrap();
-                            let request = read_http_request(&mut stream);
+                            let request = if chunk_delay.is_zero() {
+                                read_http_request(&mut stream)
+                            } else {
+                                // Delayed mode is only used by the cancellation test.
+                                match read_http_request_or_hangup(&mut stream) {
+                                    Some(request) => request,
+                                    None => continue,
+                                }
+                            };
                             rq.fetch_add(1, Ordering::Relaxed);
                             let response = hydration_mock_response(
                                 &request,
@@ -10370,16 +10509,21 @@ mod tests {
                                 chunk_count,
                                 chunk_size_bytes,
                             );
-                            match response {
-                                MockResponse::Text(body) => stream.write_all(body.as_bytes()).unwrap(),
+                            if !chunk_delay.is_zero() && request.path.contains("/chunks/") {
+                                std::thread::sleep(chunk_delay);
+                            }
+                            let written: std::io::Result<()> = match response {
+                                MockResponse::Text(body) => stream.write_all(body.as_bytes()),
                                 MockResponse::Binary(body) => {
                                     let header = format!(
                                         "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                         body.len()
                                     );
-                                    stream.write_all(header.as_bytes()).unwrap();
-                                    stream.write_all(&body).unwrap();
+                                    stream.write_all(header.as_bytes()).and_then(|()| stream.write_all(&body))
                                 }
+                            };
+                            if chunk_delay.is_zero() {
+                                written.unwrap();
                             }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -10442,17 +10586,27 @@ mod tests {
             };
 
             // Exact wire shape the server deserializes off the socket.
-            let req = serde_json::to_vec(&crate::ipc_socket::IpcRequest::HydrateFile {
+            let mut req = serde_json::to_vec(&crate::ipc_socket::IpcRequest::HydrateFile {
                 file_id: file_id.clone(),
                 dest_path: dest_string.clone(),
+                progress: false,
             })
             .unwrap();
+            req.push(b'\n');
             client.write_all(&req).await.unwrap();
 
-            let mut buf = vec![0u8; 65536];
-            let n = client.read(&mut buf).await.unwrap();
+            // One delimited reply line (task 1670 issue 3 framing).
+            let mut reply = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                client.read_exact(&mut byte).await.unwrap();
+                if byte[0] == b'\n' {
+                    break;
+                }
+                reply.push(byte[0]);
+            }
             let resp: crate::ipc_socket::IpcResponse =
-                serde_json::from_slice(&buf[..n]).expect("daemon must return a valid IpcResponse");
+                serde_json::from_slice(&reply).expect("daemon must return a valid IpcResponse");
 
             drop(client);
             let _ = cancel_tx.send(());
@@ -10551,7 +10705,7 @@ mod tests {
         let resp = ipc_hydrate_roundtrip(db, bridge, TEST_FILE_ID, &legit_dest);
 
         assert!(
-            matches!(resp, crate::ipc_socket::IpcResponse::Ok),
+            matches!(resp, crate::ipc_socket::IpcResponse::Ok {}),
             "a legitimate in-root hydrate must succeed, got {resp:?}"
         );
         assert_eq!(
@@ -10564,6 +10718,229 @@ mod tests {
         assert!(
             served >= 2,
             "the legitimate path must contact the backend for metadata + chunk (got {served})"
+        );
+    }
+
+    /// Start a real `serve_ipc_at` server on a throwaway socket and hand `body`
+    /// a connected client (task 1670 issue 3 hydrate-streaming tests).
+    #[cfg(unix)]
+    fn with_ipc_client<T>(
+        db: Arc<StateDb>,
+        bridge: Arc<EngineBridge>,
+        body: impl FnOnce(tokio::net::UnixStream) -> std::pin::Pin<Box<dyn std::future::Future<Output = T>>>,
+    ) -> T {
+        let sock_dir = tempfile::tempdir().unwrap();
+        let sp = sock_dir.path().join("ipc.sock");
+        tokio::runtime::Runtime::new().unwrap().block_on(async move {
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(crate::ipc_socket::serve_ipc_at_with_ready(
+                sp.clone(),
+                db,
+                bridge,
+                cancel_rx,
+                Some(ready_tx),
+            ));
+            tokio::time::timeout(Duration::from_secs(5), ready_rx)
+                .await
+                .expect("IPC readiness timed out")
+                .expect("IPC startup failed");
+            let client = tokio::net::UnixStream::connect(&sp).await.unwrap();
+            let out = body(client).await;
+            let _ = cancel_tx.send(());
+            let _ = server.await;
+            out
+        })
+    }
+
+    /// Read one `\n`-terminated JSON line, byte at a time, with a deadline.
+    #[cfg(unix)]
+    async fn read_json_line(client: &mut tokio::net::UnixStream) -> serde_json::Value {
+        use tokio::io::AsyncReadExt;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            let n = tokio::time::timeout_at(deadline, client.read(&mut byte))
+                .await
+                .expect("no delimited line from the daemon within 10s")
+                .unwrap();
+            assert!(n > 0, "daemon closed the connection mid-reply");
+            if byte[0] == b'\n' {
+                return serde_json::from_slice(&line).expect("reply line must be valid JSON");
+            }
+            line.push(byte[0]);
+        }
+    }
+
+    #[cfg(unix)]
+    fn hydrate_request_line(dest: &Path, progress: bool) -> Vec<u8> {
+        let mut req = serde_json::to_vec(&serde_json::json!({
+            "HydrateFile": {
+                "file_id": TEST_FILE_ID,
+                "dest_path": dest.to_string_lossy(),
+                "progress": progress,
+            }
+        }))
+        .unwrap();
+        req.push(b'\n');
+        req
+    }
+
+    /// Task 1670 issue 3: a hydrate that opts in streams `HydrateProgress`
+    /// frames (initial 0/total, then one per decrypted chunk) BEFORE the single
+    /// final `{"Ok":{}}`, and the byte counts are the real plaintext sizes.
+    #[cfg(unix)]
+    #[test]
+    fn ipc_hydrate_streams_progress_frames_before_the_final_reply() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10], vec![b'c'; 10]];
+        let server = IpcHydrationMock::start(file_key, chunks);
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/three-chunks.bin", None, FileStatus::CloudOnly, 30);
+        let dest = dest_dir.path().join("three-chunks.bin");
+        let request = hydrate_request_line(&dest, true);
+
+        let lines = with_ipc_client(db, bridge, |mut client| {
+            Box::pin(async move {
+                client.write_all(&request).await.unwrap();
+                let mut lines = Vec::new();
+                loop {
+                    let line = read_json_line(&mut client).await;
+                    let is_progress = line.get("HydrateProgress").is_some();
+                    lines.push(line);
+                    if !is_progress {
+                        return lines;
+                    }
+                }
+            })
+        });
+
+        let progress: Vec<(u64, u64)> = lines
+            .iter()
+            .filter_map(|l| l.get("HydrateProgress"))
+            .map(|p| (p["done"].as_u64().unwrap(), p["total"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            progress,
+            vec![(0, 30), (10, 30), (20, 30), (30, 30)],
+            "progress frames must be the initial 0/total then cumulative plaintext bytes per chunk"
+        );
+        assert_eq!(
+            lines.last().unwrap(),
+            &serde_json::json!({"Ok": {}}),
+            "the final reply must come AFTER every progress frame"
+        );
+        assert_eq!(lines.len(), 5, "4 progress frames + 1 final reply, nothing else");
+        assert_eq!(std::fs::read(&dest).unwrap().len(), 30);
+        server.stop_and_count();
+    }
+
+    /// Task 1670 issue 3: a client that does not ask for progress (the 0.8.6
+    /// extension) must get exactly ONE reply line and no progress frames — it
+    /// reads a single reply and would take the first progress frame for it.
+    #[cfg(unix)]
+    #[test]
+    fn ipc_hydrate_without_opt_in_sends_no_progress_frames() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10]];
+        let server = IpcHydrationMock::start(file_key, chunks);
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/two-chunks.bin", None, FileStatus::CloudOnly, 20);
+        let request = hydrate_request_line(&dest_dir.path().join("two-chunks.bin"), false);
+
+        let (first, quiet) = with_ipc_client(db, bridge, |mut client| {
+            Box::pin(async move {
+                use tokio::io::AsyncReadExt;
+                client.write_all(&request).await.unwrap();
+                let first = read_json_line(&mut client).await;
+                let mut extra = [0u8; 16];
+                let quiet = tokio::time::timeout(Duration::from_millis(300), client.read(&mut extra))
+                    .await
+                    .is_err();
+                (first, quiet)
+            })
+        });
+        assert_eq!(first, serde_json::json!({"Ok": {}}), "the first and only line is the final reply");
+        assert!(quiet, "nothing may follow the single reply");
+        server.stop_and_count();
+    }
+
+    /// Task 1670 issue 3: when the client hangs up mid-download (Finder cancelled
+    /// the Progress), the daemon stops downloading, never writes the plaintext,
+    /// and puts the row's status back instead of leaving it on `Downloading`.
+    #[cfg(unix)]
+    #[test]
+    fn ipc_hydrate_is_cancelled_and_status_restored_when_the_client_hangs_up() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10], vec![b'c'; 10]];
+        // 1 s per chunk: a completed hydrate needs ~3 s, a cancelled one is
+        // stopped inside the first chunk. Generous margins because CI runs the
+        // whole suite in parallel on shared runners.
+        let server = IpcHydrationMock::start_with_chunk_delay(file_key, chunks, Duration::from_millis(1000));
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
+        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        seed_bridge_row(&bridge, TEST_FILE_ID, "/slow.bin", None, FileStatus::CloudOnly, 30);
+        let dest = dest_dir.path().join("slow.bin");
+        let request = hydrate_request_line(&dest, true);
+        let db_probe = db.clone();
+
+        let (status_when_first_frame_arrived, status_600ms_after_hangup) = with_ipc_client(db.clone(), bridge, |mut client| {
+            Box::pin(async move {
+                client.write_all(&request).await.unwrap();
+                let first = read_json_line(&mut client).await;
+                assert_eq!(first["HydrateProgress"]["done"], 0, "first frame is the initial 0/total");
+                let status = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
+                drop(client); // Finder cancelled the transfer
+                // Well inside the first chunk's 1 s delay: a daemon that
+                // watches the socket has already dropped the download; one that
+                // only notices at its next write has not.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let after_hangup = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
+                // Then leave time for a (wrongly) uncancelled hydrate to
+                // finish (3 x 1 s).
+                tokio::time::sleep(Duration::from_millis(3000)).await;
+                (status, after_hangup)
+            })
+        });
+
+        assert_eq!(
+            status_when_first_frame_arrived,
+            FileStatus::Downloading,
+            "the test must hang up while the row is genuinely mid-download"
+        );
+        assert_eq!(
+            status_600ms_after_hangup,
+            FileStatus::CloudOnly,
+            "the daemon must notice the hang-up promptly (within 600 ms), not at its next progress write"
+        );
+        assert_eq!(
+            db.get_file(TEST_FILE_ID).unwrap().unwrap().status,
+            FileStatus::CloudOnly,
+            "a cancelled hydrate must restore the row's status, not leave Downloading/Local"
+        );
+        assert!(!dest.exists(), "a cancelled hydrate must not write plaintext to disk");
+        let served = server.stop_and_count();
+        assert!(
+            served <= 2,
+            "the daemon must stop fetching after the hang-up: metadata + at most the in-flight chunk, got {served}"
         );
     }
 

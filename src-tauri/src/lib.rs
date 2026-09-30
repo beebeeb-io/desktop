@@ -34,6 +34,8 @@ mod native_parity_tests;
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
 // in-process (see `windows_cf`), so this module is `unix`-only.
 #[cfg(unix)]
+mod ipc_frame;
+#[cfg(unix)]
 mod ipc_socket;
 mod keychain;
 // Known-folder backup ("Manage backup", task 0797 / Model 2). The catalog +
@@ -61,8 +63,9 @@ mod staged_payload;
 mod state_paths;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
-// `QueueFinderCreate`; the macOS File Provider and Linux FUSE paths drive that
-// over the Unix socket instead. Compiled everywhere (cheap, cross-platform via
+// `QueueFinderCreate`; the macOS File Provider extension drives that over the
+// Unix socket instead, and the Linux FUSE prototype does not use the socket at
+// all (it calls the in-process `EngineBridge` directly). Compiled everywhere (cheap, cross-platform via
 // `notify`) but the runner only spawns it on Windows (see `runner::run`).
 mod watcher;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
@@ -2282,8 +2285,10 @@ async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sy
 
     let path = ipc_socket::ipc_socket_path();
     let deadline = Instant::now() + Duration::from_secs(3);
-    let request = serde_json::to_vec(&ipc_socket::IpcRequest::GetSyncSummary)
+    // One `\n`-terminated frame (task 1670 issue 3; see `docs/IPC_PROTOCOL.md`).
+    let mut request = serde_json::to_vec(&ipc_socket::IpcRequest::GetSyncSummary)
         .map_err(|e| format!("encode IPC readiness probe: {e}"))?;
+    request.push(b'\n');
 
     loop {
         if let Ok(guard) = ipc_bind_error.lock()
