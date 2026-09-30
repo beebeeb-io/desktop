@@ -9677,8 +9677,10 @@ mod tests {
     }
 
     /// The text of `install_finder_location`, for the structural wiring tests below.
-    fn install_finder_location_source() -> &'static str {
-        let source = include_str!("lib.rs");
+    fn install_finder_location_source() -> String {
+        // Windows checkouts can carry CRLF line endings (CI run 36772299380 failed on exactly
+        // that): normalise, so the multi-line shape check below is about code, not about EOLs.
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
         let start = source
             .find("async fn install_finder_location(")
             .expect("install_finder_location exists");
@@ -9686,7 +9688,7 @@ mod tests {
             + source[start..]
                 .find("async fn continue_without_finder_location(")
                 .expect("next command exists");
-        &source[start..end]
+        source[start..end].to_string()
     }
 
     #[test]
