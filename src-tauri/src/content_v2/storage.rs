@@ -392,10 +392,38 @@ impl Store {
             ensure!(old == (e.offset, e.packed, e.len), "immutable extent");
             return Ok(());
         }
-        self.db.execute(
+        let _admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        metadata_admitted(&self.db, &self.path, false)?;
+        let (reserved, excess) = self.budget_from_disk()?;
+        ensure!(reserved + excess + DIRTY_LIMIT <= self.quota, "metadata quota");
+        let _ = take_page_write_bytes(&self.db)?;
+        let tx = self.db.unchecked_transaction()?;
+        let before: u64 = tx.query_row(
+            "SELECT (SELECT page_count FROM pragma_page_count)-(SELECT freelist_count FROM pragma_freelist_count)",
+            [], |r| r.get(0),
+        )?;
+        tx.execute(
             "INSERT INTO v2_extents VALUES(?1,?2,?3,?4,?5)",
             params![a.id.as_slice(), ordinal, e.offset, e.packed, e.len],
         )?;
+        let after: u64 = tx.query_row(
+            "SELECT (SELECT page_count FROM pragma_page_count)-(SELECT freelist_count FROM pragma_freelist_count)",
+            [], |r| r.get(0),
+        )?;
+        // Charge index/page growth and a bounded row allowance even when the
+        // insertion fits a currently allocated page. Never spend payload slack twice.
+        let charge = (after.saturating_sub(before) * 4096).max(128);
+        let (used, allowance): (u64, u64) = tx.query_row(
+            "SELECT consumed_bytes,payload_bytes FROM v2_reservations WHERE reservation_id=?1 AND phase<>'Released'",
+            [a.reservation.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        ensure!(used.checked_add(charge).is_some_and(|n| n <= allowance), "extent amplification exceeds reservation");
+        tx.execute("UPDATE v2_reservations SET consumed_bytes=consumed_bytes+?2 WHERE reservation_id=?1", params![a.reservation.as_slice(), charge])?;
+        tx.commit()?;
+        ensure!(take_page_write_bytes(&self.db)? <= DIRTY_LIMIT, "extent dirty page bound");
+        if file_len(&wal_path(&self.path)) >= 64 * MIB {
+            checkpoint(&self.db, &self.path, false)?;
+        }
         Ok(())
     }
     fn scan(
