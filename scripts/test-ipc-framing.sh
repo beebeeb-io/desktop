@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-EXPECTED_TESTS=22
+EXPECTED_TESTS=25
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

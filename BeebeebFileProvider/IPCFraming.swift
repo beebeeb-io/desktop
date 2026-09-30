@@ -44,6 +44,29 @@ enum IPCFraming {
     /// honest "did not answer" error after 10 minutes rather than hanging Finder.
     static let hydrateTimeoutSeconds = 600
 
+    /// QueueFinderCreate / QueueFinderModify WITH file contents. Unlike the
+    /// other metadata calls, the daemon copies the whole file into its
+    /// staging area (`StagedPayload::copy`, a synchronous `std::fs::copy`)
+    /// BEFORE it replies, and sends nothing in between. A timeout here is not
+    /// harmless: the extension reports failure while the daemon carries on and
+    /// queues the upload, and Finder's retry then queues it again under a
+    /// fresh id (a duplicate). So the timeout must outlast any copy that will
+    /// finish. It is bounded by disk, not network: 600 s covers 15 GB at a
+    /// pessimistic 25 MB/s (spinning or USB disk; an APFS same-volume copy is
+    /// a clone and near-instant), and it is the same 20x-metadata ceiling as
+    /// hydrate. A wedged daemon still surfaces after 10 minutes, not never.
+    /// A copy that would take longer still times out; making THAT
+    /// duplicate-proof needs a request id the daemon dedups on (protocol
+    /// change, tracked in the task file, not done here).
+    static let stagedCopyTimeoutSeconds = 600
+
+    /// Timeout for a write-queue request: long only when the daemon has file
+    /// contents to copy; a folder create, a rename or a delete stays on the
+    /// short metadata timeout so a wedged daemon still fails fast.
+    static func writeQueueTimeoutSeconds(hasContents: Bool) -> Int {
+        return metadataTimeoutSeconds // MUTATION C (red-proof)
+    }
+
     static let readChunkBytes = 64 * 1024
 
     /// Encode a request as one frame: compact JSON + "\n".
@@ -208,6 +231,13 @@ final class IPCFrameReader {
     private let maxFrameBytes: Int
     private var buffer = [UInt8]()
     private var scanner = IPCJSONValueScanner()
+    /// `buffer[0..<scannedThrough]` is known to contain no delimiter, so each
+    /// pass looks only at bytes appended since the last one. Rescanning the
+    /// whole buffer after every 64 KiB read is quadratic on a large reply.
+    private var scannedThrough = 0
+    /// Total bytes examined while hunting for delimiters. Test-visible: the
+    /// framing tests assert it stays linear in the reply size.
+    private(set) var delimiterBytesExamined = 0
 
     init(maxFrameBytes: Int = IPCFraming.maxReplyBytes, read: @escaping IPCReadFunction) {
         self.maxFrameBytes = maxFrameBytes
@@ -220,9 +250,12 @@ final class IPCFrameReader {
         while true {
             // 1. A complete delimited frame already buffered (frames often
             //    arrive several to a read).
-            if let index = buffer.firstIndex(of: IPCFraming.delimiter) {
+            let found = buffer[scannedThrough..<buffer.count].firstIndex(of: IPCFraming.delimiter)
+            delimiterBytesExamined += (found.map { $0 + 1 } ?? buffer.count) - scannedThrough
+            if let index = found {
                 let frame = Array(buffer[0..<index])
                 buffer.removeSubrange(0...index)
+                scannedThrough = 0
                 scanner.reset()
                 scanner.feed(buffer[0..<buffer.count])
                 if IPCFrameReader.isBlank(frame) {
@@ -230,10 +263,12 @@ final class IPCFrameReader {
                 }
                 return Data(frame)
             }
+            // MUTATION A (red-proof): scan position never advances
             // 2. Legacy peer: one complete value, no delimiter.
             if scanner.hasCompleteValue {
                 let frame = buffer
                 buffer.removeAll()
+                scannedThrough = 0
                 scanner.reset()
                 return Data(frame)
             }
@@ -261,6 +296,7 @@ final class IPCFrameReader {
                 }
                 let frame = buffer
                 buffer.removeAll()
+                scannedThrough = 0
                 scanner.reset()
                 return Data(frame)
             }

@@ -50,9 +50,19 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         // BEFORE `fetchContents` returned, so Finder never even received the
         // Progress object. Now the work runs on a background queue, the
         // Progress is returned immediately, its units are plaintext BYTES
-        // (switched from the placeholder 1 as soon as the daemon reports the
-        // real size), and cancelling it cancels the daemon request.
-        let progress = Progress(totalUnitCount: 1)
+        // (switched over as soon as the daemon reports the real size), and
+        // cancelling it cancels the daemon request.
+        //
+        // It starts INDETERMINATE: Apple documents `Progress.isIndeterminate`
+        // as true when `totalUnitCount` or `completedUnitCount` is less than
+        // zero (or both are zero), so `totalUnitCount = -1` is the documented
+        // way to say "size not known yet". A placeholder of 1 would render as
+        // a determinate 0% bar for as long as the size stays unknown (an old
+        // daemon sends no progress frames at all). Apple documents no
+        // Finder-specific rule beyond "the system observes this progress
+        // object", so whether Finder draws a spinner or a bar is only
+        // provable on a Mac (still open, see task 1670 Notes).
+        let progress = Progress(totalUnitCount: -1)
         progress.kind = .file
         progress.setUserInfoObject(Progress.FileOperationKind.downloading, forKey: .fileOperationKindKey)
         progress.isCancellable = true
@@ -72,7 +82,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         switch XPCBridge.hydrateDestinationURL(for: itemIdentifier) {
         case .failure(let error):
             completionHandler(nil, nil, error)
-            progress.completedUnitCount = 1
+            Self.finish(progress)
             return progress
         case .success(let url):
             destinationURL = url
@@ -123,8 +133,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     cancellation: cancellation,
                     onProgress: { done, total in
                         // Real progress from the daemon's download + decrypt.
-                        // `total` is 0 when the size is unknown: stay
-                        // indeterminate rather than show a wrong bar.
+                        // `total` is 0 when the size is unknown: leave the
+                        // Progress at its indeterminate -1 rather than show a
+                        // wrong bar.
                         if total > 0 {
                             progress.totalUnitCount = total
                             progress.completedUnitCount = min(done, total)
@@ -161,10 +172,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     completionHandler(nil, nil, error)
                 }
             }
-            progress.completedUnitCount = progress.totalUnitCount
+            Self.finish(progress)
         }
 
         return progress
+    }
+
+    /// Mark a fetchContents Progress complete. An indeterminate Progress
+    /// (`totalUnitCount == -1`, size never reported) must become a real
+    /// 1-of-1 first: `completedUnitCount = totalUnitCount` would set -1 and
+    /// leave it indeterminate instead of finished.
+    private static func finish(_ progress: Progress) {
+        if progress.totalUnitCount < 1 {
+            progress.totalUnitCount = 1
+        }
+        progress.completedUnitCount = progress.totalUnitCount
     }
 
     /// Task 1670 round 4: copy `sourceURL` (our own App-Group hydrate-cache

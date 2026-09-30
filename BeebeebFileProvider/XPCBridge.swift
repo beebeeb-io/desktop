@@ -362,7 +362,10 @@ final class XPCBridge {
         if let contentType {
             payload["content_type"] = contentType
         }
-        return try decodeWriteResponse(sendRequest(["QueueFinderCreate": payload]))
+        return try decodeWriteResponse(sendRequest(
+            ["QueueFinderCreate": payload],
+            timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
+        ))
     }
 
     func queueModifyItem(
@@ -389,7 +392,10 @@ final class XPCBridge {
         if let baseVersionIdentifier {
             payload["base_version_identifier"] = baseVersionIdentifier
         }
-        return try decodeWriteResponse(sendRequest(["QueueFinderModify": payload]))
+        return try decodeWriteResponse(sendRequest(
+            ["QueueFinderModify": payload],
+            timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
+        ))
     }
 
     func queueDeleteItem(

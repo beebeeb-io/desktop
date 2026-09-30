@@ -2,8 +2,10 @@
 
 Task 1670 issue 3. This is the contract between the desktop daemon
 (`src-tauri/src/ipc_socket.rs`) and its socket clients: the macOS File Provider
-extension (`BeebeebFileProvider/XPCBridge.swift`) and the Linux FUSE prototype.
-Unix sockets do not exist on Windows, where Cloud Files runs in-process.
+extension (`BeebeebFileProvider/XPCBridge.swift`) and the Rust readiness probe
+(`wait_for_file_provider_ipc_ready`). The Linux FUSE prototype (`src-tauri/src/linux_fuse`)
+does not use this socket. Unix sockets do not exist on Windows, where Cloud Files runs
+in-process.
 
 Implementations that must stay in step:
 
@@ -88,7 +90,8 @@ Applied as `SO_RCVTIMEO`/`SO_SNDTIMEO`, i.e. per `read()`/`write()` call:
 
 | Call | Timeout | Reason |
 | --- | --- | --- |
-| list / item / queue* | 30 s | Database work in the daemon; answers in milliseconds. |
+| list / item / queue delete / queue create+modify without contents | 30 s | Database work in the daemon; answers in milliseconds. |
+| queue create / modify WITH contents | 600 s | The daemon copies the whole file into staging (`StagedPayload::copy`, synchronous) before replying and sends nothing meanwhile. A timeout here is a duplicate hazard: the extension reports failure, the daemon still queues the upload, Finder retries and queues it again under a fresh id. 600 s covers 15 GB at 25 MB/s (a same-volume APFS copy is a clone, near-instant). A copy longer than that still times out; closing that fully needs a client request id the daemon dedups on (not implemented). |
 | hydrate | 600 s idle | Each progress frame restarts it. The daemon's HTTP client allows 30 s per request (`api_client.rs`) and a hydrate makes one metadata request plus one per chunk; an older daemon sends no progress and is silent for the whole download. 20x the per-request ceiling also covers `download_kbps_limit` pacing sleeps. |
 
 A timeout surfaces as `BeebeebIPCError.timedOut(seconds:)`

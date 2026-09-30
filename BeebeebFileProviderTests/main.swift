@@ -180,6 +180,43 @@ check("two frames in one read come out one at a time") {
     try expect(text(second) == "{\"b\":2}", "second was \(text(second))")
 }
 
+check("delimiter search is linear: a 4 MiB reply in 64 KiB reads examines each byte once") {
+    let body = String(repeating: "x", count: 4 * 1024 * 1024)
+    let payload = utf8("{\"pad\":\"\(body)\"}\n")
+    let reader = IPCFrameReader(read: scripted(slices(payload, every: 64 * 1024)))
+    let frame = try reader.nextFrame()
+    try expect(frame.count == payload.count - 1, "frame is \(frame.count) bytes, expected \(payload.count - 1)")
+    // Rescanning the whole buffer after every read would examine roughly
+    // 32x payload.count here (64 reads, ~half the buffer each time).
+    try expect(reader.delimiterBytesExamined <= payload.count,
+               "examined \(reader.delimiterBytesExamined) bytes for a \(payload.count)-byte reply")
+}
+
+check("frames straddling read boundaries survive the incremental delimiter scan") {
+    // Boundaries fall: inside frame 1, exactly before frame 1's delimiter,
+    // exactly after it, mid-frame 2, and with frame 3 arriving whole.
+    let reader = IPCFrameReader(read: scripted([
+        .bytes(utf8("{\"a\":")),
+        .bytes(utf8("1}")),
+        .bytes(utf8("\n")),
+        .bytes(utf8("{\"b\":2}\n{\"c\"")),
+        .bytes(utf8(":3}\n{\"d\":4}\n")),
+    ]))
+    var frames = [String]()
+    for _ in 0..<4 {
+        frames.append(text(try reader.nextFrame()))
+    }
+    try expect(frames == ["{\"a\":1}", "{\"b\":2}", "{\"c\":3}", "{\"d\":4}"], "got \(frames)")
+}
+
+check("write-queue calls with contents get the long staged-copy timeout, others stay short") {
+    try expect(IPCFraming.writeQueueTimeoutSeconds(hasContents: true) == IPCFraming.stagedCopyTimeoutSeconds,
+               "with contents: \(IPCFraming.writeQueueTimeoutSeconds(hasContents: true))s")
+    try expect(IPCFraming.stagedCopyTimeoutSeconds >= 600, "staged-copy timeout is only \(IPCFraming.stagedCopyTimeoutSeconds)s")
+    try expect(IPCFraming.writeQueueTimeoutSeconds(hasContents: false) == IPCFraming.metadataTimeoutSeconds,
+               "without contents: \(IPCFraming.writeQueueTimeoutSeconds(hasContents: false))s")
+}
+
 check("blank lines between frames are skipped") {
     let reader = IPCFrameReader(read: scripted([.bytes(utf8("\n\r\n{\"a\":1}\n"))]))
     let frame = try reader.nextFrame()

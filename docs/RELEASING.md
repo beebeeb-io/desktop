@@ -115,10 +115,14 @@ and Linux have already been built and the GitHub release created by the normal w
 
    ```sh
    VERSION=0.8.7   # plain semver, no -alpha/-beta suffix
-   [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "plain semver only"; exit 1; }
-   jq --arg version "$VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp \
-     && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
-   jq -r .version src-tauri/tauri.conf.json   # must print $VERSION, not 0.1.0
+   # if/else, not `|| exit 1`: pasted into an interactive shell, `exit` would close your terminal.
+   if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+     jq --arg version "$VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp \
+       && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+     jq -r .version src-tauri/tauri.conf.json   # must print $VERSION, not 0.1.0
+   else
+     echo "plain semver only: got '$VERSION'" >&2
+   fi
    ```
 
    After the build, `plutil -extract CFBundleShortVersionString raw <built .app>/Contents/Info.plist` must print the same version.
