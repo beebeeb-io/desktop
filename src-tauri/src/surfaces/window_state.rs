@@ -92,6 +92,25 @@ impl PRect {
     }
 }
 
+/// Height of the macOS title bar in points. The plugin's stored size omits it.
+pub const TITLE_BAR_POINTS: f64 = 28.0;
+
+fn scale_of(d: &PhysicalDisplay) -> f64 {
+    if d.scale_factor.is_finite() && d.scale_factor > 0.0 {
+        d.scale_factor
+    } else {
+        1.0
+    }
+}
+
+/// `inner` (what the plugin stored) grown by the title bar at `scale`.
+fn outer_rect(inner: &PRect, scale: f64) -> PRect {
+    PRect {
+        h: inner.h.saturating_add((TITLE_BAR_POINTS * scale).round() as u32),
+        ..*inner
+    }
+}
+
 /// A display as tauri reports it: `Monitor::work_area()` (physical, excludes the
 /// menu bar, notch band and Dock) and its scale factor.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,14 +171,18 @@ pub fn validate_restore(saved: Option<&SavedWindowState>, displays: &[PhysicalDi
         w: s.width,
         h: s.height,
     };
-    let Some(display) = displays.iter().position(|d| d.work_area.contains_rect(&rect)) else {
+    // The plugin stores the OUTER position but the INNER size, so `rect` has no
+    // title bar. Settings is decorated: its real extent is `rect` plus the title
+    // bar on the bottom edge (the top edge is the stored outer y). Test the
+    // outer extent, with the title bar converted at each candidate display's own
+    // scale.
+    let Some(display) = displays
+        .iter()
+        .position(|d| d.work_area.contains_rect(&outer_rect(&rect, scale_of(d))))
+    else {
         return RestoreDecision::Ignore(OffScreen);
     };
-    let scale = if displays[display].scale_factor.is_finite() && displays[display].scale_factor > 0.0 {
-        displays[display].scale_factor
-    } else {
-        1.0
-    };
+    let scale = scale_of(&displays[display]);
     // One logical pixel of slack for rounding on fractional scales.
     if (rect.w as f64 / scale - SETTINGS_WIDTH).abs() > 1.0 {
         return RestoreDecision::Ignore(WrongWidth);
@@ -377,6 +400,64 @@ mod tests {
                 "({x}, {y})"
             );
         }
+    }
+
+    #[test]
+    fn the_title_bar_counts_towards_fitting_inside_the_work_area() {
+        // The plugin stores the window's OUTER position and its INNER size.
+        // Settings is decorated, so the real window also covers a title bar
+        // (28 pt, 56 px at 2x) that the stored size leaves out. Display 0's work
+        // area ends at y = 74 + 1800 = 1874.
+        let just_fits = SavedWindowState {
+            y: 1874 - 800 - 56,
+            ..valid()
+        };
+        let under_the_dock = SavedWindowState {
+            y: 1874 - 800,
+            ..valid()
+        };
+        let d = displays();
+        assert!(
+            matches!(
+                validate_restore(Some(&just_fits), &d),
+                RestoreDecision::Restore { display: 0, .. }
+            ),
+            "outer bottom is exactly the work area bottom"
+        );
+        assert_eq!(
+            validate_restore(Some(&under_the_dock), &d),
+            RestoreDecision::Ignore(IgnoreReason::OffScreen),
+            "the inner rect fits but the title bar puts the outer bottom under the Dock"
+        );
+        // The boundary at 2x is 56 px, not 28: one px short of it is out.
+        let d2 = displays();
+        assert_eq!(
+            validate_restore(
+                Some(&SavedWindowState {
+                    y: 1874 - 800 - 55,
+                    ..valid()
+                }),
+                &d2
+            ),
+            RestoreDecision::Ignore(IgnoreReason::OffScreen),
+            "the title bar is 28 pt, so 56 px on a 2x display"
+        );
+        // On the 1x external the title bar is 28 px: work area ends at 24 + 1025.
+        let external = |y| SavedWindowState {
+            width: 560,
+            height: 400,
+            x: 3100,
+            y,
+            ..valid()
+        };
+        assert!(matches!(
+            validate_restore(Some(&external(1049 - 400 - 28)), &d),
+            RestoreDecision::Restore { display: 1, .. }
+        ));
+        assert_eq!(
+            validate_restore(Some(&external(1049 - 400 - 27)), &d),
+            RestoreDecision::Ignore(IgnoreReason::OffScreen)
+        );
     }
 
     #[test]

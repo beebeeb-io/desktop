@@ -50,6 +50,13 @@ pub struct PopoverSnapshot {
     pub connectivity: Connectivity,
     /// Files are in flight (`sync_in_flight_count > 0`).
     pub syncing: bool,
+    /// A failed Finder install is being shown by ANOTHER surface right now
+    /// (`failure::finder_failure_shown_elsewhere`). Spec section 7: the popover
+    /// shows f2 only while it is the surface that shows the failure, never both
+    /// at once, so when this is set `FinderSetup::Failed` does not produce
+    /// `FinderFailed`. Slice 2's snapshot builder fills it from the failure
+    /// ledger and the registry.
+    pub finder_failure_elsewhere: bool,
 }
 
 impl PopoverSnapshot {
@@ -64,6 +71,7 @@ impl PopoverSnapshot {
             storage_full: false,
             connectivity: Connectivity::Online,
             syncing: false,
+            finder_failure_elsewhere: false,
         }
     }
 }
@@ -108,11 +116,14 @@ pub fn popover_phase(s: &PopoverSnapshot) -> PopoverPhase {
         SessionEnded
     } else if !s.vault_unlocked {
         Locked
-    } else if s.finder == FinderSetup::Failed {
+    } else if s.finder == FinderSetup::Failed && !s.finder_failure_elsewhere {
         FinderFailed
     } else if s.finder == FinderSetup::Adding {
         FinderAdding
-    } else if s.finder == FinderSetup::Missing {
+    } else if s.finder == FinderSetup::Missing || s.finder == FinderSetup::Failed {
+        // A failed install that another surface is already reporting (spec
+        // section 7) is still "Finder is not set up" here, so the popover
+        // says that, plainly, and does not repeat the failure.
         FinderMissing
     } else if s.paused {
         Paused
@@ -151,6 +162,38 @@ mod tests {
             Syncing => |s| s.syncing = true,
             Synced => |_| {},
         }
+    }
+
+    #[test]
+    fn a_finder_failure_shown_by_another_surface_is_not_repeated_as_f2() {
+        let failed = PopoverSnapshot {
+            finder: FinderSetup::Failed,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&failed), FinderFailed);
+        let elsewhere = PopoverSnapshot {
+            finder_failure_elsewhere: true,
+            ..failed
+        };
+        assert_eq!(popover_phase(&elsewhere), FinderMissing);
+        // The flag changes nothing unless the install actually failed...
+        for finder in [FinderSetup::Ready, FinderSetup::Missing, FinderSetup::Adding] {
+            let base = PopoverSnapshot {
+                finder,
+                ..PopoverSnapshot::healthy()
+            };
+            let flagged = PopoverSnapshot {
+                finder_failure_elsewhere: true,
+                ..base
+            };
+            assert_eq!(popover_phase(&flagged), popover_phase(&base), "{finder:?}");
+        }
+        // ...and it does not lift the higher phases.
+        let locked = PopoverSnapshot {
+            vault_unlocked: false,
+            ..elsewhere
+        };
+        assert_eq!(popover_phase(&locked), Locked);
     }
 
     #[test]

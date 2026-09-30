@@ -8338,10 +8338,20 @@ pub fn run() {
             }
         })
         // Red-dot close button → hide to tray instead of quitting
+        //
+        // The decision is `surfaces::policy::close_policy` (task 1683 slice 1):
+        // Hide for every label on every platform today, so this is a refactor,
+        // not a change. Slice 6 makes macOS label-aware (onboarding and review
+        // are destroyed) by flipping `MACOS_LABEL_AWARE_CLOSE`, not by editing
+        // this closure.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if surfaces::policy::close_policy(surfaces::policy::Platform::current(), window.label())
+                    == surfaces::registry::ClosePolicy::Hide
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .run(tauri::generate_context!())
@@ -9235,7 +9245,7 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 #[cfg(not(target_os = "windows"))]
 fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
     let (label, width, height, resizable) = (
-        "settings",
+        surfaces::policy::main_window_label(surfaces::policy::Platform::current()),
         MACOS_SETTINGS_WINDOW_WIDTH,
         MACOS_SETTINGS_WINDOW_HEIGHT,
         false,
@@ -9391,7 +9401,7 @@ fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 
     #[cfg(target_os = "windows")]
     {
-        let label = "main-app";
+        let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
         let url = match nav {
             Some(nav) => format!("index.html?window=main-app&platform=windows&nav={nav}"),
             None => "index.html?window=main-app&platform=windows".to_string(),

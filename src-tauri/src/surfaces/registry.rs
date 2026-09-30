@@ -6,7 +6,16 @@
 //! the labels `tray`, `windows-onboarding`, `main-app` and `conflict-<id>` are
 //! removed from the macOS config in slice 6 and [`SurfaceKind::from_label`]
 //! refuses them.
+//!
+//! At most ONE surface is visible at a time (spec section 2, "Visible at the
+//! same time: 1"; device rung 8, "at most one window visible"): opening any
+//! kind hides whichever other one is showing. Slice 1 originally hid only the
+//! popover, which left settings, onboarding and review free to stack up to three
+//! deep, the P3 window sprawl this task exists to remove. The consequence for
+//! the popover (a tray click hides a visible Settings window) is recorded for
+//! Guus in `.claude/tasks/decisions/1683-s1-spec-reconciliations.md`.
 
+use super::failure::Visible;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -80,8 +89,12 @@ pub enum OpenAction {
 pub struct OpenPlan {
     pub kind: SurfaceKind,
     pub action: OpenAction,
-    /// Surfaces that must be hidden first (spec rule 3: opening any other
-    /// window hides the popover).
+    /// Surfaces that must be hidden first. Spec section 2 ("Visible at the same
+    /// time: 1") and rule 3: opening a surface hides every other visible one.
+    /// They are HIDDEN, never destroyed, even onboarding and review (whose
+    /// close policy is destroy): superseding a window is not the user closing
+    /// it, and destroying it would throw away work in progress. Ordered by
+    /// kind so the list is deterministic.
     pub hide: Vec<SurfaceKind>,
 }
 
@@ -97,12 +110,15 @@ impl SurfaceRegistry {
     }
 
     /// Ask for a surface. Records the result, so calling it twice is the
-    /// "opening a kind twice yields one window" contract.
+    /// "opening a kind twice yields one window" contract, and leaves `kind` as
+    /// the ONE visible surface (every other visible kind is in `hide`).
     pub fn open(&mut self, kind: SurfaceKind) -> OpenPlan {
         let mut hide = Vec::new();
-        if kind != SurfaceKind::Popover && self.is_visible(SurfaceKind::Popover) {
-            self.live.insert(SurfaceKind::Popover, false);
-            hide.push(SurfaceKind::Popover);
+        for (other, visible) in self.live.iter_mut() {
+            if *other != kind && *visible {
+                *visible = false;
+                hide.push(*other);
+            }
         }
         let action = if self.live.contains_key(&kind) {
             OpenAction::Show
@@ -146,6 +162,15 @@ impl SurfaceRegistry {
 
     pub fn visible_count(&self) -> usize {
         self.live.values().filter(|v| **v).count()
+    }
+
+    /// Which app windows are visible, in the form the failure reducer takes.
+    pub fn visible(&self) -> Visible {
+        Visible {
+            popover: self.is_visible(SurfaceKind::Popover),
+            settings: self.is_visible(SurfaceKind::Settings),
+            other_window: self.is_visible(SurfaceKind::Onboarding) || self.is_visible(SurfaceKind::Review),
+        }
     }
 
     pub fn live_labels(&self) -> Vec<&'static str> {
@@ -260,12 +285,69 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_popover_does_not_hide_settings() {
+    fn opening_the_popover_hides_a_visible_settings_window() {
+        // Spec section 2: "Visible at the same time: 1". The popover is a
+        // surface like any other, so it does not sit on top of Settings.
         let mut r = SurfaceRegistry::new();
         r.open(Settings);
         let plan = r.open(Popover);
-        assert!(plan.hide.is_empty());
-        assert!(r.is_visible(Settings));
+        assert_eq!(plan.hide, vec![Settings]);
+        assert!(!r.is_visible(Settings) && r.is_live(Settings), "hidden, not destroyed");
+        assert_eq!(r.visible_count(), 1);
+    }
+
+    #[test]
+    fn opening_a_window_hides_every_other_visible_window_not_only_the_popover() {
+        // Starts from Settings, not from the popover: the slice-1 review case.
+        // Settings, then review, then onboarding must never show 3 at once.
+        let mut r = SurfaceRegistry::new();
+        r.open(Settings);
+        let to_review = r.open(Review);
+        assert_eq!(to_review.hide, vec![Settings]);
+        assert_eq!(r.visible_count(), 1);
+        let to_onboarding = r.open(Onboarding);
+        assert_eq!(to_onboarding.hide, vec![Review]);
+        assert_eq!(r.visible_count(), 1);
+        assert!(r.is_visible(Onboarding));
+        // Superseded windows are hidden, never destroyed: no in-progress
+        // onboarding or review is lost because the user opened something else.
+        assert_eq!(r.live_count(), 3);
+        // ...and coming back to one is a Show, not a rebuild.
+        assert_eq!(r.open(Settings).action, OpenAction::Show);
+        assert_eq!(r.visible_count(), 1);
+    }
+
+    #[test]
+    fn at_most_one_surface_is_visible_after_any_sequence_of_opens_and_closes() {
+        // Every sequence of up to 5 operations over 4 kinds x {open, close}.
+        let ops: Vec<(SurfaceKind, bool)> = SurfaceKind::ALL
+            .into_iter()
+            .flat_map(|k| [(k, true), (k, false)])
+            .collect();
+        let mut sequences = 0usize;
+        let mut stack: Vec<Vec<usize>> = vec![vec![]];
+        while let Some(seq) = stack.pop() {
+            let mut r = SurfaceRegistry::new();
+            for &i in &seq {
+                let (kind, open) = ops[i];
+                if open {
+                    r.open(kind);
+                } else {
+                    r.close(kind);
+                }
+                assert!(r.visible_count() <= 1, "{seq:?} left {} visible", r.visible_count());
+            }
+            sequences += 1;
+            if seq.len() < 5 {
+                for i in 0..ops.len() {
+                    let mut next = seq.clone();
+                    next.push(i);
+                    stack.push(next);
+                }
+            }
+        }
+        // 1 + 8 + 8^2 + ... + 8^5: proves the loop walked them all.
+        assert_eq!(sequences, 37_449);
     }
 
     #[test]
@@ -297,6 +379,41 @@ mod tests {
         assert!(r.dock_icon_wanted());
         r.close(Onboarding);
         assert!(!r.dock_icon_wanted());
+    }
+
+    #[test]
+    fn visible_reports_exactly_what_is_showing() {
+        let none = Visible::default();
+        assert_eq!(SurfaceRegistry::new().visible(), none);
+        for (kind, expected) in [
+            (Popover, Visible { popover: true, ..none }),
+            (Settings, Visible { settings: true, ..none }),
+            (
+                Onboarding,
+                Visible {
+                    other_window: true,
+                    ..none
+                },
+            ),
+            (
+                Review,
+                Visible {
+                    other_window: true,
+                    ..none
+                },
+            ),
+        ] {
+            let mut r = SurfaceRegistry::new();
+            r.open(kind);
+            assert_eq!(r.visible(), expected, "{kind:?} open");
+            r.open(Popover);
+            r.close(Popover);
+            assert_eq!(
+                r.visible(),
+                none,
+                "{kind:?} hidden by the popover, which was then closed"
+            );
+        }
     }
 
     #[test]

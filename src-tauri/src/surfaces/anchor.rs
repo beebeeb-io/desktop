@@ -27,6 +27,16 @@
 //!   cap (defensive; the spec only states the height rule).
 //! - Icon's display unavailable: the top right of the PRIMARY display's visible
 //!   frame. It is never centred and never a remembered position.
+//!
+//!   The spec says two things about "unavailable". Rule 2: top right of the
+//!   primary display. Section 9: "Fallback when AppKit gives nothing: today's
+//!   physical logic, unchanged." They are one chain, not a conflict, and this is
+//!   the recorded answer for slice 6: (1) the caller asks AppKit for the status
+//!   item's screen and rect; (2) if AppKit gives nothing, it runs today's
+//!   physical lookup (`physical_point_monitor_index`) and converts that rect to
+//!   logical points; (3) only when both give nothing does it pass `icon: None`
+//!   here, and THIS file's answer is the top right of the primary display. This
+//!   file implements step 3 only, because steps 1 and 2 need AppKit and tao.
 //! - Settings (ruling 6, Guus 2026-09-30): the same function with the top-right
 //!   anchor on the icon's display, `ICON_GAP` under the menu bar, so its top
 //!   edge lines up with the popover's.

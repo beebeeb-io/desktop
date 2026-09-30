@@ -227,7 +227,9 @@ fn every_window_the_shipping_config_creates_is_covered_on_every_platform() {
     // tray, windows-onboarding, main-app (config) plus the dynamic
     // conflict-<file_id> windows: a window with no capability cannot `invoke` or
     // `listen`, and fails silently.
-    for platform in ["windows", "linux"] {
+    // macOS creates the same labels today (the P3 defect), so it is in the loop;
+    // a capability file that dropped one of them for macOS must fail here.
+    for platform in ["macOS", "windows", "linux"] {
         let mut labels: Vec<&str> = TODAYS_WINDOWS.to_vec();
         labels.extend(["settings", "onboarding", "conflict-7f3a-0001"]);
         assert_eq!(uncovered(platform, &labels), Vec::<String>::new(), "{platform}");

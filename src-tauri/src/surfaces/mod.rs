@@ -23,6 +23,9 @@
 //! | [`failure`] | section 7 (one surface per failure) |
 //! | [`phase`] | section 3 "State machine", section 9 "Popover phase" |
 //! | [`policy`] | section 11 (Windows and Linux impact) |
+//!
+//! `combined_tests` (test-only) drives the registry, the failure reducer and the
+//! phase reducer together: each is correct alone and they can still disagree.
 
 pub mod anchor;
 pub mod blur_guard;
@@ -32,5 +35,7 @@ pub mod policy;
 pub mod registry;
 pub mod window_state;
 
+#[cfg(test)]
+mod combined_tests;
 #[cfg(test)]
 mod config_tests;

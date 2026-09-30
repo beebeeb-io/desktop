@@ -18,6 +18,10 @@
 //!   (Finder install, whole-engine state, a file row, the vault password); only
 //!   a transient failure that gates nothing is a toast; a background event is a
 //!   native notification and never a toast in an app window.
+//! - A toast is raised once, in the surface where the action started
+//!   ([`FailureLedger::take_toasts`]); it never replays in another window.
+//! - The popover's phase reducer must agree with [`place`]: see
+//!   [`finder_failure_shown_elsewhere`] and `phase::PopoverSnapshot`.
 
 use std::collections::BTreeMap;
 
@@ -107,9 +111,26 @@ pub fn place(kind: FailureKind, origin: Option<Origin>, vis: Visible) -> Option<
         FailureKind::EngineWhole => vis.popover.then_some(ErrorSurface::PopoverState),
         FailureKind::FileRow => vis.popover.then_some(ErrorSurface::ActivityRow),
         FailureKind::VaultPassword => vis.popover.then_some(ErrorSurface::UnlockInline),
-        FailureKind::TransientAction => vis.any().then_some(ErrorSurface::Toast),
+        // A toast belongs to the window where the action started, and only
+        // while that window is visible. With no known origin any window will do.
+        FailureKind::TransientAction => match origin {
+            Some(Origin::Popover) => vis.popover,
+            Some(Origin::Settings) => vis.settings,
+            None => vis.any(),
+        }
+        .then_some(ErrorSurface::Toast),
         FailureKind::Background => Some(ErrorSurface::NativeNotification),
     }
+}
+
+/// Whether a failed Finder install is currently shown by a surface OTHER than
+/// the popover. The popover's phase reducer needs this so it does not also
+/// show f2 (spec section 7: "never both at once").
+pub fn finder_failure_shown_elsewhere(origin: Option<Origin>, vis: Visible) -> bool {
+    matches!(
+        place(FailureKind::FinderInstall, origin, vis),
+        Some(surface) if surface != ErrorSurface::PopoverState
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,10 +171,39 @@ impl FailureLedger {
         self.reports.len()
     }
 
-    /// Every error surface on screen. At most one entry per failure id.
+    /// The toasts to raise right now, each exactly once. A toast is an EVENT, not
+    /// state: it is raised when the failure happens and is gone after, so this
+    /// removes every transient report. A transient failure whose origin surface
+    /// is not visible is dropped without a toast (nobody could see it; replaying
+    /// it later in another window would be the stale-toast defect), and every
+    /// other kind of failure is left in the ledger untouched.
+    pub fn take_toasts(&mut self, vis: Visible) -> Vec<Rendered> {
+        let transient: Vec<String> = self
+            .reports
+            .values()
+            .filter(|r| r.kind == FailureKind::TransientAction)
+            .map(|r| r.id.clone())
+            .collect();
+        let mut toasts = Vec::new();
+        for id in transient {
+            if let Some(r) = self.reports.remove(&id) {
+                if place(r.kind, r.origin, vis) == Some(ErrorSurface::Toast) {
+                    toasts.push(Rendered {
+                        id: r.id,
+                        surface: ErrorSurface::Toast,
+                    });
+                }
+            }
+        }
+        toasts
+    }
+
+    /// Every persistent error surface on screen. At most one entry per failure
+    /// id. Toasts are not here: see [`FailureLedger::take_toasts`].
     pub fn rendered(&self, vis: Visible) -> Vec<Rendered> {
         self.reports
             .values()
+            .filter(|r| r.kind != FailureKind::TransientAction)
             .filter_map(|r| {
                 place(r.kind, r.origin, vis).map(|surface| Rendered {
                     id: r.id.clone(),
@@ -290,11 +340,107 @@ mod tests {
     }
 
     #[test]
-    fn a_transient_failure_that_gates_nothing_is_a_toast_when_a_window_is_open() {
+    fn a_transient_failure_that_gates_nothing_is_a_toast_in_the_surface_where_it_started() {
+        // Spec section 7: "the surface where the user started the action". A
+        // toggle that failed in Settings is not shown in the popover.
         for vis in all_visibility() {
-            let expected = if vis.any() { Some(Toast) } else { None };
-            assert_eq!(place(TransientAction, Some(Origin::Settings), vis), expected, "{vis:?}");
+            let from_settings = if vis.settings { Some(Toast) } else { None };
+            let from_popover = if vis.popover { Some(Toast) } else { None };
+            let unknown = if vis.any() { Some(Toast) } else { None };
+            assert_eq!(
+                place(TransientAction, Some(Origin::Settings), vis),
+                from_settings,
+                "settings {vis:?}"
+            );
+            assert_eq!(
+                place(TransientAction, Some(Origin::Popover), vis),
+                from_popover,
+                "popover {vis:?}"
+            );
+            assert_eq!(place(TransientAction, None, vis), unknown, "no origin {vis:?}");
         }
+    }
+
+    #[test]
+    fn a_stale_settings_toggle_failure_does_not_come_back_as_a_toast_in_the_popover() {
+        // The review scenario: a Settings toggle fails to save, Settings is
+        // closed, the popover opens.
+        let mut ledger = FailureLedger::new();
+        ledger.apply(FailureEvent::Failed(FailureReport::new(
+            "toggle:launch-at-login",
+            TransientAction,
+            Some(Origin::Settings),
+        )));
+        let popover_only = Visible {
+            popover: true,
+            ..Visible::default()
+        };
+        assert_eq!(ledger.take_toasts(popover_only), vec![]);
+        assert_eq!(ledger.rendered(popover_only), vec![]);
+        assert_eq!(
+            ledger.len(),
+            0,
+            "a toast nobody could see is dropped, not kept for later"
+        );
+    }
+
+    #[test]
+    fn a_toast_fires_once_and_is_not_raised_again_on_the_next_render() {
+        let mut ledger = FailureLedger::new();
+        ledger.apply(FailureEvent::Failed(FailureReport::new(
+            "toggle:launch-at-login",
+            TransientAction,
+            Some(Origin::Settings),
+        )));
+        let settings = Visible {
+            settings: true,
+            ..Visible::default()
+        };
+        // A toast is an event, not state: it is not part of `rendered`.
+        assert_eq!(ledger.rendered(settings), vec![]);
+        let first = ledger.take_toasts(settings);
+        assert_eq!(
+            first,
+            vec![Rendered {
+                id: "toggle:launch-at-login".into(),
+                surface: Toast
+            }]
+        );
+        assert_eq!(ledger.take_toasts(settings), vec![]);
+        // Settings hidden and shown again (or the popover opened): still nothing.
+        let popover = Visible {
+            popover: true,
+            ..Visible::default()
+        };
+        assert_eq!(ledger.take_toasts(popover), vec![]);
+        assert_eq!(ledger.take_toasts(settings), vec![]);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn taking_toasts_leaves_every_other_failure_alone() {
+        let mut ledger = FailureLedger::new();
+        ledger.apply(FailureEvent::Failed(FailureReport::new(
+            "finder-install",
+            FinderInstall,
+            Some(Origin::Settings),
+        )));
+        ledger.apply(FailureEvent::Failed(FailureReport::new(
+            "toggle",
+            TransientAction,
+            Some(Origin::Settings),
+        )));
+        let settings = Visible {
+            settings: true,
+            ..Visible::default()
+        };
+        assert_eq!(ledger.take_toasts(settings).len(), 1);
+        assert_eq!(
+            ledger.len(),
+            1,
+            "the gating failure stays until an attempt or success clears it"
+        );
+        assert_eq!(ledger.rendered(settings).len(), 1);
     }
 
     #[test]
