@@ -1081,4 +1081,33 @@ mod tests {
             "must not descend through a symlink, got: {found:?}"
         );
     }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn round6_real_watcher_uses_queued_file_identity() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, Storage::CloudFilters::*};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        crate::windows_cf::register_sync_root(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let path = root.join("local.txt");
+        fs::write(&path, b"watcher upload bytes").unwrap();
+        assert!(dispatch_local_create(&bridge, &root, &path, "scan"));
+        let ops = db.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(ops.len(), 1);
+        let expected = ops[0].file_id.as_ref().unwrap();
+        assert_eq!(&db.get_file_by_path("local.txt").unwrap().unwrap().file_id, expected);
+        let file = fs::File::open(&path).unwrap();
+        let mut buffer = vec![0u64; 1024];
+        unsafe { CfGetPlaceholderInfo(HANDLE(file.as_raw_handle()), CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(), (buffer.len()*8) as u32, None).unwrap(); }
+        let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+        let actual = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) }.to_vec();
+        drop(file);
+        crate::windows_cf::unregister_sync_root(&root).unwrap();
+        for op in ops.iter() { if let Some(payload) = &op.payload_path { fs::remove_file(payload).unwrap(); } }
+        assert_eq!(String::from_utf8(actual).unwrap(), *expected, "watcher identity must belong to its queued DB row");
+    }
+
 }
