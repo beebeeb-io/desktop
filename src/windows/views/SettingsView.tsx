@@ -1,3 +1,4 @@
+import { useRegionLabel } from '../useRegion'
 import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate } from '../../capabilities'
 import { CapabilityNotice } from '../../CapabilityNotice'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
@@ -42,7 +43,6 @@ import {
   type DesktopNotificationPrefKey,
 } from '../notificationPreferenceMeta'
 import { T, Card, Chip, Modal, NavIcon, PageHeader, PrimaryBtn, Skeleton, useToast } from '../ui'
-import { useRegionCity } from '../useRegion'
 import {
   CACHE_LIMIT_OPTIONS,
   buildCacheLimitView,
@@ -738,8 +738,8 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
     ? 'Loading data residency…'
     : error ? undefined
     : currentRegion?.continent === 'europe'
-      ? 'Stored in the EU.'
-      : `Stored in ${currentRegion?.displayName}.`
+      ? `Stored in the EU (currently ${currentRegion.locationLabel}).`
+      : `Stored in ${currentRegion?.displayName} (currently ${currentRegion?.locationLabel}).`
 
   return (
     <SettingsSectionShell>
@@ -875,6 +875,7 @@ function shellIntegrationCommandsFor(platform: PlatformName): { state: string; i
 }
 
 function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
+  const regionLabel = useRegionLabel()
   // Gate everything below on `resolved`: `platform` starts `null` and only
   // becomes a real value once `desktop_platform` answers. Deriving `commands`
   // from `resolved ? platform : null` means `commands` itself is the single
@@ -899,7 +900,6 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
   const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
-  const regionCity = useRegionCity()
 
   const refresh = async () => {
     if (!commands) return
@@ -976,7 +976,7 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     <SettingsSectionShell>
       <PageHeader
         title={label}
-        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for ${regionCity}.`}
+        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave. ${regionLabel}.`}
       />
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>

@@ -783,71 +783,16 @@ export interface SetPreferredRegionResponse {
   preferred_region: string | null
 }
 
-/** Live default city — the only acceptable fallback (no provider, ever). */
-const FALLBACK_CITY = 'Falkenstein'
-
-/** city → country, mirrored from the webapp `countryFromCity`. */
-function countryFromCity(city: string): string {
-  const map: Record<string, string> = {
-    falkenstein: 'Germany',
-    helsinki: 'Finland',
-    ede: 'Netherlands',
-  }
-  return map[city.toLowerCase()] ?? ''
-}
-
-/**
- * Resolve the effective region's CITY from a `/me/region` response.
- * Effective region = `preferred_region ?? default region's continent`; we then
- * look up that region's `city`. Falls back to "Falkenstein" (the live default)
- * when the response is missing/empty. NEVER returns a provider.
- */
-export function regionCity(resp: UserRegionResponse | null | undefined): string {
-  if (!resp || !resp.regions?.length) return FALLBACK_CITY
-  const effective = resp.preferred_region ?? resp.regions.find(r => r.is_default)?.continent
-  const region = resp.regions.find(r => r.continent === effective) ?? resp.regions.find(r => r.is_default)
-  return region?.city || FALLBACK_CITY
-}
-
-/**
- * "City, Country" label for the effective region (e.g. "Falkenstein, Germany").
- * Falls back to just the city when the country is unknown. NEVER a provider.
- */
-export function regionLabel(resp: UserRegionResponse | null | undefined): string {
-  const city = regionCity(resp)
-  const country = countryFromCity(city)
-  return country ? `${city}, ${country}` : city
-}
-
-/**
- * Map a raw region code (e.g. "falkenstein") to its display CITY. Used where a
- * caller already has the code (AccountView's `Subscription.region`) and doesn't
- * need a fetch. Falls back to "Falkenstein". NEVER returns a provider.
- */
-export function regionCityFromCode(code: string | null | undefined): string {
-  const map: Record<string, string> = {
-    falkenstein: 'Falkenstein',
-    helsinki: 'Helsinki',
-    ede: 'Ede',
-  }
-  return map[(code ?? '').toLowerCase()] ?? FALLBACK_CITY
-}
-
-// Module-singleton cached fetch: repeated callers in one window share ONE
-// network round-trip. On error the cached promise resolves to null so callers
-// fall back to the default city without retry-storming.
+// Coalesce concurrent readers, but never retain a previous account or failed
+// request across mounts/sign-in. Product hooks begin with neutral copy.
 let regionPromise: Promise<UserRegionResponse | null> | null = null
 
 export function fetchRegion(): Promise<UserRegionResponse | null> {
   if (!regionPromise) {
     regionPromise = accountRegion().then(r => (r.ok ? r.value : null)).catch(() => null)
+      .finally(() => { regionPromise = null })
   }
   return regionPromise
-}
-
-function updateCachedRegionPreference(preferredRegion: string | null): void {
-  if (!regionPromise) return
-  regionPromise = regionPromise.then(resp => (resp ? { ...resp, preferred_region: preferredRegion } : resp))
 }
 
 // ── Wrappers ────────────────────────────────────────────────────────────────
@@ -870,10 +815,8 @@ export function accountRegion(): Promise<CommandResult<UserRegionResponse>> {
   return command<UserRegionResponse>('account_region')
 }
 
-export async function setAccountRegion(preferredRegion: string | null): Promise<CommandResult<SetPreferredRegionResponse>> {
-  const result = await command<SetPreferredRegionResponse>('account_set_region', { preferredRegion })
-  if (result.ok) updateCachedRegionPreference(result.value.preferred_region)
-  return result
+export function setAccountRegion(preferredRegion: string | null): Promise<CommandResult<SetPreferredRegionResponse>> {
+  return command<SetPreferredRegionResponse>('account_set_region', { preferredRegion })
 }
 
 export function accountActivity(): Promise<CommandResult<AccountActivity>> {

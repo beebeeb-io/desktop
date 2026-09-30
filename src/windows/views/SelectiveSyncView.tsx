@@ -36,10 +36,11 @@
  * Sibling idiom: DevicesView.tsx + InsightsView.tsx + BandwidthView.tsx.
  */
 
+import { useRegionLabel } from '../useRegion'
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
-import { useRegionLabel } from '../useRegion'
 
 const RED = 'oklch(0.5 0.18 25)'
 

@@ -21,7 +21,7 @@
  *
  * Brand: amber is reserved for encryption state + primary/destructive-confirm
  * actions; Inter for human text, JetBrains Mono for ids/codes/timestamps;
- * name the city only ("Falkenstein"), never the storage provider; no emojis.
+ * keep product copy residency-neutral, never name the storage provider; no emojis.
  */
 
 import { useEffect, useState } from 'react'

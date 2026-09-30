@@ -12,7 +12,7 @@
  *
  * Brand: amber only for encryption/quota state + the by-type bars; Inter for
  * human text, JetBrains Mono for every machine value (bytes, counts, paths,
- * percentages, file ids); name the city only ("Falkenstein"), never the storage provider; honest voice; no emojis.
+ * percentages, file ids); use the effective continent in product copy, never the storage provider; honest voice; no emojis.
  *
  * Data wrappers (desktopApi.ts → src-tauri account commands):
  *   accountUsage()             → BillingUsage  { used_bytes, quota_bytes, percentage }
@@ -23,6 +23,8 @@
  * layout shape), error (calm "Not available in this build" for unsupported, else
  * "Couldn't load" + reason + Retry), empty, and loaded.
  */
+
+import { useRegionLabel } from '../useRegion'
 
 import { useEffect, useState } from 'react'
 import {
@@ -38,7 +40,6 @@ import {
   type Subscription,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
-import { useRegionLabel } from '../useRegion'
 
 // ── Local constants ─────────────────────────────────────────────────────────
 

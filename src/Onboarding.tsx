@@ -1,3 +1,4 @@
+import { useRegionLabel } from './windows/useRegion'
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import OnboardingErrorBoundary from './OnboardingErrorBoundary'
@@ -39,6 +40,7 @@ export default function Onboarding() {
 
 function OnboardingView() {
   const [step, setStep] = useState<Step>('signin')
+  const regionLabel = useRegionLabel(step)
 
   useEffect(() => {
     let cancelled = false
@@ -89,7 +91,7 @@ function OnboardingView() {
           </div>
         </div>
         <div className="sidebar-footer">
-          End-to-end encrypted | Falkenstein | Zero-knowledge
+          {regionLabel} | Zero-knowledge
         </div>
       </aside>
 

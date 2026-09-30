@@ -13,9 +13,11 @@
  *
  * Design tokens + idioms are shared through `src/windows/ui.tsx`. Brand: amber
  * for encryption state + the active nav icon accent only; Inter for humans,
- * JetBrains Mono for ids/sizes; name the city only ("Falkenstein"), never the
+ * JetBrains Mono for ids/sizes; use the effective continent in product copy, never the
  * storage provider; honest voice; no emojis.
  */
+
+import { useRegionLabel } from './windows/useRegion'
 
 import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -62,7 +64,6 @@ import DevicesView from './windows/views/DevicesView'
 import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
-import { useRegionLabel } from './windows/useRegion'
 import { usePlatformName, thisDeviceNoun } from './platform'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
@@ -196,12 +197,13 @@ function PlaceholderBody({ note, dataSlot, rows = 3 }: { note: string; dataSlot:
 // ── Signed-out gate ─────────────────────────────────────────────────────────
 
 function SignedOutGate({ onOpenSignIn }: { onOpenSignIn: () => void }) {
+  const regionLabel = useRegionLabel()
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '28px 36px', gap: 10 }}>
       <NavIcon name="lock" size={26} color={T.ink3} />
       <div style={{ fontSize: 16, fontWeight: 600, color: T.ink, marginTop: 6 }}>Sign in to Beebeeb</div>
       <div style={{ fontSize: 12, color: T.ink3, textAlign: 'center' as const, lineHeight: 1.6, maxWidth: 320 }}>
-        Your files are encrypted on this PC before they leave for Falkenstein. Sign in to see your vault, devices, and account.
+        Your files are encrypted on this PC before they leave. {regionLabel}. Sign in to see your vault, devices, and account.
       </div>
       <div style={{ marginTop: 8 }}>
         <PrimaryBtn onClick={onOpenSignIn}>Sign in</PrimaryBtn>
@@ -1623,6 +1625,7 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
 // ── Root component ──────────────────────────────────────────────────────────
 
 export default function WindowsApp() {
+  const regionLabel = useRegionLabel()
   const caps = useCapabilities()
   const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
   const [searchOpen, setSearchOpen] = useState(false)
@@ -1894,7 +1897,7 @@ export default function WindowsApp() {
             <div style={{ marginTop: 'auto', padding: '14px 12px 10px', borderTop: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 6 }}>
               <NavIcon name="shield" size={11} color={T.amberDeep} />
               <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-                Falkenstein
+                {regionLabel}
               </span>
             </div>
           )}

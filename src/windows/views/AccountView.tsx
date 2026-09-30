@@ -4,7 +4,7 @@
  * Replaces the scaffolded `account` placeholder in WindowsApp.tsx. Two cards:
  *   1. Profile  — email + verified/unverified state, member-since, role, and a
  *                 calm warning row when the account is frozen / pending deletion.
- *   2. Plan     — plan + billing cycle + status, region (city only, e.g. Falkenstein),
+ *   2. Plan     — plan + billing cycle + status, region (continent-aware product copy),
  *                 quota usage, renewal date, and seats when a multi-seat plan.
  * plus an honest footer: password & billing are managed on the web, opened via
  * the real `openUrl` IPC — no faked in-app mutation surfaces.
@@ -16,6 +16,8 @@
  * percentages) render in JetBrains Mono; human copy in Inter.
  */
 
+import { useRegionLabel } from '../useRegion'
+
 import { useEffect, useState } from 'react'
 import {
   accountProfile,
@@ -23,7 +25,6 @@ import {
   clearSession,
   formatBytes,
   openUrl,
-  regionCityFromCode,
   type AccountProfile,
   type Subscription,
 } from '../../desktopApi'
@@ -251,6 +252,7 @@ function QuotaBar({ used, quota }: { used: number; quota: number }) {
 }
 
 function PlanCard({ sub }: { sub: Subscription }) {
+  const regionLabel = useRegionLabel()
   const renewsRel = relativeFuture(sub.current_period_end)
   const renewsAbs = sub.current_period_end ? shortDate(sub.current_period_end) : null
   const hasSeats = sub.seats > 1
@@ -275,7 +277,7 @@ function PlanCard({ sub }: { sub: Subscription }) {
 
       <Row label="Region">
         <NavIcon name="shield" size={12} color={T.ink3} />
-        <span style={{ fontFamily: T.fontMono, fontSize: 11.5, color: T.ink2, letterSpacing: '0.02em' }}>{regionCityFromCode(sub.region)}</span>
+        <span style={{ fontFamily: T.fontMono, fontSize: 11.5, color: T.ink2, letterSpacing: '0.02em' }}>{regionLabel}</span>
       </Row>
 
       <Row label="Renews" mono last={!hasSeats}>

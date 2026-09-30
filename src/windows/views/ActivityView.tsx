@@ -19,9 +19,10 @@
  *
  * Brand: amber only for the encryption state line + unread dot + active tab +
  * the live switch knob; Inter for human text, JetBrains Mono for every machine
- * value (ids, timestamps, ip/device, counts, percentages); name the city only
- * ("Falkenstein"), never the storage provider; honest voice; no emojis.
+ * value (ids, timestamps, ip/device, counts, percentages); use the effective continent in product copy, never the storage provider; honest voice; no emojis.
  */
+
+import { useRegionLabel } from '../useRegion'
 
 import { useEffect, useState } from 'react'
 import {
@@ -32,7 +33,6 @@ import {
   type NotificationList,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
-import { useRegionLabel } from '../useRegion'
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
 // All wire timestamps are RFC3339 strings; guard null/undefined + unparseable.
@@ -500,8 +500,8 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 // ── Root ─────────────────────────────────────────────────────────────────────
 
 export default function ActivityView() {
-  const [tab, setTab] = useState<Tab>('timeline')
   const regionLabel = useRegionLabel()
+  const [tab, setTab] = useState<Tab>('timeline')
 
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
