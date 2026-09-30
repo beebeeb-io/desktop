@@ -191,7 +191,7 @@ impl Ledger {
     fn key_path(&self, slot: &Id) -> PathBuf {
         self.keys.join(hex(slot))
     }
-    fn save_key(&self, slot: &Id, key: &Id) -> Result<()> {
+    fn save_key(&self, slot: &Id, key: &Id, fault: &mut Fault) -> Result<()> {
         let wrapped = Zeroizing::new(wrap(key, true)?);
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -201,7 +201,13 @@ impl Ledger {
             options.mode(0o600);
         }
         let mut f = options.open(self.key_path(slot))?;
-        f.write_all(&wrapped)?;
+        fault.point("key create")?;
+        let half = wrapped.len() / 2;
+        f.write_all(&wrapped[..half])?;
+        fault.point("key write")?;
+        f.write_all(&wrapped[half..])?;
+        f.flush()?;
+        fault.point("key flush")?;
         f.sync_all()?;
         Ok(())
     }
@@ -261,7 +267,7 @@ impl Ledger {
             self.key(&slot)?
         } else {
             let key = Zeroizing::new(id());
-            self.save_key(&slot, &key)?;
+            self.save_key(&slot, &key, fault)?;
             key
         };
         fault.point("after key publication")?;

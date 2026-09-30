@@ -1,5 +1,5 @@
 use super::*;
-fn owner_body(store: &Store, kind: &str) -> Vec<u8> {
+pub(super) fn owner_body(store: &Store, kind: &str) -> Vec<u8> {
     let (account, root): (Vec<u8>, Vec<u8>) = store
         .db
         .query_row(
@@ -10,7 +10,7 @@ fn owner_body(store: &Store, kind: &str) -> Vec<u8> {
         .unwrap();
     records::fixture(kind, account.try_into().unwrap(), root.try_into().unwrap()).unwrap()
 }
-fn owner(store: &Store, kind: &str) -> Id {
+pub(super) fn owner(store: &Store, kind: &str) -> Id {
     let owner = id();
     store.owner(owner, kind, &owner_body(store, kind)).unwrap();
     owner
@@ -19,10 +19,10 @@ fn owner(store: &Store, kind: &str) -> Id {
 fn witness() -> Vec<u8> {
     wire::record("Witness", &[b"volume", b"file", b"exclusion"]).unwrap()
 }
-fn discard(a: &Artifact) -> Vec<u8> {
+pub(super) fn discard(a: &Artifact) -> Vec<u8> {
     wire::record("UserDiscard", &[&a.id, &a.hash]).unwrap()
 }
-fn envelope(account: Id) -> Vec<u8> {
+pub(super) fn envelope(account: Id) -> Vec<u8> {
     wire::record(
         "Envelope",
         &[
@@ -37,7 +37,7 @@ fn envelope(account: Id) -> Vec<u8> {
     )
     .unwrap()
 }
-fn captured(s: &mut Store, bytes: &[u8]) -> Artifact {
+pub(super) fn captured(s: &mut Store, bytes: &[u8]) -> Artifact {
     let o = owner(s, "Snapshot");
     s.capture(
         o,
@@ -1177,7 +1177,7 @@ fn slice1_g5_windows_sharing_blocks_key_purge_safely() {
 }
 
 /// OS available-to-caller bytes, captured alongside logical reservations.
-fn available_bytes(path: &Path) -> u64 {
+pub(super) fn available_bytes(path: &Path) -> u64 {
     #[cfg(unix)]
     unsafe {
         use std::os::unix::ffi::OsStrExt;

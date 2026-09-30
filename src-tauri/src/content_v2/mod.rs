@@ -17,6 +17,7 @@ mod ledger;
 mod records;
 mod storage;
 mod storage_tests;
+mod round2_tests;
 mod tests;
 mod wire;
 use ledger::*;
