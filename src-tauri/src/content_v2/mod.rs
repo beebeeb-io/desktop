@@ -294,3 +294,24 @@ fn metadata_admitted(db: &Connection, path: &Path, terminal: bool) -> Result<()>
     );
     Ok(())
 }
+
+/// Actual pages written to WAL, including writes into reused capacity. Reset per
+/// transaction. SQLite excludes rollback/recovery; callers only sample success.
+fn take_page_write_bytes(db: &Connection) -> Result<u64> {
+    let mut pages = 0;
+    let mut highwater = 0;
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_db_status(
+            db.handle(),
+            rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
+            &mut pages,
+            &mut highwater,
+            1,
+        )
+    };
+    ensure!(
+        result == rusqlite::ffi::SQLITE_OK && pages >= 0,
+        "page-write instrumentation unsupported"
+    );
+    Ok(pages as u64 * 4096)
+}

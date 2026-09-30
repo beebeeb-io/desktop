@@ -1286,3 +1286,30 @@ fn slice1_g4_owner_admission_waits_for_account_bootstrap() {
             .unwrap();
     });
 }
+
+#[test]
+fn slice1_g7_dirty_pages_count_wal_reuse() {
+    let h = Harness::new().unwrap();
+    let mut s = Store::new(&h).unwrap();
+    let o = owner(&s, "Snapshot");
+    let a = s
+        .allocate(o, "Capture", "Full", 8 * MIB, 0, &mut Fault::default())
+        .unwrap();
+    s.chunk(&a, 0, &vec![1; CHUNK]).unwrap();
+    let busy: i64 =
+        s.db.query_row("PRAGMA wal_checkpoint(RESTART)", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(busy, 0);
+    let before = file_len(&wal_path(&s.path));
+    s.max_dirty = 0;
+    s.chunk(&a, 1, &vec![2; CHUNK]).unwrap();
+    assert!(
+        file_len(&wal_path(&s.path)) <= before,
+        "fixture must actually reuse WAL capacity"
+    );
+    assert!(
+        s.max_dirty >= CHUNK as u64 && s.max_dirty <= DIRTY_LIMIT,
+        "dirty pages must be counted even without WAL growth: {}",
+        s.max_dirty
+    );
+}

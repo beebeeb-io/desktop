@@ -330,7 +330,7 @@ impl Store {
             written.checked_add(bytes.len() as u64).is_some_and(|n| n <= expected),
             "payload exceeds reservation"
         );
-        let before = file_len(&wal_path(&self.path));
+        let _ = take_page_write_bytes(&self.db)?;
         let tx = self.db.unchecked_transaction()?;
         let phase: String = tx.query_row(
             "SELECT phase FROM v2_artifacts WHERE artifact_id=?1",
@@ -364,7 +364,7 @@ impl Store {
             params![a.reservation.as_slice(), growth],
         )?;
         tx.commit()?;
-        let dirty = file_len(&wal_path(&self.path)).saturating_sub(before);
+        let dirty = take_page_write_bytes(&self.db)?;
         self.max_dirty = self.max_dirty.max(dirty);
         ensure!(dirty <= DIRTY_LIMIT, "transaction dirty page bound");
         self.max_buffer = self.max_buffer.max(bytes.len() * 2);
