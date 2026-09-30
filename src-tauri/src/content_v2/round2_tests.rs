@@ -432,4 +432,14 @@ fn slice1_r2_reserve_grows_for_all_participating_databases() {
         "six participating databases need six terminal budgets"
     );
     assert!(allocated_len(&reserve).unwrap() >= 6 * 64 * MIB);
+    let mut physical = Reserve::existing(h.path()).unwrap();
+    physical.release_terminal().unwrap();
+    assert_eq!(file_len(&reserve), 6 * 64 * MIB - 16 * MIB);
+    physical.refill().unwrap();
+    assert_eq!(
+        file_len(&reserve),
+        6 * 64 * MIB,
+        "refill must restore every participating database's terminal budget"
+    );
+    assert!(allocated_len(&reserve).unwrap() >= 6 * 64 * MIB);
 }
