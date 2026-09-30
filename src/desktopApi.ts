@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, subscribeAccountSession } from './accountSession'
+import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
 
 export type CommandResult<T> =
   | { ok: true; value: T }
@@ -399,6 +400,20 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
     const reason = reasonFrom(error)
     return { ok: false, reason, unsupported: isUnsupported(reason) }
   }
+}
+
+/**
+ * Everything the menu-bar popover needs for its first frame (task 1683 slice 2).
+ * Call it when the popover is shown (`popover-shown`) and after its own actions,
+ * never on a timer. Not used by any rendered UI yet (slice 3).
+ */
+export async function popoverSnapshot(activityLimit?: number): Promise<CommandResult<PopoverSnapshot>> {
+  const result = await command<unknown>('popover_snapshot', activityLimit === undefined ? undefined : { activityLimit })
+  if (!result.ok) return result
+  const snapshot = parsePopoverSnapshot(result.value)
+  return snapshot
+    ? { ok: true, value: snapshot }
+    : { ok: false, reason: 'The popover snapshot had an unexpected shape.', unsupported: false }
 }
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
