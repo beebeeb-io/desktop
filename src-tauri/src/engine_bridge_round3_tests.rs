@@ -405,6 +405,11 @@ async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool, fa
         assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1, "provider partial is not another save");
         let ops = bridge.db.list_review_operations().unwrap();
         assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), expected);
+        if count > 0 {
+            std::fs::write(&path, b"new save after failed provider write").unwrap();
+            crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+            assert_eq!(bridge.db.list_review_operations().unwrap().len(), 1);
+        }
     }
     let _ = fault;
     drop(bridge);
@@ -437,6 +442,12 @@ async fn round3_partial(append: bool, native_queue: bool, unknown_base: bool, fa
             crate::windows_edits::hash_bytes(&expected),
             "native live materialization must fill missing base ranges"
         );
+    }
+    if fault.is_some_and(|count| count > 0) {
+        let recovered: Vec<_> = std::fs::read_dir(root.join(".beebeeb/windows-writes")).unwrap()
+            .filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "recovery")).collect();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(std::fs::read(recovered[0].path()).unwrap(), b"new save after failed provider write");
     }
     let contents = received.lock().unwrap();
     assert_eq!(contents.len(), 1);
@@ -586,4 +597,49 @@ async fn regression_1640_r4_keep_theirs_save_at_download_completion() {
     assert_eq!(std::fs::read(ops[0].payload_path.as_ref().unwrap()).unwrap(), b"save made during download");
     assert_eq!(ops[0].base_version, Some(7));
     drop(watcher);
+}
+
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn regression_1640_r4_keep_theirs_interrupted_install_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("edit.txt");
+    let db_path = dir.path().join("state.db");
+    let key = hydration_test_key([9; 32], TEST_FILE_ID);
+    let server = Round3Server::start(move |request| {
+        if request.path.ends_with("/chunks/0") {
+            return round3_binary(&beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"remote winner").unwrap());
+        }
+        http_json("200 OK", serde_json::json!({"id":TEST_FILE_ID,"version_number":20,"chunk_count":1,"size_bytes":13})).into_bytes()
+    });
+    let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
+    round3_seed(&bridge, &root, b"baseline");
+    crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(Some(3)));
+    let result = bridge.resolve_keep_theirs(TEST_FILE_ID, &root).await;
+    crate::windows_cf::placeholders::partial_edits::TEST_FAIL_AFTER.with(|v| v.set(None));
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"rem");
+    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 0, "provider prefix must not queue");
+    drop(bridge);
+    std::fs::write(&path, b"save after failed resolution").unwrap();
+    let bridge = test_bridge_with_api(&db_path, server.url.clone(), [9; 32]);
+    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 0);
+    bridge.resolve_keep_theirs(TEST_FILE_ID, &root).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"remote winner");
+    let retained: Vec<_> = std::fs::read_dir(root.join(".beebeeb/windows-writes")).unwrap()
+        .filter_map(Result::ok).collect();
+    assert_eq!(retained.len(), 1, "only ambiguous recovery bytes remain, no orphan remote payload");
+    assert_eq!(std::fs::read(retained[0].path()).unwrap(), b"save after failed resolution");
+    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+    assert_eq!(bridge.db.list_review_operations().unwrap().len(), 0, "recovered provider bytes must not queue");
+    std::fs::write(&path, b"next normal save").unwrap();
+    crate::watcher::run_one_scan(&bridge, &root, &mut Default::default());
+    let ops = bridge.db.list_review_operations().unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].base_version, Some(20));
 }

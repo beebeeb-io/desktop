@@ -131,6 +131,7 @@ struct LiveInstall {
     payload: std::path::PathBuf,
     hash: String,
     version: Option<i64>,
+    retain_payload: bool,
 }
 
 fn install_marker(root: &Path, path: &Path) -> anyhow::Result<std::path::PathBuf> {
@@ -204,11 +205,11 @@ fn write_install(file: &mut std::fs::File, intent: &LiveInstall) -> anyhow::Resu
 
 pub(crate) fn install_staged(
     root: &Path, path: &Path, file: &mut std::fs::File, payload: &Path,
-    version: Option<i64>, finish: impl FnOnce(Option<i64>, &str) -> anyhow::Result<()>,
+    version: Option<i64>, retain_payload: bool, finish: impl FnOnce(Option<i64>, &str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     // Never replace an unfinished intent, even if the new download succeeded.
     let marker = install_marker(root, path)?;
-    let intent = LiveInstall { payload: payload.to_owned(), hash: hash_file(payload)?, version };
+    let intent = LiveInstall { payload: payload.to_owned(), hash: hash_file(payload)?, version, retain_payload };
     let journal = durable_bytes(marker.parent().unwrap(), "intent", &serde_json::to_vec(&intent)?)?;
     publish_conflict_copy(&journal, &marker)?;
     std::fs::remove_file(journal)?;
@@ -217,6 +218,7 @@ pub(crate) fn install_staged(
     finish(intent.version, &intent.hash)?;
     std::fs::remove_file(&marker)?;
     sync_parent(&marker)?;
+    if !intent.retain_payload { std::fs::remove_file(&intent.payload)?; }
     Ok(())
 }
 
@@ -239,9 +241,11 @@ pub(crate) fn recover_install(
         file.seek(SeekFrom::Start(0))?;
         write_install(&mut file, &intent)?;
     }
+    file.sync_all()?;
     finish(intent.version, &intent.hash)?;
     std::fs::remove_file(&marker)?;
     sync_parent(&marker)?;
+    if !intent.retain_payload { std::fs::remove_file(&intent.payload)?; }
     Ok(true)
 }
 

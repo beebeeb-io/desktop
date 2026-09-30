@@ -551,7 +551,7 @@ impl EngineBridge {
                 let patch = Zeroizing::new(std::fs::read(&source)?);
                 let payload = Path::new(op.payload_path.as_deref().ok_or_else(|| anyhow::anyhow!("missing full payload"))?);
                 crate::windows_cf::placeholders::partial_edits::materialize_if_unchanged(&path, &spec, &patch, |file| {
-                    crate::windows_edits::install_staged(root, &path, file, payload, None, |_, _| Ok(()))
+                    crate::windows_edits::install_staged(root, &path, file, payload, None, true, |_, _| Ok(()))
                 })?;
             }
         }
@@ -3213,10 +3213,18 @@ impl EngineBridge {
         let dest = local_file_path_under_sync_root(sync_root, &entry.path)?;
         self.ensure_shared_hydrate_path_safe(file_id)?;
         anyhow::ensure!(hydrate_dest_is_allowed(&dest, &[sync_root]), "invalid resolution destination");
-        crate::windows_edits::recover_install(sync_root, &dest, |version, hash| {
-            if let Some(version) = version { self.db.record_download_baseline(file_id, version, hash)?; }
-            Ok(())
-        })?;
+        if crate::windows_edits::install_pending(sync_root, &dest)? {
+            // Capture/retain the old chain while the watcher still excludes the
+            // unfinished destination; do not capture recovered provider bytes.
+            let chain = self.preserve_resolution_chain(file_id, sync_root).await?;
+            crate::windows_edits::recover_install(sync_root, &dest, |version, hash| {
+                if let Some(version) = version { self.db.record_download_baseline(file_id, version, hash)?; }
+                Ok(())
+            })?;
+            self.db.set_status(file_id, FileStatus::Local)?;
+            self.retire_resolution_chain(file_id, &chain)?;
+            return Ok(());
+        }
         // Capture before network, but revalidate on the SAME exclusive handle
         // used for replacement after download. A late save aborts resolution.
         let before = crate::windows_edits::hash_file(&dest)?;
@@ -3227,13 +3235,12 @@ impl EngineBridge {
         anyhow::ensure!(crate::windows_edits::hash_reader(&mut destination)? == before,
             "File changed during resolution; latest save and queued snapshots retained. Retry Keep Theirs.");
         let payload = crate::windows_edits::durable_bytes(&staging, "resolution", &download.bytes)?;
-        crate::windows_edits::install_staged(sync_root, &dest, &mut destination, &payload, download.version, |version, hash| {
+        crate::windows_edits::install_staged(sync_root, &dest, &mut destination, &payload, download.version, false, |version, hash| {
             if let Some(version) = version { self.db.record_download_baseline(file_id, version, hash)?; }
             Ok(())
         })?;
         self.db.mark_cached(file_id, &dest.to_string_lossy(), download.bytes.len() as i64, now_secs())?;
         drop(destination);
-        std::fs::remove_file(payload)?;
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
