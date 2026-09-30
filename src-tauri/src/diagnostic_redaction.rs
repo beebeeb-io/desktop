@@ -217,34 +217,64 @@ fn redact(error: &str, names: &KnownNames, mode: Mode) -> RedactedError {
     };
 
     let mut out: Vec<String> = Vec::new();
-    let mut skip_next = false;
+    // Armed by a credential label; stays armed across further labels
+    // (`Authorization: Bearer <tok>`) and bare punctuation until a VALUE token
+    // has actually been redacted. The value is redacted whatever it looks like
+    // (UUID, number, standard word).
+    let mut armed = false;
     for part in scanned.split_whitespace() {
         if out.len() >= MAX_OUTPUT_TOKENS {
             out.push("[truncated]".into());
             redactions += 1;
             break;
         }
-        if skip_next {
-            out.push("[redacted]".into());
-            redactions += 1;
-            skip_next = false;
-            continue;
+        let shape = credential_shape(part);
+        if armed {
+            match shape {
+                // Another label (`Bearer` after `Authorization:`) or a run of
+                // punctuation: not the value yet, keep the skip armed.
+                CredentialShape::Label | CredentialShape::Punctuation => {
+                    out.push(part.replace(NAME_MARK, ""));
+                    continue;
+                }
+                // `Cookie: session=<tok>`: the pair's own value is the secret.
+                CredentialShape::LabelledValue { key, delim, value_is_label } if !value_is_label => {
+                    out.push(format!("{}{delim}[redacted]", key.replace(NAME_MARK, "")));
+                    redactions += 1;
+                    armed = false;
+                    continue;
+                }
+                CredentialShape::LabelledValue { key, delim, .. } => {
+                    out.push(format!("{}{delim}[redacted]", key.replace(NAME_MARK, "")));
+                    redactions += 1;
+                    continue; // `x=Bearer` then the real value: stay armed
+                }
+                CredentialShape::Other => {
+                    out.push(redact_value(part));
+                    redactions += 1;
+                    armed = false;
+                    continue;
+                }
+            }
         }
-        let lower = part.to_ascii_lowercase();
-        if lower == "bearer" || lower == "token" || lower == "authorization:" || lower == "session" {
-            out.push(part.replace(NAME_MARK, ""));
-            skip_next = true;
-            continue;
-        }
-        if lower.starts_with("bearer=")
-            || lower.starts_with("token=")
-            || lower.starts_with("session_token=")
-            || lower.starts_with("authorization=")
-        {
-            let key = part.split_once('=').map(|(k, _)| k).unwrap_or(part);
-            out.push(format!("{key}=[redacted]"));
-            redactions += 1;
-            continue;
+        match shape {
+            CredentialShape::Label => {
+                out.push(part.replace(NAME_MARK, ""));
+                armed = true;
+                continue;
+            }
+            CredentialShape::LabelledValue { key, delim, value_is_label } => {
+                if value_is_label {
+                    // `authorization=Bearer <tok>`: the label run continues.
+                    out.push(part.replace(NAME_MARK, ""));
+                    armed = true;
+                } else {
+                    out.push(format!("{}{delim}[redacted]", key.replace(NAME_MARK, "")));
+                    redactions += 1;
+                }
+                continue;
+            }
+            CredentialShape::Punctuation | CredentialShape::Other => {}
         }
         if part.chars().count() > 96 {
             out.push("[redacted]".into());
@@ -269,6 +299,95 @@ fn redact(error: &str, names: &KnownNames, mode: Mode) -> RedactedError {
         text: out.join(" "),
         redactions,
     }
+}
+
+/// Words that introduce a credential value (compared lowercase, punctuation and
+/// the trailing `:`/`=` removed).
+const CREDENTIAL_LABELS: &[&str] = &[
+    "bearer",
+    "token",
+    "session",
+    "authorization",
+    "session_token",
+    "session-token",
+    "x-session-token",
+    "access_token",
+    "refresh_token",
+    "x-auth-token",
+    "api_key",
+    "x-api-key",
+    "cookie",
+    "set-cookie",
+];
+
+enum CredentialShape<'a> {
+    /// A bare label: `Bearer`, `Authorization:`, `"token":`, `Bearer,`.
+    Label,
+    /// Only punctuation (`-`, `:`, `"`): carries no value.
+    Punctuation,
+    /// `key=value` / `key:value` glued in one whitespace part, key a label.
+    LabelledValue {
+        key: &'a str,
+        delim: char,
+        /// The value is itself a label (`authorization=Bearer`), so the real
+        /// secret is the NEXT part.
+        value_is_label: bool,
+    },
+    Other,
+}
+
+fn label_core(text: &str) -> String {
+    text.chars()
+        .filter(|c| *c != NAME_MARK)
+        .collect::<String>()
+        .trim_matches(|c| EDGE_PUNCT.contains(&c) || c == '=')
+        .to_ascii_lowercase()
+}
+
+fn is_credential_label(text: &str) -> bool {
+    let core = label_core(text);
+    CREDENTIAL_LABELS.contains(&core.as_str())
+}
+
+fn credential_shape(part: &str) -> CredentialShape<'_> {
+    if is_credential_label(part) {
+        return CredentialShape::Label;
+    }
+    if label_core(part).is_empty() {
+        return CredentialShape::Punctuation;
+    }
+    if let Some(idx) = part.find(['=', ':']) {
+        let (key, rest) = part.split_at(idx);
+        let delim = rest.chars().next().unwrap_or('=');
+        let value = &rest[delim.len_utf8()..];
+        if is_credential_label(key) {
+            if label_core(value).is_empty() {
+                // `Authorization:` / `"token":` with the delimiter attached.
+                return CredentialShape::Label;
+            }
+            return CredentialShape::LabelledValue {
+                key,
+                delim,
+                value_is_label: is_credential_label(value),
+            };
+        }
+    }
+    CredentialShape::Other
+}
+
+/// Replacement for a credential value, keeping only edge punctuation so
+/// `"Bearer <tok>"` stays well-formed.
+fn redact_value(part: &str) -> String {
+    let part = part.replace(NAME_MARK, "");
+    // Already a placeholder (the persisted copy is redacted once at write and
+    // again at export): stay idempotent rather than nesting `[[redacted]]`.
+    if part.contains("[redacted]") {
+        return part;
+    }
+    let trimmed_start = part.trim_start_matches(|c| EDGE_PUNCT.contains(&c));
+    let lead = &part[..part.len() - trimmed_start.len()];
+    let trail = &part[part.trim_end_matches(|c| EDGE_PUNCT.contains(&c)).len()..];
+    format!("{lead}[redacted]{trail}")
 }
 
 enum Filtered {
@@ -987,6 +1106,127 @@ mod tests {
         assert!(!out.text.contains("abc.def.ghi"));
         assert!(!out.text.contains("super-secret"));
         assert_eq!(out.redactions, 2, "{out:?}");
+    }
+
+    // ---- task 1685 P1: stacked / variant credential label shapes ----------
+    //
+    // A credential label must keep the skip armed until an actual VALUE has
+    // been redacted, and that value is redacted even when it looks like a UUID,
+    // a number or a standard word.
+
+    const UUID_TOKEN: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    /// Runs both passes. The token must not appear in either output, the export
+    /// pass must equal `expected` exactly and count `redactions` placeholders.
+    fn assert_credential_shape(input: &str, token: &str, expected: &str, redactions: u32) {
+        let export = redact_for_export(input, &KnownNames::new());
+        assert!(!export.text.contains(token), "export leaked {token:?}: {}", export.text);
+        assert_eq!(export.text, expected, "export text for {input:?}");
+        assert_eq!(export.redactions, redactions, "export count for {input:?}: {export:?}");
+        let secrets = redact_secrets_only(input);
+        assert!(!secrets.contains(token), "secrets-only leaked {token:?}: {secrets}");
+        assert_eq!(secrets, expected, "secrets-only text for {input:?}");
+    }
+
+    #[test]
+    fn credential_authorization_colon_bearer_uuid() {
+        let input = format!("Authorization: Bearer {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "Authorization: Bearer [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_authorization_bearer_uuid_keeps_following_words() {
+        let input = format!("401 Authorization: Bearer {UUID_TOKEN} retry failed");
+        assert_credential_shape(&input, UUID_TOKEN, "401 Authorization: Bearer [redacted] retry failed", 1);
+    }
+
+    #[test]
+    fn credential_authorization_equals_bearer() {
+        let input = format!("authorization=Bearer {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "authorization=Bearer [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_bearer_colon() {
+        let input = format!("Bearer: {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "Bearer: [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_token_colon() {
+        let input = format!("token: {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "token: [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_session_token_space() {
+        let input = format!("session_token {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "session_token [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_x_session_token_header() {
+        let input = format!("X-Session-Token: {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "X-Session-Token: [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_cookie_session_equals() {
+        let input = format!("Cookie: session={UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "Cookie: session=[redacted]", 1);
+    }
+
+    #[test]
+    fn credential_bearer_comma_then_value() {
+        let input = format!("Bearer, {UUID_TOKEN}");
+        assert_credential_shape(&input, UUID_TOKEN, "Bearer, [redacted]", 1);
+    }
+
+    #[test]
+    fn credential_quoted_bearer_value() {
+        let input = format!("\"Bearer {UUID_TOKEN}\"");
+        assert_credential_shape(&input, UUID_TOKEN, "\"Bearer [redacted]\"", 1);
+    }
+
+    #[test]
+    fn credential_json_shaped_token() {
+        let input = format!("{{\"token\": \"{UUID_TOKEN}\"}}");
+        assert_credential_shape(&input, UUID_TOKEN, "{\"token\": \"[redacted]\"}", 1);
+    }
+
+    #[test]
+    fn credential_value_that_looks_like_a_number_or_standard_word() {
+        assert_credential_shape("Authorization: Bearer 4815162342 ok", "4815162342", "Authorization: Bearer [redacted] ok", 1);
+        assert_credential_shape("token: failed ok", "failed", "token: [redacted] ok", 1);
+    }
+
+    #[test]
+    fn credential_label_at_end_of_string_is_kept_and_nothing_else_is_touched() {
+        for input in ["failed with Authorization:", "failed with Authorization: Bearer", "failed with token"] {
+            let export = redact_for_export(input, &KnownNames::new());
+            assert_eq!(export.text, input);
+            assert_eq!(export.redactions, 0, "{export:?}");
+            assert_eq!(redact_secrets_only(input), input);
+        }
+    }
+
+    #[test]
+    fn credential_redaction_is_idempotent_across_the_persist_and_export_passes() {
+        let input = format!("Authorization: Bearer {UUID_TOKEN} \"token\": \"{UUID_TOKEN}\"");
+        let once = redact_secrets_only(&input);
+        assert_eq!(redact_secrets_only(&once), once);
+        let export = redact_for_export(&once, &KnownNames::new());
+        assert!(!export.text.contains("[["), "{}", export.text);
+        assert!(!export.text.contains(UUID_TOKEN), "{}", export.text);
+    }
+
+    #[test]
+    fn credential_labels_do_not_arm_beyond_the_value() {
+        // Only the value after the label run is consumed; later words survive.
+        let input = format!("token: {UUID_TOKEN} token: other failed");
+        let export = redact_for_export(&input, &KnownNames::new());
+        assert_eq!(export.text, "token: [redacted] token: [redacted] failed");
+        assert_eq!(export.redactions, 2);
     }
 
     #[test]
