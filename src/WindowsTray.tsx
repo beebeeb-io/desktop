@@ -40,34 +40,7 @@ import {
   type SyncStatus,
 } from './desktopApi'
 import { T, useToast } from './windows/ui'
-
-// ── File-type classification (ported from repos/web file-icon.tsx getFileType,
-//    pure, no @beebeeb/shared import) ─────────────────────────────────────────
-
-type TrayFileType = 'pdf' | 'image' | 'video' | 'audio' | 'code' | 'archive' | 'default'
-
-function getFileType(name: string): TrayFileType {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-
-  if (ext === 'pdf') return 'pdf'
-
-  if (
-    ['jpg', 'jpeg', 'png', 'gif', 'heic', 'heif', 'webp', 'svg', 'ico', 'bmp', 'tiff', 'tif', 'avif', 'dng', 'cr2', 'cr3', 'nef', 'arw', 'orf', 'rw2', 'raf'].includes(ext)
-  )
-    return 'image'
-  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', 'hevc'].includes(ext)) return 'video'
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma', 'm4a', 'aiff', 'opus'].includes(ext)) return 'audio'
-
-  if (
-    ['js', 'jsx', 'ts', 'tsx', 'py', 'rs', 'go', 'rb', 'java', 'kt', 'swift', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'r', 'scala', 'zig', 'asm', 'sql', 'graphql', 'proto'].includes(ext)
-  )
-    return 'code'
-  if (['html', 'htm', 'css', 'scss', 'sass', 'less', 'vue', 'svelte', 'astro'].includes(ext)) return 'code'
-
-  if (['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz', 'zst', 'lz', 'dmg', 'iso'].includes(ext)) return 'archive'
-
-  return 'default'
-}
+import { TrayActionButton, TrayIconButton, getFileType, type TrayFileType } from './trayShared'
 
 // Per-type tint for the file glyph. Neutral by default; amber is reserved for
 // encryption state only (brand rule), so these are non-amber category hues.
@@ -437,31 +410,9 @@ export default function WindowsTray() {
         <div style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em' }}>
           Beebeeb
         </div>
-        <button
-          title="Settings"
-          aria-label="Open settings"
-          onClick={() => void openSettings()}
-          style={{
-            width: 28,
-            height: 28,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: T.ink3,
-            background: 'transparent',
-            border: 'none',
-            borderRadius: 6,
-            cursor: 'pointer',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = T.paper3
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent'
-          }}
-        >
+        <TrayIconButton title="Settings" ariaLabel="Open settings" onClick={() => void openSettings()}>
           <ActionIcon name="cog" size={15} />
-        </button>
+        </TrayIconButton>
       </div>
 
       {/* Status line */}
@@ -675,58 +626,10 @@ export default function WindowsTray() {
           flexShrink: 0,
         }}
       >
-        <ActionButton icon="folder" label="Open folder" onClick={() => void openFolder()} disabled={opening || !status?.sync_root} />
-        <ActionButton icon="external" label="View online" onClick={() => void viewOnline()} borderLeft />
-        <ActionButton icon="trash" label="Recycle bin" onClick={() => void openRecycleBin()} borderLeft />
+        <TrayActionButton icon={<ActionIcon name="folder" size={15} color={T.ink2} />} label="Open folder" onClick={() => void openFolder()} disabled={opening || !status?.sync_root} />
+        <TrayActionButton icon={<ActionIcon name="external" size={15} color={T.ink2} />} label="View online" onClick={() => void viewOnline()} borderLeft />
+        <TrayActionButton icon={<ActionIcon name="trash" size={15} color={T.ink2} />} label="Recycle bin" onClick={() => void openRecycleBin()} borderLeft />
       </div>
     </div>
-  )
-}
-
-function ActionButton({
-  icon,
-  label,
-  onClick,
-  borderLeft,
-  disabled = false,
-}: {
-  icon: string
-  label: string
-  onClick: () => void
-  borderLeft?: boolean
-  disabled?: boolean
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 5,
-        padding: '10px 4px',
-        fontSize: 11,
-        fontFamily: T.fontSans,
-        fontWeight: 500,
-        color: T.ink2,
-        background: 'transparent',
-        border: 'none',
-        borderLeft: borderLeft ? `1px solid ${T.line}` : 'none',
-        cursor: disabled ? 'default' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        lineHeight: 1,
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = T.paper3
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = 'transparent'
-      }}
-    >
-      <ActionIcon name={icon} size={15} color={T.ink2} />
-      {label}
-    </button>
   )
 }

@@ -86,7 +86,8 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     shellIntegrationCommandsFor: () => ({ state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }),
     SettingsSectionShell: 'section', Chip: 'chip',
     getCurrentWindow: () => ({ onFocusChanged: async () => () => {}, hide: async () => {} }),
-    BrandMark: 'brand', ActionIcon: 'icon', FileGlyph: 'glyph', ActionButton: 'action',
+    // Task 1683 slice 3: the header gear and the footer button moved to src/trayShared.tsx; the stubs follow them.
+    BrandMark: 'brand', ActionIcon: 'icon', FileGlyph: 'glyph', TrayActionButton: 'action', TrayIconButton: 'icon-button',
     TRAY_RECENT_LIMIT: 50, TRAY_VIEW_ALL_THRESHOLD: 8,
     ...overrides,
   })
@@ -276,7 +277,8 @@ describe('runtime sync root (1646)', () => {
   }
 
   test('Tray action forwards disabled state to the native button', () => {
-    const h = harness('WindowsTray.tsx', 'ActionButton')
+    // Task 1683 slice 3: the button is the shared `TrayActionButton` now (src/trayShared.tsx); same assertion.
+    const h = harness('trayShared.tsx', 'TrayActionButton')
     try {
       h.setProps({ icon: 'folder', label: 'Open folder', onClick() {}, disabled: true })
       expect(h.elements().find(e => e.type === 'button').props.disabled).toBe(true)
