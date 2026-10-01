@@ -342,6 +342,10 @@ struct Inner {
     /// `true` once the pulse has reported `syncing`, so it knows to report the
     /// way back to `idle` (and only then).
     showing_syncing: bool,
+    /// What the pre-popover emitter last said for this state (`running` until the first tick
+    /// ends, then `idle`, `error`, `paused`, `stopped`). The pulse repeats it, so a user who
+    /// reads the tray tooltip sees the same words while a file moves as before this slice.
+    legacy_state: &'static str,
 }
 
 /// Owns "what did we last tell the UI", so a one-second pulse and the tick can
@@ -362,6 +366,7 @@ impl StatusTracker {
                 reason: None,
                 last_tick_ok_at: None,
                 showing_syncing: false,
+                legacy_state: "running",
             }),
         }
     }
@@ -386,6 +391,7 @@ impl StatusTracker {
         inner.reason = None;
         inner.last_tick_ok_at = None;
         inner.showing_syncing = false;
+        inner.legacy_state = "running";
         Self::payload(&inner, "running", None)
     }
 
@@ -396,6 +402,7 @@ impl StatusTracker {
         inner.error = None;
         inner.reason = None;
         inner.showing_syncing = false;
+        inner.legacy_state = "paused";
         Self::payload(&inner, "paused", None)
     }
 
@@ -406,6 +413,7 @@ impl StatusTracker {
         inner.reason = None;
         inner.last_tick_ok_at = None;
         inner.showing_syncing = false;
+        inner.legacy_state = "stopped";
         Self::payload(&inner, "stopped", None)
     }
 
@@ -420,6 +428,7 @@ impl StatusTracker {
                 inner.error = None;
                 inner.reason = None;
                 inner.last_tick_ok_at = Some(now);
+                inner.legacy_state = "idle";
                 Self::payload(&inner, "idle", Some(activity))
             }
             Outcome::Down { down, error } => {
@@ -433,6 +442,7 @@ impl StatusTracker {
                 // The old emitter said `error` for a tick that returned `Err` and
                 // `idle` for one that returned `Ok`, whatever the link did.
                 let legacy = if error.is_some() { "error" } else { "idle" };
+                inner.legacy_state = legacy;
                 Self::payload(&inner, legacy, None)
             }
         }
@@ -464,12 +474,14 @@ impl StatusTracker {
             inner.error = None;
             inner.reason = None;
             inner.showing_syncing = false;
+            inner.legacy_state = "paused";
             return Some(Self::payload(&inner, "paused", None));
         }
         if inner.state == State::Paused {
             // Resumed: the pause toggle already told the UI `idle`; the next tick
             // decides the rest, and work in flight shows as syncing meanwhile.
             inner.state = State::Idle;
+            inner.legacy_state = "idle";
         }
         if !matches!(inner.state, State::Running | State::Idle | State::Syncing) {
             // Offline, error and stopped outrank syncing (spec section 3).
@@ -482,12 +494,12 @@ impl StatusTracker {
         if activity.files_remaining > 0 {
             inner.state = State::Syncing;
             inner.showing_syncing = true;
-            return Some(Self::payload(&inner, "idle", Some(activity)));
+            return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
         }
         if inner.showing_syncing {
             inner.state = State::Idle;
             inner.showing_syncing = false;
-            return Some(Self::payload(&inner, "idle", Some(activity)));
+            return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
         }
         None
     }
@@ -1159,6 +1171,48 @@ mod tests {
         assert_eq!(tray_tooltip(&json!({ "state": "paused" })), "Beebeeb · Paused");
         assert_eq!(legacy_state(&json!({ "state": "idle" })), "idle");
         assert_eq!(legacy_state(&json!({})), "");
+    }
+
+    #[test]
+    fn a_file_moving_before_the_first_tick_ends_keeps_the_old_running_tooltip() {
+        // Before this slice the tray said `Beebeeb · running` until the first tick ended, while
+        // the initial upload was still going. The pulse must not turn that into `Synced`.
+        let t = tracker();
+        let started = t.running().to_json();
+        assert_eq!(tray_tooltip(&started), "Beebeeb · running");
+
+        let moving = t.pulse(false, true, || busy(3, 30, 1)).unwrap().to_json();
+        assert_eq!(moving["state"], "syncing", "the popover still sees the new state");
+        assert_eq!(moving["legacy_state"], "running");
+        assert_eq!(tray_tooltip(&moving), "Beebeeb · running");
+        assert_same_to_a_user(&moving, &old_payload("running", None));
+
+        // The last file lands before the tick ends: still not `Synced`, the tick has not said so.
+        let landed = t.pulse(false, true, Activity::default).unwrap().to_json();
+        assert_eq!(landed["state"], "idle");
+        assert_eq!(tray_tooltip(&landed), "Beebeeb · running");
+
+        // The tick ends: now it is `Synced`, and later pulses keep saying so.
+        let done = t.finish_tick(&Outcome::Synced, 9, Activity::default()).to_json();
+        assert_eq!(tray_tooltip(&done), "Beebeeb · Synced");
+        let again = t.pulse(false, true, || busy(2, 20, 1)).unwrap().to_json();
+        assert_eq!(tray_tooltip(&again), "Beebeeb · Synced");
+    }
+
+    #[test]
+    fn a_pulse_after_a_resume_says_idle_like_the_pause_toggle_did() {
+        let t = tracker();
+        t.finish_tick(&Outcome::Synced, 1, Activity::default());
+        assert_eq!(t.pulse(true, false, Activity::default).unwrap().legacy_state, "paused");
+        let resumed = t.pulse(false, true, || busy(2, 20, 1)).unwrap().to_json();
+        assert_eq!(resumed["state"], "syncing");
+        assert_same_to_a_user(&resumed, &old_payload("idle", None));
+        // Resumed before the first tick ever ended (paused straight after start).
+        let t = tracker();
+        t.running();
+        assert_eq!(t.pulse(true, false, Activity::default).unwrap().legacy_state, "paused");
+        let resumed = t.pulse(false, true, || busy(2, 20, 1)).unwrap().to_json();
+        assert_same_to_a_user(&resumed, &old_payload("idle", None));
     }
 
     #[test]

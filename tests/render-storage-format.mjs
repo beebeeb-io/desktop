@@ -6,9 +6,13 @@
 //
 //   node tests/render-storage-format.mjs REPO OUTPUT [DESIGN_HEADER_PNG]
 //   PLAYWRIGHT_MODULE=/opt/node22/lib/node_modules/playwright/index.mjs
+//   FONTS_CSS=/path/to/fonts.css   optional stylesheet that declares Inter, for the PNG only.
+//                                  Unset or missing, the PNG renders in a fallback face and the
+//                                  script says so; set REQUIRE_FONTS=1 to make that an error.
 //
 // Local evidence, not a CI gate (Playwright is not a desktop dependency). Prints a count line.
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
@@ -18,6 +22,12 @@ const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(
 const [repo, output, designPng] = process.argv.slice(2)
 assert(repo && output, 'usage: node tests/render-storage-format.mjs REPO OUTPUT [DESIGN_HEADER_PNG]')
 await mkdir(output, { recursive: true })
+
+// The assertions do not depend on a face; only the PNG's look does. Never fall back silently.
+const fontsCss = process.env.FONTS_CSS ?? ''
+const haveFonts = fontsCss !== '' && existsSync(fontsCss)
+if (process.env.REQUIRE_FONTS === '1') assert(haveFonts, `REQUIRE_FONTS=1 but FONTS_CSS is unset or missing: "${fontsCss}"`)
+console.log(haveFonts ? `fonts: ${fontsCss}` : 'WARNING fonts: FONTS_CSS unset or missing, the PNGs use a fallback face (assertions unaffected)')
 
 const entry = path.join(output, 'storage-format-entry.ts')
 await writeFile(entry, `import * as m from ${JSON.stringify(path.join(repo, 'src/storageFormat.ts'))}\n;(window as unknown as { storageFormat: typeof m }).storageFormat = m\n`)
@@ -69,7 +79,7 @@ try {
     // A file: page, because about:blank may not load file: images and fonts.
     const htmlPath = path.join(output, `compare-${locale}.html`)
     await writeFile(htmlPath, `<!doctype html><meta charset="utf-8">
-      <link rel="stylesheet" href="${pathToFileURL('/home/user/evidence/1683/fonts.css').href}">
+      ${haveFonts ? `<link rel="stylesheet" href="${pathToFileURL(fontsCss).href}">` : ''}
       <body style="margin:0;background:#f4f1ea;font-family:Inter,system-ui,sans-serif;display:flex;gap:24px;padding:16px;align-items:flex-start">
         <div><div style="font:11px monospace;color:#555;margin-bottom:6px">design render (a-up-to-date), header</div>
           ${design ? `<div style="width:380px;height:72px;overflow:hidden;border:1px solid #ccc;background:url(${design}) -144px -28px no-repeat"></div>` : '<i>no design png given</i>'}</div>

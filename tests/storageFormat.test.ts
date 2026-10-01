@@ -36,7 +36,7 @@ describe('formatStorageSize (task 1683 slice 2)', () => {
   })
 
   test('large numbers group by the locale and never overflow the unit list', () => {
-    // 1.5 PB stays in PB, the top unit, and groups its thousands: 1,500 PB.
+    // 1.5e18 bytes (1.5 EB) stays in PB, the top unit, and groups its thousands: 1,500 PB.
     expect(formatStorageSize(1_500_000_000_000_000_000, 'en')).toBe('1,500 PB')
     expect(formatStorageSize(1_500_000_000_000_000_000, 'nl')).toBe('1.500 PB')
   })

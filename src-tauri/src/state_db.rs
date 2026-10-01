@@ -497,8 +497,9 @@ pub struct TransferActivity {
 }
 
 /// What is waiting to transfer, read in one locked pass (task 1683 slice 2).
-/// `upload_files` counts queued upload operations that are due to run (not paused,
-/// attempts left); `download_*` counts rows currently `downloading`. The bytes are
+/// `upload_files` counts queued upload operations that are due to run (`next_retry_at` has
+/// come, not paused, attempts left), so an upload sitting out a retry backoff is not a file
+/// left; `download_*` counts rows currently `downloading`. The bytes are
 /// the plaintext sizes of those files' rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TransferBacklog {
@@ -1096,15 +1097,17 @@ impl StateDb {
         rows.collect()
     }
 
-    /// What is waiting to transfer (see [`TransferBacklog`]).
-    pub fn transfer_backlog(&self) -> Result<TransferBacklog> {
+    /// What is waiting to transfer (see [`TransferBacklog`]). `now` is unix seconds: an upload whose
+    /// retry time is still ahead of it is waiting out a backoff and does not count.
+    pub fn transfer_backlog(&self, now: i64) -> Result<TransferBacklog> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let (upload_files, upload_bytes): (i64, i64) = conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(MAX(COALESCE(f.size_bytes, 0), 0)), 0)
              FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
              WHERE q.kind IN ('upload_file', 'upload_version')
+               AND q.next_retry_at <= ?1
                AND q.paused_reason IS NULL AND q.attempts < q.max_attempts",
-            [],
+            params![now],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let (download_files, download_bytes): (i64, i64) = conn.query_row(
@@ -3185,12 +3188,35 @@ mod tests {
         db.enqueue_operation(&queued_op("r1", OperationKind::RenameFile, "f5")).unwrap();
         db.record_operation_pause("u3", OperationPauseReason::Quota, Some("quota exceeded"), 5).unwrap();
 
-        let backlog = db.transfer_backlog().unwrap();
+        let backlog = db.transfer_backlog(100).unwrap();
         assert_eq!(backlog.upload_files, 2, "u1 and u2 are due; u3 is paused; r1 is a rename");
         assert_eq!(backlog.upload_bytes, 300, "100 + 200");
         assert_eq!((backlog.download_files, backlog.download_bytes), (1, 50));
         assert_eq!(backlog.queued_ops, 4, "every queued operation, paused or not");
         assert_eq!(backlog.paused_for_quota, 1);
+    }
+
+    #[test]
+    fn an_upload_waiting_out_a_retry_backoff_is_not_a_file_left() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "f1", "one.bin", None, FileStatus::Uploading, 100);
+        seed_contract_row(&db, "f2", "two.bin", None, FileStatus::Local, 5_000);
+        db.enqueue_operation(&queued_op("u1", OperationKind::UploadFile, "f1")).unwrap();
+        // Failed once and backed off for ten minutes (from t=1000 to t=1600).
+        let mut backing_off = queued_op("u2", OperationKind::UploadFile, "f2");
+        backing_off.attempts = 1;
+        backing_off.next_retry_at = 1_600;
+        db.enqueue_operation(&backing_off).unwrap();
+
+        let during = db.transfer_backlog(1_000).unwrap();
+        assert_eq!(during.upload_files, 1, "only u1 is due; u2 waits for t=1600");
+        assert_eq!(during.upload_bytes, 100, "the backed-off file's 5000 bytes are not in the total");
+        assert_eq!(during.queued_ops, 2, "it is still a queued operation");
+
+        let at_the_retry_time = db.transfer_backlog(1_600).unwrap();
+        assert_eq!(at_the_retry_time.upload_files, 2, "due again exactly at next_retry_at");
+        assert_eq!(at_the_retry_time.upload_bytes, 5_100);
     }
 
     #[test]
@@ -3204,7 +3230,7 @@ mod tests {
         db.enqueue_operation(&exhausted).unwrap();
         db.enqueue_operation(&queued_op("u2", OperationKind::UploadFile, "f2")).unwrap();
         db.record_operation_pause("u2", OperationPauseReason::Auth, None, 5).unwrap();
-        let backlog = db.transfer_backlog().unwrap();
+        let backlog = db.transfer_backlog(100).unwrap();
         assert_eq!(backlog.upload_files, 0);
         assert_eq!(backlog.paused_for_quota, 0);
         assert_eq!(backlog.queued_ops, 2);

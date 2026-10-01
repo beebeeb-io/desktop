@@ -1425,7 +1425,7 @@ fn emit_payload<R: tauri::Runtime>(app: &tauri::AppHandle<R>, payload: serde_jso
 /// The work in flight right now: queue and downloading rows from the state DB,
 /// bytes from the transfer board.
 fn current_activity(db: &StateDb, transfers: &crate::transfer_progress::TransferBoard) -> Activity {
-    compute_activity(&db.transfer_backlog().unwrap_or_default(), transfers)
+    compute_activity(&db.transfer_backlog(now_secs()).unwrap_or_default(), transfers)
 }
 
 /// What a finished tick means, as the event to emit.
@@ -2284,6 +2284,26 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         None
+    }
+
+    #[test]
+    fn the_pulses_activity_counts_an_upload_that_is_due_and_not_one_in_retry_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        seed_file(&db, "f1", 100);
+        seed_file(&db, "f2", 5_000);
+        let mut due = upload_op("op-f1", "f1");
+        due.next_retry_at = 1; // long past: due now
+        let mut backing_off = upload_op("op-f2", "f2");
+        backing_off.attempts = 1;
+        backing_off.next_retry_at = i64::MAX; // waiting out a backoff
+        db.enqueue_operation(&due).unwrap();
+        db.enqueue_operation(&backing_off).unwrap();
+
+        let board = crate::transfer_progress::TransferBoard::new();
+        let activity = current_activity(&db, &board);
+        assert_eq!(activity.files_remaining, 1, "one file left, not two");
+        assert_eq!(activity.bytes_total, 100, "the backed-off file's 5000 bytes are not in the total");
     }
 
     #[cfg(not(target_os = "windows"))]

@@ -106,9 +106,10 @@ pub struct StorageUsage {
 struct CacheEntry {
     usage: StorageUsage,
     fetched_at: i64,
-    /// The session the summary was fetched under (`UI_SESSION_REVISION`): a new
-    /// sign-in or an unlock changes it, so a summary from before is refetched.
-    session_revision: u64,
+    /// The in-memory session the summary was fetched under (`VAULT_EPOCH` in `lib.rs`, which moves
+    /// whenever a session is installed or cleared): a sign-in, a lock or a sign-out changes it, so
+    /// a summary from before is refetched. Not `UI_SESSION_REVISION`: a lock does not move that.
+    vault_epoch: u64,
 }
 
 #[derive(Debug, Default)]
@@ -118,25 +119,25 @@ pub struct StorageCache {
 
 impl StorageCache {
     /// The cached summary if it is from this session and younger than the TTL.
-    fn fresh(&self, now: i64, session_revision: u64) -> Option<(StorageUsage, i64)> {
+    fn fresh(&self, now: i64, vault_epoch: u64) -> Option<(StorageUsage, i64)> {
         self.entry
-            .filter(|e| e.session_revision == session_revision && now.saturating_sub(e.fetched_at) < STORAGE_TTL_SECS)
+            .filter(|e| e.vault_epoch == vault_epoch && now.saturating_sub(e.fetched_at) < STORAGE_TTL_SECS)
             .map(|e| (e.usage, e.fetched_at))
     }
 
     /// The cached summary from this session whatever its age (used when the
     /// refetch fails: an old number, marked stale, beats an empty header).
-    fn last_known(&self, session_revision: u64) -> Option<(StorageUsage, i64)> {
+    fn last_known(&self, vault_epoch: u64) -> Option<(StorageUsage, i64)> {
         self.entry
-            .filter(|e| e.session_revision == session_revision)
+            .filter(|e| e.vault_epoch == vault_epoch)
             .map(|e| (e.usage, e.fetched_at))
     }
 
-    fn put(&mut self, usage: StorageUsage, fetched_at: i64, session_revision: u64) {
+    fn put(&mut self, usage: StorageUsage, fetched_at: i64, vault_epoch: u64) {
         self.entry = Some(CacheEntry {
             usage,
             fetched_at,
-            session_revision,
+            vault_epoch,
         });
     }
 }
@@ -157,14 +158,14 @@ pub struct StorageDto {
 pub async fn cached_storage<F, Fut>(
     cache: &Mutex<StorageCache>,
     now: i64,
-    session_revision: u64,
+    vault_epoch: u64,
     fetch: F,
 ) -> Option<StorageDto>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<StorageUsage, String>>,
 {
-    if let Some((usage, fetched_at)) = cache.lock().ok()?.fresh(now, session_revision) {
+    if let Some((usage, fetched_at)) = cache.lock().ok()?.fresh(now, vault_epoch) {
         return Some(StorageDto {
             used_bytes: usage.used_bytes,
             quota_bytes: usage.quota_bytes,
@@ -175,7 +176,7 @@ where
     match fetch().await {
         Ok(usage) => {
             if let Ok(mut guard) = cache.lock() {
-                guard.put(usage, now, session_revision);
+                guard.put(usage, now, vault_epoch);
             }
             Some(StorageDto {
                 used_bytes: usage.used_bytes,
@@ -189,7 +190,7 @@ where
             cache
                 .lock()
                 .ok()
-                .and_then(|guard| guard.last_known(session_revision))
+                .and_then(|guard| guard.last_known(vault_epoch))
                 .map(|(usage, fetched_at)| StorageDto {
                     used_bytes: usage.used_bytes,
                     quota_bytes: usage.quota_bytes,
@@ -507,14 +508,15 @@ pub struct DbView {
 }
 
 /// Read what the snapshot needs from the state DB: the queue, the rows in flight,
-/// failed and in conflict, and the newest finished transfers.
-pub fn gather_db_view(db: &crate::state_db::StateDb, activity_limit: usize) -> Result<DbView, String> {
+/// failed and in conflict, and the newest finished transfers. `now` is unix seconds, for which
+/// queued uploads are due.
+pub fn gather_db_view(db: &crate::state_db::StateDb, activity_limit: usize, now: i64) -> Result<DbView, String> {
     use crate::state_db::FileStatus;
     let list = |status| db.list_by_status(status).map_err(|e| format!("list files: {e}"));
     let mut in_flight = list(FileStatus::Uploading)?;
     in_flight.extend(list(FileStatus::Downloading)?);
     Ok(DbView {
-        backlog: db.transfer_backlog().map_err(|e| format!("transfer backlog: {e}"))?,
+        backlog: db.transfer_backlog(now).map_err(|e| format!("transfer backlog: {e}"))?,
         conflicts: list(FileStatus::Conflict)?,
         in_flight,
         failed: list(FileStatus::Error)?,
@@ -1328,6 +1330,27 @@ mod tests {
     }
 
     #[test]
+    fn the_snapshot_reads_the_queue_as_of_now_and_skips_an_upload_in_retry_backoff() {
+        use crate::state_db::{OperationKind, StateDb};
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed(&db, "a", "A/due.bin", FileStatus::Local, 100, 1);
+        seed(&db, "b", "A/waiting.bin", FileStatus::Local, 5_000, 1);
+        let mut due = queued("op-a", OperationKind::UploadFile, "a");
+        due.next_retry_at = 50;
+        let mut waiting = queued("op-b", OperationKind::UploadFile, "b");
+        waiting.attempts = 1;
+        waiting.next_retry_at = 500;
+        db.enqueue_operation(&due).unwrap();
+        db.enqueue_operation(&waiting).unwrap();
+
+        let at_100 = gather_db_view(&db, 5, 100).unwrap().backlog;
+        assert_eq!((at_100.upload_files, at_100.upload_bytes), (1, 100), "only op-a is due at t=100");
+        let at_500 = gather_db_view(&db, 5, 500).unwrap().backlog;
+        assert_eq!((at_500.upload_files, at_500.upload_bytes), (2, 5_100), "op-b is due again at t=500");
+    }
+
+    #[test]
     fn a_real_state_db_becomes_the_snapshot_the_popover_shows() {
         use crate::state_db::{OperationKind, OperationPauseReason, StateDb, TransferActivityInput};
         let dir = tempfile::tempdir().unwrap();
@@ -1354,7 +1377,7 @@ mod tests {
         })
         .unwrap();
 
-        let view = gather_db_view(&db, 5).unwrap();
+        let view = gather_db_view(&db, 5, 100).unwrap();
         assert_eq!(view.backlog.upload_files, 1, "op-u1 is due, op-p1 is paused for quota");
         assert_eq!(view.backlog.download_files, 1);
         assert_eq!(view.backlog.queued_ops, 2);
@@ -1420,7 +1443,7 @@ mod tests {
     fn an_empty_state_db_is_an_empty_snapshot_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
-        let view = gather_db_view(&db, 8).unwrap();
+        let view = gather_db_view(&db, 8, 100).unwrap();
         assert_eq!(view.backlog, TransferBacklog::default());
         assert!(
             view.conflicts.is_empty() && view.in_flight.is_empty() && view.failed.is_empty() && view.recent.is_empty()

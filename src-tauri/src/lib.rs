@@ -592,8 +592,15 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
 // UI cache epoch, independent of the credential-bearing command lease epoch.
 static UI_SESSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Bumped whenever the in-memory session is installed or cleared (sign-in, unlock, lock,
-/// sign-out). Keys the popover's cached storage summary, so an unlock refetches it even when
+/// Bumped at every place the in-memory session is installed by a sign-in or recovery-phrase
+/// unlock, and at every place it is cleared (lock, sign-out). The password unlock from the
+/// Keychain (`install_unlocked_session`) does NOT bump: it is correct only because the lock that
+/// came before it did. A new path that clears the session (an auth-expiry auto-lock, say) must
+/// call `bump_vault_epoch()` itself, or the popover serves the pre-clear storage figure for up to
+/// five minutes after the next unlock. `lock_then_unlock_refetches_the_storage_summary` runs the
+/// real lock and the real unlock install and fails if the lock stops bumping.
+///
+/// Keys the popover's cached storage summary, so an unlock refetches it even when
 /// `UI_SESSION_REVISION` does not move (a lock keeps `auth_present` true, and the email is the
 /// same on the way back). Kept separate from `UI_SESSION_REVISION` on purpose: bumping that one
 /// makes the existing UI refetch, and slice 2 changes nothing a user sees.
@@ -1632,6 +1639,16 @@ async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     clear_session_impl(&state).await
 }
 
+/// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
+/// (see its doc): the lock that preceded this already moved the epoch, and a cold start has no
+/// cached storage summary to go stale. Split out of `unlock_vault` so a test can run the real
+/// install after the real `lock_vault`; the Keychain read before it has no Linux backend.
+fn install_unlocked_session(acct: &AccountRuntime, session: Session) -> Result<(), String> {
+    let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    *guard = Some(session);
+    Ok(())
+}
+
 /// Restore a Keychain-backed session into memory and start the engine for the
 /// configured sync root. Keychain may show the OS unlock prompt depending on
 /// the user's security settings. Until the user calls this command, hydration
@@ -1675,10 +1692,7 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
         let token = session.token.clone();
         let master_key = session.master_key;
-        {
-            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-            *guard = Some(session);
-        }
+        install_unlocked_session(&acct, session)?;
         set_auth_present(&state, true);
         tracing::info!("vault unlocked from Keychain");
         start_engine_if_possible(
@@ -3818,7 +3832,7 @@ async fn popover_snapshot(
                 let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
                     return Ok(None);
                 };
-                popover_data::gather_db_view(&db, limit).map(Some)
+                popover_data::gather_db_view(&db, limit, now).map(Some)
             })
             .await
             .map_err(|e| format!("popover data task failed: {e}"))??
@@ -11440,6 +11454,47 @@ mod popover_snapshot_command_tests {
             bump_vault_epoch();
             run_command(&app).unwrap();
             assert_eq!(api.requests().len(), 2, "a new session refetches the storage summary");
+        });
+    }
+
+    #[test]
+    fn lock_then_unlock_refetches_the_storage_summary() {
+        // The real `lock_vault` and the real unlock install (`install_unlocked_session`, the part of
+        // `unlock_vault` after the Keychain read, which has no Linux backend), with the real
+        // snapshot command between them. Nothing bumps the epoch by hand.
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            let app = mock_app_with_account(true, true);
+            assert_eq!(run_command(&app).unwrap()["storage"]["used_bytes"], 84_300_000_000_i64);
+            assert_eq!(run_command(&app).unwrap()["phase"], "synced");
+            assert_eq!(api.requests().len(), 1, "two snapshots inside the TTL, 1 fetch");
+
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(lock_vault(app.state::<AppState>())).expect("the real lock runs");
+            let locked = run_command(&app).unwrap();
+            // (Not the phase: after a lock `auth_present` follows the real credential store, which
+            // is empty on a Linux runner and the developer's own on a Mac.)
+            assert_eq!(locked["account"]["vault_unlocked"], false);
+            assert_eq!(locked["storage"], serde_json::Value::Null, "no storage figure while locked");
+            assert_eq!(api.requests().len(), 1, "a locked snapshot calls nothing");
+
+            let acct = app.state::<AppState>().active_account().unwrap();
+            install_unlocked_session(
+                &acct,
+                Session {
+                    token: "tok-abc".into(),
+                    master_key: [7u8; 32],
+                    email: Some("sam@example.eu".into()),
+                },
+            )
+            .unwrap();
+            let unlocked = run_command(&app).unwrap();
+            assert_eq!(unlocked["storage"]["used_bytes"], 84_300_000_000_i64);
+            assert_eq!(
+                api.requests().len(),
+                2,
+                "an unlock inside the 5 minute TTL refetches: the pre-lock figure is not served"
+            );
         });
     }
 
