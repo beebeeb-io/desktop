@@ -156,6 +156,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
     needs: test
     runs-on: ${{ matrix.os }}
+    # Baseline for Build Windows is ~14 min (0.8.7 runs); signing adds the
+    # per-file Artifact Signing calls. A hang (the first signed run hung ~60
+    # min in "Build Tauri app" with zero sign requests — cancelled) must fail
+    # the job, not park it for the 6-hour default.
+    timeout-minutes: 45
     permissions:
       contents: read
       # Windows Authenticode signing authenticates to Azure Artifact Signing via
@@ -302,7 +307,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: bun run tauri
-          args: --target ${{ matrix.target }} -- --locked
+          # -v: the bundler hides the custom sign command's output otherwise
+          # (tauri-apps/tauri#11778); verbose makes every signing invocation
+          # and its output visible in the job log.
+          args: -v --target ${{ matrix.target }} -- --locked
 
       - name: Validate signed macOS artifact
         if: runner.os == 'macOS'
