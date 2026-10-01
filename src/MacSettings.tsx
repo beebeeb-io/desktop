@@ -180,6 +180,7 @@ function GeneralTab({ settings }: { settings: SettingsConfig }) {
     <>
       <SettingsGroup>
         <ToggleRow
+          tall
           name="login"
           label="Open Beebeeb at login"
           hint={loginUnreadable ? 'Couldn’t read this setting.' : 'Starts in the menu bar. No window opens.'}

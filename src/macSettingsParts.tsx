@@ -173,6 +173,7 @@ export function ToggleRow({
   on,
   onChange,
   disabled,
+  tall,
 }: {
   name: string
   label: ReactNode
@@ -180,13 +181,14 @@ export function ToggleRow({
   on: boolean
   onChange: (next: boolean) => void
   disabled?: boolean
+  tall?: boolean
 }) {
   return (
     <SettingRow
       name={name}
       label={label}
       hint={hint}
-      tall={Boolean(hint)}
+      tall={tall}
       control={<Switch name={name} on={on} onChange={onChange} disabled={disabled} hasHint={Boolean(hint)} />}
     />
   )

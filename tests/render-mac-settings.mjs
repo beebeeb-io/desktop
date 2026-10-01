@@ -297,6 +297,27 @@ try {
         } finally { await short.context.close() }
       }
     }
+    // Side by side with the design renders (j, k, l, m), light theme, same 1x scale.
+    if (process.env.DESIGN_PNG_DIR && !process.env.ONLY) {
+      const pairs = [['general', 'l-settings-general'], ['account', 'k-settings-account'], ['sync', 'j-settings-sync'], ['about', 'm-settings-about']]
+      for (const [shot, design] of pairs) {
+        const mine = path.join(output, 'png', `${shot}-light.png`)
+        const theirs = path.join(process.env.DESIGN_PNG_DIR, `${design}.png`)
+        assert(existsSync(theirs), `missing design render ${theirs}`)
+        const html = path.join(output, 'png', `compare-${shot}.html`)
+        await writeFile(html, `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#d9d6cf;font:11px monospace;color:#333;display:flex;gap:24px;padding:16px;align-items:flex-start">
+          <div><div style="margin-bottom:6px">design render ${design}</div><img id="a" src="${pathToFileURL(theirs).href}"></div>
+          <div><div style="margin-bottom:6px">this build (Chromium, 1x, ${shot} tab)</div><img id="b" src="${pathToFileURL(mine).href}"></div></body>`)
+        const page = await browser.newPage({ viewport: { width: 1200, height: 520 } })
+        await page.goto(pathToFileURL(html).href)
+        await page.waitForFunction(() => [...document.images].every((i) => i.complete && i.naturalWidth > 0))
+        const size = await page.evaluate(() => ({ design: [document.getElementById('a').naturalWidth, document.getElementById('a').naturalHeight], mine: [document.getElementById('b').naturalWidth, document.getElementById('b').naturalHeight] }))
+        await page.screenshot({ path: path.join(output, 'png', `compare-${shot}.png`), fullPage: true })
+        await page.close()
+        console.log(`compare ${shot}: design ${size.design.join('x')}, this build ${size.mine.join('x')}`)
+        check(size.design[0] === size.mine[0], `${shot}: same width as the design render`, `${size.design[0]} vs ${size.mine[0]}`)
+      }
+    }
   }
 } finally {
   await browser.close()
