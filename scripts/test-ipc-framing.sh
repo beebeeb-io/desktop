@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-EXPECTED_TESTS=35
+EXPECTED_TESTS=37
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -84,9 +84,16 @@ mkdir -p "$OUT_DIR"
 BIN="$OUT_DIR/ipc-framing-tests"
 LOG="$OUT_DIR/run.log"
 
+# task 1694: FileProviderItem.swift joins the compile line too. It imports
+# FileProvider + UniformTypeIdentifiers, both system frameworks on macOS, so
+# plain swiftc still works and the add-subitems capability mapping
+# (BeebeebProviderItem flags -> NSFileProviderItemCapabilities) is now under
+# test, not just the framing.
+
 xcrun swiftc \
   -o "$BIN" \
   BeebeebFileProvider/IPCFraming.swift \
+  BeebeebFileProvider/FileProviderItem.swift \
   BeebeebFileProviderTests/main.swift
 
 code=0

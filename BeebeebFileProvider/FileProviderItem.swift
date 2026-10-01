@@ -43,6 +43,10 @@ struct BeebeebProviderItem: Codable {
     static let write = 1 << 1
     static let rename = 1 << 2
     static let delete = 1 << 3
+    /// .allowsAddingSubItems — task 1694. Bit 4, identical numbering to the
+    /// Rust payload builder's CAP_ADD_SUBITEMS (src-tauri/src/ipc_socket.rs);
+    /// the payload crosses the XPC bridge as this plain Int.
+    static let addSubItems = 1 << 4
 
     static func namespace(_ namespace: BeebeebNamespace) -> BeebeebProviderItem {
         BeebeebProviderItem(
@@ -53,7 +57,7 @@ struct BeebeebProviderItem: Codable {
             sizeBytes: 0,
             contentType: UTType.folder.identifier,
             status: "local",
-            capabilities: read,
+            capabilities: read | addSubItems,
             versionIdentifier: nil
         )
     }
@@ -133,6 +137,12 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
         }
         if model.capabilities & BeebeebProviderItem.delete != 0 {
             result.insert(.allowsDeleting)
+        }
+        if model.capabilities & BeebeebProviderItem.addSubItems != 0 {
+            // Task 1694: without this Finder refuses every drop INTO the item
+            // (blocked icon) — it is the only flag that governs adding
+            // sub-items.
+            result.insert(.allowsAddingSubItems)
         }
         return result
     }
