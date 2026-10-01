@@ -20,6 +20,7 @@ ACCEPTANCE = "content_v2::storage_tests::slice1_acceptance_twenty_three_gib_cycl
 def check(log, cargo_exit_code, acceptance=False):
     current = None
     announced = None
+    pending_announcement = None
     binaries = 0
     total = 0
     library_seen = False
@@ -38,11 +39,17 @@ def check(log, cargo_exit_code, acceptance=False):
             if current is not None:
                 raise ValueError(f"missing result for {current}")
             current = line.replace("\\", "/")
-            announced = None
+            announced = pending_announcement
+            pending_announcement = None
         elif re.fullmatch(r"running \d+ tests?", line):
-            if current is None or announced is not None:
-                raise ValueError("test count without a unique binary header")
-            announced = int(line.split()[1])
+            if acceptance and current is None and pending_announcement is None and binaries == 0:
+                # PowerShell merges native stdout/stderr asynchronously. The sole
+                # acceptance binary may announce its count before Cargo's header.
+                pending_announcement = int(line.split()[1])
+            else:
+                if current is None or announced is not None:
+                    raise ValueError("test count without a unique binary header")
+                announced = int(line.split()[1])
         elif line.startswith("test result:"):
             match = re.fullmatch(
                 r"test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; "
@@ -71,6 +78,8 @@ def check(log, cargo_exit_code, acceptance=False):
             current = None
     if current is not None:
         raise ValueError(f"missing result for {current}")
+    if pending_announcement is not None:
+        raise ValueError("test count without a unique binary header")
     if not library_seen or total == 0:
         raise ValueError("missing library results or zero total executed tests")
     if cargo_exit_code != 0:
@@ -116,6 +125,9 @@ def self_test():
     acceptance_good += "cycles=20 payload_per_worker=1073741824 final_validation=3221225472 peak_db=1\n"
     cases += [
         ("named acceptance", acceptance_good, 0, None),
+        ("named acceptance count before header", acceptance_good.replace(f"{lib}\nrunning 1 tests", f"running 1 tests\n{lib}"), 0, None),
+        ("acceptance count without header", acceptance_good.replace(lib + "\n", ""), 0, "malformed or orphaned test result"),
+        ("acceptance duplicate early count", "running 1 test\n" + acceptance_good.replace(f"{lib}\nrunning 1 tests", f"running 1 tests\n{lib}"), 0, "test count without a unique binary header"),
         ("acceptance missing cycle", acceptance_good.replace("cycle=20 allocated_db_peak=1\n", ""), 0, "all 20 cycles"),
         ("acceptance wrong final size", acceptance_good.replace("final_validation=3221225472", "final_validation=1"), 0, "all 20 cycles"),
         ("acceptance empty", fixture(lib, 0), 0, "zero executed tests"),
@@ -136,7 +148,7 @@ def self_test():
             if run.returncode != expected or (error and error not in run.stderr):
                 raise AssertionError(f"{name}: expected exit {expected} / {error!r}, "
                                      f"got {run.returncode}\n{run.stdout}\n{run.stderr}")
-            if error is None and ("1 harnesses; 1 executed tests" if name == "named acceptance" else "4 harnesses; 5 executed tests") not in run.stdout:
+            if error is None and ("1 harnesses; 1 executed tests" if name.startswith("named acceptance") else "4 harnesses; 5 executed tests") not in run.stdout:
                 raise AssertionError(f"{name}: per-binary aggregation failed: {run.stdout}")
             print(f"PASS {name}: guard exit {run.returncode}" + (f"; {run.stderr.strip()}" if error else ""))
     print(f"Self-test: {len(cases)} passed; 0 failed")
