@@ -1,0 +1,520 @@
+/*
+ * macOS Settings window (task 1683 slice 4). Imported by main.tsx; every rule is scoped to a
+ * `.ms-` class, so it cannot touch another window.
+ *
+ * Colours are design.css tokens only (tests/noHardcodedThemeColors scans this file too). The
+ * mock's `--ok` is `--ok-icon`, its `--on-amber` is `--amber-ink`; both already exist.
+ *
+ * The layout rules below are the ones that stop screenshot 3 from coming back (spec section 8):
+ *   1. The shell is `height: 100vh; overflow: hidden`. Only `.ms-pane` scrolls, so the toolbar
+ *      can never scroll away (the empty sidebar).
+ *   2. Grid tracks are `minmax(0, 1fr)` and every flex text block is `min-width: 0`, so one
+ *      unbreakable string cannot widen a track (the clipped headings).
+ *   3. Anything that can hold user data wraps with `overflow-wrap: anywhere`.
+ * tests/macSettingsLayout.test.ts pins each of these in this file; tests/render-mac-settings.mjs
+ * measures them in Chromium with a 60-character path in every data field.
+ */
+
+.ms-shell {
+  box-sizing: border-box;
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  background: var(--paper-2);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+/* ── Toolbar: four tabs, centred, 74 pt tall (the native traffic lights sit at its left). ── */
+
+.ms-toolbar {
+  box-sizing: border-box;
+  height: 74px;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 4px;
+  padding-bottom: 6px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.ms-tab {
+  box-sizing: border-box;
+  width: 76px;
+  height: 52px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 14px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.ms-tab:hover {
+  background: var(--paper-2);
+}
+
+.ms-tab[aria-selected='true'] {
+  background: var(--paper-3);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ── The content pane: the only scroll container in the window. ── */
+
+.ms-pane {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 20px 22px 22px;
+}
+
+.ms-loading {
+  color: var(--ink-3);
+  padding: 4px;
+}
+
+/* ── Groups and rows ── */
+
+.ms-group {
+  margin: 0;
+  min-width: 0;
+}
+
+/* Spaced from the group above, not from the one below: a dialog rendered after the last group
+   must not leave 18 pt of dead space under the content. */
+.ms-group + .ms-group {
+  margin-top: 18px;
+}
+
+.ms-group-title {
+  margin: 0 4px 6px;
+  font-size: 11.5px;
+  line-height: 16px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.ms-card {
+  min-width: 0;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.ms-card > * {
+  border-bottom: 1px solid var(--line);
+}
+
+.ms-card > :last-child {
+  border-bottom: 0;
+}
+
+.ms-row {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 46px;
+  padding: 9px 14px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.ms-row--tall {
+  min-height: 58px;
+}
+
+.ms-row-text {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ms-row-label {
+  font-size: 13px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.ms-row-hint {
+  margin-top: 1px;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.ms-row-control {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ms-with-glyph {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ms-lock-glyph {
+  display: inline-flex;
+  color: var(--amber-deep);
+}
+
+.ms-count {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.ms-added {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.ms-ok-disc {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ok-icon);
+  color: var(--paper);
+}
+
+.ms-icon {
+  flex: 0 0 auto;
+}
+
+/* ── Account card ── */
+
+.ms-account {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.ms-avatar {
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper-3);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.ms-account-text {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ms-account-email {
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ms-account-plan {
+  margin-top: 1px;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.ms-storage {
+  margin-top: 9px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ms-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--paper-3);
+}
+
+.ms-bar-fill {
+  height: 100%;
+  background: var(--ink-3);
+}
+
+.ms-bar[data-red='true'] .ms-bar-fill {
+  background: var(--red);
+}
+
+.ms-storage-label {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* ── Controls ── */
+
+.ms-btn {
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ms-btn:hover:not(:disabled) {
+  background: var(--paper-2);
+}
+
+.ms-btn--primary {
+  border-color: var(--amber);
+  background: var(--amber);
+  color: var(--amber-ink);
+}
+
+.ms-btn--primary:hover:not(:disabled) {
+  background: var(--amber);
+  filter: brightness(0.96);
+}
+
+.ms-btn:disabled,
+.ms-switch:disabled,
+.ms-select select:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ms-iconbtn {
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.ms-iconbtn:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+/* A neutral switch (spec section 5; contrast pairs in section 10). */
+.ms-switch {
+  box-sizing: border-box;
+  position: relative;
+  width: 32px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1.5px solid var(--ink-3);
+  border-radius: 10px;
+  background: var(--paper-2);
+  cursor: pointer;
+}
+
+.ms-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.ms-switch[aria-checked='true'] {
+  border-color: var(--ink);
+  background: var(--ink);
+}
+
+.ms-switch[aria-checked='true'] .ms-switch-knob {
+  left: 14px;
+  background: var(--paper);
+}
+
+.ms-select {
+  position: relative;
+  display: inline-flex;
+  width: 132px;
+  height: 26px;
+}
+
+.ms-select select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0 26px 0 10px;
+  appearance: none;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.ms-select-chevron {
+  position: absolute;
+  top: 0;
+  right: 8px;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+/* ── Notes under a row: one failure, once (spec section 7). ── */
+
+.ms-note {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 10px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--paper);
+}
+
+.ms-note--alert {
+  background: var(--err-bg);
+}
+
+.ms-note-glyph {
+  display: inline-flex;
+  padding-top: 1px;
+  color: var(--red);
+}
+
+.ms-note-text {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ms-note-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ms-note-body {
+  font-size: 12.5px;
+  line-height: 17px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.ms-note-actions {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ms-mono {
+  margin-top: 2px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Sheets (in-window dialogs) ── */
+
+.ms-sheet-copy {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.ms-sheet-copy:last-child {
+  margin-bottom: 0;
+}
+
+.ms-sheet-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+}
+
+.ms-folder-list {
+  max-height: 260px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* ── Focus and motion ── */
+
+.ms-tab:focus-visible,
+.ms-btn:focus-visible,
+.ms-switch:focus-visible,
+.ms-iconbtn:focus-visible,
+.ms-select select:focus-visible,
+.ms-pane:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ms-switch-knob {
+    transition: left 120ms var(--ease);
+  }
+}

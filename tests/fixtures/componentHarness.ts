@@ -39,6 +39,19 @@ export function textOf(node: any): string {
   return node == null || typeof node === 'boolean' ? '' : String(node)
 }
 
+/**
+ * Resolve function components into the intrinsic elements they render, so text, roles and
+ * handlers inside presentational components (task 1683 slice 4) are readable. Only meant for
+ * components without hooks: they are called directly, once. Fragments and DOM elements pass
+ * through; children are resolved recursively.
+ */
+export function expand(node: any): any {
+  if (Array.isArray(node)) return node.map(expand)
+  if (!node || typeof node !== 'object' || !node.props) return node
+  if (typeof node.type === 'function') return expand(node.type({ ...node.props }))
+  return { ...node, props: { ...node.props, children: expand(node.props.children) } }
+}
+
 export type Handler = (args: any) => unknown | Promise<unknown>
 
 export interface Mounted {
@@ -58,7 +71,7 @@ export interface Mounted {
 export function mount(
   file: string,
   name: string,
-  opts: { backend: Record<string, Handler>; bindings?: Record<string, unknown>; props?: any },
+  opts: { backend: Record<string, Handler>; bindings?: Record<string, unknown>; props?: any; expand?: boolean },
 ): Mounted {
   const states: any[] = []
   const deps: any[][] = []
@@ -93,7 +106,22 @@ export function mount(
       deps[index] = next
     },
     useMemo: (fn: any) => fn(),
-    useCallback: (fn: any) => fn,
+    // Identity unless the caller asks for stable callbacks (opts.expand): a memoised
+    // callback keeps an effect that depends on it from re-running on every render.
+    useCallback(fn: any, next: any[]) {
+      if (!opts.expand) return fn
+      const index = cursor++
+      const slot = states[index]
+      if (slot && next && slot.deps && slot.deps.length === next.length && next.every((v: any, i: number) => v === slot.deps[i])) return slot.fn
+      states[index] = { fn, deps: next }
+      return fn
+    },
+    useRef(initial: any) {
+      const index = cursor++
+      if (!(index in states)) states[index] = { current: initial }
+      return states[index]
+    },
+    useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
     useToast: () => ({ showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }),
     ...opts.bindings,
   })
@@ -102,8 +130,9 @@ export function mount(
     for (let i = 0; i < 12; i++) { while (effects.length) effects.shift()!(); await Promise.resolve() }
     render()
   }
+  const view = () => (opts.expand ? expand(tree) : tree)
   const findButton = (label: string) => {
-    const match = elementsOf(tree).find((el) => el.type === 'button' && textOf(el.props.children).trim() === label)
+    const match = elementsOf(view()).find((el) => el.type === 'button' && textOf(el.props.children).trim() === label)
     if (!match) throw new Error(`no button "${label}" in the current render`)
     return match
   }
@@ -112,7 +141,7 @@ export function mount(
     toasts,
     calls,
     tree: () => tree,
-    elements: () => elementsOf(tree),
+    elements: () => elementsOf(view()),
     render,
     flush,
     click: async (label) => { await findButton(label).props.onClick(); await flush() },
