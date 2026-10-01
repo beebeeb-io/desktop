@@ -1,4 +1,4 @@
-# Beebeeb Desktop 0.8.7 — Finder: a fix for opening files, awaiting the hand test; support bundle: file names and paths redacted, one stated residual
+# Beebeeb Desktop 0.8.7 — Finder: a fix for opening files, awaiting the hand test; support bundle: file names and paths redacted, one stated residual; new macOS Settings window behind a dev URL
 
 This is an alpha build. The Mac build is Apple Silicon only (Intel is not built). It follows up
 0.8.6, where opening a not-yet-downloaded file from Finder stopped failing with the "helper
@@ -22,6 +22,15 @@ written for them.
   now states what the export contains, including the one residual described below. The button also
   now saves the bundle and reveals it; before, it showed a toast saying the file had been written
   without writing one.
+- **[macOS] A new Settings window exists behind a dev URL only (task 1683 slice 4, PR #85):** one
+  window with four tabs (General, Account, Sync, About), sized to its content and built from the
+  commands the existing pages already use. It mounts only at the dev URL
+  `?window=settings-v2&platform=macos` and no window configuration opens it yet, so nothing a user
+  sees changes on any platform in this build. Two bugs found in review of this window were fixed
+  before it merged: queued settings writes keep their own snapshot after a failed write (a later
+  queued change is still saved, the failed change shows as unsaved), and a failed Finder-state
+  refresh after a successful reset no longer leaves the stale "Added" state (the row shows
+  unavailable with Try again).
 
 ### Bug Fixes / Hardening
 
@@ -70,6 +79,17 @@ written for them.
   guard exit 0;
   `bunx tsc --noEmit` exit 0. The release workflow re-runs `bun test` and `cargo test --locked`
   as its own gate before any installer is built.
+- Re-measured after the notes were amended for PR #85: this amendment (the PR #86 commit) changes
+  only `RELEASE_NOTES.md` on top of desktop main 4569db1 (the 1683-slice-4 squash, 3700+ lines of
+  application and test code), so the tested code is unchanged from 4569db1: `bun test` 542 pass / 0 fail across
+  41 files (2077 expects), `bunx tsc --noEmit` exit 0 and `bun run lint` exit 0 (local macOS
+  runs, lock-serialized). The `cargo test --locked` (src-tauri) figures come from the green
+  "Rust test (Linux)" CI job of 4569db1 (run 36850579832, cargo exit 0 under the count guard),
+  the platform this release gate runs on: lib `test result: ok. 782 passed` (4 ignored), keychain
+  `test result: ok. 20 passed`, windows_session_wiring `test result: ok. 8 passed`,
+  windows_signout_cleanup `test result: ok. 3 passed`, all 0 failed, 813 tests executed. The
+  earlier gate's lib figure (652) predates PR #84, which added the engine-status, popover,
+  link-health and transfer-progress Rust suites.
 - Desktop CI on the release commit, including the macOS job "File Provider Swift (macOS)", which
   compiles the Finder extension and runs the framing tests with a counted result.
 - The macOS build is notarized and stapled by `scripts/release-macos-local.sh`, which refuses to
