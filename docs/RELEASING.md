@@ -104,6 +104,59 @@ worktree without `node_modules`, set `TAURI_CLI` to the installed `@tauri-apps/c
 node scripts/verify-updater-key-rotation.mjs
 ```
 
+## Windows Authenticode signing (Azure Artifact Signing)
+
+Since 0.8.8, Windows release artifacts are Authenticode-signed with **Azure Artifact Signing**
+(formerly Trusted Signing): public trust, publisher `CN=Initlabs B.V., O=Initlabs B.V., L=Wijchen,
+C=NL` (validated organization, KvK 95157565). Before 0.8.8 every Windows installer shipped
+unsigned and SmartScreen showed "unknown publisher" (decision 1499, task 1617).
+
+Service coordinates (non-secret):
+
+| Item | Value |
+|------|-------|
+| Subscription | `devidee-bv` (`b21372e3-1771-4ead-8897-0ba48505e8be`) |
+| Resource group / account | `beebeeb-signing` / `beebeebsigning` |
+| Endpoint | `https://weu.codesigning.azure.net/` |
+| Certificate profile | `beebeeb-publictrust` (PublicTrust; 3-day certs, auto-rotating) |
+| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:ref:refs/heads/main` |
+| Role | `Artifact Signing Certificate Profile Signer`, scoped to the account |
+
+How a release build signs (all in `release.yml`, Windows job only):
+
+1. `azure/login` authenticates by GitHub OIDC federated credential — there is no
+   client secret or certificate anywhere. Secrets are identifiers only:
+   `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`.
+2. `scripts/windows/sign-artifact.ps1` is injected as Tauri's
+   `bundle.windows.signCommand` at build time (not committed, so local bundling
+   keeps working). The bundler invokes it for the app binary before packaging,
+   the NSIS installer and its uninstaller, and the MSI. The script runs
+   `signtool` with the Microsoft Artifact Signing dlib (fetched from NuGet on
+   demand), which authenticates via the ambient `az` login; every signature is
+   RFC3161-timestamped (`http://timestamp.acs.microsoft.com` — mandatory, the
+   cert rotates every 3 days) and re-verified by the script itself.
+3. `scripts/windows/verify-authenticode.ps1` is the fail-closed publication
+   gate: every staged installer and the executables *inside* each installer
+   payload (NSIS via 7z, MSI via `msiexec /a`) must be `Valid`, signed by
+   `CN=Initlabs B.V.`, and timestamped. (Do not also gate on
+   `target/.../release/*.exe`: the bundler restores the *unsigned* main binary
+   after packaging — the signed app exe exists only inside the payloads.) The
+   gate's `-SelfTest` must first reject an unsigned and a wrong-publisher
+   fixture. Any failure blocks the release.
+
+Dispatch `release.yml` **from `main`** — the federated credential's subject is
+`ref:refs/heads/main`, so a run from any other ref cannot authenticate.
+
+SmartScreen honesty: signing removes the "unknown publisher" warning
+immediately, but SmartScreen *reputation* accrues with download volume and
+starts at zero for a freshly issued certificate (OV and EV are treated the same
+since March 2024). A first-download prompt can linger briefly.
+
+Rotation/continuity: certificates are short-lived and rotate inside Azure; the
+timestamp keeps every published signature valid indefinitely. Nothing in this
+repo or in CI secrets can impersonate the publisher — only that Azure account
+plus the GitHub workflow's OIDC subject can.
+
 ## macOS: local build, then backfill the manifest
 
 macOS is not in `release.yml`'s CI build matrix (see the matrix comment) — Developer ID signing
