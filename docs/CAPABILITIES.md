@@ -235,7 +235,7 @@ placeholder default is unreachable for a validated NavId.
 
 ## Complete registered IPC cross-reference
 
-90 registered application commands at the U1 source revision; task 1665 adds `consume_menu_update_check` (91 total). Every command is indexed below; plugin opener/event/window IPCs are covered by the surface checklist. `desktopApi.ts` entries are wrapper references, not independent views. Native/internal-only and compact-only entries are deliberately retained so their absence from Windows is visible.
+90 registered application commands at the U1 source revision; task 1665 adds `consume_menu_update_check` (91 total); task 1683 slice 2 adds `popover_snapshot` (92 total). Every command is indexed below; plugin opener/event/window IPCs are covered by the surface checklist. `desktopApi.ts` entries are wrapper references, not independent views. Native/internal-only and compact-only entries are deliberately retained so their absence from Windows is visible.
 
 | Registered command | Source references (relative to src/) | Windows reachability |
 | --- | --- | --- |
@@ -252,6 +252,7 @@ placeholder default is unreachable for a validated NavId.
 | `lock_vault` | `pages/Account.tsx` | Compact-only; no Windows view action |
 | `sync_status` | `pages/VersionCenter.tsx`, `pages/SyncFolder.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `desktop_storage_summary` | `WindowsApp.tsx`, `pages/Status.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
+| `popover_snapshot` | `desktopApi.ts` (`popoverSnapshot`) | Not rendered by any UI yet: the macOS menu-bar popover (task 1683 slice 3) reads it once when shown; cached storage summary, no polling; leases like every credential command |
 | `free_up_space` | `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `export_diagnostics` | No TS literal | Native/internal handler; returns the redacted bundle JSON (format 2, task 1685) and is called by `report_problem`; no direct Windows TS button |
 | `list_version_conflict_center` | `pages/VersionCenter.tsx` | Compact-only; no Windows view action |

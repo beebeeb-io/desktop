@@ -28,6 +28,7 @@ mod desktop_search;
 mod diagnostic_redaction;
 mod desktop_capabilities;
 mod engine_bridge;
+mod engine_status;
 #[cfg(test)]
 #[path = "../tests/support/bridge.rs"]
 mod native_parity_tests;
@@ -61,8 +62,11 @@ mod linux_fuse {
 mod lockfile;
 #[cfg(target_os = "macos")]
 mod macos_file_provider;
+mod link_health;
+mod popover_data;
 mod runner;
 mod state_db;
+mod transfer_progress;
 mod staged_payload;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
@@ -587,6 +591,24 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
 
 // UI cache epoch, independent of the credential-bearing command lease epoch.
 static UI_SESSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bumped at every place the in-memory session is installed by a sign-in or recovery-phrase
+/// unlock, and at every place it is cleared (lock, sign-out). The password unlock from the
+/// Keychain (`install_unlocked_session`) does NOT bump: it is correct only because the lock that
+/// came before it did. A new path that clears the session (an auth-expiry auto-lock, say) must
+/// call `bump_vault_epoch()` itself, or the popover serves the pre-clear storage figure for up to
+/// five minutes after the next unlock. `lock_then_unlock_refetches_the_storage_summary` runs the
+/// real lock and the real unlock install and fails if the lock stops bumping.
+///
+/// Keys the popover's cached storage summary, so an unlock refetches it even when
+/// `UI_SESSION_REVISION` does not move (a lock keeps `auth_present` true, and the email is the
+/// same on the way back). Kept separate from `UI_SESSION_REVISION` on purpose: bumping that one
+/// makes the existing UI refetch, and slice 2 changes nothing a user sees.
+static VAULT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn bump_vault_epoch() {
+    VAULT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
 
 fn set_auth_present(state: &AppState, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
@@ -1148,6 +1170,7 @@ async fn desktop_unlock_with_recovery_phrase(
                 master_key,
                 email,
             });
+            bump_vault_epoch();
         }
         set_auth_present(&state, true);
         tracing::info!("vault provisioned from recovery phrase");
@@ -1382,6 +1405,7 @@ pub(crate) async fn apply_session(
             master_key: *master_key,
             email: email.clone(),
         });
+        bump_vault_epoch();
     }
     set_auth_present(state, true);
     set_auth_email(state, email);
@@ -1576,6 +1600,7 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
+            bump_vault_epoch();
             tracing::info!("session cleared via IPC");
         }
         Err(_) => {
@@ -1612,6 +1637,16 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
 #[tauri::command]
 async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
     clear_session_impl(&state).await
+}
+
+/// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
+/// (see its doc): the lock that preceded this already moved the epoch, and a cold start has no
+/// cached storage summary to go stale. Split out of `unlock_vault` so a test can run the real
+/// install after the real `lock_vault`; the Keychain read before it has no Linux backend.
+fn install_unlocked_session(acct: &AccountRuntime, session: Session) -> Result<(), String> {
+    let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    *guard = Some(session);
+    Ok(())
 }
 
 /// Restore a Keychain-backed session into memory and start the engine for the
@@ -1657,10 +1692,7 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
         let token = session.token.clone();
         let master_key = session.master_key;
-        {
-            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-            *guard = Some(session);
-        }
+        install_unlocked_session(&acct, session)?;
         set_auth_present(&state, true);
         tracing::info!("vault unlocked from Keychain");
         start_engine_if_possible(
@@ -1733,6 +1765,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
+            bump_vault_epoch();
             tracing::info!("vault locked; runtime session cleared");
         }
         Err(_) => {
@@ -2626,6 +2659,11 @@ async fn install_finder_location(
     let mut cfg = DesktopConfig::load()?;
     // Spec section 7: the previous attempt's saved failure is cleared when a new attempt starts.
     begin_finder_install_attempt(&mut cfg)?;
+    // State f1 ("Adding Beebeeb to Finder"): the popover snapshot reports it for exactly
+    // as long as this command runs, on every exit path.
+    let _adding = app
+        .try_state::<popover_data::PopoverRuntime>()
+        .map(|runtime| runtime.finder_adding_guard());
     let started_pending_engine = start_engine_for_pending_finder_install(
         app.clone(),
         &state,
@@ -3564,11 +3602,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
             .lock()
             .map(|g| g.clone())
             .unwrap_or_else(|_| "stopped".to_string());
-        let engine = match raw.as_str() {
-            "running" | "idle" | "syncing" => "running",
-            "error" => "error",
-            _ => "stopped",
-        };
+        let engine = engine_status::sync_status_engine(raw.as_str());
         if logged_in && !vault_unlocked && engine == "stopped" {
             "locked".to_string()
         } else {
@@ -3723,6 +3757,120 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
         })
     })
 }
+
+/// Everything the menu-bar popover needs for its first frame, in one call (task 1683
+/// slice 2, spec section 9). The UI calls it when the popover is shown (the
+/// `popover-shown` event) and after its own actions; nothing polls it.
+///
+/// Reads, in this order: the session (locked / signed out / session ended), the live
+/// pause flag, the engine's last `engine-status` (real state, progress, last
+/// successful check, reason), the Finder install state (macOS only), the storage
+/// summary (cached for five minutes, refetched after an unlock, never when the vault
+/// is locked), and the state DB (queue, recent transfers, conflicts). File names are
+/// read only while the vault is unlocked, like `desktop_file_overview`.
+#[tauri::command]
+async fn popover_snapshot(
+    state: State<'_, AppState>,
+    runtime: State<'_, popover_data::PopoverRuntime>,
+    activity_limit: Option<usize>,
+) -> Result<popover_data::PopoverSnapshotDto, String> {
+    // Windows admission: the snapshot reads the session token, so it leases like every
+    // credential command (tests/windows_session_wiring.rs guards this).
+    session_command!(async {
+        use popover_data::{SnapshotInputs, cached_storage, fetch_storage_usage, finder_setup_for};
+
+        let now = now_unix_seconds();
+        let acct = state.active_account()?;
+        let (vault_unlocked, token, session_email) = {
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            (
+                guard.is_some(),
+                guard.as_ref().map(|s| s.token.clone()),
+                guard.as_ref().and_then(|s| s.email.clone()),
+            )
+        };
+        let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
+        let logged_in = vault_unlocked || auth_present;
+        let auth_expired = acct.auth_health.is_expired();
+        let paused = acct.sync_paused.load(std::sync::atomic::Ordering::Relaxed);
+        let email = session_email.or_else(|| acct.auth_email.lock().ok().and_then(|guard| guard.clone()));
+
+        // Finder. Only macOS has one, and only matters once the phases above it are clear.
+        let adding = runtime.finder_adding.load(std::sync::atomic::Ordering::SeqCst);
+        let is_macos = cfg!(target_os = "macos");
+        let (finder, finder_reason) = if is_macos && logged_in && vault_unlocked && !adding {
+            // The probe asks the OS about the File Provider domain: keep it off the executor.
+            let install = tokio::task::spawn_blocking(finder_location_state)
+                .await
+                .map_err(|e| format!("finder state task failed: {e}"))?
+                .or_else(|_| DesktopConfig::load().map(|cfg| finder_install_state_from_config(&cfg, false, None)))?;
+            (
+                finder_setup_for(true, &install.status, install.reason_category.as_deref(), false),
+                install.reason_category,
+            )
+        } else {
+            (finder_setup_for(is_macos, "missing", None, adding), None)
+        };
+
+        let storage = match token {
+            Some(token) if vault_unlocked => {
+                cached_storage(
+                    &runtime.storage,
+                    now,
+                    VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
+                    || async move { fetch_storage_usage(&runner::api_base_url(), &token).await },
+                )
+                .await
+            }
+            _ => None,
+        };
+
+        let board = runtime.transfers.active();
+        let limit = activity_limit.unwrap_or(popover_data::DEFAULT_ACTIVITY_LIMIT);
+        let db_view = if vault_unlocked {
+            tokio::task::spawn_blocking(move || -> Result<_, String> {
+                let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
+                    return Ok(None);
+                };
+                popover_data::gather_db_view(&db, limit, now).map(Some)
+            })
+            .await
+            .map_err(|e| format!("popover data task failed: {e}"))??
+        } else {
+            None
+        };
+        let popover_data::DbView {
+            backlog,
+            conflicts,
+            in_flight,
+            failed,
+            recent,
+        } = db_view.unwrap_or_default();
+
+        let engine = runtime.status.lock().map(|view| view.clone()).unwrap_or_default();
+        Ok(popover_data::assemble(SnapshotInputs {
+            now,
+            logged_in,
+            vault_unlocked,
+            auth_expired,
+            paused,
+            email,
+            engine,
+            finder,
+            finder_reason,
+            finder_failure_elsewhere: false,
+            storage,
+            backlog,
+            conflicts,
+            in_flight,
+            failed,
+            recent,
+            board,
+            activity_limit: limit,
+        }))
+    })
+}
+
 
 // `pub(crate)` so `free_up_space_blocking` (also `pub(crate)`, reused by the
 // Windows shell status-flyout command) can name it as its return type.
@@ -8080,6 +8228,8 @@ pub fn run() {
         // browser-login handoff) after login. The sync engine task reads
         // from this.
         .manage(AppState::default())
+        // Task 1683 slice 2: transfer board, last engine status, cached storage summary.
+        .manage(popover_data::PopoverRuntime::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -8110,6 +8260,7 @@ pub fn run() {
             desktop_unlock_with_recovery_phrase,
             lock_vault,
             sync_status,
+            popover_snapshot,
             desktop_storage_summary,
             free_up_space,
             export_diagnostics,
@@ -9009,7 +9160,7 @@ fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
 /// (idle / syncing / error PNGs) are a follow-up once design ships
 /// the colored set. Updating the tooltip on every tick is cheap and
 /// lets the user see "Syncing 5 files…" change as work progresses.
-fn attach_tray_status_listener(app: &tauri::AppHandle) {
+fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Listener;
     let app_for_listener = app.clone();
     app.listen("engine-status", move |event| {
@@ -9020,9 +9171,19 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
                 return;
             }
         };
-        let state = payload.get("state").and_then(|v| v.as_str()).unwrap_or("");
-        let files_remaining = payload.get("files_remaining").and_then(|v| v.as_u64());
-        let error = payload.get("error").and_then(|v| v.as_str());
+        // Task 1683 slice 2: `state` can now be `syncing` or `offline`. Nothing a user
+        // sees today may change before the flip (slice 6), so the tooltip and
+        // `sync_status` keep reading the state the old emitter would have sent
+        // (`engine_status::legacy_state`).
+        let state = engine_status::legacy_state(&payload);
+
+        // The popover snapshot reads the NEW fields (real state, progress, last check,
+        // reason) from this mirror.
+        if let Some(runtime) = app_for_listener.try_state::<popover_data::PopoverRuntime>()
+            && let Ok(mut view) = runtime.status.lock()
+        {
+            view.apply(&payload);
+        }
 
         // Mirror the latest state into the active account's `engine_state`
         // (per-account, decision 0800) so the `sync_status` command can return
@@ -9037,22 +9198,7 @@ fn attach_tray_status_listener(app: &tauri::AppHandle) {
             *guard = state.to_string();
         }
 
-        let tooltip = match state {
-            "idle" => "Beebeeb · Synced".to_string(),
-            "syncing" => match files_remaining {
-                Some(0) | None => "Beebeeb · Syncing…".to_string(),
-                Some(1) => "Beebeeb · Syncing 1 file…".to_string(),
-                Some(n) => format!("Beebeeb · Syncing {n} files…"),
-            },
-            "paused" => "Beebeeb · Paused".to_string(),
-            "offline" => "Beebeeb · Offline".to_string(),
-            "error" => match error {
-                Some(msg) if !msg.is_empty() => format!("Beebeeb · Error: {msg}"),
-                _ => "Beebeeb · Error".to_string(),
-            },
-            "stopped" => "Beebeeb · Not signed in".to_string(),
-            other => format!("Beebeeb · {other}"),
-        };
+        let tooltip = engine_status::tray_tooltip(&payload);
 
         if let Some(tray) = app_for_listener.tray_by_id("tray")
             && let Err(e) = tray.set_tooltip(Some(&tooltip))
@@ -11122,5 +11268,474 @@ mod recovery_phrase_unlock_tests {
             persisted.lock().unwrap().is_none(),
             "nothing may be persisted when unverified"
         );
+    }
+}
+
+/// Runs the REAL `popover_snapshot` command (task 1683 slice 2) on a mock Tauri runtime: real
+/// `AppState`, real `PopoverRuntime`, the real session gate, the real storage fetch over HTTP
+/// against a loopback API, the real cache. No webview and no window exist, and no state DB is
+/// read (a test process has no state directory; that leg is `popover_data::gather_db_view`'s
+/// own test against a real DB).
+#[cfg(all(test, not(target_os = "windows")))]
+mod popover_snapshot_command_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri::Manager;
+
+    /// The command reads `BB_API_BASE` and the user config directory, both process-wide.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A loopback API that answers every request with `status` and `body`, and records the
+    /// raw requests it received.
+    struct LoopbackApi {
+        base: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl LoopbackApi {
+        fn start(status: &'static str, body: &'static str) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (seen, halt) = (requests.clone(), stop.clone());
+            let handle = std::thread::spawn(move || {
+                while !halt.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let mut buf = [0u8; 8192];
+                            let n = stream.read(&mut buf).unwrap_or(0);
+                            seen.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                        }
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    }
+                }
+            });
+            Self {
+                base,
+                requests,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for LoopbackApi {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    /// Point the command at `api` and at an empty config directory for the duration of `f`.
+    fn with_isolated_env<T>(api_base: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config_home = tempfile::tempdir().unwrap();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = ["BB_API_BASE", "XDG_CONFIG_HOME", "HOME"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        // SAFETY: serialized by ENV_LOCK; every exit path below restores the saved values.
+        unsafe {
+            std::env::set_var("BB_API_BASE", api_base);
+            std::env::set_var("XDG_CONFIG_HOME", config_home.path());
+            std::env::set_var("HOME", config_home.path());
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (key, value) in saved {
+            // SAFETY: same guard as above.
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        result.unwrap_or_else(|e| std::panic::resume_unwind(e))
+    }
+
+    fn mock_app_with_account(signed_in: bool, unlocked: bool) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        app.manage(AppState::default());
+        app.manage(popover_data::PopoverRuntime::default());
+        let state = app.state::<AppState>();
+        synthesize_single_account(&state, account::AccountId("acct-test".into()));
+        if unlocked {
+            let acct = state.active_account().unwrap();
+            *acct.session.lock().unwrap() = Some(Session {
+                token: "tok-abc".into(),
+                master_key: [7u8; 32],
+                email: Some("sam@example.eu".into()),
+            });
+        }
+        if signed_in {
+            *state.auth_present.lock().unwrap() = true;
+        }
+        app
+    }
+
+    fn run_command(app: &tauri::App<tauri::test::MockRuntime>) -> Result<serde_json::Value, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime
+            .block_on(popover_snapshot(
+                app.state::<AppState>(),
+                app.state::<popover_data::PopoverRuntime>(),
+                None,
+            ))
+            .map(|snapshot| serde_json::to_value(snapshot).unwrap())
+    }
+
+    const USAGE: &str = "{\"used_bytes\":84300000000,\"quota_bytes\":200000000000}";
+
+    #[test]
+    fn the_real_command_reads_the_session_the_engine_status_and_the_storage_api() {
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            let app = mock_app_with_account(true, true);
+
+            let first = run_command(&app).expect("the command runs");
+            assert_eq!(first["phase"], "synced");
+            assert_eq!(first["account"]["email"], "sam@example.eu");
+            assert_eq!(first["account"]["vault_unlocked"], true);
+            assert_eq!(first["storage"]["used_bytes"], 84_300_000_000_i64);
+            assert_eq!(first["storage"]["quota_bytes"], 200_000_000_000_i64);
+            assert_eq!(first["storage"]["stale"], false);
+            assert_eq!(first["finder"]["setup"], "ready", "no Finder location to set up off macOS");
+            // The same shape the TypeScript side validates.
+            let shared: serde_json::Value =
+                serde_json::from_str(include_str!("../../tests/fixtures/popover-snapshot.synced.json")).unwrap();
+            for key in shared.as_object().unwrap().keys() {
+                assert!(first.get(key).is_some(), "the command's snapshot lacks `{key}`");
+            }
+            assert_eq!(first.as_object().unwrap().len(), shared.as_object().unwrap().len());
+
+            let requests = api.requests();
+            assert_eq!(requests.len(), 1, "one call to the billing API");
+            let raw = requests[0].to_ascii_lowercase();
+            assert!(raw.starts_with("get /api/v1/billing/usage"), "{raw}");
+            assert!(raw.contains("authorization: bearer tok-abc"), "{raw}");
+
+            // Twenty more opens inside the TTL: the cache answers, the API is not called.
+            for _ in 0..20 {
+                assert_eq!(run_command(&app).unwrap()["storage"]["used_bytes"], 84_300_000_000_i64);
+            }
+            assert_eq!(api.requests().len(), 1, "21 snapshots, 1 fetch");
+
+            // The engine says offline: the phase follows, still no extra call.
+            let runtime = app.state::<popover_data::PopoverRuntime>();
+            runtime.status.lock().unwrap().apply(&serde_json::json!({
+                "state": "offline", "reason": { "code": "connect", "detail": null }, "last_tick_ok_at": 4242
+            }));
+            let offline = run_command(&app).unwrap();
+            assert_eq!(offline["phase"], "offline");
+            assert_eq!(offline["reason"], serde_json::json!({ "code": "connect", "detail": null }));
+            assert_eq!(offline["engine"]["last_tick_ok_at"], 4242);
+
+            // The user pauses: pause outranks offline.
+            let state = app.state::<AppState>();
+            state.active_account().unwrap().sync_paused.store(true, Ordering::Relaxed);
+            assert_eq!(run_command(&app).unwrap()["phase"], "paused");
+
+            // A session change (unlock, sign-in) refetches even inside the TTL.
+            bump_vault_epoch();
+            run_command(&app).unwrap();
+            assert_eq!(api.requests().len(), 2, "a new session refetches the storage summary");
+        });
+    }
+
+    #[test]
+    fn lock_then_unlock_refetches_the_storage_summary() {
+        // The real `lock_vault` and the real unlock install (`install_unlocked_session`, the part of
+        // `unlock_vault` after the Keychain read, which has no Linux backend), with the real
+        // snapshot command between them. Nothing bumps the epoch by hand.
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            let app = mock_app_with_account(true, true);
+            assert_eq!(run_command(&app).unwrap()["storage"]["used_bytes"], 84_300_000_000_i64);
+            assert_eq!(run_command(&app).unwrap()["phase"], "synced");
+            assert_eq!(api.requests().len(), 1, "two snapshots inside the TTL, 1 fetch");
+
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(lock_vault(app.state::<AppState>())).expect("the real lock runs");
+            let locked = run_command(&app).unwrap();
+            // (Not the phase: after a lock `auth_present` follows the real credential store, which
+            // is empty on a Linux runner and the developer's own on a Mac.)
+            assert_eq!(locked["account"]["vault_unlocked"], false);
+            assert_eq!(locked["storage"], serde_json::Value::Null, "no storage figure while locked");
+            assert_eq!(api.requests().len(), 1, "a locked snapshot calls nothing");
+
+            let acct = app.state::<AppState>().active_account().unwrap();
+            install_unlocked_session(
+                &acct,
+                Session {
+                    token: "tok-abc".into(),
+                    master_key: [7u8; 32],
+                    email: Some("sam@example.eu".into()),
+                },
+            )
+            .unwrap();
+            let unlocked = run_command(&app).unwrap();
+            assert_eq!(unlocked["storage"]["used_bytes"], 84_300_000_000_i64);
+            assert_eq!(
+                api.requests().len(),
+                2,
+                "an unlock inside the 5 minute TTL refetches: the pre-lock figure is not served"
+            );
+        });
+    }
+
+    #[test]
+    fn the_real_command_never_calls_the_api_for_a_signed_out_or_locked_account() {
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            let signed_out = mock_app_with_account(false, false);
+            let s = run_command(&signed_out).unwrap();
+            assert_eq!(s["phase"], "signed_out");
+            assert_eq!(s["storage"], serde_json::Value::Null);
+
+            let locked = mock_app_with_account(true, false);
+            let l = run_command(&locked).unwrap();
+            assert_eq!(l["phase"], "locked");
+            assert_eq!(l["storage"], serde_json::Value::Null);
+            assert_eq!(l["activity"], serde_json::json!([]), "no file names while the vault is locked");
+
+            assert_eq!(api.requests().len(), 0, "0 API calls without an unlocked session");
+        });
+    }
+
+    #[test]
+    fn the_real_command_survives_a_storage_api_that_answers_500() {
+        let api = LoopbackApi::start("500 Internal Server Error", "{}");
+        with_isolated_env(&api.base, || {
+            let app = mock_app_with_account(true, true);
+            let snapshot = run_command(&app).expect("a failing usage call must not fail the whole snapshot");
+            assert_eq!(snapshot["phase"], "synced");
+            assert_eq!(snapshot["storage"], serde_json::Value::Null, "no number is invented");
+            assert_eq!(api.requests().len(), 1);
+        });
+    }
+
+    #[test]
+    fn the_real_status_listener_keeps_old_consumers_on_the_old_state_and_feeds_the_popover_the_new_one() {
+        use tauri::Emitter;
+        let app = mock_app_with_account(true, true);
+        attach_tray_status_listener(app.handle());
+        let runtime = app.state::<popover_data::PopoverRuntime>();
+        let state = app.state::<AppState>();
+        let engine = |state: &AppState| state.active_account().unwrap().engine_state.lock().unwrap().clone();
+
+        // What `runner::run_status_pulse` emits while a file moves.
+        app.handle()
+            .emit(
+                "engine-status",
+                serde_json::json!({
+                    "state": "syncing", "legacy_state": "idle", "sync_root": null, "error": null,
+                    "files_remaining": 14, "bytes_total": 100, "bytes_done": 40,
+                    "last_tick_ok_at": 1234, "reason": null
+                }),
+            )
+            .unwrap();
+        // `sync_status` (old UI) still reads `idle`; the popover's mirror reads `syncing`.
+        assert_eq!(engine(&state), "idle");
+        {
+            let view = runtime.status.lock().unwrap();
+            assert_eq!(view.state, "syncing");
+            assert_eq!(view.files_remaining, Some(14));
+            assert_eq!(view.bytes_done, Some(40));
+            assert_eq!(view.last_tick_ok_at, Some(1234));
+        }
+
+        // A link that is down, after a tick that returned Ok: old consumers still say idle.
+        app.handle()
+            .emit(
+                "engine-status",
+                serde_json::json!({
+                    "state": "offline", "legacy_state": "idle", "sync_root": null, "error": null,
+                    "files_remaining": null, "bytes_total": null, "bytes_done": null,
+                    "last_tick_ok_at": 1234, "reason": { "code": "connect", "detail": null }
+                }),
+            )
+            .unwrap();
+        assert_eq!(engine(&state), "idle");
+        assert_eq!(runtime.status.lock().unwrap().state, "offline");
+        assert_eq!(engine_status::sync_status_engine(&engine(&state)), "running");
+
+        // The pause toggle sends a bare `{state}`: it is its own legacy value.
+        app.handle().emit("engine-status", serde_json::json!({ "state": "paused" })).unwrap();
+        assert_eq!(engine(&state), "paused");
+        assert_eq!(runtime.status.lock().unwrap().state, "paused");
+        assert_eq!(runtime.status.lock().unwrap().last_tick_ok_at, Some(1234), "a pause keeps the last check");
+    }
+
+    /// The same command and the same engine HTTP client, against a REAL local API. Ignored by
+    /// default (needs a running server and a session token); the evidence run is in
+    /// `/home/user/evidence/1683-s2/real-api/`.
+    ///
+    /// ```text
+    /// BB_REAL_API_BASE=http://127.0.0.1:3001 BB_REAL_API_TOKEN=<session token> \
+    ///   cargo test --lib real_api -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a running local API: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    fn real_api_the_command_and_the_engine_client_against_a_real_server() {
+        let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
+        let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
+        with_isolated_env(&base, || {
+            let app = mock_app_with_account(true, true);
+            // Swap in the real session token.
+            let state = app.state::<AppState>();
+            state.active_account().unwrap().session.lock().unwrap().as_mut().unwrap().token = token.clone();
+            let snapshot = run_command(&app).expect("the command runs against the real API");
+            println!("real API snapshot: {}", serde_json::to_string_pretty(&snapshot).unwrap());
+            assert_eq!(snapshot["phase"], "synced");
+            let used = snapshot["storage"]["used_bytes"].as_i64().expect("used_bytes from the real API");
+            let quota = snapshot["storage"]["quota_bytes"].as_i64().expect("quota_bytes from the real API");
+            assert!(used >= 0, "used {used}");
+            assert!(quota >= 0, "quota {quota}");
+            assert_eq!(snapshot["storage"]["stale"], false);
+
+            // A wrong token: the server answers 401, which is not a storage summary.
+            let bad = mock_app_with_account(true, true);
+            let bad_state = bad.state::<AppState>();
+            bad_state.active_account().unwrap().session.lock().unwrap().as_mut().unwrap().token = "not-a-real-token".into();
+            let refused = run_command(&bad).expect("a 401 must not fail the snapshot");
+            assert_eq!(refused["storage"], serde_json::Value::Null);
+
+            // The engine's own HTTP client: a real `GET /sync/ops` is an answer, so the link
+            // monitor records a check and no failure; a 401 is also an answer, not a link failure.
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let good = api_client::ApiClient::new(base.clone(), token.clone(), [0u8; 32]);
+            let monitor = good.link();
+            let ops = runtime.block_on(good.sync_ops(0));
+            println!("real GET /sync/ops: {:?}", ops.as_ref().map(|o| o.ops.len()).map_err(|e| e.to_string()));
+            let seen = monitor.snapshot();
+            assert!(seen.last_ok_at.is_some(), "a real answer records a check: {ops:?}");
+            assert_eq!(seen.failure, None);
+            let unauthorised = api_client::ApiClient::new(base.clone(), "not-a-real-token".into(), [0u8; 32]);
+            let monitor = unauthorised.link();
+            let err = runtime.block_on(unauthorised.sync_ops(0)).expect_err("a wrong token is refused");
+            println!("real GET /sync/ops with a wrong token: {err}");
+            assert!(err.to_string().contains("401"), "{err}");
+            assert_eq!(monitor.snapshot().failure, None, "a 401 is the server answering");
+        });
+    }
+
+    /// The engine's real tick against a real server that then goes away. `sync_tick` swallows a
+    /// failed `GET /sync/ops` and returns `Ok`, so only the link monitor can say "offline".
+    /// Ignored by default: run it with the API up, and stop the API while the second phase waits.
+    ///
+    /// ```text
+    /// BB_REAL_API_BASE=http://127.0.0.1:3901 BB_REAL_API_TOKEN=<token> \
+    ///   cargo test --lib real_api_a_tick -- --ignored --nocapture   # then stop the API
+    /// ```
+    #[test]
+    #[ignore = "needs a running local API that the operator stops mid-test"]
+    fn real_api_a_tick_is_synced_then_offline_when_the_server_goes_away() {
+        use engine_status::{Down, Outcome, tick_outcome};
+        let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
+        let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(state_db::StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(api_client::ApiClient::new(base.clone(), token, [0u8; 32]));
+        let link = api.link();
+        let bridge = engine_bridge::EngineBridge::new(db, api);
+        // A multi-thread runtime, like the engine's: it keeps polling the pooled connection
+        // between ticks, so it notices the server closing it (a runtime that is only ever
+        // driven inside `block_on` would write the next request to a dead socket and get a
+        // reset instead of a refused connection).
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let now = || now_unix_seconds();
+
+        // Phase 1: the server is up. The first tick bootstraps from `GET /sync/snapshot`.
+        let started = now();
+        let first = runtime.block_on(engine_bridge::sync_tick(&bridge, dir.path()));
+        println!("tick 1 (server up): {:?}", first.as_ref().map(|c| c.len()).map_err(|e| e.to_string()));
+        let outcome = tick_outcome(first.as_ref().map(|_| ()).map_err(|e| e), &link.snapshot(), started);
+        println!("tick 1 outcome: {outcome:?}; link: {:?}", link.snapshot());
+        assert_eq!(outcome, Outcome::Synced);
+        assert!(link.snapshot().last_ok_at.is_some());
+
+        // Phase 2: wait until the server has really gone (connection refused).
+        let addr = base.trim_start_matches("http://").to_string();
+        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        println!("WAITING FOR THE API AT {addr} TO STOP");
+        while std::net::TcpStream::connect(&addr).is_ok() {
+            assert!(std::time::Instant::now() < gone_by, "the operator never stopped the API");
+            runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
+        }
+        // Let the runtime see the pooled connection close, as the engine's does between ticks.
+        runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(500)).await });
+        let started = now();
+        let second = runtime.block_on(engine_bridge::sync_tick(&bridge, dir.path()));
+        println!("tick 2 (server gone): {:?}", second.as_ref().map(|c| c.len()).map_err(|e| e.to_string()));
+        let outcome = tick_outcome(second.as_ref().map(|_| ()).map_err(|e| e), &link.snapshot(), started);
+        println!("tick 2 outcome: {outcome:?}; link: {:?}", link.snapshot());
+        assert!(
+            matches!(outcome, Outcome::Down { down: Down::Offline(_), .. }),
+            "a tick that could not reach the server must be offline, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_real_command_reports_an_expired_session_before_anything_else() {
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            let app = mock_app_with_account(true, true);
+            let state = app.state::<AppState>();
+            let acct = state.active_account().unwrap();
+            for _ in 0..3 {
+                acct.auth_health
+                    .note_result(Some(&anyhow::anyhow!("HTTP 401 Unauthorized: stale token")));
+            }
+            assert_eq!(run_command(&app).unwrap()["phase"], "session_ended");
+        });
+    }
+}
+
+/// Registration wiring for the popover (task 1683 slice 2), asserted on the source because `run()`
+/// needs a real window system. Runs on every platform, unlike the mock-runtime tests above.
+#[cfg(test)]
+mod popover_wiring_tests {
+    #[test]
+    fn the_popover_command_state_and_handler_are_registered() {
+        // Structural, like the other wiring tests here: `run()` needs a real window system, so
+        // the registration is asserted on the source. An unmanaged `PopoverRuntime` would make
+        // the command (and the runner's progress board) fail at run time, not at compile time.
+        let full = include_str!("lib.rs").replace("\r\n", "\n");
+        // Everything before this test module: the mock-app helpers below also call `manage`.
+        let source = &full[..full.find("mod popover_snapshot_command_tests {").unwrap()];
+        assert_eq!(source.matches(".manage(popover_data::PopoverRuntime::default())").count(), 1);
+        assert_eq!(source.matches("            popover_snapshot,\n").count(), 1, "in generate_handler!");
+        // `sync_status` reads the mirrored state through the shared mapping.
+        let start = source.find("async fn sync_status(").expect("sync_status exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("engine_status::sync_status_engine(raw.as_str())"));
+        // The storage cache is keyed by the vault epoch, and the epoch moves at every place the
+        // session is installed (2) or cleared (2): sign-in, unlock, lock, sign-out.
+        assert_eq!(source.matches("bump_vault_epoch();\n").count(), 4);
+        assert!(source.contains("VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                    || async move { fetch_storage_usage"));
+        // The Finder install marks the popover's f1 state for as long as it runs.
+        let install = {
+            let at = source.find("async fn install_finder_location(").unwrap();
+            &source[at..at + source[at..].find("async fn continue_without_finder_location(").unwrap()]
+        };
+        let clear = install.find("begin_finder_install_attempt(&mut cfg)?").unwrap();
+        let adding = install.find("finder_adding_guard()").expect("the install marks the attempt for the popover");
+        let slow = install.find("install_file_provider_domain()").unwrap();
+        assert!(clear < adding && adding < slow, "the marker is set before the slow File Provider work");
     }
 }

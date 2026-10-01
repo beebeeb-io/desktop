@@ -334,6 +334,9 @@ pub struct ApiClient {
     token: String,
     master_key: [u8; 32],
     client: Client,
+    /// Outcome of the most recent request, read by the runner after each tick
+    /// (see `link_health`). Not secret.
+    link: std::sync::Arc<crate::link_health::LinkMonitor>,
 }
 
 impl Drop for ApiClient {
@@ -371,11 +374,17 @@ impl ApiClient {
             token,
             master_key,
             client: Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
                 .default_headers(provenance_headers())
                 .build()
                 .expect("reqwest client"),
+            link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
         }
+    }
+
+    /// The shared record of whether the last requests reached the server.
+    pub fn link(&self) -> std::sync::Arc<crate::link_health::LinkMonitor> {
+        self.link.clone()
     }
 
     /// Helper for tests + downloaders: full URL of a single chunk.
@@ -1019,10 +1028,18 @@ impl ApiClient {
         let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
         loop {
-            let resp = build()
+            let resp = match build()
                 .header("Authorization", format!("Bearer {}", self.token))
                 .send()
-                .await?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.link.note_reqwest_error(&e, now_unix_secs() as i64);
+                    return Err(e.into());
+                }
+            };
+            self.link.note_status(resp.status(), now_unix_secs() as i64);
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Self::check_status(resp).await;
             }
@@ -1427,6 +1444,111 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    // ── link monitor (task 1683 slice 2) ─────────────────────────────────────────
+    //
+    // `send_with_retry` is the one path every engine request that is retried on 429
+    // goes through (`sync_ops`, `sync_snapshot`, `list_files`, every typed GET). It
+    // must record what happened to the request, because `sync_tick` swallows a failed
+    // `/sync/ops` and returns `Ok`.
+
+    /// Serve ONE request on loopback with the given raw HTTP response (or hang up
+    /// without answering when `None`), then stop. Returns the base URL.
+    fn one_shot_server(raw_response: Option<&'static str>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = stream.read(&mut buf);
+                if let Some(raw) = raw_response {
+                    let _ = stream.write_all(raw.as_bytes());
+                }
+            }
+        });
+        url
+    }
+
+    fn link_client(base: String) -> ApiClient {
+        ApiClient::new(base, "tok".into(), [0u8; 32])
+    }
+
+    #[test]
+    fn a_typed_get_that_is_answered_records_an_answer() {
+        let base = one_shot_server(Some(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        ));
+        let client = link_client(base);
+        let link = client.link();
+        run_async(client.get_typed::<serde_json::Value>("/x")).unwrap();
+        let snap = link.snapshot();
+        assert!(snap.last_ok_at.is_some(), "a 200 is an answer");
+        assert_eq!(snap.failure, None);
+    }
+
+    #[test]
+    fn a_typed_get_answered_with_503_records_the_server_not_answering() {
+        let base = one_shot_server(Some(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 4\r\nconnection: close\r\n\r\ndown",
+        ));
+        let client = link_client(base);
+        let link = client.link();
+        let err = run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        let (failure, _) = link.snapshot().failure.expect("a 503 is a link failure");
+        assert_eq!(failure.kind, crate::link_health::LinkFailureKind::ServerDidNotAnswer);
+        assert_eq!(failure.reason, crate::link_health::LinkReason::Http5xx(503));
+        assert_eq!(link.snapshot().last_ok_at, None);
+        // The error the caller gets is unchanged (tick code keys on its text).
+        assert!(err.to_string().starts_with("HTTP 503"), "{err}");
+    }
+
+    #[test]
+    fn a_typed_get_answered_with_401_is_an_answer_not_a_link_failure() {
+        let base = one_shot_server(Some(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno",
+        ));
+        let client = link_client(base);
+        let link = client.link();
+        let err = run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        assert!(err.to_string().starts_with("HTTP 401"), "{err}");
+        assert_eq!(link.snapshot().failure, None, "a 401 means the server answered");
+        assert!(link.snapshot().last_ok_at.is_some());
+    }
+
+    #[test]
+    fn a_typed_get_with_nothing_listening_records_offline() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = link_client(format!("http://127.0.0.1:{port}"));
+        let link = client.link();
+        run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        let (failure, _) = link.snapshot().failure.expect("connection refused is a link failure");
+        assert_eq!(failure.kind, crate::link_health::LinkFailureKind::Offline);
+    }
+
+    #[test]
+    fn a_failure_then_an_answer_leaves_the_link_up() {
+        // Two requests on one client: the second one's answer clears the first one's
+        // failure (the latest outcome wins).
+        let link_url = one_shot_server(Some(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        ));
+        let client = link_client(link_url);
+        let link = client.link();
+        link.note_failure(
+            crate::link_health::LinkFailure {
+                kind: crate::link_health::LinkFailureKind::Offline,
+                reason: crate::link_health::LinkReason::Connect,
+            },
+            1,
+        );
+        run_async(client.get_typed::<serde_json::Value>("/x")).unwrap();
+        assert_eq!(link.snapshot().failure, None);
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{
+  "state": "offline",
+  "legacy_state": "error",
+  "sync_root": "/Users/sam/Beebeeb",
+  "error": "sync_ops",
+  "files_remaining": null,
+  "bytes_total": null,
+  "bytes_done": null,
+  "last_tick_ok_at": null,
+  "reason": { "code": "connect", "detail": null }
+}

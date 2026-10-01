@@ -24,23 +24,24 @@
 //!
 //! ## Status events
 //!
-//! The task emits `engine-status` events with payload
-//! `{state, sync_root, error?, files_remaining?}`. `state` is one of
-//! `idle` / `syncing` / `error` / `stopped`. The WebView and the tray
-//! tooltip listener (`attach_tray_status_listener` in `lib.rs`) both
-//! consume this stream.
+//! The task emits `engine-status` events. The payload, the seven `state`
+//! values (`running` / `idle` / `syncing` / `paused` / `offline` / `error` /
+//! `stopped`) and the rules that pick one live in [`crate::engine_status`]. The
+//! tray tooltip listener (`attach_tray_status_listener` in `lib.rs`) and the
+//! popover snapshot consume this stream.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
+use crate::engine_status::{Activity, StatusTracker, compute_activity, tick_outcome};
 use crate::engine_bridge::{
     ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick,
 };
@@ -788,9 +789,10 @@ async fn stop_task_and_confirm(
     confirmed
 }
 
-#[cfg(target_os = "windows")]
+/// Aborts a spawned task when dropped. On Windows it also covers the forced-abort
+/// path of the heartbeat producer; the status pulse uses it on every platform so a
+/// force-aborted `run` cannot leave the pulse running with the DB handle.
 struct AbortWorkerOnDrop(tokio::task::AbortHandle);
-#[cfg(target_os = "windows")]
 impl Drop for AbortWorkerOnDrop {
     fn drop(&mut self) {
         self.0.abort();
@@ -914,7 +916,28 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     // this bridge — and every clone of it handed to the IPC socket server
     // (below) and the Windows upload watcher — observes a stop request the
     // instant `abort()` sets it, not just at this loop's next tick boundary.
-    let bridge = Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping));
+    // Task 1683 slice 2: the board the popover snapshot reads (managed app state),
+    // or a private one when this runner has no app state (tests).
+    let transfers = app
+        .try_state::<crate::popover_data::PopoverRuntime>()
+        .map(|runtime| runtime.transfers.clone())
+        .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
+    let bridge = Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
+    // What each request saw of the link (offline vs server did not answer).
+    let link = api.link();
+    let tracker = Arc::new(StatusTracker::new(Some(sync_root.to_string_lossy().into_owned())));
+    // `syncing` needs a pulse: the tick awaits every due upload to completion, so
+    // the post-tick counts are almost always zero (see `engine_status`).
+    let _status_pulse = AbortWorkerOnDrop(
+        tokio::spawn(run_status_pulse(
+            app.clone(),
+            tracker.clone(),
+            db.clone(),
+            transfers.clone(),
+            sync_paused.clone(),
+        ))
+        .abort_handle(),
+    );
 
     // ── Heartbeat telemetry (the WRITE/PRODUCE side of the Bandwidth view) ──
     //
@@ -1043,7 +1066,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     #[cfg(target_os = "windows")]
     let _upload_watcher = crate::watcher::spawn(bridge.clone(), sync_root.clone());
 
-    emit_status(&app, "running", Some(&sync_root), None);
+    emit_payload(&app, tracker.running().to_json());
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
@@ -1110,7 +1133,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.
                 if sync_paused.load(Ordering::Relaxed) {
-                    emit_status(&app, "paused", Some(&sync_root), None);
+                    emit_payload(&app, tracker.paused().to_json());
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
@@ -1136,6 +1159,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                 }
 
                 let syncing_before_tick = sync_in_flight_count(&db);
+                let tick_started_at = now_secs() as i64;
 
                 match bridge.refresh_shared_roots().await {
                     Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
@@ -1237,7 +1261,13 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             unresolved_after_tick,
                         );
 
-                        emit_status(&app, "idle", Some(&sync_root), None);
+                        // `Ok` is not the whole story: `sync_tick` swallows a failed
+                        // `GET /sync/ops`, so the link monitor decides whether this
+                        // was really a check that reached the server.
+                        emit_payload(
+                            &app,
+                            finish_tick_payload(&tracker, Ok(()), &link, tick_started_at, &db, &transfers),
+                        );
                         // Feed the heartbeat producer the post-tick state. It
                         // promotes this to "syncing" itself when the DB snapshot
                         // shows files in flight, so a steady-state tick reads as
@@ -1290,7 +1320,10 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         // auth failures (not network blips) is what flips
                         // `auth_health` and surfaces the persistent banner.
                         auth_health.note_result(Some(&e));
-                        emit_status(&app, "error", Some(&sync_root), Some(&e.to_string()));
+                        emit_payload(
+                            &app,
+                            finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers),
+                        );
                         set_telemetry_state(&telemetry, "error");
                         // Windows breadcrumb flyout: surface the tick failure as
                         // an Error state in the flyout too.
@@ -1302,7 +1335,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
         }
     }
 
-    emit_status(&app, "stopped", Some(&sync_root), None);
+    emit_payload(&app, tracker.stopped().to_json());
 
     // Stop the heartbeat producer, then post ONE final best-effort "stopped"
     // beat. Ordering: cancel + await the producer FIRST so it can't race a
@@ -1377,14 +1410,71 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
 /// Best-effort: a missing main window or serialisation issue is
 /// logged but doesn't break the runner.
 fn emit_status(app: &AppHandle, state: &str, sync_root: Option<&PathBuf>, error: Option<&str>) {
-    let payload = serde_json::json!({
-        "state": state,
-        "sync_root": sync_root.map(|p| p.to_string_lossy().into_owned()),
-        "error": error,
-        "files_remaining": serde_json::Value::Null,
-    });
-    if let Err(e) = app.emit("engine-status", payload) {
+    emit_payload(
+        app,
+        crate::engine_status::plain_payload(state, sync_root.map(|p| p.to_string_lossy().into_owned()), error),
+    );
+}
+
+fn emit_payload<R: tauri::Runtime>(app: &tauri::AppHandle<R>, payload: serde_json::Value) {
+    if let Err(e) = app.emit(crate::engine_status::EVENT, payload) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
+    }
+}
+
+/// The work in flight right now: queue and downloading rows from the state DB,
+/// bytes from the transfer board.
+fn current_activity(db: &StateDb, transfers: &crate::transfer_progress::TransferBoard) -> Activity {
+    compute_activity(&db.transfer_backlog(now_secs()).unwrap_or_default(), transfers)
+}
+
+/// What a finished tick means, as the event to emit.
+fn finish_tick_payload(
+    tracker: &StatusTracker,
+    result: Result<(), &anyhow::Error>,
+    link: &crate::link_health::LinkMonitor,
+    tick_started_at: i64,
+    db: &StateDb,
+    transfers: &crate::transfer_progress::TransferBoard,
+) -> serde_json::Value {
+    let outcome = tick_outcome(result, &link.snapshot(), tick_started_at);
+    let activity = current_activity(db, transfers);
+    let payload = tracker.finish_tick(&outcome, now_secs() as i64, activity).to_json();
+    if activity.files_remaining == 0 {
+        // Nothing left: the batch is over, the next burst starts its bar at 0.
+        transfers.reset_batch();
+    }
+    payload
+}
+
+/// How often the pulse looks. The look itself is free while nothing is moving.
+const STATUS_PULSE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Reports `syncing` (with progress) while files move, and the way back to `idle`.
+/// Runs for the engine's lifetime and is aborted with it.
+async fn run_status_pulse<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    tracker: Arc<StatusTracker>,
+    db: Arc<StateDb>,
+    transfers: Arc<crate::transfer_progress::TransferBoard>,
+    sync_paused: Arc<AtomicBool>,
+) {
+    let mut ticker = tokio::time::interval(STATUS_PULSE_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let transfer_in_flight = !transfers.active().is_empty();
+        let payload = tracker.pulse(sync_paused.load(Ordering::Relaxed), transfer_in_flight, || {
+            current_activity(&db, &transfers)
+        });
+        if let Some(payload) = payload {
+            let going_quiet = payload.state == crate::engine_status::State::Idle;
+            emit_payload(&app, payload.to_json());
+            if going_quiet {
+                // The batch is over: the next burst of work starts its bar at 0.
+                transfers.reset_batch();
+            }
+        }
     }
 }
 
@@ -2023,5 +2113,269 @@ mod tests {
             trimmed.trim_end_matches('/').to_string()
         };
         assert_eq!(result, "https://api.beebeeb.io");
+    }
+
+    // ── Engine status: the tick's payload and the pulse (task 1683 slice 2) ────
+
+    fn status_db(dir: &Path) -> Arc<StateDb> {
+        Arc::new(StateDb::open(dir.join("state.db")).unwrap())
+    }
+
+    fn upload_op(op_id: &str, file_id: &str) -> crate::state_db::PendingOperation {
+        crate::state_db::PendingOperation {
+            op_id: op_id.into(),
+            kind: crate::state_db::OperationKind::UploadFile,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn seed_file(db: &StateDb, id: &str, size: i64) {
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: id.into(),
+            path: format!("Work/{id}.bin"),
+            status: FileStatus::Local,
+            size_bytes: size,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_good_tick_with_nothing_left_is_idle_and_ends_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        let board = crate::transfer_progress::TransferBoard::new();
+        let g = board.begin("a", crate::transfer_progress::Direction::Up, 500);
+        g.update(500);
+        g.finish();
+        let link = crate::link_health::LinkMonitor::new();
+        let tracker = StatusTracker::new(None);
+        let payload = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board);
+        assert_eq!(payload["state"], "idle");
+        assert_eq!(payload["files_remaining"], 0);
+        assert_eq!(payload["bytes_total"], 500, "the final frame of the batch: 500 of 500");
+        assert_eq!(payload["bytes_done"], 500);
+        assert!(payload["last_tick_ok_at"].as_i64().unwrap() > 0, "a good check stamps its time");
+        assert_eq!(board.finished_bytes(), 0, "nothing left: the next batch starts its bar at 0");
+    }
+
+    #[test]
+    fn a_good_tick_with_work_left_keeps_the_batch_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        seed_file(&db, "b", 300);
+        db.enqueue_operation(&upload_op("op-b", "b")).unwrap();
+        let board = crate::transfer_progress::TransferBoard::new();
+        let g = board.begin("a", crate::transfer_progress::Direction::Up, 500);
+        g.update(500);
+        g.finish();
+        let link = crate::link_health::LinkMonitor::new();
+        let tracker = StatusTracker::new(None);
+        let payload = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board);
+        assert_eq!(payload["files_remaining"], 1);
+        assert_eq!(payload["bytes_total"], 800, "500 finished + 300 still queued");
+        assert_eq!(payload["bytes_done"], 500);
+        assert_eq!(board.finished_bytes(), 500, "work is left, so the batch is not over");
+    }
+
+    #[test]
+    fn a_tick_whose_request_failed_at_the_link_is_offline_and_not_a_good_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        let board = crate::transfer_progress::TransferBoard::new();
+        let link = crate::link_health::LinkMonitor::new();
+        link.note_failure(
+            crate::link_health::LinkFailure {
+                kind: crate::link_health::LinkFailureKind::Offline,
+                reason: crate::link_health::LinkReason::Connect,
+            },
+            now_secs() as i64,
+        );
+        let tracker = StatusTracker::new(None);
+        let payload = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board);
+        assert_eq!(payload["state"], "offline");
+        assert_eq!(payload["legacy_state"], "idle", "an Ok tick still reads idle to old consumers");
+        assert_eq!(payload["last_tick_ok_at"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_failed_tick_is_an_error_with_the_error_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        let board = crate::transfer_progress::TransferBoard::new();
+        let link = crate::link_health::LinkMonitor::new();
+        let tracker = StatusTracker::new(None);
+        let err = anyhow::anyhow!("HTTP 503 Service Unavailable: down");
+        let payload = finish_tick_payload(&tracker, Err(&err), &link, 0, &db, &board);
+        assert_eq!(payload["state"], "error");
+        assert_eq!(payload["legacy_state"], "error");
+        assert_eq!(payload["error"], "HTTP 503 Service Unavailable: down");
+        assert_eq!(payload["reason"]["code"], "http_5xx");
+    }
+
+    #[test]
+    fn the_tick_loop_reports_through_the_tracker() {
+        // `run` needs a real window system, so its wiring is asserted on the source (CRLF
+        // normalised: a Windows checkout has CRLF, slice 5's lesson).
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        for needle in [
+            "emit_payload(&app, tracker.running().to_json());",
+            "emit_payload(&app, tracker.paused().to_json());",
+            "emit_payload(&app, tracker.stopped().to_json());",
+            "finish_tick_payload(&tracker, Ok(()), &link, tick_started_at, &db, &transfers)",
+            "finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers)",
+            "run_status_pulse(",
+            ".with_transfers(transfers.clone())",
+            "let link = api.link();",
+        ] {
+            assert_eq!(body.matches(needle).count(), 1, "`run` must contain exactly one `{needle}`");
+        }
+        // The old bare emitters are gone from the loop: each `emit_status` left in `run` is a
+        // start-up failure (`"error"`), never a state the tracker owns.
+        for old in ["emit_status(&app, \"idle\"", "emit_status(&app, \"paused\"", "emit_status(&app, \"running\"", "emit_status(&app, \"stopped\""] {
+            assert_eq!(body.matches(old).count(), 0, "`run` still emits `{old}` around the tracker");
+        }
+    }
+
+    /// Collect every `engine-status` payload the mock app emits.
+    #[cfg(not(target_os = "windows"))]
+    fn collect_status_events(app: &tauri::App<tauri::test::MockRuntime>) -> Arc<Mutex<Vec<serde_json::Value>>> {
+        use tauri::Listener;
+        let events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        app.handle().listen(crate::engine_status::EVENT, move |event| {
+            if let Ok(payload) = serde_json::from_str(event.payload()) {
+                sink.lock().unwrap().push(payload);
+            }
+        });
+        events
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn wait_for_event(
+        events: &Arc<Mutex<Vec<serde_json::Value>>>,
+        within: Duration,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> Option<serde_json::Value> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < within {
+            if let Some(found) = events.lock().unwrap().iter().find(|e| pred(e)).cloned() {
+                return Some(found);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    #[test]
+    fn the_pulses_activity_counts_an_upload_that_is_due_and_not_one_in_retry_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        seed_file(&db, "f1", 100);
+        seed_file(&db, "f2", 5_000);
+        let mut due = upload_op("op-f1", "f1");
+        due.next_retry_at = 1; // long past: due now
+        let mut backing_off = upload_op("op-f2", "f2");
+        backing_off.attempts = 1;
+        backing_off.next_retry_at = i64::MAX; // waiting out a backoff
+        db.enqueue_operation(&due).unwrap();
+        db.enqueue_operation(&backing_off).unwrap();
+
+        let board = crate::transfer_progress::TransferBoard::new();
+        let activity = current_activity(&db, &board);
+        assert_eq!(activity.files_remaining, 1, "one file left, not two");
+        assert_eq!(activity.bytes_total, 100, "the backed-off file's 5000 bytes are not in the total");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_real_pulse_emits_syncing_with_progress_then_idle_and_resets_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        seed_file(&db, "f1", 100);
+        db.enqueue_operation(&upload_op("op-f1", "f1")).unwrap();
+        let board = crate::transfer_progress::TransferBoard::new();
+        let paused = Arc::new(AtomicBool::new(false));
+        let app = tauri::test::mock_app();
+        let events = collect_status_events(&app);
+        let tracker = Arc::new(StatusTracker::new(None));
+        tracker.finish_tick(&crate::engine_status::Outcome::Synced, 1, Activity::default());
+        let pulse = tokio::spawn(run_status_pulse(
+            app.handle().clone(),
+            tracker,
+            db.clone(),
+            board.clone(),
+            paused,
+        ));
+
+        // Quiet: nothing is moving, so nothing is emitted (and no DB work is done).
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(events.lock().unwrap().is_empty(), "an idle engine emits nothing");
+
+        // A file starts moving: within a couple of pulses the UI hears `syncing`.
+        let transfer = board.begin("f1", crate::transfer_progress::Direction::Up, 100);
+        transfer.update(40);
+        let syncing = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "syncing")
+            .await
+            .expect("a `syncing` event while a file moves");
+        assert_eq!(syncing["files_remaining"], 1);
+        assert_eq!(syncing["bytes_total"], 100);
+        assert_eq!(syncing["bytes_done"], 40);
+        assert_eq!(syncing["legacy_state"], "idle");
+
+        // It finishes and leaves the queue: the pulse says `idle` and ends the batch.
+        transfer.update(100);
+        transfer.finish();
+        db.remove_operation("op-f1").unwrap();
+        let idle = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "idle")
+            .await
+            .expect("an `idle` event when the work is done");
+        assert_eq!(idle["files_remaining"], 0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(board.finished_bytes(), 0, "the pulse ends the batch when it goes quiet");
+        pulse.abort();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_real_pulse_reports_a_pause_the_moment_it_happens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = status_db(dir.path());
+        let board = crate::transfer_progress::TransferBoard::new();
+        let paused = Arc::new(AtomicBool::new(false));
+        let app = tauri::test::mock_app();
+        let events = collect_status_events(&app);
+        let tracker = Arc::new(StatusTracker::new(None));
+        tracker.finish_tick(&crate::engine_status::Outcome::Synced, 1, Activity::default());
+        let pulse = tokio::spawn(run_status_pulse(
+            app.handle().clone(),
+            tracker,
+            db,
+            board,
+            paused.clone(),
+        ));
+        paused.store(true, Ordering::Relaxed);
+        let paused_event = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "paused").await;
+        assert!(paused_event.is_some(), "the pulse must say `paused` within two seconds of the flag");
+        pulse.abort();
     }
 }

@@ -7,9 +7,9 @@
 //! (slice 2 builds them); it never reads the network, the keychain or a clock.
 //!
 //! Precedence, first match wins (spec section 3):
-//! signed out, session ended, locked, Finder failed, Finder adding, Finder
-//! missing, PAUSED (nothing is attempted while paused, so no failure is shown),
-//! storage full, offline, error, syncing, synced.
+//! signed out, session ended, locked, Finder failed, Finder turned off in System
+//! Settings, Finder adding, Finder missing, PAUSED (nothing is attempted while
+//! paused, so no failure is shown), storage full, offline, error, syncing, synced.
 //!
 //! Two calls the spec left implicit, made here so they are tested:
 //! - "Signed out or session ended" is two phases (states e and e2). Not logged
@@ -18,8 +18,15 @@
 //!   token can still be installed), so `SessionEnded` needs `logged_in`.
 //! - A conflict is not a phase. It is a row in the list states (a1) and a badge
 //!   on the menu-bar icon, so it does not appear here.
+//! - Finder turned off in System Settings (`FinderUserDisabled`, added in slice
+//!   2 by lead ruling) is its own phase, not `FinderMissing`: the spec's action
+//!   for Missing is "Add to Finder", which cannot succeed while the user has the
+//!   extension off. The copy and the action ("Open Login Items & Extensions",
+//!   the neutral notice slice 5 built) are not in the approved design, so slice 3
+//!   must have that state drawn before it renders one.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FinderSetup {
     Ready,
     Missing,
@@ -27,19 +34,23 @@ pub enum FinderSetup {
     Adding,
     /// The last attempt failed (state f2).
     Failed,
+    /// The user (or macOS) turned the Beebeeb File Provider off in System
+    /// Settings. Not a failure of ours and not something "Add to Finder" can fix.
+    UserDisabled,
 }
 
 /// Why the engine cannot reach Beebeeb, when it cannot (spec section 9: NEW in
 /// slice 2). `ServerDidNotAnswer` covers timeouts and 5xx; `Offline` is a
 /// connection-level failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Connectivity {
     Online,
     Offline,
     ServerDidNotAnswer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PopoverSnapshot {
     pub logged_in: bool,
     pub auth_expired: bool,
@@ -76,12 +87,14 @@ impl PopoverSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PopoverPhase {
     SignedOut,
     SessionEnded,
     Locked,
     FinderFailed,
+    FinderUserDisabled,
     FinderAdding,
     FinderMissing,
     Paused,
@@ -93,11 +106,12 @@ pub enum PopoverPhase {
 }
 
 /// The precedence order, highest first. Kept as data so the tests can walk it.
-pub const PRECEDENCE: [PopoverPhase; 12] = [
+pub const PRECEDENCE: [PopoverPhase; 13] = [
     PopoverPhase::SignedOut,
     PopoverPhase::SessionEnded,
     PopoverPhase::Locked,
     PopoverPhase::FinderFailed,
+    PopoverPhase::FinderUserDisabled,
     PopoverPhase::FinderAdding,
     PopoverPhase::FinderMissing,
     PopoverPhase::Paused,
@@ -118,6 +132,8 @@ pub fn popover_phase(s: &PopoverSnapshot) -> PopoverPhase {
         Locked
     } else if s.finder == FinderSetup::Failed && !s.finder_failure_elsewhere {
         FinderFailed
+    } else if s.finder == FinderSetup::UserDisabled {
+        FinderUserDisabled
     } else if s.finder == FinderSetup::Adding {
         FinderAdding
     } else if s.finder == FinderSetup::Missing || s.finder == FinderSetup::Failed {
@@ -153,6 +169,7 @@ mod tests {
             SessionEnded => |s| s.auth_expired = true,
             Locked => |s| s.vault_unlocked = false,
             FinderFailed => |s| s.finder = FinderSetup::Failed,
+            FinderUserDisabled => |s| s.finder = FinderSetup::UserDisabled,
             FinderAdding => |s| s.finder = FinderSetup::Adding,
             FinderMissing => |s| s.finder = FinderSetup::Missing,
             Paused => |s| s.paused = true,
@@ -197,6 +214,37 @@ mod tests {
     }
 
     #[test]
+    fn finder_turned_off_in_system_settings_is_its_own_phase_not_missing() {
+        // Lead ruling (slice 2): "Add to Finder" cannot fix this, so it must not be
+        // `FinderMissing`, whose action is exactly that.
+        let off = PopoverSnapshot {
+            finder: FinderSetup::UserDisabled,
+            ..PopoverSnapshot::healthy()
+        };
+        assert_eq!(popover_phase(&off), FinderUserDisabled);
+        // It is not a failure of ours, so another surface showing a failure changes nothing.
+        let elsewhere = PopoverSnapshot {
+            finder_failure_elsewhere: true,
+            ..off
+        };
+        assert_eq!(popover_phase(&elsewhere), FinderUserDisabled);
+        // It yields to the higher phases and outranks everything below the Finder group.
+        let locked = PopoverSnapshot {
+            vault_unlocked: false,
+            ..off
+        };
+        assert_eq!(popover_phase(&locked), Locked);
+        let busy = PopoverSnapshot {
+            paused: true,
+            storage_full: true,
+            connectivity: Connectivity::Offline,
+            syncing: true,
+            ..off
+        };
+        assert_eq!(popover_phase(&busy), FinderUserDisabled);
+    }
+
+    #[test]
     fn a_healthy_snapshot_is_synced() {
         assert_eq!(popover_phase(&PopoverSnapshot::healthy()), Synced);
     }
@@ -213,7 +261,7 @@ mod tests {
     /// Phases that are values of the SAME snapshot field (`finder`,
     /// `connectivity`) cannot hold at once, so they have no pair to order.
     fn same_field(a: PopoverPhase, b: PopoverPhase) -> bool {
-        let finder = [FinderFailed, FinderAdding, FinderMissing];
+        let finder = [FinderFailed, FinderUserDisabled, FinderAdding, FinderMissing];
         let net = [Offline, Error];
         (finder.contains(&a) && finder.contains(&b)) || (net.contains(&a) && net.contains(&b))
     }
@@ -242,8 +290,8 @@ mod tests {
                 pairs += 1;
             }
         }
-        // C(12, 2) = 66, minus 3 Finder pairs and 1 network pair.
-        assert_eq!(pairs, 62);
+        // C(13, 2) = 78, minus 6 Finder pairs and 1 network pair.
+        assert_eq!(pairs, 71);
     }
 
     #[test]
@@ -334,6 +382,6 @@ mod tests {
         for p in PRECEDENCE {
             assert!(seen.insert(format!("{p:?}")), "{p:?} listed twice");
         }
-        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.len(), 13);
     }
 }

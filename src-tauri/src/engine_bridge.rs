@@ -210,6 +210,10 @@ pub struct EngineBridge {
     /// Wire-byte counters shared with the heartbeat producer. Both are
     /// drained (swapped to 0) once per beat; incremented by the chunk loops.
     pub wire: Arc<WireCounters>,
+    /// Bytes done and total for every transfer in flight (task 1683 slice 2). The
+    /// runner hands in the board the popover snapshot reads; a one-shot bridge
+    /// keeps a private one nobody reads.
+    transfers: Arc<crate::transfer_progress::TransferBoard>,
     /// Cooperative stop signal (task 1538 Codex P1, PR #49 lib.rs:1087
     /// thread). `false` for the lifetime of a normal bridge. Flipped `true`
     /// by [`crate::runner::EngineRunner::abort`] BEFORE it even sends the
@@ -389,7 +393,38 @@ impl EngineBridge {
             db,
             api,
             wire: WireCounters::new(),
+            transfers: crate::transfer_progress::TransferBoard::new(),
             stopping,
+        }
+    }
+
+    /// Report transfer progress to `board` (task 1683 slice 2).
+    pub fn with_transfers(mut self, board: Arc<crate::transfer_progress::TransferBoard>) -> Self {
+        self.transfers = board;
+        self
+    }
+
+    pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
+        &self.transfers
+    }
+
+    /// Remember that a transfer finished, for the popover's recent-activity arrow.
+    /// Best-effort: a failed write costs a row in a list, never the transfer.
+    fn record_transfer_done(&self, direction: crate::transfer_progress::Direction, file_id: &str, bytes: u64) {
+        let (name, rel_path) = match self.db.get_file(file_id) {
+            Ok(Some(entry)) => (crate::transfer_progress::display_name(&entry.path), Some(entry.path)),
+            _ => return,
+        };
+        let input = crate::state_db::TransferActivityInput {
+            direction: direction.as_str(),
+            file_id: Some(file_id.to_string()),
+            file_name: name,
+            rel_path,
+            bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
+            occurred_at: now_secs() as i64,
+        };
+        if let Err(e) = self.db.record_transfer_activity(input) {
+            tracing::debug!(error = %e, "could not record transfer activity (best-effort)");
         }
     }
 
@@ -753,6 +788,7 @@ impl EngineBridge {
                     content_type,
                     Some(session.object_version_id.clone()),
                 )?;
+                self.record_transfer_done(crate::transfer_progress::Direction::Up, &server_file_id, plaintext_size);
                 #[cfg(target_os = "windows")]
                 self.defer_local_upload_finalization(op, &server_file_id, sync_root, payload_path)?;
                 self.db.track_staged_payload(&payload_path.to_string_lossy(), None, true)?;
@@ -836,6 +872,18 @@ impl EngineBridge {
             file.seek(std::io::SeekFrom::Start(first_chunk * chunk_size as u64))?;
         }
         let mut buffer = vec![0u8; chunk_size];
+        // Task 1683 slice 2: per-file bytes for the popover. Keyed by the LOCAL file
+        // id (the `files` row the activity list reads); a resumed session starts at
+        // its acknowledged watermark, not at 0.
+        let payload_total = u64::try_from(session.payload_size).unwrap_or(0);
+        let progress = self
+            .transfers
+            .begin(local_file_id, crate::transfer_progress::Direction::Up, payload_total);
+        progress.update(crate::transfer_progress::uploaded_bytes(
+            first_chunk,
+            chunk_size as u64,
+            payload_total,
+        ));
         // Rate-limit ceiling: read once per file, not per chunk (config is on
         // disk but the file is fast to parse; at most one read per upload op).
         let upload_kbps_limit = crate::config::DesktopConfig::load()
@@ -860,6 +908,11 @@ impl EngineBridge {
                 .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted)
                 .await?;
             self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
+            progress.update(crate::transfer_progress::uploaded_bytes(
+                chunk_index + 1,
+                chunk_size as u64,
+                payload_total,
+            ));
 
             // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
             self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
@@ -878,7 +931,11 @@ impl EngineBridge {
             }
         }
 
-        self.api.complete_upload_session(&session.upload_session_id).await
+        let completed = self.api.complete_upload_session(&session.upload_session_id).await;
+        if completed.is_ok() {
+            progress.finish();
+        }
+        completed
     }
 
     /// Post-`complete` best-effort work: thumbnails, staged-payload cleanup and
@@ -2356,6 +2413,11 @@ impl EngineBridge {
         // catch.
         let mut downloading_guard = DownloadingStatusGuard::arm(&self.db, file_id);
         self.db.set_status(file_id, FileStatus::Downloading)?;
+        // Task 1683 slice 2: the popover's per-file bytes. The caller's own progress
+        // callback (the IPC handler forwarding to Finder) still gets every report.
+        let transfer = self
+            .transfers
+            .begin(file_id, crate::transfer_progress::Direction::Down, 0);
         let hydrated = self.do_hydrate(file_id, progress).await;
         // Past the only cancellation point (the download await): every path
         // below sets the final status itself.
@@ -2404,6 +2466,9 @@ impl EngineBridge {
                 }
 
                 self.db.set_status(file_id, FileStatus::Local)?;
+                let downloaded_bytes = self.transfers.get(file_id).map(|t| t.total).unwrap_or(0);
+                transfer.finish();
+                self.record_transfer_done(crate::transfer_progress::Direction::Down, file_id, downloaded_bytes);
 
                 // Task 1670 round 4 (Codex P2 on PR #75, review thread on
                 // `runner.rs:1044`): see [`record_hydration_cache_state`]'s
@@ -2654,6 +2719,10 @@ impl EngineBridge {
         // report lets the UI switch from indeterminate to determinate before
         // the first chunk lands.
         let total = approx_size_hint as u64;
+        // Task 1683 slice 2: the board first, so a caller that reads it from inside its
+        // own callback sees the same bytes it was just told about. A no-op for a file
+        // that is not registered (a partial range read).
+        self.transfers.report(file_id, 0, total);
         if let Some(report) = progress {
             report(0, total);
         }
@@ -2669,6 +2738,7 @@ impl EngineBridge {
                 .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
+            self.transfers.report(file_id, acc.len() as u64, total);
             if let Some(report) = progress {
                 report(acc.len() as u64, total);
             }
@@ -8695,6 +8765,146 @@ mod tests {
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
     }
 
+    // ── Transfer progress + activity (task 1683 slice 2) ─────────────────────
+
+    fn slice2_upload_op(op_id: &str, file_id: &str, target: &str, payload: &Path) -> PendingOperation {
+        PendingOperation {
+            op_id: op_id.into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: Some(target.into()),
+            metadata_json: Some(
+                serde_json::json!({
+                    "operation": "create_file",
+                    "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                    "display_name": "report.txt",
+                    "content_type": "text/plain"
+                })
+                .to_string(),
+            ),
+            payload_path: Some(payload.to_string_lossy().into_owned()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finished_upload_adds_its_bytes_to_the_batch_and_records_an_up_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"live upload payload").unwrap();
+        let server = UploadMockServer::start(false);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [11u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&slice2_upload_op("op-1", "local-file-1", "Reports/report.txt", &payload))
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-1".to_string()]);
+        server.finish();
+
+        assert_eq!(bridge.transfers().finished_bytes(), 19, "the payload is 19 bytes");
+        assert!(bridge.transfers().active().is_empty(), "nothing is in flight after the upload");
+        let rows = bridge.db.list_recent_transfer_activity(5).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].direction, "up");
+        assert_eq!(rows[0].file_name, "report.txt");
+        assert_eq!(rows[0].rel_path.as_deref(), Some("Reports/report.txt"));
+        assert_eq!(rows[0].bytes, 19);
+        assert_eq!(rows[0].file_id.as_deref(), Some("server-file-1"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_leaves_nothing_on_the_board_and_no_activity_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, b"retry me").unwrap();
+        let server = UploadMockServer::start(true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [12u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&slice2_upload_op("op-2", "local-file-2", "retry.txt", &payload))
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.retried_op_ids, vec!["op-2".to_string()]);
+        server.finish();
+
+        assert!(bridge.transfers().active().is_empty(), "a failed upload must not linger as in flight");
+        assert_eq!(bridge.transfers().finished_bytes(), 0, "a failed upload finishes no bytes");
+        assert!(bridge.db.list_recent_transfer_activity(5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_hydrate_reports_per_file_bytes_and_records_a_down_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10], vec![b'c'; 10]];
+        // 1 metadata GET + 3 chunk GETs.
+        let server = HydrationMockServer::start(file_key, chunks, 4);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "Photos/three-chunks.bin", None, FileStatus::CloudOnly, 30);
+        let dest = dir.path().join("three-chunks.bin");
+
+        // Read the board from inside the caller's own progress callback: that is the
+        // moment a popover snapshot would see mid-transfer.
+        let seen: Arc<Mutex<Vec<(u64, u64, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let board = bridge.transfers().clone();
+        let seen_in = seen.clone();
+        let progress = move |done: u64, total: u64| {
+            let on_board = board.get(TEST_FILE_ID).expect("in flight while reporting");
+            seen_in.lock().unwrap().push((done, total, on_board.done, on_board.total));
+        };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                bridge
+                    .hydrate_file_with_progress(TEST_FILE_ID, &dest, &[dir.path()], Some(&progress))
+                    .await
+            })
+            .unwrap();
+        server.finish();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(0, 30, 0, 30), (10, 30, 10, 30), (20, 30, 20, 30), (30, 30, 30, 30)],
+            "the caller still gets every report, and the board already holds the same bytes and the same total"
+        );
+        assert!(bridge.transfers().active().is_empty());
+        assert_eq!(bridge.transfers().finished_bytes(), 30);
+        let rows = bridge.db.list_recent_transfer_activity(5).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].direction.as_str(), rows[0].file_name.as_str()), ("down", "three-chunks.bin"));
+        assert_eq!(rows[0].bytes, 30);
+    }
+
+    #[test]
+    fn a_hydrate_without_a_caller_callback_still_fills_the_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [9u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![vec![b'x'; 12]], 2);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "one.bin", None, FileStatus::CloudOnly, 12);
+        let dest = dir.path().join("one.bin");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir.path()]).await })
+            .unwrap();
+        server.finish();
+        assert_eq!(bridge.transfers().finished_bytes(), 12);
+    }
+
     // ── Interrupted upload resume (flow 7, harness STEP 9) ──────────────────
     //
     // A desktop upload cut mid-transfer (tokio timeout on the transfer loop,
@@ -9042,6 +9252,104 @@ mod tests {
         assert!(
             bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none(),
             "resume state must be cleared once the upload completes"
+        );
+    }
+
+    /// Poll the board until `file_id` shows at least `done` bytes, or give up.
+    async fn wait_for_upload_bytes(
+        board: &Arc<crate::transfer_progress::TransferBoard>,
+        file_id: &str,
+        done: u64,
+        within: Duration,
+    ) -> Option<crate::transfer_progress::Transfer> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < within {
+            if let Some(t) = board.get(file_id)
+                && t.done >= done
+            {
+                return Some(t);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_upload_reports_its_bytes_chunk_by_chunk_and_a_cut_one_leaves_nothing() {
+        // 20 bytes in chunks of 8 (8 + 8 + 4). Chunk 1 hangs, so after chunk 0 is
+        // acknowledged the upload sits at 8 of 20: the moment a popover would look.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21u8; 32]);
+        bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+        let board = bridge.transfers().clone();
+
+        let (cut, seen) = tokio::join!(
+            tokio::time::timeout(Duration::from_millis(1500), bridge.process_due_operations(dir.path(), 200)),
+            wait_for_upload_bytes(&board, "local-file-resume", 8, Duration::from_millis(1400)),
+        );
+        assert!(cut.is_err(), "the first pass is cut mid-upload");
+        let seen = seen.expect("the board showed the upload after chunk 0 was acknowledged");
+        assert_eq!(
+            seen,
+            crate::transfer_progress::Transfer {
+                direction: crate::transfer_progress::Direction::Up,
+                done: 8,
+                total: 20
+            }
+        );
+        assert!(board.active().is_empty(), "a cut upload must not linger as in flight");
+        assert_eq!(board.finished_bytes(), 0, "a cut upload finishes no bytes");
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+        server.finish();
+        assert_eq!(board.finished_bytes(), 20, "the resumed upload finishes the whole 20 bytes");
+        assert!(board.active().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resumed_upload_starts_its_bar_at_the_acknowledged_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("resume.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21u8; 32]);
+        let op = resumable_create_op(&payload);
+        bridge.db.enqueue_operation(&op).unwrap();
+        // A previous run acknowledged chunk 0 (8 bytes) of session-1 and was killed.
+        bridge
+            .db
+            .put_upload_resume(&UploadResume {
+                op_id: op.op_id.clone(),
+                payload_path: payload.to_string_lossy().into_owned(),
+                payload_size: 20,
+                payload_mtime_ns: payload_mtime_ns(&payload),
+                upload_session_id: "session-1".into(),
+                server_file_id: "server-file-1".into(),
+                object_version_id: "object-init-1".into(),
+                chunk_size_bytes: 8,
+                chunk_count: 3,
+                acked_chunks: 1,
+                metadata_applied: true,
+                is_create: true,
+            })
+            .unwrap();
+        let board = bridge.transfers().clone();
+        let (cut, seen) = tokio::join!(
+            tokio::time::timeout(Duration::from_millis(1200), bridge.process_due_operations(dir.path(), 200)),
+            wait_for_upload_bytes(&board, "local-file-resume", 8, Duration::from_millis(1000)),
+        );
+        assert!(cut.is_err(), "chunk 1 hangs, so the pass is cut");
+        let seen = seen.expect("the resumed upload shows on the board");
+        assert_eq!((seen.done, seen.total), (8, 20), "it resumes at 8 of 20, not at 0");
+        let requests = server.finish();
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
+            0,
+            "chunk 0 is not re-sent, so 8 bytes can only come from the watermark"
         );
     }
 

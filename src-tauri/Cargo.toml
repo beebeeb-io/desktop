@@ -304,6 +304,13 @@ tempfile = "3"
 # used only by the merged-config tests in src/surfaces/config_tests.rs.
 json-patch = { version = "3", default-features = false }
 
+# Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
+# real status listener and the real status pulse against a mock runtime. A feature only (no new
+# crate; Cargo.lock is unchanged). Not on Windows: slice 1's lib test binary died at load there
+# (0xc0000139) the moment a test touched the webview runtime, and Linux runs these tests.
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "test"] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
