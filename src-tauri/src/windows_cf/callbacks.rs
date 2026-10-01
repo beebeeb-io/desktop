@@ -525,7 +525,7 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         return;
     }
     let info = unsafe { &*callback_info };
-    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+    let Some(lease) = super::callback_bridge(info.CallbackContext) else {
         return;
     };
 
@@ -534,10 +534,14 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
     if !callback_parameters.is_null() {
         let params = unsafe { &*callback_parameters };
         let close = unsafe { params.Anonymous.CloseCompletion };
-        if (close.Flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED)
-            != CF_CALLBACK_CLOSE_COMPLETION_FLAG_NONE
-        {
-            // Deleted on close — leave it to the delete-completion callback.
+        if (close.Flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED) != CF_CALLBACK_CLOSE_COMPLETION_FLAG_NONE {
+            // Some native paths only deliver deleted-close. The same durable
+            // identity deduplication handles both notifications.
+            push_notify_event(crate::watcher::NotifyEvent::Delete {
+                path: notify_full_path(info),
+                file_id: notify_identity(info),
+                generation: lease.generation_id(),
+            });
             return;
         }
     }
@@ -561,13 +565,14 @@ pub unsafe extern "system" fn notify_delete_completion_callback(
         return;
     }
     let info = unsafe { &*callback_info };
-    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+    let Some(lease) = super::callback_bridge(info.CallbackContext) else {
         return;
     };
-    let Some(path) = notify_full_path(info) else {
-        return;
-    };
-    push_notify_event(crate::watcher::NotifyEvent::Delete(path));
+    push_notify_event(crate::watcher::NotifyEvent::Delete {
+        path: notify_full_path(info),
+        file_id: notify_identity(info),
+        generation: lease.generation_id(),
+    });
 }
 
 /// `NOTIFY_RENAME_COMPLETION` — fires after a local rename/move completes. The
@@ -586,7 +591,7 @@ pub unsafe extern "system" fn notify_rename_completion_callback(
         return;
     }
     let info = unsafe { &*callback_info };
-    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+    let Some(lease) = super::callback_bridge(info.CallbackContext) else {
         return;
     };
     let params = unsafe { &*callback_parameters };
@@ -604,7 +609,25 @@ pub unsafe extern "system" fn notify_rename_completion_callback(
         return;
     };
 
-    push_notify_event(crate::watcher::NotifyEvent::Rename { source, target });
+    push_notify_event(crate::watcher::NotifyEvent::Rename {
+        source,
+        target,
+        file_id: notify_identity(info),
+        generation: lease.generation_id(),
+    });
+}
+
+/// Copy opaque provider identity while callback memory is valid. Never adopt
+/// a pathname when identity is malformed or missing.
+fn notify_identity(info: &CF_CALLBACK_INFO) -> Option<String> {
+    if info.FileIdentity.is_null() || info.FileIdentityLength == 0 || info.FileIdentityLength > 4096 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(info.FileIdentity.cast::<u8>(), info.FileIdentityLength as usize) };
+    std::str::from_utf8(bytes)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// Join `CF_CALLBACK_INFO.NormalizedPath` with the volume DOS name into an
@@ -915,7 +938,6 @@ fn wide_to_vec(ptr: *const u16) -> Option<Vec<u16>> {
     }
     Some(out)
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -222,6 +222,7 @@ pub struct EngineBridge {
     /// entire in-progress due-operations batch, or a fresh watcher/File-
     /// Provider write landing mid-teardown, through unchecked.
     stopping: Arc<AtomicBool>,
+    pub(crate) work_available: tokio::sync::Notify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,6 +391,7 @@ impl EngineBridge {
             api,
             wire: WireCounters::new(),
             stopping,
+            work_available: tokio::sync::Notify::new(),
         }
     }
 
@@ -441,10 +443,17 @@ impl EngineBridge {
             if self.is_stopping() {
                 break;
             }
+            if !self.db.operation_is_pending(&op.op_id)? {
+                continue;
+            }
             let result = self.execute_operation(&op, sync_root, now).await;
             match result {
                 Ok(()) => {
-                    self.db.remove_operation(&op.op_id)?;
+                    if operation_metadata(&op)?["local_path"].is_string() {
+                        self.db.acknowledge_namespace(&op.op_id)?;
+                    } else {
+                        self.db.remove_operation(&op.op_id)?;
+                    }
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
                     }
@@ -479,6 +488,9 @@ impl EngineBridge {
 
     async fn execute_operation(&self, op: &PendingOperation, sync_root: &Path, now: i64) -> anyhow::Result<()> {
         match op.kind {
+            OperationKind::ReconcileDelete => {
+                anyhow::bail!("Delete requires identity reconciliation; retained for review")
+            }
             OperationKind::PinTree => Ok(()),
             OperationKind::HydrateFile => {
                 let file_id = op
@@ -505,13 +517,25 @@ impl EngineBridge {
                 Ok(())
             }
             OperationKind::MoveFile | OperationKind::RenameFile => {
+                // A later local delete supersedes metadata work, including failed PATCHes.
+                if let Some(id) = op.file_id.as_deref() {
+                    if self.db.get_file(id)?.is_some_and(|f| f.status == FileStatus::Trashing) {
+                        return Ok(());
+                    }
+                }
                 let file_id = op
                     .file_id
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("metadata operation missing file_id"))?;
                 let metadata = operation_metadata(op)?;
                 let name = metadata["name_encrypted"].as_str();
-                self.api.update_metadata(file_id, name, op.parent_id.as_deref()).await?;
+                if metadata["local_path"].is_string() {
+                    self.api
+                        .update_namespace(file_id, name, op.parent_id.as_deref())
+                        .await?;
+                } else {
+                    self.api.update_metadata(file_id, name, op.parent_id.as_deref()).await?;
+                }
                 Ok(())
             }
             OperationKind::TrashFile => {
@@ -1519,6 +1543,14 @@ impl EngineBridge {
                 "name_encrypted": name_encrypted,
                 "base_version_identifier": target.base_version_identifier,
             });
+            if let Some(path) = &target.rel_path {
+                let existing = self
+                    .db
+                    .get_file(&file_id)?
+                    .ok_or_else(|| anyhow::anyhow!("rename identity is unknown"))?;
+                payload["local_source"] = existing.path.trim_start_matches('/').into();
+                payload["local_path"] = path.clone().into();
+            }
             apply_shared_context(&mut payload, item_contract.as_ref());
             self.enqueue_finder_operation(
                 kind,
@@ -1540,6 +1572,19 @@ impl EngineBridge {
         file_id: &str,
         base_version_identifier: Option<String>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_delete(file_id, base_version_identifier, None)
+    }
+
+    pub(crate) fn queue_watcher_delete(&self, file_id: &str, path: &str) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_delete(file_id, None, Some(path))
+    }
+
+    fn queue_delete(
+        &self,
+        file_id: &str,
+        base_version_identifier: Option<String>,
+        path: Option<&str>,
+    ) -> anyhow::Result<FinderWriteOutcome> {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
             anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
@@ -1547,6 +1592,8 @@ impl EngineBridge {
         let item_contract = self.ensure_item_allows_shared_write(file_id, "delete")?;
         let mut payload = serde_json::json!({
             "operation": "trash",
+            "local_delete": true,
+            "delete_path": path,
             "base_version_identifier": base_version_identifier,
         });
         apply_shared_context(&mut payload, item_contract.as_ref());
@@ -2185,6 +2232,7 @@ impl EngineBridge {
             updated_at: now,
         };
         self.db.enqueue_operation(&op)?;
+        self.work_available.notify_one();
         Ok(FinderWriteOutcome::Queued {
             op_id,
             file_id,
@@ -3847,7 +3895,6 @@ fn plan_hydration_chunk_range(
     }))
 }
 
-
 pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
@@ -4265,7 +4312,6 @@ fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
-
 fn default_finder_staging_root() -> PathBuf {
     let primary = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -4293,7 +4339,6 @@ fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
     let _ = std::fs::remove_file(probe);
     Ok(())
 }
-
 
 fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
     version_identifier.and_then(|value| {
@@ -4441,7 +4486,7 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
                 .unwrap_or_else(|| "Rename or move is queued for metadata sync.".to_string()),
             "review_upload",
         ),
-        OperationKind::TrashFile => (
+        OperationKind::TrashFile | OperationKind::ReconcileDelete => (
             "delete",
             "delete review",
             op.last_error
@@ -5373,7 +5418,7 @@ fn remove_pruned_placeholders(sync_root: &Path, rows: &[crate::state_db::PrunedR
         };
         // Register BEFORE the remove so the NOTIFY_DELETE_COMPLETION the remove
         // fires is already suppressed when it lands in the watcher.
-        crate::watcher::suppress_engine_delete(&path);
+        crate::watcher::suppress_engine_delete(&path, &row.file_id);
         if let Err(e) = crate::windows_cf::placeholders::delete_placeholder(&path, row.is_dir) {
             // Zero-knowledge: never log the path — only the file_id + kind.
             tracing::warn!(file_id = %row.file_id, is_dir = row.is_dir, error = %e, "remote-deletion reconcile: placeholder removal failed");
@@ -5511,6 +5556,7 @@ fn apply_sync_op(
             }
         }
         "file_restore" => {
+            bridge.db().release_restored_tombstones(id)?;
             // The restore payload is only `{ id }` (server `routes/files.rs`), so
             // the un-trashed row's full metadata is NOT recoverable from the op.
             // We already DELETED this row on the preceding `file_trash`/
@@ -5748,6 +5794,32 @@ fn process_metadata_row(
     }
     let size = f["size_bytes"].as_i64().unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+    let leaf = resolve_relative_path(f, file_id, bridge.api().master_key());
+    let remote_path = if parent_rel_path.is_empty() {
+        leaf
+    } else {
+        format!("{parent_rel_path}/{leaf}")
+    };
+    if bridge.db().delete_observation_blocks(file_id, &remote_path)? {
+        // Preserve the path context for descendants without materializing rows.
+        return Ok(Some(
+            bridge
+                .db()
+                .get_file(file_id)?
+                .map(|e| (e.path, e.item_kind))
+                .unwrap_or((
+                    remote_path,
+                    if f["is_folder"].as_bool() == Some(true) {
+                        ItemKind::Folder
+                    } else {
+                        ItemKind::File
+                    },
+                )),
+        ));
+    }
+    if bridge.db().namespace_pending(file_id, &remote_path)? {
+        return Ok(bridge.db().get_file(file_id)?.map(|e| (e.path, e.item_kind)));
+    }
 
     // Helper to refresh metadata + return the resolved path/kind. The single
     // place that writes the row's nested path and folder/file classification.
@@ -8906,7 +8978,6 @@ mod tests {
             .filter(|r| r.method == method && r.path == path)
             .count()
     }
-
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn round5_lock_during_keep_mine_restores_conflict_and_removes_staging() {

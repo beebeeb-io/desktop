@@ -1071,7 +1071,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
         tokio::select! {
             biased;
             _ = &mut cancel => break,
-            _ = tick.tick() => {
+            _ = async { tokio::select! { _ = tick.tick() => {}, _ = bridge.work_available.notified() => {} } } => {
                 // Task 1670 round 3: run BEFORE the `sync_paused` check below
                 // — bounding staged plaintext lifetime is a security property
                 // independent of whether the user paused file sync, and

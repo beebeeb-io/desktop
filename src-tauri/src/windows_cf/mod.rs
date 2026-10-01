@@ -1081,7 +1081,7 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
             PCWSTR(path_wide.as_ptr()),
             table.as_ptr(),
             Some(generation as usize as *const std::ffi::c_void),
-            CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO,
+            CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO | CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH,
         )
         .map_err(|e| anyhow::anyhow!("CfConnectSyncRoot failed: {e}"))
     }
