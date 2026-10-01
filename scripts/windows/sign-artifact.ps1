@@ -88,7 +88,10 @@ function Install-ArtifactSigningDlib {
   try {
     # PowerShell 5.1 defaults can exclude TLS 1.2 on older images.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client' -OutFile $zip -UseBasicParsing
+    # Version pinned deliberately (supply-chain hardening, PR #90 review):
+    # 1.0.128 verified to carry bin/x64/Azure.CodeSigning.Dlib.dll. Bump
+    # explicitly after checking the new package.
+    Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client/1.0.128' -OutFile $zip -UseBasicParsing
     Expand-Archive -Path $zip -DestinationPath $dst -Force
   } catch {
     Stop-Signing "Could not download/extract the Artifact Signing dlib: $($_.Exception.Message)"
