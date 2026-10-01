@@ -352,7 +352,7 @@ fn slice1_r2_terminal_completion_requires_actual_reserve_release() {
         "new payload must wait for reserve refill"
     );
     let mut reserve = Reserve::existing(h.path()).unwrap();
-    reserve.refill().unwrap();
+    reserve.refill(&h).unwrap();
     s.allocate(new_owner, "Capture", "Full", 1, 0, &mut Fault::default())
         .unwrap();
 }
@@ -449,7 +449,7 @@ fn slice1_r2_reserve_grows_for_all_participating_databases() {
             "reopen lost the participating reserve requirement"
         );
     }
-    physical.refill().unwrap();
+    physical.refill(&h).unwrap();
     assert_eq!(
         file_len(&reserve),
         6 * 64 * MIB,

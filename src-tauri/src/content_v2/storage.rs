@@ -1135,8 +1135,14 @@ impl Reserve {
         );
         Ok(released)
     }
-    pub(super) fn refill(&mut self) -> Result<()> {
+    pub(super) fn refill(&mut self, h: &Harness) -> Result<()> {
+        self.refill_with_hook(&h.volume, &mut |_| Ok(()))
+    }
+    // Deterministic scheduling seam; dormant test module only.
+    pub(super) fn refill_with_hook(&mut self, _volume: &Arc<Mutex<Budget>>, hook: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+        hook("before lock")?;
         let required = required_emergency(self.path.parent().context("reserve parent")?, None)?;
+        hook("after observation")?;
         let mut f = fs::OpenOptions::new().append(true).open(&self.path)?;
         let bytes = vec![0xA5; CHUNK];
         while self.remaining < required {

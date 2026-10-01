@@ -16,6 +16,7 @@ mod fault_vfs;
 mod ledger;
 mod records;
 mod round2_tests;
+mod round3_tests;
 mod storage;
 mod storage_tests;
 mod tests;

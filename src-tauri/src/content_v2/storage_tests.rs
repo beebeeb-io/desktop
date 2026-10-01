@@ -587,7 +587,7 @@ fn slice1_g5_real_sqlite_full_terminal_reserve() {
         .unwrap();
     s.dispose(&a, &discard(&a), &mut Fault::default()).unwrap();
     s.gc(&a, &mut Fault::default()).unwrap();
-    reserve.refill().unwrap();
+    reserve.refill(&h).unwrap();
     assert_eq!(file_len(&reserve.path), 256 * MIB);
 }
 #[test]
