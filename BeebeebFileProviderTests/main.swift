@@ -3,10 +3,10 @@ import Foundation
 // Framing tests for BeebeebFileProvider/IPCFraming.swift (task 1670 issue 3).
 //
 // The File Provider extension target has no XCTest target, so this is a plain
-// executable: scripts/test-ipc-framing.sh compiles IPCFraming.swift together
-// with this file (pure Foundation, no FileProvider), runs it, and asserts the
-// printed COUNT ("ipc-framing: N passed, 0 failed") -- a run that executed
-// fewer tests than declared fails the script.
+// executable: scripts/test-ipc-framing.sh compiles IPCFraming.swift and
+// FileProviderItem.swift (task 1694) together with this file, runs it, and
+// asserts the printed COUNT ("ipc-framing: N passed, 0 failed") -- a run that
+// executed fewer tests than declared fails the script.
 
 setvbuf(stdout, nil, _IOLBF, 0)
 signal(SIGPIPE, SIG_IGN)
@@ -670,6 +670,79 @@ check("content fingerprint: stable for an untouched file, changes with size and 
     try expect(grown.sizeBytes == 11 && grown != touched, "a different size must change the fingerprint")
 
     try expect(IPCContentFingerprint.ofFile(at: dir.appendingPathComponent("missing.bin")) == nil, "a missing file has no fingerprint")
+}
+
+// MARK: - Task 1694: add-subitems capability mapping
+
+// Finder refuses a drop into an item whose NSFileProviderItemCapabilities
+// lacks .allowsAddingSubItems. The daemon payload crosses the XPC bridge as
+// a plain Int with bit 4 = addSubItems (same numbering as Rust's
+// CAP_ADD_SUBITEMS); FileProviderItem.capabilities must map it.
+//
+// These tests compile against BeebeebFileProvider/FileProviderItem.swift
+// (added to the harness compile line by scripts/test-ipc-framing.sh,
+// task 1694). On unmodified code the mapping never emits
+// .allowsAddingSubItems, so the two positive tests go red at runtime.
+
+check("1694: addSubItems bit (1 << 4) maps to .allowsAddingSubItems") {
+    let withBit = BeebeebProviderItem(
+        identifier: "1694-folder",
+        parentIdentifier: "namespace:my_files",
+        filename: "Folder",
+        kind: .folder,
+        sizeBytes: 0,
+        contentType: nil,
+        status: "local",
+        capabilities: 1 << 4,
+        versionIdentifier: nil
+    )
+    let mapped = FileProviderItem(model: withBit).capabilities
+    try expect(
+        mapped.contains(.allowsAddingSubItems),
+        "capability bit 1 << 4 must map to .allowsAddingSubItems, got \(mapped.rawValue)"
+    )
+    try expect(
+        !mapped.contains(.allowsReading),
+        "bit 1 << 4 must not gain .allowsReading, got \(mapped.rawValue)"
+    )
+    // NOTE: .allowsWriting cannot be negatively asserted here — on this
+    // SDK .allowsWriting and .allowsAddingSubItems share rawValue 2, so
+    // contains(.allowsWriting) is true whenever .allowsAddingSubItems is
+    // set. The read-only-file half below pins the direction that matters.
+
+    let withoutBit = BeebeebProviderItem(
+        identifier: "1694-file",
+        parentIdentifier: "namespace:my_files",
+        filename: "file.txt",
+        kind: .file,
+        sizeBytes: 0,
+        contentType: nil,
+        status: "local",
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil
+    )
+    let fileMapped = FileProviderItem(model: withoutBit).capabilities
+    try expect(
+        fileMapped.contains(.allowsReading),
+        "read bit must still map to .allowsReading"
+    )
+    try expect(
+        !fileMapped.contains(.allowsAddingSubItems),
+        "a read-only file payload must not gain .allowsAddingSubItems, got \(fileMapped.rawValue)"
+    )
+}
+
+check("1694: namespace model grants .allowsAddingSubItems") {
+    let namespace = BeebeebProviderItem.namespace(.myFiles)
+    let mapped = FileProviderItem(model: namespace).capabilities
+    try expect(
+        mapped.contains(.allowsReading),
+        "namespace must keep .allowsReading"
+    )
+    try expect(
+        mapped.contains(.allowsAddingSubItems),
+        "sidebar namespace roots must grant .allowsAddingSubItems (task 1694), got \(mapped.rawValue)"
+    )
 }
 
 print("ipc-framing: \(passed) passed, \(failed) failed")

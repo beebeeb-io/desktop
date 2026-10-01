@@ -143,6 +143,11 @@ const CAP_READ: u32 = 1 << 0;
 const CAP_WRITE: u32 = 1 << 1;
 const CAP_RENAME: u32 = 1 << 2;
 const CAP_DELETE: u32 = 1 << 3;
+/// `.allowsAddingSubItems` on the Swift side (task 1694). Bit 4, with the
+/// SAME numbering on both sides of the XPC bridge — the payload crosses it
+/// as a plain u32 (`FileProviderItemPayload.capabilities` ↔
+/// `BeebeebProviderItem.capabilities`, Swift: `BeebeebProviderItem.addSubItems`).
+const CAP_ADD_SUBITEMS: u32 = 1 << 4;
 
 /// The macOS App Group shared between the containing app
 /// (`src-tauri/entitlements.plist`) and the File Provider extension
@@ -1387,8 +1392,30 @@ fn namespace_payload(identifier: &str, filename: &str) -> FileProviderItemPayloa
         size_bytes: 0,
         content_type: Some("public.folder".to_string()),
         status: "local".to_string(),
-        capabilities: CAP_READ,
+        capabilities: CAP_READ | CAP_ADD_SUBITEMS,
         version_identifier: None,
+    }
+}
+
+/// Task 1694 rule (lead decision, 2026-10-01): every LIVE folder accepts
+/// adding sub-items. Finder refuses a drop into any item whose
+/// `.allowsAddingSubItems` is unset, which is why drops onto Beebeeb folders
+/// showed the blocked icon everywhere. The grant is gated ONLY on kind +
+/// status — deliberately NOT on `permission_bits`: a read-only shared root
+/// is still a live folder, and the daemon rejects unauthorized writes at the
+/// write path anyway. `Trashing` is the read-only terminal state (the item
+/// is on its way out) and keeps the bit unset. Files never get the bit.
+/// `capabilities_for_status` stays status-only; the folder grant is applied
+/// at the payload construction sites where the kind is known.
+fn with_folder_add_subitems(
+    kind: &str,
+    status: &crate::state_db::FileStatus,
+    capabilities: u32,
+) -> u32 {
+    if kind == "folder" && !matches!(status, crate::state_db::FileStatus::Trashing) {
+        capabilities | CAP_ADD_SUBITEMS
+    } else {
+        capabilities
     }
 }
 
@@ -1439,6 +1466,10 @@ fn file_entry_payload(
             capabilities |= CAP_WRITE | CAP_RENAME | CAP_DELETE;
         }
     }
+    // The contract branch zeroes `capabilities` above, so the folder
+    // add-subitems grant is re-applied here, after the permission rebuild
+    // (task 1694).
+    let capabilities = with_folder_add_subitems(kind, &entry.status, capabilities);
 
     FileProviderItemPayload {
         identifier: entry.file_id.clone(),
@@ -1463,13 +1494,26 @@ fn file_entry_payload_without_contract(
     parent_identifier: &str,
 ) -> FileProviderItemPayload {
     let status = file_status_string(&entry.status);
-    let capabilities = capabilities_for_status(&entry.status);
+    // Kind is derivable WITHOUT a contract: `FileEntry.item_kind` is read
+    // from the `files.item_kind` column by the SELECT mappers (written only
+    // by `set_file_contract_state`). It used to be hardcoded to "file",
+    // which mis-reported folders AND lost them the folder add-subitems
+    // grant (task 1694).
+    let kind = match entry.item_kind {
+        crate::state_db::ItemKind::Folder => "folder",
+        crate::state_db::ItemKind::File => "file",
+    };
+    let capabilities = with_folder_add_subitems(
+        kind,
+        &entry.status,
+        capabilities_for_status(&entry.status),
+    );
 
     FileProviderItemPayload {
         identifier: entry.file_id.clone(),
         parent_identifier: parent_identifier.to_string(),
         filename: filename_from_path(&entry.path),
-        kind: "file".to_string(),
+        kind: kind.to_string(),
         size_bytes: entry.size_bytes,
         content_type: None,
         status: status.to_string(),
@@ -1550,7 +1594,12 @@ mod tests {
         assert_eq!(items.len(), 2);
         let read_only = items.iter().find(|item| item.identifier == "read-root").unwrap();
         assert_eq!(read_only.kind, "folder");
-        assert_eq!(read_only.capabilities, CAP_READ);
+        // Task 1694 (lead rule): every LIVE folder accepts adding sub-items,
+        // gated only on kind+status — NOT on permission_bits. A read-only
+        // shared root is still a live folder, so it carries
+        // READ | ADD_SUBITEMS (unauthorized writes are rejected at the write
+        // path, not by hiding the folder's drop affordance).
+        assert_eq!(read_only.capabilities, CAP_READ | CAP_ADD_SUBITEMS);
 
         let editable = items.iter().find(|item| item.identifier == "write-root").unwrap();
         assert_eq!(
@@ -1569,6 +1618,202 @@ mod tests {
         assert!(!is_authorized_peer(1000, 1001));
         assert!(!is_authorized_peer(0, 1000));
         assert!(is_authorized_peer(0, 0));
+    }
+
+    // ── Task 1694: Finder blocks adding files to folders — add-subitems
+    // capability bit ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_1694_namespace_payload_grants_add_subitems() {
+        // Finder refuses a drop into an item without .allowsAddingSubItems;
+        // the sidebar namespace roots ("My files", "Shared with me", …)
+        // advertised CAP_READ only, so every drop was blocked (Guus,
+        // 0.8.7-alpha, 2026-10-01). The namespace payload must grant
+        // READ | ADD_SUBITEMS.
+        let ns = namespace_payload(NAMESPACE_MY_FILES, "My files");
+        assert_eq!(
+            ns.capabilities,
+            CAP_READ | CAP_ADD_SUBITEMS,
+            "namespace payload must grant READ | ADD_SUBITEMS, got {:#b}",
+            ns.capabilities
+        );
+    }
+
+    fn seed_1694_item(
+        db: &StateDb,
+        file_id: &str,
+        status: FileStatus,
+        permissions: i64,
+        item_kind: ItemKind,
+    ) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: format!("My files/{file_id}.txt"),
+            status,
+            size_bytes: 0,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: item_kind.clone(),
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.namespace = Namespace::MyFiles;
+        contract.permission_bits = permissions;
+        contract.item_kind = item_kind.clone();
+        db.set_file_contract_state(&contract).unwrap();
+    }
+
+    #[test]
+    fn test_1694_local_folder_payload_grants_add_subitems() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "1694-local-folder",
+            FileStatus::Local,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::Folder,
+        );
+        let entry = db.get_file("1694-local-folder").unwrap().unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(payload.kind, "folder");
+        assert!(
+            payload.capabilities & CAP_ADD_SUBITEMS != 0,
+            "a live Local folder must grant ADD_SUBITEMS (task 1694), got {:#b}",
+            payload.capabilities
+        );
+    }
+
+    #[test]
+    fn test_1694_cloud_only_folder_payload_grants_add_subitems() {
+        // The majority real-world case: CloudOnly entries dominate the tree
+        // (Guus's vault: 8195 cloud_only files), so the fix is worthless
+        // unless a CloudOnly folder also accepts drops.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "1694-cloud-folder",
+            FileStatus::CloudOnly,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::Folder,
+        );
+        let entry = db.get_file("1694-cloud-folder").unwrap().unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(payload.kind, "folder");
+        assert!(
+            payload.capabilities & CAP_ADD_SUBITEMS != 0,
+            "a live CloudOnly folder must grant ADD_SUBITEMS (task 1694), got {:#b}",
+            payload.capabilities
+        );
+    }
+
+    #[test]
+    fn test_1694_trashing_folder_payload_does_not_grant_add_subitems() {
+        // `Trashing` is the read-only terminal state (a locally-deleted item
+        // whose server-trash is pending); a folder on its way out must NOT
+        // accept new sub-items — in either payload branch.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "1694-trashing-folder",
+            FileStatus::Trashing,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::Folder,
+        );
+        let entry = db.get_file("1694-trashing-folder").unwrap().unwrap();
+        let contract_payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(contract_payload.kind, "folder");
+        assert!(
+            contract_payload.capabilities & CAP_ADD_SUBITEMS == 0,
+            "a Trashing folder must NOT grant ADD_SUBITEMS, got {:#b}",
+            contract_payload.capabilities
+        );
+
+        let no_contract_payload =
+            file_entry_payload_without_contract(&entry, NAMESPACE_MY_FILES);
+        assert!(
+            no_contract_payload.capabilities & CAP_ADD_SUBITEMS == 0,
+            "a Trashing folder must NOT grant ADD_SUBITEMS in the no-contract fallback either, got {:#b}",
+            no_contract_payload.capabilities
+        );
+    }
+
+    #[test]
+    fn test_1694_file_payload_does_not_grant_add_subitems() {
+        // Only folders accept sub-items; a file payload must never carry the
+        // bit, whatever its status.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "1694-local-file",
+            FileStatus::Local,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::File,
+        );
+        let entry = db.get_file("1694-local-file").unwrap().unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(payload.kind, "file");
+        assert!(
+            payload.capabilities & CAP_ADD_SUBITEMS == 0,
+            "a file payload must NOT grant ADD_SUBITEMS, got {:#b}",
+            payload.capabilities
+        );
+    }
+
+    #[test]
+    fn test_1694_no_contract_folder_payload_grants_add_subitems_and_reports_folder_kind() {
+        // The no-contract fallback used to hardcode kind "file". It must
+        // derive the kind from FileEntry.item_kind (the files.item_kind
+        // column) — otherwise a contract-less folder is mis-reported as a
+        // file AND loses the folder ADD grant.
+        let entry = FileEntry {
+            file_id: "1694-nc-folder".into(),
+            path: "My files/1694-nc-folder".into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        };
+        let payload = file_entry_payload_without_contract(&entry, NAMESPACE_MY_FILES);
+        assert_eq!(
+            payload.kind, "folder",
+            "no-contract fallback must derive kind from FileEntry.item_kind, not hardcode \"file\""
+        );
+        assert!(
+            payload.capabilities & CAP_ADD_SUBITEMS != 0,
+            "a no-contract live folder must grant ADD_SUBITEMS, got {:#b}",
+            payload.capabilities
+        );
+    }
+
+    #[test]
+    fn test_1694_no_contract_file_payload_does_not_grant_add_subitems() {
+        let entry = FileEntry {
+            file_id: "1694-nc-file".into(),
+            path: "My files/1694-nc-file.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        let payload = file_entry_payload_without_contract(&entry, NAMESPACE_MY_FILES);
+        assert_eq!(payload.kind, "file");
+        assert!(
+            payload.capabilities & CAP_ADD_SUBITEMS == 0,
+            "a no-contract file payload must NOT grant ADD_SUBITEMS, got {:#b}",
+            payload.capabilities
+        );
     }
 
     fn seed_shared_root(db: &StateDb, file_id: &str, path: &str, permissions: i64) {

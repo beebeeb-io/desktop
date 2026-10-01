@@ -291,7 +291,7 @@ final class XPCBridge {
                 sizeBytes: 0,
                 contentType: nil,
                 status: "local",
-                capabilities: BeebeebProviderItem.read,
+                capabilities: BeebeebProviderItem.read | BeebeebProviderItem.addSubItems,
                 versionIdentifier: nil
             )
         }
