@@ -196,9 +196,12 @@ describe('useSettingsConfig', () => {
     release()
     await Promise.all([first, second])
     expect(overlapped).toBe(false)
-    // Each write sends the window's config as it is when the write starts, so the last one on
-    // disk is the final state whatever order the clicks and the disk were in.
-    expect(order).toEqual(['start:2000:false', 'end:2000:false', 'start:2000:false', 'end:2000:false'])
+    // Each write carries the snapshot its own change produced: the first sends its change alone,
+    // the second sends both, so the last one on disk is the final state whatever order the
+    // clicks and the disk were in. (A write that read whatever was latest when it started would
+    // put a later change into an earlier write — which is exactly what made a failed first
+    // write discard the second one, see the queued-write test above.)
+    expect(order).toEqual(['start:2000:true', 'end:2000:true', 'start:2000:false', 'end:2000:false'])
   })
 
   test('a failed write is ONE toast and the window shows what is really saved, not what was clicked', async () => {
@@ -211,6 +214,38 @@ describe('useSettingsConfig', () => {
     expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t save that setting' })
     expect(hook().state).toEqual({ status: 'ready', config })
     expect(m.calls.filter((c) => c.name === 'get_desktop_config')).toHaveLength(2)
+  })
+
+  test('a later change survives a failed earlier queued write: it is still written, and the window says what is on disk', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const disk = { config: structuredClone(config) }
+    const writes: any[] = []
+    const m = open('useSettingsConfig', {
+      get_desktop_config: () => structuredClone(disk.config),
+      set_desktop_config: async ({ config: written }: any) => {
+        writes.push(structuredClone(written))
+        if (writes.length === 1) await gate
+        if (writes.length === 1) throw new Error('disk full')
+        disk.config = structuredClone(written)
+      },
+    })
+    await m.flush()
+    const hook = () => m.tree() as any
+    const first = hook().save({ upload_kbps_limit: 2000 })
+    const second = hook().save({ notify_conflicts: false })
+    await Promise.resolve()
+    release()
+    await Promise.all([first, second])
+    await m.flush()
+    // The first write fails (one toast). The second change was queued behind it: it must still
+    // reach the disk, computed from what is actually on disk — not be written over by the stale
+    // config the failed write's read left behind, and not be reported saved when it was not.
+    expect(m.toasts).toHaveLength(1)
+    expect(writes).toHaveLength(2)
+    expect(writes[1]).toEqual({ ...config, notify_conflicts: false })
+    expect(disk.config).toEqual({ ...config, notify_conflicts: false })
+    expect(hook().state).toEqual({ status: 'ready', config: { ...config, notify_conflicts: false } })
   })
 
   test('a load failure is its own state and Try again reads again', async () => {
@@ -585,6 +620,37 @@ describe('Sync tab', () => {
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
     expect(visibleText(m)).not.toContain('socket busy')
+  })
+
+  test('a successful repair whose refreshed Finder state cannot be read stops claiming Added and offers Try again', async () => {
+    let failRead = false
+    const st = { finder: finder.installed }
+    const m = open('SyncTab', {
+      finder_location_state: () => {
+        if (failRead) throw new Error('offline')
+        return st.finder
+      },
+      reset_macos_integration: () => {
+        st.finder = finder.missing // the repair really removed the integration
+        return { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
+      },
+      list_remote_tree: () => [folder('a', 'Photos', true)],
+      open_login_items_and_extensions_settings: () => undefined,
+    }, { props: { settings: ready() } })
+    await m.flush()
+    expect(visibleText(m)).toContain('Added')
+    await press(m, 'Repair…')
+    failRead = true
+    await press(m, 'Repair')
+    // The reset succeeded but the refresh failed: the row must not keep the pre-repair "Added"
+    // (the integration is gone), and the failed refresh needs its own way back in.
+    expect(visibleText(m)).not.toContain('Added')
+    expect(visibleText(m)).toContain('Couldn’t check Finder.')
+    expect(buttons(m)).toContain('Try again')
+    failRead = false
+    await press(m, 'Try again')
+    expect(visibleText(m)).toContain('Add it to see your files in Finder like any other folder.')
+    expect(buttons(m)).toContain('Add to Finder')
   })
 
   test('Keep on this Mac: the count of kept folders and a way to choose', async () => {

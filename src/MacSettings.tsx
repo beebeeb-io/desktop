@@ -76,14 +76,19 @@ export interface SettingsConfig {
 /**
  * Notifications and the speed limits are fields of one config object that `set_desktop_config`
  * replaces as a whole, so the window owns one copy: two quick changes cannot overwrite each
- * other with a stale object. Writes are queued in order. A failed write is a toast, and the
- * config is read back so the switch shows what is really saved, not what was clicked.
+ * other with a stale object. Writes are queued in order, and each write carries the snapshot
+ * its own change produced, so a later change cannot rewrite what an earlier write sends. A
+ * failed write is a toast, and the config is read back so the switch shows what is really
+ * saved, not what was clicked; the writes still queued behind the failure are rebased onto
+ * what that read found, so a later change survives an earlier one failing.
  */
 function useSettingsConfig(): SettingsConfig {
   const { showToast } = useToast()
   const [state, setState] = useState<ConfigState>({ status: 'loading' })
   const latest = useRef<DesktopConfig | null>(null)
   const queue = useRef<Promise<void>>(Promise.resolve())
+  /** Changes queued behind the write that is running, with the snapshot each will send. */
+  const pending = useRef<Array<{ patch: Partial<DesktopConfig>; next: DesktopConfig }>>([])
 
   const read = useCallback(async (): Promise<boolean> => {
     const result = await command<DesktopConfig>('get_desktop_config')
@@ -109,15 +114,33 @@ function useSettingsConfig(): SettingsConfig {
       const next = { ...base, ...patch }
       latest.current = next
       setState({ status: 'ready', config: next })
+      const entry = { patch, next }
+      pending.current.push(entry)
       const write = async () => {
-        const result = await command<void>('set_desktop_config', { config: latest.current ?? next })
+        const result = await command<void>('set_desktop_config', { config: entry.next })
+        pending.current = pending.current.filter((queued) => queued !== entry)
         if (result.ok) return
         showToast({
           variant: 'error',
           title: 'Couldn’t save that setting',
           message: result.unsupported ? commandUnavailableLabel('set_desktop_config') : result.reason,
         })
-        if (!(await read())) setState({ status: 'failed' })
+        if (!(await read())) {
+          setState({ status: 'failed' })
+          return
+        }
+        // What is on disk lacks the failed patch and every queued one: rebase the still-queued
+        // snapshots onto the config the read brought back, so the later changes still go out
+        // and the window shows the failed change as unsaved instead of claiming it.
+        const onDisk = latest.current
+        if (onDisk === null) return
+        let current = onDisk
+        for (const queued of pending.current) {
+          current = { ...current, ...queued.patch }
+          queued.next = current
+        }
+        latest.current = current
+        setState({ status: 'ready', config: current })
       }
       queue.current = queue.current.then(write, write)
       return queue.current
@@ -460,7 +483,13 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setFinderLoadFailed(false)
     const result = await command<FinderInstallState>('finder_location_state')
     if (result.ok) setFinder(result.value)
-    else setFinderLoadFailed(true)
+    else {
+      // The state could not be read: whatever it said before may no longer be true (a repair
+      // that just succeeded removed the integration), so drop it and show the failed refresh
+      // with its Try again instead of the stale row.
+      setFinder(null)
+      setFinderLoadFailed(true)
+    }
   }, [])
 
   const loadTree = useCallback(async () => {
