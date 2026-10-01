@@ -20,9 +20,17 @@ Beebeeb desktop app. **Tauri v2** shell around the web client (`repos/web`) plus
 
 **`desktop-v0.8.5`** (or later — check
 https://github.com/beebeeb-io/desktop/releases/latest) **is published** for all three
-platforms: signed MSI + NSIS installer for Windows, AppImage/.deb/.rpm for Linux, and a
+platforms: MSI + NSIS installer for Windows (Authenticode-signed from `desktop-v0.8.8` onward),
+AppImage/.deb/.rpm for Linux, and a
 Developer ID signed + notarized `.dmg` for macOS (Apple Silicon only — Intel is not built),
 each with a minisign `.sig` for the auto-updater.
+
+> **Correction — 2026-10-01 (decision 1499, task 1617):** earlier revisions of this section said
+> "signed MSI + NSIS installer for Windows". That was wrong: every Windows release through 0.8.7
+> shipped **unsigned** (minisign updater `.sig` files are not Authenticode). `desktop-v0.8.8` is
+> the first Authenticode-signed Windows release — Azure Artifact Signing, publisher
+> `CN=Initlabs B.V.`, timestamped, enforced by `scripts/windows/verify-authenticode.ps1` in
+> `release.yml`. See `docs/RELEASING.md` → "Windows Authenticode signing".
 
 Windows updater manifests must preserve installer type. Fresh Windows installs are documented as
 NSIS `setup.exe` installs, so publish `windows-x86_64-nsis` and the generic `windows-x86_64`

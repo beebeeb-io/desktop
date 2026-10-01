@@ -1,112 +1,84 @@
-# Beebeeb Desktop 0.8.7 — Finder: a fix for opening files, awaiting the hand test; support bundle: file names and paths redacted, one stated residual; new macOS Settings window behind a dev URL
+# Beebeeb Desktop 0.8.8 — Windows is signed: installers and app now carry an Authenticode signature from Initlabs B.V., no more "unknown publisher"
 
-This is an alpha build. The Mac build is Apple Silicon only (Intel is not built). It follows up
-0.8.6, where opening a not-yet-downloaded file from Finder stopped failing with the "helper
-application" error but then failed with "daemon response was not valid json" after a long wait and
-with no progress shown. This build fixes the cause of that (see Bug Fixes / Hardening), together
-with a privacy fix to the support bundle and two smaller fixes. Whether opening a file from Finder
-now works on a real Mac is not verified yet: that hand test is what this alpha is for. Windows and
-Linux carry the same merged source as everything else on `main`, but nothing in this release was
-written for them.
+Every Windows installer published through 0.8.7 was unsigned, so Windows warned with the
+"unknown publisher" / "Windows protected your PC" prompt on every download. This release signs
+the Windows artifacts with Azure Artifact Signing: the NSIS `setup.exe`, the MSI, the application
+`beebeeb-desktop.exe` inside both installers, and the uninstaller all carry a timestamped
+Authenticode signature whose publisher is **Initlabs B.V.** — the verified organization behind
+Beebeeb (KvK 95157565, Wijchen). Signing is enforced by a release gate that refuses to publish
+any Windows artifact without a valid signature from that publisher (see Verification).
+
+This CI release publishes **Windows and Linux** assets. The macOS build is not part of it: macOS
+builds on a local Mac holding the Developer ID identity and is added to the same release and
+manifest afterwards (see `docs/RELEASING.md`). macOS users stay on their current version until
+that build is published — details under "macOS status". The source in this release also carries
+the macOS Finder fix below (task 1694) and two macOS menu-bar slices that are not user-visible
+yet.
 
 ### What's New
 
-- **[macOS] Real download progress in Finder:** when you open a file that is not on this Mac yet,
-  Finder now shows a progress bar that advances as the file is downloaded and decrypted, and the
-  download can be cancelled from Finder. Before, Finder showed nothing until the whole download had
-  finished.
-- **[macOS] Long downloads no longer time out:** a large file may keep downloading as long as it
-  keeps making progress. The limit is 10 minutes without any progress, not 10 minutes in total.
-  Quick requests (listing a folder) still give up after 30 seconds.
-- **The support bundle says exactly what it keeps and removes (task 1685):** the Account page copy
-  now states what the export contains, including the one residual described below. The button also
-  now saves the bundle and reveals it; before, it showed a toast saying the file had been written
-  without writing one.
-- **[macOS] A new Settings window exists behind a dev URL only (task 1683 slice 4, PR #85):** one
-  window with four tabs (General, Account, Sync, About), sized to its content and built from the
-  commands the existing pages already use. It mounts only at the dev URL
-  `?window=settings-v2&platform=macos` and no window configuration opens it yet, so nothing a user
-  sees changes on any platform in this build. Two bugs found in review of this window were fixed
-  before it merged: queued settings writes keep their own snapshot after a failed write (a later
-  queued change is still saved, the failed change shows as unsaved), and a failed Finder-state
-  refresh after a successful reset no longer leaves the stale "Added" state (the row shows
-  unavailable with Try again).
+- **[Windows] Signed installers and app:** after downloading, Windows now shows "Initlabs B.V." as
+  the verified publisher for `Beebeeb_<version>_x64-setup.exe`, `Beebeeb_<version>_x64_en-US.msi`,
+  and the app itself. The signature is RFC3161 timestamped, so it stays valid even though Artifact
+  Signing certificates rotate every three days. One honest caveat: with a freshly issued
+  certificate, SmartScreen's *reputation* system starts at zero, so on the very first downloads
+  Windows may still show a "more info → Run anyway" prompt while reputation accrues with download
+  volume (Microsoft treats OV and EV certificates the same here since March 2024). What is gone
+  immediately is the "unknown publisher" identity warning — the file is no longer unattributable.
 
 ### Bug Fixes / Hardening
 
-- **[macOS] Opening a file from Finder no longer fails with "daemon response was not valid json"
-  (task 1670, issue 3):** the daemon's success reply was the bare JSON string `"Ok"`, and the
-  Finder extension only accepts a JSON object, so every successful download was reported as a
-  failure once it finished. Messages are now one JSON object per line in both directions, the
-  extension reads and writes in full (a reply over 64 KiB used to be cut short), and a reply that
-  cannot be parsed is reported with a fixed message instead of raw bytes. The old extension with
-  the new daemon, and the new extension with the old daemon, both keep working. The daemon side
-  was proven failing and then passing by tests; the Swift side is exercised only by the macOS CI
-  job and by the hand test this alpha exists for.
-- **[P0] The support bundle removes file names and folder paths, with one stated residual (task
-  1685):** the diagnostics export promised "no plaintext names", but the last error message it
-  carried could include the path of the file that failed, so a bundle sent to support could
-  disclose file and folder names. Names and paths known to the state database are replaced first,
-  every remaining path becomes `[path]`, and every other word that is not a standard error word or
-  a number becomes `[name]`. Credential tokens are still removed. The residual, stated in the app:
-  a name the state database does not know can survive if it is a common word or digits, and UUIDs
-  and the server address are kept. So the bundle can still contain such a name; it is no longer
-  guaranteed name-free, only much less likely to carry one.
-- **A slow Finder copy can no longer be uploaded twice (task 1684):** if copying a large file into
-  Finder took longer than the extension was willing to wait, Finder retried and the daemon queued a
-  second upload of the same file. The extension now sends a key derived from the file's name,
-  parent, size and modification time with each write, and the daemon returns the first result for a
-  repeat instead of queueing again. It does not cover a retry after the daemon restarts, and
-  whether Finder's real retry presents the same size and modification time is not yet confirmed on
-  a device; if it does not, the behaviour is the old one (one extra upload), not worse.
-- **Error toasts are readable, and an error is shown once (task 1683, slice 5):** in the dark
-  theme the error toast title had a contrast ratio of 1.10:1 against its background; all four toast
-  types now take their colours from the theme and meet 4.5:1 for text and 3:1 for icons in both
-  themes. A failed "Install in Finder" used to show the same message twice, as a toast and as a
-  banner that outlived it; it is now one inline error.
-- **Groundwork for the menu-bar redesign (task 1683, slice 1):** internal surface logic (window
-  anchoring, state tracking, a failure ledger), behaviour-neutral. Only a few small policy
-  functions are called by the shipping app, and they reproduce today's behaviour on every
-  platform, so this contains no visible change.
+- **[macOS] Finder no longer blocks adding files to folders (task 1694):** dragging or copying a
+  file into a Beebeeb Drive folder failed because the File Provider item capabilities never
+  advertised the "add items" bit. The Rust payload and the Swift mapping now carry it. (Reaches
+  macOS users with the macOS 0.8.8 build — see "macOS status".)
+- **Nothing unsigned can be published from the release workflow (task 1617):** a gate verifies,
+  per artifact, that the Authenticode signature is `Valid`, that the signer subject is
+  `CN=Initlabs B.V.`, and that a timestamp counter-signature is present — not only for the
+  installers on the release page but for the executables *inside* each installer payload (NSIS
+  payload via 7z, MSI payload via a `msiexec /a` administrative extraction). The gate's own
+  red-proof runs first on every release build: it must reject an unsigned fixture and a
+  wrong-publisher fixture before it is trusted to pass anything. A skipped or broken signing step
+  therefore fails the build instead of shipping an unsigned artifact.
+- **Release tooling: the WSL `az` wrapper passes arguments faithfully** (workspace tooling, not
+  app code): the previous `cmd.exe /c` route mangled arguments containing spaces or quotes, which
+  broke Azure CLI JSON payloads during the signing setup.
+
+### macOS status for this release
+
+- No macOS asset ships in `desktop-v0.8.8`; macOS is built locally (Developer ID + notarization)
+  and uploaded to this release afterwards, then the update manifest's `darwin-aarch64` entry is
+  backfilled (`docs/RELEASING.md`). Until that happens macOS installs stay on their current
+  version and are not offered 0.8.8 — the Windows/Linux manifest entries changing does not touch
+  them.
+- When the macOS 0.8.8 build lands, it carries task 1694 (Finder add-files fix) plus merged
+  1683 slices (menu-bar popover backend, a macOS Settings window). The 1683 UI is reachable
+  behind a dev URL only and is not user-visible in this build.
 
 ### Verification
 
-- Test gate on the release source (lead, Linux, fresh tree at 9119239 = desktop main f79fab3 plus
-  the release tooling): `bun test` 419 pass / 0 fail across 36 files; `cargo test --locked`
-  (src-tauri) per binary: lib `test result: ok. 652 passed` (2 ignored), keychain
-  `test result: ok. 20 passed`, windows_session_wiring `test result: ok. 8 passed`,
-  windows_signout_cleanup `test result: ok. 3 passed`, all 0 failed, 683 tests executed, count
-  guard exit 0;
-  `bunx tsc --noEmit` exit 0. The release workflow re-runs `bun test` and `cargo test --locked`
-  as its own gate before any installer is built.
-- Re-measured after the notes were amended for PR #85: this amendment (the PR #86 commit) changes
-  only `RELEASE_NOTES.md` on top of desktop main 4569db1 (the 1683-slice-4 squash, 3700+ lines of
-  application and test code), so the tested code is unchanged from 4569db1: `bun test` 542 pass / 0 fail across
-  41 files (2077 expects), `bunx tsc --noEmit` exit 0 and `bun run lint` exit 0 (local macOS
-  runs, lock-serialized). The `cargo test --locked` (src-tauri) figures come from the green
-  "Rust test (Linux)" CI job of 4569db1 (run 36850579832, cargo exit 0 under the count guard),
-  the platform this release gate runs on: lib `test result: ok. 782 passed` (4 ignored), keychain
-  `test result: ok. 20 passed`, windows_session_wiring `test result: ok. 8 passed`,
-  windows_signout_cleanup `test result: ok. 3 passed`, all 0 failed, 813 tests executed. The
-  earlier gate's lib figure (652) predates PR #84, which added the engine-status, popover,
-  link-health and transfer-progress Rust suites.
-- Desktop CI on the release commit, including the macOS job "File Provider Swift (macOS)", which
-  compiles the Finder extension and runs the framing tests with a counted result.
-- The macOS build is notarized and stapled by `scripts/release-macos-local.sh`, which refuses to
-  upload anything unless `spctl` reports `source=Notarized Developer ID` for both the app and the
-  dmg.
-- **Not verified: opening a not-yet-downloaded file from Finder on a real Mac against a live File
-  Provider domain, with the progress bar and the cancel button.** This alpha exists so that can be
-  done by hand before anything reaches the stable channel.
-- Not verified: that Finder's real retry of a slow copy presents the same size and modification
-  time (task 1684), and that a cancel from Finder ends the download on the daemon side on a device.
-- Not verified: Windows and Linux real-hardware smoke tests for this release.
+- The Authenticode gate is proven red-first, with counts (evidence in workspace task 1617):
+  guard self-test rejected both fixtures (unsigned bytes: `UnknownError`, 1/1; `cmd.exe`,
+  Microsoft-signed `Valid` but wrong publisher, 1/1 — self-test exit 0), and the gate rejected
+  the real unsigned 0.8.7 artifacts as fixtures: `Beebeeb_0.8.7_x64-setup.exe` plus its 2 payload
+  application PEs (3/3 failed, exit 1) and the 0.8.7 MSI payload app exe (1/1 failed, exit 1).
+- The release workflow re-runs `bun test` and `cargo test --locked` as its gate before any
+  installer is built, then the Authenticode gate above, then minisign updater signatures are
+  produced per installer as before.
+- Post-release evidence (CI run URL, per-asset `Get-AuthenticodeSignature` output with SHA-256
+  hashes, payload re-verification of the published bytes, manifest check) is recorded in
+  workspace task 1617.
+- **Not verified:** the SmartScreen first-download prompt behavior noted under "What's New" — that
+  needs a clean Windows machine download after publication, watched as reputation accrues.
+- **Not verified:** a full Windows real-hardware smoke test of this release (install, sync,
+  close-to-tray). The signing change does not alter app behavior, but nothing in this release was
+  installed on a device yet.
 
 ### Install / Update
 
-Alpha channel only: this build does not touch the stable manifest, and installs on the stable
-channel will not see it. Download the `.dmg` from the `desktop-v0.8.7` GitHub release and open it by
-hand; a Developer ID signed, notarized build installs without a Gatekeeper prompt the same way
-0.8.5 and 0.8.6 did. On macOS there is no in-app update path onto the alpha channel yet, so this is
-a manual install for testing, not a rollout. (The Windows app has a release-channel picker in its
-Settings.)
+Windows and Linux installs on the stable channel are offered 0.8.8 by the auto-updater; fresh
+installs come from the `desktop-v0.8.8` GitHub release or the download page. Windows users: the
+installer is now signed, so no "unknown publisher" prompt — if you had skipped the warning on an
+older build once, you can stop doing that. macOS: stay put until the macOS 0.8.8 build is
+published (see "macOS status"); there is no macOS asset in this release to install by hand. (The
+Windows app has a release-channel picker in its Settings.)
