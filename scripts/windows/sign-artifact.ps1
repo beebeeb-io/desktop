@@ -127,23 +127,27 @@ $metadata = Join-Path $CacheDir 'metadata.json'
   Endpoint               = $Endpoint
   CodeSigningAccountName = $Account
   CertificateProfileName = $Profile
-  # Keep only fast-failing or working credentials: Environment +
-  # WorkloadIdentity (the OIDC paths azure/login provides via the AZURE_*
-  # env vars, authenticated in seconds) and AzureCli as a logged-in
-  # fallback. Exclude the probing/slow ones: ManagedIdentity probes IMDS
-  # (absent on GitHub runners — packets are dropped, not refused),
-  # SharedTokenCache/VisualStudio probe user stores that do not exist on a
-  # runner, and InteractiveBrowser would hang waiting for a browser.
-  # The first signed release run hung ~33 minutes inside the first signtool
-  # call with zero sign requests reaching the service (diagnosed from the
-  # verbose bundler log: init at 22:11:10Z, job cancelled at 22:44Z) — the
-  # same reason azure/artifact-signing-action exposes exclude-* inputs.
-  ExcludeManagedIdentityCredential    = $true
-  ExcludeSharedTokenCacheCredential   = $true
-  ExcludeVisualStudioCredential       = $true
-  ExcludeVisualStudioCodeCredential   = $true
-  ExcludeAzurePowerShellCredential    = $true
-  ExcludeInteractiveBrowserCredential = $true
+  # The dlib runs DefaultAzureCredential internally; without exclusions it
+  # probes Managed Identity (IMDS is absent on GitHub runners — packets are
+  # silently dropped, not refused), SharedTokenCache and Visual Studio user
+  # stores; the first signed release runs hung 33-45 minutes inside the first
+  # signtool call with zero sign requests reaching the service (diagnosed
+  # from the verbose bundler log: dlib init at 22:11:10Z, job cancelled at
+  # 22:44Z with signtool still alive). The documented contract is an array of
+  # PascalCase credential type names (learn.microsoft.com/azure/artifact-
+  # signing/how-to-signing-integrations); application-time matching is
+  # case-sensitive (Azure/trusted-signing-action#70), so spell exactly.
+  # Keep Environment + WorkloadIdentity (azure/login's OIDC env) and
+  # AzureCliCredential (logged in) as the credential chain.
+  ExcludeCredentials = @(
+    'ManagedIdentityCredential',
+    'SharedTokenCacheCredential',
+    'VisualStudioCredential',
+    'VisualStudioCodeCredential',
+    'AzureDeveloperCliCredential',
+    'AzurePowerShellCredential',
+    'InteractiveBrowserCredential'
+  )
 } | ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding ASCII
 
 Write-Host "sign-artifact: signing '$FilePath' via $Account/$Profile ($Endpoint)"
