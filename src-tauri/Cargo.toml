@@ -310,8 +310,8 @@ tempfile = "3"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
-# Keep the real 20-cycle, multi-GiB storage gate in default `cargo test --locked`.
-# Its checksum and SQLite work needs optimized tests; no CLI profile overrides.
+# Optimize bounded default storage regressions and the named full acceptance job.
+# Both use plain locked Cargo commands; no CLI profile overrides.
 [profile.test]
 opt-level = 2
 debug = 0

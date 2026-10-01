@@ -581,7 +581,7 @@ fn slice1_g5_real_sqlite_full_terminal_reserve() {
     // Tie the fixture page allowance to measured physical reserve shrink,
     // never the byte count returned by release_terminal(). NTFS exhaustion is open.
     let before = allocated_len(&reserve.path).unwrap();
-    reserve.release_terminal().unwrap();
+    reserve.release_terminal(&h).unwrap();
     let physically_released = before - allocated_len(&reserve.path).unwrap();
     s.db.execute_batch(&format!("PRAGMA max_page_count={}", pages + physically_released / 4096))
         .unwrap();
@@ -789,12 +789,39 @@ impl Read for Generated {
     }
 }
 #[test]
-fn slice1_g4_twenty_three_gib_cycles_and_g7_three_gib_manifest() {
+#[ignore = "mandatory acceptance: 20 x 3 GiB plus final 3 GiB validation"]
+fn slice1_acceptance_twenty_three_gib_cycles_and_three_gib_manifest() {
+    run_storage_campaign(20, 1024 * MIB, 3 * 1024 * MIB);
+}
+
+#[test]
+fn slice1_g4_bounded_cycles_and_g7_manifest() {
+    let (_h, mut s, a) = run_storage_campaign(2, 64 * MIB, 96 * MIB);
+    // Reuse the same database after physical reclamation, then verify again.
+    s.dispose(&a, &discard(&a), &mut Fault::default()).unwrap();
+    s.gc(&a, &mut Fault::default()).unwrap();
+    let o = owner(&s, "Snapshot");
+    let next = s
+        .capture(
+            o,
+            &mut Generated {
+                left: 96 * MIB,
+                byte: 0x43,
+            },
+            96 * MIB,
+            &mut Fault::default(),
+        )
+        .unwrap();
+    s.verify(&next).unwrap();
+    assert!(s.max_buffer <= 16 * MIB as usize && s.max_dirty <= DIRTY_LIMIT && s.max_rows <= ROWS);
+}
+
+fn run_storage_campaign(cycles: usize, payload: u64, validation: u64) -> (Harness, Store, Artifact) {
     let h = Harness::new().unwrap();
     let mut s = Store::new(&h).unwrap();
     let mut peak_db = 0;
     let mut peak_wal = 0;
-    for cycle in 0..20 {
+    for cycle in 0..cycles {
         let jobs = std::thread::scope(|scope| {
             let mut jobs = Vec::new();
             for i in 0..3 {
@@ -806,11 +833,8 @@ fn slice1_g4_twenty_three_gib_cycles_and_g7_three_gib_manifest() {
                         .capture_as(
                             o,
                             if i == 2 { "Replacement" } else { "Capture" },
-                            &mut Generated {
-                                left: 1024 * MIB,
-                                byte: i,
-                            },
-                            1024 * MIB,
+                            &mut Generated { left: payload, byte: i },
+                            payload,
                             &mut Fault::default(),
                         )
                         .unwrap();
@@ -826,7 +850,7 @@ fn slice1_g4_twenty_three_gib_cycles_and_g7_three_gib_manifest() {
             .sum();
         let reserved_peak = h.volume.lock().unwrap().reserved;
         let available_peak = available_bytes(h.path());
-        assert!(reserved_peak >= 3 * 1024 * MIB);
+        assert!(reserved_peak >= 3 * payload);
         peak_db = peak_db.max(db_bytes);
         peak_wal = peak_wal.max(wal_bytes);
         assert!(db_bytes + wal_bytes <= 20 * 1024 * MIB);
@@ -851,7 +875,7 @@ fn slice1_g4_twenty_three_gib_cycles_and_g7_three_gib_manifest() {
             .sum();
         assert!(
             settled_total <= 64 * MIB,
-            "all retired account DBs remain bounded over 20 cycles"
+            "all retired account DBs remain bounded over the campaign"
         );
         println!(
             "cycle={} allocated_db_peak={db_bytes} allocated_wal_peak={wal_bytes} reserved_peak={reserved_peak} available_peak={available_peak} settled_all_databases={settled_total}",
@@ -863,19 +887,20 @@ fn slice1_g4_twenty_three_gib_cycles_and_g7_three_gib_manifest() {
         .capture(
             o,
             &mut Generated {
-                left: 3 * 1024 * MIB,
+                left: validation,
                 byte: 0x72,
             },
-            3 * 1024 * MIB,
+            validation,
             &mut Fault::default(),
         )
         .unwrap();
     s.verify(&a).unwrap();
     assert!(s.max_buffer <= 16 * MIB as usize && s.max_dirty <= 8 * MIB && s.max_rows <= 256);
     println!(
-        "cycles=20 peak_db={peak_db} peak_wal={peak_wal} max_buffer={} max_dirty={} max_rows={}",
+        "cycles={cycles} payload_per_worker={payload} final_validation={validation} peak_db={peak_db} peak_wal={peak_wal} max_buffer={} max_dirty={} max_rows={}",
         s.max_buffer, s.max_dirty, s.max_rows
     );
+    (h, s, a)
 }
 
 #[test]

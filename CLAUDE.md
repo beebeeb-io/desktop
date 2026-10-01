@@ -268,6 +268,20 @@ The full rules live in the workspace `CLAUDE.md` → "How we work" (also summari
 - **The count-shaped truth line:** `cargo test` in `src-tauri/` → per-binary
   `test result: ok. N passed; 0 failed`; `bun run tauri build … -- --locked` asserts the exit code
   and the bundle files on disk (`ls` them, paste the listing).
+- **Dormant storage acceptance (task 1640):** default `cargo test --locked` keeps
+  two three-worker 64 MiB cycles, reclamation, same-DB reuse, a 96 MiB manifest,
+  and the threshold/reserve regressions. The full campaign is mandatory as a
+  separate named job: from `src-tauri/`, run
+  `cargo test --locked --lib content_v2::storage_tests::slice1_acceptance_twenty_three_gib_cycles_and_three_gib_manifest -- --ignored --exact --nocapture`.
+  Its truth line is `test result: ok. 1 passed; 0 failed; 0 ignored`, with the
+  named test and `cycles=20`, `payload_per_worker=1073741824`,
+  `final_validation=3221225472` in saved output. It executes all twenty
+  three-worker 3 GiB cycles and the final 3 GiB capture/manifest verification.
+  Record default and acceptance wall times separately. Validate default logs
+  with `python scripts/assert-cargo-test-counts.py <log> --cargo-exit-code <code>`;
+  add `--acceptance` for the one explicitly selected campaign. The guard rejects
+  empty/incorrect/extra acceptance selection and any filtered default run.
+  Never use bare `--ignored`: machine-registration fixtures remain opt-in and OFF.
 - **"Cannot be done here" is the normal state of this repo:** macOS signing/notary, Windows
   installers, and Finder/File Provider need hardware and credentials this session may not have.
   Route each to `.claude/tasks/decisions/` with the specific question; never fake a local folder
