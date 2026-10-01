@@ -433,7 +433,7 @@ fn slice1_r2_reserve_grows_for_all_participating_databases() {
     );
     assert!(allocated_len(&reserve).unwrap() >= 6 * 64 * MIB);
     let mut physical = Reserve::existing(h.path()).unwrap();
-    physical.release_terminal().unwrap();
+    physical.release_terminal(&h).unwrap();
     assert_eq!(file_len(&reserve), 6 * 64 * MIB - 16 * MIB);
     let first_path = stores[0].0.path.clone();
     let first_artifact = stores[0].1.clone();

@@ -79,7 +79,7 @@ impl Store {
     pub(super) fn owner(&self, owner: Id, kind: &str, body: &[u8]) -> Result<()> {
         // Metadata admission scans the volume too: do not observe another account's
         // database between pathname creation and its schema/bootstrap commit.
-        let admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        let mut admission = self.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
         metadata_admitted(&self.db, &self.path, false)?;
         let (reserved, excess) = self.budget_from_disk()?;
         let new_terminal = if matches!(kind, "Upload" | "RootRetirement") {
@@ -97,6 +97,10 @@ impl Store {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .context("volume root")?;
+        if new_terminal > 0 {
+            grow_emergency(root, Some(&self.path), &admission)?;
+            admission.emergency_required = required_emergency(root, Some(&self.path))?;
+        }
         admission.space_admitted(
             root,
             (reserved
@@ -192,7 +196,7 @@ impl Store {
                 &other
             };
             let (payload,count):(u64,u64)=conn.query_row("SELECT coalesce(sum(payload_bytes+duplicate_bytes),0),count(*) FROM v2_reservations WHERE phase<>'Released'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            let terminal_owners: u64 = conn.query_row("SELECT count(*) FROM v2_owners WHERE kind IN ('Upload','RootRetirement') AND terminal_disposition IS NULL", [], |r| r.get(0))?;
+            let terminal_owners = terminal_obligations(conn)?;
             let cost = payload
                 + (count + terminal_owners) * 128 * 1024
                 + if count > 0 || terminal_owners > 0 { WAL_LIMIT } else { 0 };
@@ -289,7 +293,7 @@ impl Store {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .context("volume root")?;
-        grow_emergency(root, Some(&self.path))?;
+        grow_emergency(root, Some(&self.path), &global)?;
         global.emergency_required = required_emergency(root, Some(&self.path))?;
         let (reserved, excess) = self.budget_from_disk()?;
         global.reserved = reserved;
@@ -1115,46 +1119,85 @@ impl Reserve {
         ensure!(allocated_len(&path)? >= remaining, "sparse emergency reserve");
         Ok(Self { path, remaining })
     }
-    pub(super) fn release_terminal(&mut self) -> Result<u64> {
-        ensure!(self.remaining >= 16 * MIB, "emergency reserve exhausted");
+    pub(super) fn release_terminal(&mut self, h: &Harness) -> Result<u64> {
+        let _admission = h.volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+        self.release_terminal_locked()
+    }
+    // Terminal admission already holds the allocator through its bounded SQL write.
+    pub(super) fn release_terminal_locked(&mut self) -> Result<u64> {
+        let current = file_len(&self.path);
+        ensure!(current >= 16 * MIB, "emergency reserve exhausted");
         let before = allocated_len(&self.path)?;
-        self.remaining -= 16 * MIB;
+        let remaining = current - 16 * MIB;
         let f = fs::OpenOptions::new().write(true).open(&self.path)?;
-        f.set_len(self.remaining)?;
+        f.set_len(remaining)?;
         f.sync_all()?;
-        // NTFS may keep AllocationSize until the truncating handle closes.
-        // A shorter EOF alone is not emergency headroom.
         drop(f);
         let after = allocated_len(&self.path)?;
         let released = before.saturating_sub(after);
         ensure!(
-            released >= 16 * MIB && file_len(&self.path) == self.remaining,
-            "reserve did not physically release terminal space: before={before} after={after} length={} expected={}",
-            file_len(&self.path),
-            self.remaining
+            released >= 16 * MIB && file_len(&self.path) == remaining,
+            "reserve did not physically release terminal space: before={before} after={after} length={} expected={remaining}",
+            file_len(&self.path)
         );
+        self.remaining = remaining;
         Ok(released)
     }
     pub(super) fn refill(&mut self, h: &Harness) -> Result<()> {
         self.refill_with_hook(&h.volume, &mut |_| Ok(()))
     }
     // Deterministic scheduling seam; dormant test module only.
-    pub(super) fn refill_with_hook(&mut self, _volume: &Arc<Mutex<Budget>>, hook: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+    pub(super) fn refill_with_hook(
+        &mut self,
+        volume: &Arc<Mutex<Budget>>,
+        hook: &mut impl FnMut(&str) -> Result<()>,
+    ) -> Result<()> {
         hook("before lock")?;
+        let mut admission = match volume.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                hook("blocked")?;
+                volume.lock().map_err(|_| anyhow::anyhow!("allocator poisoned"))?
+            }
+            Err(_) => bail!("allocator poisoned"),
+        };
         let required = required_emergency(self.path.parent().context("reserve parent")?, None)?;
         hook("after observation")?;
+        self.refill_locked_with_hook(required, &admission, hook)?;
+        admission.emergency_required = required;
+        Ok(())
+    }
+    pub(super) fn refill_locked(&mut self, required: u64, budget: &Budget) -> Result<()> {
+        self.refill_locked_with_hook(required, budget, &mut |_| Ok(()))
+    }
+    fn refill_locked_with_hook(
+        &mut self,
+        required: u64,
+        budget: &Budget,
+        hook: &mut impl FnMut(&str) -> Result<()>,
+    ) -> Result<()> {
+        let current = file_len(&self.path);
+        let extra = required.saturating_sub(current);
+        ensure!(
+            budget.available(self.path.parent().context("reserve parent")?)? >= extra,
+            "cannot grow physical emergency reserve"
+        );
         let mut f = fs::OpenOptions::new().append(true).open(&self.path)?;
         let bytes = vec![0xA5; CHUNK];
-        while self.remaining < required {
-            f.write_all(&bytes)?;
-            self.remaining += CHUNK as u64;
+        let mut remaining = current;
+        while remaining < required {
+            let n = (required - remaining).min(CHUNK as u64) as usize;
+            f.write_all(&bytes[..n])?;
+            remaining += n as u64;
+            hook("after write")?;
         }
         f.sync_all()?;
         drop(f);
         ensure!(
-            file_len(&self.path) >= required && allocated_len(&self.path)? >= required,
+            file_len(&self.path) == remaining && allocated_len(&self.path)? >= remaining,
             "reserve refill was not physically allocated"
         );
+        self.remaining = remaining;
         Ok(())
     }
 }

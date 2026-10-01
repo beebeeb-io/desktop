@@ -181,9 +181,6 @@ impl Ledger {
         fs::create_dir_all(&keys)?;
         // Recovery opens remain possible after an interrupted terminal release.
         // New payload/metadata admission still requires the full reserve refill.
-        if file_len(&h.path().join("reserve")) >= 256 * MIB {
-            grow_emergency(h.path(), None)?;
-        }
         admission.emergency_required = required_emergency(h.path(), None)?;
         db.execute(
             "INSERT OR IGNORE INTO installation_format VALUES(1,1,?1,NULL)",
@@ -478,6 +475,16 @@ pub(super) fn transfer(
         |r| r.get(0),
     )?;
     ensure!(disposed == 1 && live == 0, "local byte disposition incomplete");
+    let admission = ledger
+        .volume
+        .lock()
+        .map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+    let root = ledger.path.parent().context("ledger volume")?;
+    let required = required_emergency(root, Some(&store.path))?;
+    if required > required_emergency(root, None)? {
+        grow_emergency(root, Some(&store.path), &admission)?;
+    }
+    admission.space_admitted(root, DIRTY_LIMIT, true)?;
     metadata_admitted(&store.db, &store.path, true)?;
     fault.point("before transfer intent")?;
     store.db.execute(
@@ -496,11 +503,18 @@ pub(super) fn transfer(
     )?;
     ensure!(o == owner && t == token && r == record, "transfer collision");
     fault.point("after transfer intent")?;
+    drop(admission);
     ledger.put(record, "Envelope", body, Some(expires), Some(token), fault)?;
     ensure!(
         ledger.deny(token)? && ledger.read(record)? == body,
         "ledger acknowledgement mismatch"
     );
+    let admission = ledger
+        .volume
+        .lock()
+        .map_err(|_| anyhow::anyhow!("allocator poisoned"))?;
+    admission.space_admitted(root, DIRTY_LIMIT, true)?;
+    metadata_admitted(&store.db, &store.path, true)?;
     fault.point("before transfer ack")?;
     store.db.execute(
         "UPDATE v2_transfers SET phase='Acknowledged',ledger_record_id=?2,ledger_receipt=?3 WHERE transfer_id=?1",

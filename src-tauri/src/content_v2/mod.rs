@@ -118,17 +118,11 @@ impl Budget {
             allocated_len(&reserve)? >= length && length >= 64 * MIB,
             "unverified physical emergency reserve"
         );
-        let free = || -> Result<u64> {
-            let measured = available_bytes(root)?;
-            Ok(match self.capacity_ceiling {
-                Some(cap) => measured.min(cap.saturating_sub(allocated_tree(root)?)),
-                None => measured,
-            })
-        };
+        let free = || self.available(root);
         if terminal {
             if free()? < pending {
                 let mut reserve = Reserve::existing(root)?;
-                reserve.release_terminal()?;
+                reserve.release_terminal_locked()?;
             }
             ensure!(
                 free()? >= pending,
@@ -142,6 +136,13 @@ impl Budget {
             ensure!(free()? >= pending, "measured filesystem space exhausted");
         }
         Ok(())
+    }
+    fn available(&self, root: &Path) -> Result<u64> {
+        let measured = available_bytes(root)?;
+        Ok(match self.capacity_ceiling {
+            Some(cap) => measured.min(cap.saturating_sub(allocated_tree(root)?)),
+            None => measured,
+        })
     }
     fn reserve(&mut self, bytes: u64, quota: u64) -> bool {
         let Some(total) = self.reserved.checked_add(bytes) else {
@@ -441,36 +442,24 @@ fn required_emergency(root: &Path, proposed: Option<&Path>) -> Result<u64> {
                 [],
                 |r| r.get(0),
             )?;
-            if active > 0 || proposed == Some(path.as_path()) {
+            if active > 0 || terminal_obligations(&db)? > 0 || proposed == Some(path.as_path()) {
                 participating += 1;
             }
         }
     }
     Ok((participating * 64 * MIB).max(256 * MIB))
 }
-fn grow_emergency(root: &Path, proposed: Option<&Path>) -> Result<()> {
-    let required = required_emergency(root, proposed)?;
+fn terminal_obligations(db: &Connection) -> Result<u64> {
+    db.query_row("SELECT count(*) FROM (SELECT owner_id FROM v2_owners WHERE kind IN ('Upload','RootRetirement') AND terminal_disposition IS NULL UNION SELECT owner_id FROM v2_transfers WHERE phase NOT IN ('Acknowledged','Detached'))", [], |r| r.get(0)).map_err(Into::into)
+}
+// Caller holds the shared allocator through reserve growth and participant commit.
+fn grow_emergency(root: &Path, proposed: Option<&Path>, budget: &Budget) -> Result<()> {
     let mut reserve = Reserve::existing(root)?;
     ensure!(
-        reserve.remaining >= 256 * MIB,
+        reserve.remaining >= required_emergency(root, None)?,
         "emergency reserve must be refilled before admission"
     );
-    let extra = required.saturating_sub(reserve.remaining);
-    ensure!(
-        available_bytes(root)? >= extra,
-        "cannot grow physical emergency reserve"
-    );
-    let mut file = fs::OpenOptions::new().append(true).open(&reserve.path)?;
-    let bytes = vec![0xA5; CHUNK];
-    while reserve.remaining < required {
-        file.write_all(&bytes)?;
-        reserve.remaining += CHUNK as u64;
-    }
-    file.sync_all()?;
-    ensure!(
-        allocated_len(&reserve.path)? >= required,
-        "reserve growth was not physically allocated"
-    );
+    reserve.refill_locked(required_emergency(root, proposed)?, budget)?;
     Ok(())
 }
 
