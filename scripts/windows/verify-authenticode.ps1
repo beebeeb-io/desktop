@@ -75,9 +75,12 @@ function Invoke-InstallerExtraction([string]$Installer) {
   # handling is unreliable across versions - it flattens the compound file).
   # NSIS: 7z extracts the payload plus $PLUGINSDIR.
   # $PLUGINSDIR holds the NSIS toolkit's own redistributable plugin DLLs
-  # (nsDialogs, System, ...) - third-party files that are not ours to sign and
-  # that no NSIS-based installer signs; they are skipped with a counted INFO
-  # line. Everything else in the payload (the app .exe, the uninstaller) must
+  # (nsDialogs, System, ...). Tauri signs these with the same sign command when
+  # signing is enabled (tauri-bundler "Signing NSIS plugins"), but this gate
+  # skips re-verifying them: the release boundary is the installer and its
+  # application payload, and skipping keeps the gate independent of Tauri's
+  # plugin-signing behavior. They are skipped with a counted INFO line.
+  # Everything else in the payload (the app .exe, the uninstaller) must
   # carry a valid Initlabs B.V. signature.
   $work = Join-Path $env:TEMP ("beebeeb-guard-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Force -Path $work | Out-Null

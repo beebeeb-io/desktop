@@ -136,11 +136,13 @@ How a release build signs (all in `release.yml`, Windows job only):
    RFC3161-timestamped (`http://timestamp.acs.microsoft.com` — mandatory, the
    cert rotates every 3 days) and re-verified by the script itself.
 3. `scripts/windows/verify-authenticode.ps1` is the fail-closed publication
-   gate: every staged installer, the built app binary, and the executables
-   *inside* each installer payload (NSIS via 7z, MSI via `msiexec /a`) must be
-   `Valid`, signed by `CN=Initlabs B.V.`, and timestamped. The gate's
-   `-SelfTest` must first reject an unsigned and a wrong-publisher fixture
-   before it is trusted to pass anything. Any failure blocks the release.
+   gate: every staged installer and the executables *inside* each installer
+   payload (NSIS via 7z, MSI via `msiexec /a`) must be `Valid`, signed by
+   `CN=Initlabs B.V.`, and timestamped. (Do not also gate on
+   `target/.../release/*.exe`: the bundler restores the *unsigned* main binary
+   after packaging — the signed app exe exists only inside the payloads.) The
+   gate's `-SelfTest` must first reject an unsigned and a wrong-publisher
+   fixture. Any failure blocks the release.
 
 Dispatch `release.yml` **from `main`** — the federated credential's subject is
 `ref:refs/heads/main`, so a run from any other ref cannot authenticate.

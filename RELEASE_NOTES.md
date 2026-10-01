@@ -63,8 +63,10 @@ yet.
   the real unsigned 0.8.7 artifacts as fixtures: `Beebeeb_0.8.7_x64-setup.exe` plus its 2 payload
   application PEs (3/3 failed, exit 1) and the 0.8.7 MSI payload app exe (1/1 failed, exit 1).
 - The release workflow re-runs `bun test` and `cargo test --locked` as its gate before any
-  installer is built, then the Authenticode gate above, then minisign updater signatures are
-  produced per installer as before.
+  installer is built. The build then produces both signatures — Authenticode through the
+  signing hook (app binary before packaging, installers and uninstaller after) and the minisign
+  updater `.sig` per installer at bundle time — the Authenticode gate above runs on the staged
+  artifacts, and only then is anything uploaded.
 - Post-release evidence (CI run URL, per-asset `Get-AuthenticodeSignature` output with SHA-256
   hashes, payload re-verification of the published bytes, manifest check) is recorded in
   workspace task 1617.

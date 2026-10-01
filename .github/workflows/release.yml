@@ -351,9 +351,13 @@ jobs:
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig release-assets/
 
       # Fail-closed Authenticode gate (task 1617): no unsigned or wrongly-signed
-      # Windows artifact may reach the release. Verifies the staged installers,
-      # the built app binary, and the executables INSIDE each installer payload
-      # (NSIS: 7z; MSI: msiexec /a). The guard's -SelfTest runs first and must
+      # Windows artifact may reach the release. Verifies the staged installers
+      # themselves and the executables INSIDE each installer payload (NSIS: 7z;
+      # MSI: msiexec /a). Do NOT also verify target/.../release/*.exe: the Tauri
+      # bundler deliberately restores the UNSIGNED main binary after packaging
+      # (bundle.rs "Restore unsigned and unpatched binary"), so the only signed
+      # copy of the app exe is the one inside each installer payload — which
+      # -ExtractInstallers verifies. The guard's -SelfTest runs first and must
       # reject its unsigned + wrong-signer fixtures before it is trusted to pass
       # anything (a test is only trusted after it has been seen to fail).
       - name: Verify Authenticode signatures (Windows release gate)
@@ -363,14 +367,11 @@ jobs:
           powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\verify-authenticode.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw "verify-authenticode self-test failed: the gate accepted a bad fixture" }
 
-          $app = @(Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/*.exe' -File)
           $assets = @(Get-ChildItem 'release-assets/*' -File | Where-Object { $_.Name -match '\.(exe|msi)$' })
-          Write-Host ("app binaries: {0}; installer assets: {1}" -f $app.Count, $assets.Count)
-          if ($app.Count -lt 1) { throw "no built app .exe found to verify" }
+          Write-Host ("installer assets: {0}" -f $assets.Count)
           if ($assets.Count -ne 2) { throw "expected exactly 2 Windows installer assets (NSIS .exe + MSI), found $($assets.Count)" }
 
-          $files = $app.FullName + $assets.FullName
-          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\verify-authenticode.ps1 -Files $files -ExtractInstallers $assets.FullName
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\verify-authenticode.ps1 -Files $assets.FullName -ExtractInstallers $assets.FullName
           if ($LASTEXITCODE -ne 0) { throw "Authenticode gate failed: refusing to publish unsigned or wrongly-signed Windows artifacts (task 1617)" }
 
       - name: Stage release assets (Linux)
