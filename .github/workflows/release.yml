@@ -158,6 +158,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+      # Windows Authenticode signing authenticates to Azure Artifact Signing via
+      # GitHub OIDC (federated credential on beebeeb-desktop-release). Only the
+      # Windows matrix leg signs; the permission is harmless on Linux.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -239,6 +243,41 @@ jobs:
           mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           echo "BEEBEEB_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
+      # Windows Authenticode signing (task 1617; credentials route decided in
+      # task 1499): Azure Artifact Signing, certificate profile
+      # beebeeb-publictrust, publisher CN=Initlabs B.V. Auth is GitHub OIDC via
+      # the beebeeb-desktop-release app registration's federated credential
+      # (subject repo:beebeeb-io/desktop:ref:refs/heads/main — dispatch this
+      # workflow from main). There is no certificate or signing secret anywhere:
+      # the Artifact Signing dlib acquires its token from the ambient az login.
+      - name: Azure login for Artifact Signing (OIDC)
+        if: runner.os == 'Windows'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Enable Azure Artifact Signing (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          SIGN_SCRIPT: ${{ github.workspace }}\scripts\windows\sign-artifact.ps1
+        run: |
+          set -euo pipefail
+          # bundle.windows.signCommand is injected at release time (not
+          # committed) so local Windows bundling keeps working without signing
+          # tooling. Tauri splits the string on single spaces and substitutes
+          # %1 with the file to sign; the absolute script path keeps it
+          # independent of the bundler's working directory. sign-artifact.ps1
+          # signs the app binary before packaging plus the NSIS/MSI installers
+          # and the NSIS uninstaller, and fails closed in CI (BEEBEEB_REQUIRE_SIGNING).
+          SIGN_CMD="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${SIGN_SCRIPT} %1"
+          jq --arg cmd "$SIGN_CMD" '.bundle.windows.signCommand = $cmd' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+          grep -F 'sign-artifact.ps1' src-tauri/tauri.conf.json
+          echo "BEEBEEB_REQUIRE_SIGNING=1" >> "$GITHUB_ENV"
+
       - name: Validate release config
         if: runner.os == 'macOS'
         run: bash scripts/macos-release-preflight.sh
@@ -256,9 +295,9 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           MACOS_APP_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_APP_PROVISION_PROFILE_BASE64 }}
           MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64 }}
-          TAURI_WINDOWS_CERTIFICATE: ${{ secrets.TAURI_WINDOWS_CERTIFICATE }}
-          TAURI_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # Windows Authenticode is NOT certificate-based: no TAURI_WINDOWS_CERTIFICATE /
+          # WINDOWS_CERTIFICATE_PASSWORD secrets exist or are needed. Signing runs
+          # through bundle.windows.signCommand + Azure Artifact Signing (OIDC) above.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
@@ -310,6 +349,29 @@ jobs:
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig release-assets/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe release-assets/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig release-assets/
+
+      # Fail-closed Authenticode gate (task 1617): no unsigned or wrongly-signed
+      # Windows artifact may reach the release. Verifies the staged installers,
+      # the built app binary, and the executables INSIDE each installer payload
+      # (NSIS: 7z; MSI: msiexec /a). The guard's -SelfTest runs first and must
+      # reject its unsigned + wrong-signer fixtures before it is trusted to pass
+      # anything (a test is only trusted after it has been seen to fail).
+      - name: Verify Authenticode signatures (Windows release gate)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\verify-authenticode.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw "verify-authenticode self-test failed: the gate accepted a bad fixture" }
+
+          $app = @(Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/*.exe' -File)
+          $assets = @(Get-ChildItem 'release-assets/*' -File | Where-Object { $_.Name -match '\.(exe|msi)$' })
+          Write-Host ("app binaries: {0}; installer assets: {1}" -f $app.Count, $assets.Count)
+          if ($app.Count -lt 1) { throw "no built app .exe found to verify" }
+          if ($assets.Count -ne 2) { throw "expected exactly 2 Windows installer assets (NSIS .exe + MSI), found $($assets.Count)" }
+
+          $files = $app.FullName + $assets.FullName
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\verify-authenticode.ps1 -Files $files -ExtractInstallers $assets.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode gate failed: refusing to publish unsigned or wrongly-signed Windows artifacts (task 1617)" }
 
       - name: Stage release assets (Linux)
         if: runner.os == 'Linux'
