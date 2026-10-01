@@ -16,6 +16,10 @@
  *   • ?window=main-app&platform=windows
  *                                  → Windows main app shell (WindowsApp.tsx) —
  *                                    sidebar + content router hosting the data views
+ *   • ?window=popover&platform=macos
+ *                                  → macOS menu-bar popover (macPopover/MacPopover.tsx,
+ *                                    task 1683 slice 3). DEV URL ONLY until slice 6: no
+ *                                    Tauri config creates this window yet.
  *
  * Single HTML entry keeps the bundle layout simple — inactive components are
  * tree-shaken. The tray and main app windows are opened by the Rust side via
@@ -33,10 +37,13 @@ import Onboarding from './Onboarding'
 import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
 import WindowsApp from './WindowsApp'
-import { initializeDesktopThemeFromConfig } from './windows/theme'
+import MacPopover from './macPopover/MacPopover'
+import { DEFAULT_CONFIG } from './desktopApi'
+import { initializeDesktopThemeFromConfig, setDesktopThemePreference } from './windows/theme'
 import { ToastProvider } from './windows/ui'
 import { CapabilityProvider, CapabilityGate, useCapabilities } from './capabilities'
 import './design.css'
+import './macPopover/macPopover.css'
 
 const container = document.getElementById('root')
 if (!container) {
@@ -47,7 +54,11 @@ const params = new URLSearchParams(window.location.search)
 const which = params.get('window')
 const platform = params.get('platform')
 
-void initializeDesktopThemeFromConfig()
+// The macOS popover is created once and kept alive, so it must make no call until it is shown:
+// it applies the system theme now (no command) and re-reads the saved preference on every show.
+const isMacPopover = which === 'popover' && platform === 'macos'
+if (isMacPopover) setDesktopThemePreference(DEFAULT_CONFIG.theme)
+else void initializeDesktopThemeFromConfig()
 
 function HostOnboarding() {
   const caps = useCapabilities()
@@ -55,7 +66,13 @@ function HostOnboarding() {
 }
 
 let component: ReactElement
-if (which === 'conflict') {
+if (isMacPopover) {
+  // The popover is a frameless 372 x 488 surface of its own; `html.mac-popover` (macPopover.css)
+  // sizes the document to it. No session boundary, toast host or capability provider: each one
+  // polls or fetches on mount, and the popover must stay silent while hidden.
+  document.documentElement.classList.add('mac-popover')
+  component = <MacPopover />
+} else if (which === 'conflict') {
   component = <ConflictWindow />
 } else if (which === 'tray') {
   // The tray webview is frameless + opaque. Tag <html> so design.css can
@@ -84,7 +101,9 @@ if (which === 'conflict') {
 
 createRoot(container).render(
   <StrictMode>
-    {which === 'onboarding' ? (
+    {isMacPopover ? (
+      component
+    ) : which === 'onboarding' ? (
       <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
     ) : (
       <AccountSessionBoundary><ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider></AccountSessionBoundary>
