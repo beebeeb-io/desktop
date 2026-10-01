@@ -107,7 +107,10 @@ pub fn compute_activity(
     backlog: &crate::state_db::TransferBacklog,
     board: &crate::transfer_progress::TransferBoard,
 ) -> Activity {
-    let files_remaining = backlog.upload_files.saturating_add(backlog.download_files);
+    // A transfer that is moving but has no queue row (a one-shot upload such as Keep Mine) still
+    // counts: the board knows it even though the backlog does not.
+    let moving = u32::try_from(board.active().len()).unwrap_or(u32::MAX);
+    let files_remaining = backlog.upload_files.saturating_add(backlog.download_files).max(moving);
     let finished = board.finished_bytes();
     let in_flight_done = board.in_flight_done();
     let in_flight_total: u64 = board.active().iter().map(|(_, t)| t.total).sum();
@@ -1077,6 +1080,21 @@ mod tests {
         assert_eq!(a.bytes_total, 800);
         assert_eq!(a.bytes_done, 300);
         assert!(a.bytes_done <= a.bytes_total);
+    }
+
+    #[test]
+    fn a_moving_upload_with_no_queue_row_still_counts_as_a_file_left() {
+        use crate::transfer_progress::{Direction, TransferBoard};
+        // Keep Mine uploads directly, without enqueuing an operation.
+        let board = TransferBoard::new();
+        let g = board.begin("keep-mine", Direction::Up, 700);
+        g.update(200);
+        let a = compute_activity(&backlog(0, 0, 0, 0), &board);
+        assert_eq!(a.files_remaining, 1);
+        assert_eq!((a.bytes_total, a.bytes_done), (700, 200));
+        // A queued file that is also on the board is one file, not two.
+        let a = compute_activity(&backlog(1, 700, 0, 0), &board);
+        assert_eq!(a.files_remaining, 1);
     }
 
     #[test]

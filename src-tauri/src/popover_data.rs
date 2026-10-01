@@ -542,7 +542,9 @@ pub fn assemble(inputs: SnapshotInputs) -> PopoverSnapshotDto {
         paused: inputs.paused,
         storage_full,
         connectivity: inputs.engine.connectivity(),
-        syncing: inputs.engine.is_syncing(),
+        // A file moving right now is syncing even if the last event said idle (the pulse is up to
+        // a second behind): never an active row under a "synced" phase.
+        syncing: inputs.engine.is_syncing() || !inputs.board.is_empty(),
         finder_failure_elsewhere: inputs.finder_failure_elsewhere,
     });
 
@@ -793,6 +795,16 @@ mod tests {
         let mut i = healthy();
         i.engine = view(json!({ "state": "syncing", "files_remaining": 3 }));
         assert_eq!(phase_of(i), Syncing);
+    }
+
+    #[test]
+    fn a_file_on_the_board_is_syncing_even_when_the_last_event_said_idle() {
+        let mut i = healthy();
+        i.board = vec![("u1".into(), Transfer { direction: Direction::Up, done: 1, total: 9 })];
+        assert_eq!(phase_of(i.clone()), PopoverPhase::Syncing);
+        // Higher phases still win.
+        i.paused = true;
+        assert_eq!(phase_of(i), PopoverPhase::Paused);
     }
 
     #[test]

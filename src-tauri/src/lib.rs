@@ -592,6 +592,17 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
 // UI cache epoch, independent of the credential-bearing command lease epoch.
 static UI_SESSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Bumped whenever the in-memory session is installed or cleared (sign-in, unlock, lock,
+/// sign-out). Keys the popover's cached storage summary, so an unlock refetches it even when
+/// `UI_SESSION_REVISION` does not move (a lock keeps `auth_present` true, and the email is the
+/// same on the way back). Kept separate from `UI_SESSION_REVISION` on purpose: bumping that one
+/// makes the existing UI refetch, and slice 2 changes nothing a user sees.
+static VAULT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn bump_vault_epoch() {
+    VAULT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn set_auth_present(state: &AppState, present: bool) {
     if let Ok(mut guard) = state.auth_present.lock() {
         if *guard != present {
@@ -1152,6 +1163,7 @@ async fn desktop_unlock_with_recovery_phrase(
                 master_key,
                 email,
             });
+            bump_vault_epoch();
         }
         set_auth_present(&state, true);
         tracing::info!("vault provisioned from recovery phrase");
@@ -1386,6 +1398,7 @@ pub(crate) async fn apply_session(
             master_key: *master_key,
             email: email.clone(),
         });
+        bump_vault_epoch();
     }
     set_auth_present(state, true);
     set_auth_email(state, email);
@@ -1580,6 +1593,7 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
+            bump_vault_epoch();
             tracing::info!("session cleared via IPC");
         }
         Err(_) => {
@@ -1737,6 +1751,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
+            bump_vault_epoch();
             tracing::info!("vault locked; runtime session cleared");
         }
         Err(_) => {
@@ -3788,7 +3803,7 @@ async fn popover_snapshot(
                 cached_storage(
                     &runtime.storage,
                     now,
-                    UI_SESSION_REVISION.load(std::sync::atomic::Ordering::SeqCst),
+                    VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
                     || async move { fetch_storage_usage(&runner::api_base_url(), &token).await },
                 )
                 .await
@@ -11422,7 +11437,7 @@ mod popover_snapshot_command_tests {
             assert_eq!(run_command(&app).unwrap()["phase"], "paused");
 
             // A session change (unlock, sign-in) refetches even inside the TTL.
-            UI_SESSION_REVISION.fetch_add(1, Ordering::SeqCst);
+            bump_vault_epoch();
             run_command(&app).unwrap();
             assert_eq!(api.requests().len(), 2, "a new session refetches the storage summary");
         });
@@ -11654,6 +11669,10 @@ mod popover_wiring_tests {
         let start = source.find("async fn sync_status(").expect("sync_status exists");
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
         assert!(body.contains("engine_status::sync_status_engine(raw.as_str())"));
+        // The storage cache is keyed by the vault epoch, and the epoch moves at every place the
+        // session is installed (2) or cleared (2): sign-in, unlock, lock, sign-out.
+        assert_eq!(source.matches("bump_vault_epoch();\n").count(), 4);
+        assert!(source.contains("VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                    || async move { fetch_storage_usage"));
         // The Finder install marks the popover's f1 state for as long as it runs.
         let install = {
             let at = source.find("async fn install_finder_location(").unwrap();
