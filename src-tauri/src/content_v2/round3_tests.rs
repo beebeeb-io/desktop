@@ -53,6 +53,10 @@ fn slice1_r3_terminal_only_six_databases_grow_before_admission() {
     for _ in 0..5 {
         let s = Store::new(&h).unwrap();
         owner(&s, "RootRetirement");
+        assert!(
+            file_len(&h.path().join("reserve")) >= required_emergency(h.path(), None).unwrap(),
+            "terminal participant must physically grow reserve before owner commit"
+        );
         stores.push(s);
     }
     assert_eq!(
@@ -117,7 +121,7 @@ fn slice1_r3_two_simultaneous_refills_do_not_overallocate() {
     r.release_terminal(&h).unwrap();
     let entry = Barrier::new(2);
     let unlocked_read = Barrier::new(2);
-    std::thread::scope(|scope| {
+    let results = std::thread::scope(|scope| {
         let jobs: Vec<_> = (0..2)
             .map(|_| {
                 let mut r = Reserve::existing(h.path()).unwrap();
@@ -137,15 +141,17 @@ fn slice1_r3_two_simultaneous_refills_do_not_overallocate() {
                 })
             })
             .collect();
-        for job in jobs {
-            job.join().unwrap().unwrap();
-        }
+        jobs.into_iter().map(|job| job.join().unwrap()).collect::<Vec<_>>()
     });
     assert_eq!(
         file_len(&h.path().join("reserve")),
         256 * MIB,
         "simultaneous refill must not append the same deficit twice"
     );
+    assert_eq!(results.len(), 2);
+    for result in results {
+        result.expect("serialized refill must succeed");
+    }
     assert!(
         (256 * MIB..256 * MIB + MIB).contains(&allocated_len(&h.path().join("reserve")).unwrap()),
         "physical reserve overhead must stay below one MiB"
