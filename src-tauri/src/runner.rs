@@ -44,6 +44,7 @@ use crate::conflict::auto_resolution_deadline;
 use crate::engine_status::{Activity, StatusTracker, compute_activity, tick_outcome};
 use crate::engine_bridge::{
     ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick,
+    sync_tick_outcome, SyncTickOutcome,
 };
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
@@ -1174,8 +1175,8 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         tracing::warn!(error = %e, "shared root refresh failed");
                     }
                 }
-                match sync_tick(&*bridge, &sync_root).await {
-                    Ok(conflicts) => {
+                match sync_tick_outcome(&*bridge, &sync_root).await {
+                    Ok(tick) => {
                         // A successful tick is a real, authenticated API round
                         // trip — clears the auth-failure streak (task 1546
                         // finding 5) alongside every other post-tick bookkeeping
@@ -1187,7 +1188,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         // per file, fire a notification, emit a Tauri
                         // event so the settings page can refresh its
                         // counts immediately.
-                        for c in &conflicts {
+                        for c in &tick.conflicts {
                             handle_new_conflict(&app, c);
                         }
                         // Task 13 — sweep for conflicts past their 24h
@@ -1199,7 +1200,12 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
                             Ok(outcome) => {
                                 let completed = outcome.completed_op_ids.len() as u32;
-                                signal_file_provider_working_set(&db, "operations_applied", &outcome.invalidated_item_ids);
+                                // Task 1697 review fix (T3): ONE signal per tick
+                                // carries the union of the local queue's
+                                // invalidations and the REMOTE ingestion applies —
+                                // in a mixed tick two signals would be redundant.
+                                let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &tick.applied_item_ids);
+                                signal_file_provider_working_set(&db, reason, &ids);
                                 if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
                                     tracing::info!(
                                         paused = outcome.paused_op_ids.len(),
@@ -1211,6 +1217,12 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "operation queue processing failed");
+                                // The local queue stalled, but this tick's REMOTE
+                                // ingestion may still have applied server-side
+                                // changes — Finder must hear about them anyway.
+                                if !tick.applied_item_ids.is_empty() {
+                                    signal_file_provider_working_set(&db, "remote_changes_applied", &tick.applied_item_ids);
+                                }
                                 0
                             }
                         };
@@ -1608,6 +1620,32 @@ fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[Stri
     let _ = (db, reason, item_ids);
 }
 
+/// Task 1697 review fix (T3): ONE working-set signal per tick. Merges the
+/// local operation queue's invalidations with the remote ingestion's applied
+/// ids (server-side creates/modifies/moves/deletes reached state.db without
+/// any signal before) into a single id list, and picks the reason from
+/// whichever sides contributed — a mixed tick signals ONCE, not twice. An
+/// all-empty tick keeps today's shape: an `operations_applied` call with an
+/// empty batch (the signal path no-ops on it but still runs its log sweep).
+fn tick_working_set_signal(local_invalidated: &[String], remote_applied: &[String]) -> (&'static str, Vec<String>) {
+    if local_invalidated.is_empty() && remote_applied.is_empty() {
+        return ("operations_applied", Vec::new());
+    }
+    let mut ids: Vec<String> = Vec::with_capacity(local_invalidated.len() + remote_applied.len());
+    for id in local_invalidated.iter().chain(remote_applied.iter()) {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    let reason = match (local_invalidated.is_empty(), remote_applied.is_empty()) {
+        (false, false) => "operations_applied+remote_changes_applied",
+        (false, true) => "operations_applied",
+        (true, false) => "remote_changes_applied",
+        (true, true) => unreachable!("handled above"),
+    };
+    (reason, ids)
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1925,6 +1963,31 @@ mod tests {
         health.note_result(Some(&auth_error()));
         assert!(!health.is_expired(), "the streak must have been reset to 0, not left at 3");
     }
+
+    // Task 1697 review fix (T3): the per-tick signal merge decision. RED-first:
+// written against the pass-through stub and seen failing (it returned an
+// empty batch for non-empty inputs) before the merge landed.
+#[test]
+fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
+    // Local only: unchanged reason, ids pass through.
+    let (reason, ids) = tick_working_set_signal(&["f-1".to_string()], &[]);
+    assert_eq!(reason, "operations_applied");
+    assert_eq!(ids, vec!["f-1".to_string()]);
+    // Remote only: the ingestion side is named.
+    let (reason, ids) = tick_working_set_signal(&[], &["r-1".to_string()]);
+    assert_eq!(reason, "remote_changes_applied");
+    assert_eq!(ids, vec!["r-1".to_string()]);
+    // Mixed tick: ONE signal with the UNION, never two signals.
+    let (reason, ids) = tick_working_set_signal(&["f-1".to_string(), "f-2".to_string()], &["r-1".to_string(), "f-2".to_string()]);
+    assert_eq!(reason, "operations_applied+remote_changes_applied");
+    assert_eq!(ids, vec!["f-1".to_string(), "f-2".to_string(), "r-1".to_string()],
+        "the union dedupes while preserving first-seen order");
+    // Nothing changed: same shape as before the fix (empty batch; the macOS
+    // signal path no-ops on it but still runs its log sweep).
+    let (reason, ids) = tick_working_set_signal(&[], &[]);
+    assert_eq!(reason, "operations_applied");
+    assert!(ids.is_empty());
+}
 
     // Task 1697: the retired `file-provider-invalidate` Tauri event and its
     // payload builder are gone — the only replica-refresh channel is the
