@@ -1509,7 +1509,9 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
                 db.get_file(&contract.file_id)
                     .ok()
                     .flatten()
-                    .map(|entry| file_entry_payload(&entry, &contract, NAMESPACE_SHARED_WITH_ME))
+                    // Through the _for_db wrapper so dates/child counts are
+                    // stamped here too (task 1697).
+                    .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_SHARED_WITH_ME))
             })
             .collect(),
         _ => db

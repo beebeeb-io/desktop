@@ -227,12 +227,65 @@ the retry happens within 30 minutes. The next macOS alpha must force a write-que
 large file (or lower `stagedCopyTimeoutSeconds` for a test build) and check the unified log for
 the same `request_id=<12 hex>` on both attempts and exactly one queued upload.
 
+## Change feed + sync anchor (task 1697)
+
+The replica (`NSFileProviderReplicatedExtension`) needs a daemon-side change
+cursor to answer `enumerateChanges(for:from:)` and `currentSyncAnchor`. Three
+requests serve it; all state lives in the daemon's state.db (tables
+`fp_changes`, `fp_sync_anchor`, `fp_materialized`), so it survives extension
+process death and daemon restarts.
+
+### `ListChanges { since_anchor?, limit? }`
+
+Returns `FileProviderChanges { changes: [...], next_anchor: string|null }`.
+Each change row: `{ file_id, kind, old_parent_id, new_parent_id, item? }` —
+`kind` is `created | modified | deleted | reparented`; `item` is the FULL
+`FileProviderItemPayload` for live rows (the replica can call `didUpdateItems`
+without a second round-trip), absent for deletions and for rows that vanished
+since the change was recorded. Paged: at most `limit` (clamped 1..100,
+default 100) changes per reply; `next_anchor` doubles as the resume token
+while more remain and as the up-to-date marker when the batch completed the
+window. The anchor is the change-log rowid in decimal ASCII — strictly
+ascending, ≤ 500 bytes for any realistic history (Apple caps anchors and page
+tokens at 500 bytes).
+
+An unparseable `since_anchor` (a cursor the log no longer contains) is an
+`Error` reply — the replica answers with `NSFileProviderError.syncAnchorExpired`
+so the SYSTEM drops its caches and does a full re-enumeration; it never
+silently restarts at 0, which would double-deliver.
+
+### `GetSyncAnchor` → `FileProviderSyncAnchor { anchor: string|null }`
+
+The daemon's persistent cursor, served to `currentSyncAnchor`. The Swift side
+persists it in the App Group (`fileprovider-state.json`) for crash recovery
+and falls back to that copy when the daemon is unreachable.
+
+### `ReportMaterialized { container_ids: [...] }` → `{"Ok":{}}`
+
+The extension publishes the materialized DIRECTORIES the system reported (via
+`materializedItemsDidChange` + the system's `enumeratorForMaterializedItems`).
+The daemon's working-set signal filter (runner) fails OPEN against an
+empty/unknown set: signals fire for any batch until the set arrives, because
+Apple's documented fallback is "the working set is the entire dataset".
+
+### What records a change
+
+`upsert_file` (created/modified/reparented — a re-upsert whose row did not
+change records nothing, so the metadata sweeps produce no churn),
+`delete_file` / `delete_file_subtree` / `prune_absent` (deleted, with the
+parent captured before the delete), `set_status` / `set_size_bytes` /
+`set_file_contract_state` (modified; a contract parent change is
+`reparented`). Windows-only reconciliation writes (`reconcile_os_state`,
+`finish_windows_signout`) are deliberately NOT wired — the change log is FPFS
+machinery and Windows refreshes placeholders natively.
+
 ## Version skew (app update in progress)
 
 | Extension | Daemon | Behaviour |
 | --- | --- | --- |
 | new | old | The old daemon replies with no delimiter and keeps the connection open, and answers a hydrate with the bare string `"Ok"`. `IPCFrameReader` accepts a buffer that is already one complete JSON value without waiting for a newline, and `IPCFraming.decodeReply` maps a bare `"Ok"` to `{"Ok":{}}`. The old daemon ignores the unknown `progress` field, so no progress is shown. |
 | new | old (before 1684) | The old daemon's `serde` ignores the unknown `request_id` field, so the request works and is simply not deduplicated (the pre-1684 behaviour). |
+| new | old (before 1697) | The old daemon answers `ListChanges` with `unknown variant` — an `Error` reply the replica surfaces as `finishEnumeratingWithError`, and `currentSyncAnchor` falls back to the persisted App Group copy. The old daemon ignores the new payload fields (`created_at`, `modified_at`, `child_item_count`, `content_version`, `metadata_version`), so listings work with no dates/counts. |
 | old | new | The old extension writes its request with no delimiter and does not close: `FrameReader` accepts a buffer that is already one complete JSON value. It requests no progress, so it gets one reply, now `{"Ok":{}}\n` (which its parser accepts). It sends no `request_id`, so its write-queue requests take the pre-1684 path. |
 
 ## Tests
@@ -241,6 +294,7 @@ the same `request_id=<12 hex>` on both attempts and exactly one queued upload.
 | --- | --- | --- |
 | Rust framing units | `ipc_frame.rs` `mod tests` | `cargo test` counts |
 | Rust socket end-to-end (>64 KiB reply, split request, several requests per connection, unframed legacy request, oversize, bad line, `Ok` shape) | `src/ipc_socket_framing_tests.rs` | `cargo test` counts |
+| Change feed over the real socket (anchor, paging/resume tokens, deletes with parents, reparents, ride-along item payloads) | `src/ipc_socket_framing_tests.rs` (`list_changes_*`) | `cargo test` counts |
 | Hydrate progress + cancellation | `engine_bridge.rs` tests `ipc_hydrate_*` | `cargo test` counts |
 | Swift framing + exchange over a real `socketpair` | `BeebeebFileProviderTests/main.swift` via `scripts/test-ipc-framing.sh` (macOS CI job "File Provider Swift (macOS)") | `ipc-framing: N passed, 0 failed`, N asserted |
 | Swift key derivation (same inputs same key, any input differs, pinned vectors), request shape (`request_id` on BOTH create and modify, absent without contents) and file fingerprint | same file (10 tests of the 35) | same |
