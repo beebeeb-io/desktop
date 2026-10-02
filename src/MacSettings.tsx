@@ -415,6 +415,7 @@ function AccountTab() {
         open={confirmSignOut}
         title="Sign out of this Mac?"
         confirmLabel="Sign out"
+        danger
         onCancel={() => setConfirmSignOut(false)}
         onConfirm={() => void signOut()}
       >
@@ -424,13 +425,25 @@ function AccountTab() {
   )
 }
 
-/** A small in-window question with Cancel and one confirming action. Esc and the close button cancel. */
+/**
+ * A small in-window question with Cancel and one confirming action. Esc and the close button cancel.
+ *
+ * `danger` renders the confirm as the destructive red (`ms-btn--danger`): the ruling
+ * (2026-10-02) gives it to Sign out, which stops sync and is not offered as reversible, and
+ * keeps Repair amber because it is reversible. Confirm order stays Cancel → confirm.
+ *
+ * Enter confirms only when the confirm button itself is focused: the handler lives on that
+ * button, so on open — where focus is the close button — a stray Return natively activates
+ * Cancel and never reaches the confirm. `preventDefault` keeps the browser's native
+ * Enter-activates-a-focused-button click from firing the confirm a second time.
+ */
 function ConfirmSheet({
   open,
   title,
   confirmLabel,
   onCancel,
   onConfirm,
+  danger = false,
   children,
 }: {
   open: boolean
@@ -438,8 +451,14 @@ function ConfirmSheet({
   confirmLabel: string
   onCancel: () => void
   onConfirm: () => void
+  danger?: boolean
   children: string
 }) {
+  const onConfirmKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    onConfirm()
+  }
   return (
     <Modal
       open={open}
@@ -449,7 +468,7 @@ function ConfirmSheet({
       footer={
         <div className="ms-sheet-footer">
           <Btn onClick={onCancel}>Cancel</Btn>
-          <Btn primary onClick={onConfirm}>
+          <Btn primary={!danger} danger={danger} onKeyDown={onConfirmKeyDown} onClick={onConfirm}>
             {confirmLabel}
           </Btn>
         </div>

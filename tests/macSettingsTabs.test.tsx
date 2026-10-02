@@ -881,3 +881,109 @@ describe('MacSettings window', () => {
     expect(find(m, (el) => /sidebar/i.test(String(el.props.className ?? '')))).toHaveLength(0)
   })
 })
+
+// ── Confirmation dialogs: danger + Enter (task 1683 follow-up, ruling 2026-10-02) ──
+//
+// The ruling: the Sign out confirm is the destructive red (`ms-btn--danger`) because stopping
+// sync is not offered as reversible; Repair stays amber because it is reversible. Enter
+// confirms only when the confirm button itself is focused — the handler lives ON the button,
+// so on open (focus is the close button) a stray Return resolves to Cancel natively and never
+// reaches the confirm. Choose folders: Enter stays a no-op.
+
+describe('Confirmation dialogs: danger and Enter', () => {
+  const readySettings = { state: { status: 'ready', config }, save: async () => {}, reload: async () => {} }
+  const accountBackend = () => ({
+    popover_snapshot: () => snapshot(),
+    account_subscription: () => subscription,
+    lock_vault: () => undefined,
+    unlock_vault: () => undefined,
+    clear_session: () => undefined,
+  })
+  const repairBackend = (over: Record<string, (a: any) => unknown> = {}) => ({
+    finder_location_state: () => finder.installed,
+    install_finder_location: () => finder.installed,
+    reset_macos_integration: () => ({ removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }),
+    list_remote_tree: () => [],
+    open_login_items_and_extensions_settings: () => undefined,
+    ...over,
+  })
+  const openSyncRepair = async (over: Record<string, (a: any) => unknown> = {}) => {
+    const m = open('SyncTab', repairBackend(over), { props: { settings: readySettings } })
+    await m.flush()
+    return m
+  }
+  /** Dispatch Enter the way the harness does for other keys; report whether default was prevented. */
+  const keyEnter = (el: TreeNode): number => {
+    let prevented = 0
+    el.props.onKeyDown({ key: 'Enter', preventDefault: () => { prevented += 1 } })
+    return prevented
+  }
+
+  test('the Sign out confirm renders as destructive red, Cancel stays neutral, and the order stays Cancel → Sign out', async () => {
+    const m = open('AccountTab', accountBackend())
+    await settle(m)
+    await press(m, 'Sign out…')
+    expect(dialogs(m)).toHaveLength(1)
+    const confirm = button(m, 'Sign out')
+    expect(confirm.props.className).toContain('ms-btn--danger')
+    expect(confirm.props.className).not.toContain('ms-btn--primary')
+    expect(button(m, 'Cancel').props.className).not.toContain('ms-btn--danger')
+    const flat = m.elements().map((el) => (el.type === 'button' ? textOf(el.props.children).trim() : null))
+    expect(flat.indexOf('Cancel')).toBeGreaterThanOrEqual(0)
+    expect(flat.indexOf('Cancel')).toBeLessThan(flat.indexOf('Sign out'))
+  })
+
+  test('the Repair confirm keeps the amber primary, never the danger red', async () => {
+    const m = await openSyncRepair()
+    await press(m, 'Repair…')
+    const confirm = button(m, 'Repair')
+    expect(confirm.props.className).toContain('ms-btn--primary')
+    expect(confirm.props.className).not.toContain('ms-btn--danger')
+  })
+
+  test('on open a stray Return resolves to nothing: nothing is sent, and the only Enter handler in the sheet is the confirm button', async () => {
+    const m = open('AccountTab', accountBackend())
+    await settle(m)
+    await press(m, 'Sign out…')
+    expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
+    const handlers = find(m, (el) => typeof el.props.onKeyDown === 'function')
+    expect(handlers).toHaveLength(1)
+    expect(textOf(handlers[0].props.children).trim()).toBe('Sign out')
+  })
+
+  test('Enter on the focused confirm button confirms exactly once, and preventDefault keeps the browser click from confirming twice', async () => {
+    const m = open('AccountTab', accountBackend())
+    await settle(m)
+    await press(m, 'Sign out…')
+    expect(keyEnter(button(m, 'Sign out'))).toBe(1)
+    await m.flush()
+    expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(1)
+  })
+
+  test('Enter confirms Repair the same way, once', async () => {
+    const m = await openSyncRepair()
+    await press(m, 'Repair…')
+    expect(keyEnter(button(m, 'Repair'))).toBe(1)
+    await m.flush()
+    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(1)
+  })
+
+  test('a key that is not Enter does not confirm through the handler', async () => {
+    const m = open('AccountTab', accountBackend())
+    await settle(m)
+    await press(m, 'Sign out…')
+    button(m, 'Sign out').props.onKeyDown({ key: ' ', preventDefault: () => {} })
+    button(m, 'Sign out').props.onKeyDown({ key: 'Escape', preventDefault: () => {} })
+    await m.flush()
+    expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
+  })
+
+  test('Choose folders: Enter is a no-op — no Enter handler anywhere on the sheet, nothing sent', async () => {
+    const m = await openSyncRepair({ list_remote_tree: () => [folder('a', 'Photos', true), folder('b', 'Work', false)] })
+    await press(m, 'Choose folders…')
+    expect(dialogs(m)).toHaveLength(1)
+    expect(find(m, (el) => typeof el.props.onKeyDown === 'function')).toHaveLength(0)
+    for (const sw of find(m, (el) => el.props.role === 'switch')) expect(sw.props.onKeyDown).toBeUndefined()
+    expect(m.calls.filter((c) => c.name === 'set_recursive_pin')).toHaveLength(0)
+  })
+})

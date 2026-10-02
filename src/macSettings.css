@@ -320,6 +320,23 @@
   filter: brightness(0.96);
 }
 
+/*
+ * Destructive confirm (task 1683 ruling, 2026-10-02): the Sign out confirm is red, the one
+ * recorded exception to "one accent = amber" — Repair is reversible (amber caution is right),
+ * sign-out stops sync and is not offered as reversible. The label is --red-ink, never the
+ * theme-flipping --ink or paper: see design.css --red-ink for the contrast numbers.
+ */
+.ms-btn--danger {
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--red-ink);
+}
+
+.ms-btn--danger:hover:not(:disabled) {
+  background: var(--red);
+  filter: brightness(0.96);
+}
+
 .ms-btn:disabled,
 .ms-switch:disabled,
 .ms-select select:disabled {
