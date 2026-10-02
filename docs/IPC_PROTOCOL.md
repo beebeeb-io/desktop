@@ -95,6 +95,7 @@ Applied as `SO_RCVTIMEO`/`SO_SNDTIMEO`, i.e. per `read()`/`write()` call:
 | list / item / queue delete / queue create+modify without contents | 30 s | Database work in the daemon; answers in milliseconds. |
 | queue create / modify WITH contents | 600 s | The daemon copies the whole file into staging (`StagedPayload::copy`, synchronous) before replying and sends nothing meanwhile. A timeout here is a duplicate hazard: the extension reports failure, the daemon still queues the upload, Finder retries and queues it again under a fresh id. 600 s covers 15 GB at 25 MB/s (a same-volume APFS copy is a clone, near-instant). A copy longer than that still times out; task 1684 closes that with a stable `request_id` the daemon dedups on (next section). |
 | hydrate | 600 s idle | Each progress frame restarts it. The daemon's HTTP client allows 30 s per request (`api_client.rs`) and a hydrate makes one metadata request plus one per chunk; an older daemon sends no progress and is silent for the whole download. 20x the per-request ceiling also covers `download_kbps_limit` pacing sleeps. |
+| thumbnail | 60 s | One small encrypted variant + decrypt + atomic staging (`IPCFraming.thumbnailTimeoutSeconds`, task 1699). 2x the metadata ceiling; far below hydrate because it is never a whole-file download. |
 
 A timeout surfaces as `BeebeebIPCError.timedOut(seconds:)`
 ("Beebeeb's sync engine did not answer within N seconds..."), never as a JSON
@@ -361,6 +362,60 @@ which calls `EngineBridge::set_recursive_pin` directly; the File Provider side
 consumes pin state through the payload's `pinned` field. The `PinUpdated`
 response variant went with it.
 
+## Retired RPCs: `SetFileStatus`, `RecordOpenedFile`, `EnforceSmartCache` (task 1699)
+
+Removed with no replacement RPC (audit G13 re-audit):
+
+- `SetFileStatus` was a no-op stub (`=> Ok {}`): the extension never sent it
+  and the daemon never recorded anything. Status now flows one way, daemon →
+  extension, through `FileStatus`/`FileProviderItems` payloads and the change
+  feed.
+- `RecordOpenedFile` fed `mark_cached` + a cache-limit enforcement pass, but
+  the extension never reported opens and nothing else called the RPC. The
+  daemon enforces the configured cache limit on its own schedule
+  (`enforce_configured_cache_limit`) and still does.
+- `EnforceSmartCache` duplicated that internal enforcement over the socket.
+  The engine-side `enforce_smart_cache` machinery stays (used by
+  `enforce_local_cache_limit` / `enforce_configured_cache_limit`); only the
+  RPC surface went.
+- The `CacheCleanup` response variant existed solely for the two retired
+  arms and went with them.
+
+The framing test that previously used `SetFileStatus` as a
+success-shape probe now uses `ReportMaterialized` with an empty list.
+`retired_rpcs_are_refused_and_the_connection_survives` proves the retirement
+on the wire: an unknown variant gets an `Error` reply and the connection
+survives for the next request.
+
+## Thumbnails (`FetchThumbnail`, task 1699)
+
+`{"FetchThumbnail":{"file_id","dest_path","max_dimension"}}` →
+`{"ThumbnailWritten":{"size_bytes"}}` on success, `{"Error":{"message"}}` on
+failure. The extension asks for a decrypted thumbnail variant; the daemon
+downloads the encrypted variant from the server (`download_thumbnail`, same
+per-file key path as hydrate), decrypts in memory
+(`EngineBridge::fetch_thumbnail_to_memory`) and stages the plaintext at
+`dest_path` (`.part` write + atomic rename, 0600). The extension reads the
+staged file back into memory and deletes it — same hand-off shape as hydrate,
+so no plaintext ever crosses the socket.
+
+- `dest_path` must be under an allowed root: the sync root, the system
+  temporary directory, or (macOS) the hydrate cache directory. Anything else
+  is refused before the fetch ("not under an allowed root"), mirroring the
+  hydrate destination check.
+- `max_dimension` selects the variant the same way the Windows Cloud Files
+  provider picks thumbnails (`windows_cf/thumbnail_provider.rs`): ≤96 px
+  `small`, ≤256 px `medium`, else `large`. The Swift side clamps its request
+  to 1024 px (2x scale on the requested size, rounded up).
+- Failure semantics: any daemon-side failure (unreachable server, 404,
+  decrypt error) surfaces as one `Error` frame and the extension reports a
+  per-thumbnail error to the system. "This item has no thumbnail" is NOT
+  signalled over the socket — the extension filters folders and
+  non-image/non-video content types locally and reports `(nil, nil)`
+  (honest "no thumbnail") without calling the daemon.
+- No `contentVersion` bump: thumbnails do not change item content, and the
+  system keys its thumbnail cache on `itemVersion.contentVersion`.
+
 ## Version skew (app update in progress)
 
 | Extension | Daemon | Behaviour |
@@ -369,6 +424,7 @@ response variant went with it.
 | new | old (before 1684) | The old daemon's `serde` ignores the unknown `request_id` field, so the request works and is simply not deduplicated (the pre-1684 behaviour). |
 | new | old (before 1697) | The old daemon answers `ListChanges` with `unknown variant` — an `Error` reply the replica surfaces as `finishEnumeratingWithError`, and `currentSyncAnchor` falls back to the persisted App Group copy. The old daemon ignores the new payload fields (`created_at`, `modified_at`, `child_item_count`, `content_version`, `metadata_version`), so listings work with no dates/counts. |
 | new | old (before 1698) | The old daemon ignores the `pinned` field (`#[serde(default)]`). It has no trash-container arm: a `ListFileProviderItems` for the trash container falls through to the real-folder branch (empty), `Trashing` rows still enumerate at the root (pre-1698 shape), and `QueueFinderDelete` for an unknown id queues a doomed op. The extension treats an unknown trash container as an empty listing — honest degradation, no crash. |
+| new | old (before 1699) | The old daemon replies `unknown variant` to `FetchThumbnail`; the extension surfaces a per-thumbnail error and Finder falls back to generic icons. Browsing, hydrate and writes are unaffected. The old extension never sends `FetchThumbnail` and never sent the now-retired `SetFileStatus`/`RecordOpenedFile`/`EnforceSmartCache`, so a new daemon plus old extension is a no-change pair for 1699. |
 | old | new | The old extension writes its request with no delimiter and does not close: `FrameReader` accepts a buffer that is already one complete JSON value. It requests no progress, so it gets one reply, now `{"Ok":{}}\n` (which its parser accepts). It sends no `request_id`, so its write-queue requests take the pre-1684 path. |
 
 ## Tests
@@ -378,9 +434,11 @@ response variant went with it.
 | Rust framing units | `ipc_frame.rs` `mod tests` | `cargo test` counts |
 | Rust socket end-to-end (>64 KiB reply, split request, several requests per connection, unframed legacy request, oversize, bad line, `Ok` shape) | `src/ipc_socket_framing_tests.rs` | `cargo test` counts |
 | Change feed over the real socket (anchor, paging/resume tokens, deletes with parents, reparents, ride-along item payloads) | `src/ipc_socket_framing_tests.rs` (`list_changes_*`) | `cargo test` counts |
+| Retired RPCs refused on the wire + connection survives; thumbnail destination containment (wire + unit), variant buckets, atomic persist, daemon failure leaves no dest file | `src/ipc_socket_framing_tests.rs` (`retired_rpcs_are_refused_...`, `thumbnail_*`, `persist_thumbnail_plaintext_*`, `fetch_thumbnail_*`) | `cargo test` counts |
 | Hydrate progress + cancellation | `engine_bridge.rs` tests `ipc_hydrate_*` | `cargo test` counts |
 | Swift framing + exchange over a real `socketpair` | `BeebeebFileProviderTests/main.swift` via `scripts/test-ipc-framing.sh` (macOS CI job "File Provider Swift (macOS)") | `ipc-framing: N passed, 0 failed`, N asserted |
 | Swift key derivation (same inputs same key, any input differs, pinned vectors), request shape (`request_id` on BOTH create and modify, absent without contents) and file fingerprint | same file (10 tests of the 35) | same |
+| Swift badge mapping (status→decoration identifier, one badge per item, unknown status → none), thumbnail variant/max-dimension/eligibility helpers, `FetchThumbnail` request shape + reply decoding, thumbnail timeout constant, `pendingItemsDidChange` completes | same file (`1699-D*`, `1699-T*`, `1699-P1`) | same |
 | Daemon table: concurrent same key runs once, repeat after completion, different keys, TTL expiry, key reused for another request shape, stale result, refreshed cache hit, `forget_where`, failed result not remembered, panicking leader, capacity | `ipc_write_dedup_tests.rs` | `cargo test` counts |
 | Daemon over the real socket, counting REAL queued operations in the state DB | `ipc_socket_framing_tests.rs` (`concurrent_creates_with_one_request_id_...`, `a_repeat_after_completion_...`, `different_request_ids_...`, `a_request_without_a_request_id_...`, `a_cached_create_is_not_returned_...`, `concurrent_modifies_...`, real-delete-then-recreate, trash op finished, trash op pending, `Trashing` row, refreshed reply). The two concurrency tests hold the state DB lock so the leader is parked and every request provably overlaps it; with a tiny source file they would otherwise finish serially and exercise the cached path instead of the in-flight wait | `cargo test` counts |
 | XPCBridge call sites still use the builder and pass the key inputs (XPCBridge is not compiled into the Swift harness) | `scripts/check-ipc-timeouts.py` (+ `--self-test`, 14 mutations) | `ipc-timeout guard: 3/3 call sites correct` |

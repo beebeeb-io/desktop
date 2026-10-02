@@ -68,6 +68,57 @@ xcrun swiftc -typecheck \
   BeebeebFileProvider/*.swift
 ```
 
+## Extension sources
+
+| File | Role |
+| --- | --- |
+| `FileProviderExtension.swift` | `NSFileProviderReplicatedExtension` + `NSFileProviderThumbnailing` (task 1699), enumerator, item/change/pending-item callbacks, trash routing, hydrate staging. |
+| `FileProviderItem.swift` | `BeebeebProviderItem` wire model (Codable) + `FileProviderItem` system item, incl. `NSFileProviderItemDecorating` badge mapping (task 1699). |
+| `XPCBridge.swift` | Typed daemon IPC client (enumerate, item, hydrate, write queue, changes, anchor, thumbnails), error mapping to `NSFileProviderErrorDomain`. |
+| `IPCFraming.swift` | Line-delimited JSON framing, timeouts, cancellation, write-request builder (checked by `scripts/check-ipc-timeouts.py`). |
+| `WorkingSetStore.swift` | App-Group persistence for sync anchors, materialized containers, change filtering. |
+| `Info.plist` | Extension declaration, pipeline depths, `NSFileProviderDecorations` + badge UTI declarations, domain usage string. |
+| `Resources/badge-*.png` | Badge icons referenced by `UTImportedTypeDeclarations`; generated deterministically by `scripts/gen-badge-pngs.py` and copied into `Contents/Resources` by the build script. |
+
+Behavioural changes to this target land RED-first through the headless harness
+(`BeebeebFileProviderTests/main.swift`, run by `scripts/test-ipc-framing.sh`;
+the pass count is enforced by `EXPECTED_TESTS` in that script).
+
+## Sync badges and thumbnails (task 1699)
+
+- Sync badges: macOS renders at most the FIRST badge per item in the `Badge`
+  category, so `FileProviderItem` maps each sync status to exactly one
+  decoration, priority error > conflict > trashing > uploading > downloading.
+  Identifiers (`io.beebeeb.app.decoration.*`) and badge UTIs
+  (`io.beebeeb.app.badge.*`) are declared in `Info.plist`.
+- Thumbnails: the extension stages decrypted plaintext via the daemon
+  `FetchThumbnail` RPC into the App-Group hydrate cache, reads it back, and
+  deletes the staging file (wire contract: `docs/IPC_PROTOCOL.md`). Thumbnails
+  never bump `contentVersion` — the system keys its thumbnail cache on it.
+- `NSExtensionFileProviderAppliesChangesAtomically` is deliberately NOT
+  declared; the rationale is a comment in `Info.plist`.
+
+## BeebeebFileProviderCtl
+
+`BeebeebFileProviderCtl` is our own manual diagnostic tool (source:
+`BeebeebFileProviderTools/DomainControlTool.swift`, built to
+`src-tauri/target/fileprovider/BeebeebFileProviderCtl`). It is NOT used by the
+app or the extension; it exists for humans debugging domain state. It is
+unrelated to Apple's system `/usr/bin/fileproviderctl`.
+
+Verbs (default `status`):
+
+| Verb | Effect | Exit codes |
+| --- | --- | --- |
+| `status` | Print `installed` or `missing` for domain `io.beebeeb.app.domain` ("Drive"). | 0 always (informational); 1 on FileProvider error |
+| `install` | `NSFileProviderManager.add` for the domain. | 0 installed; 1 error |
+| `remove` | `NSFileProviderManager.remove` for the domain. | 0 removed; 1 error |
+| `signal-root` | `signalEnumerator(.rootContainer)` for the installed domain. | 0 signaled; 1 not installed or error |
+
+Unknown verbs exit 2. `scripts/qa-fileprovider.sh` wraps the SYSTEM
+`fileproviderctl` (dump/diagnose/evaluate) plus `pluginkit` for a health
+report; this ctl is the domain-level counterpart.
+
 If this later moves to a full Xcode target, keep the same contract:
 
 - extension point: `com.apple.fileprovider-nonui`;
@@ -88,6 +139,12 @@ attach sandbox/app-group entitlements to the launched provider process.
 
 Finder registration must be called by the containing app, not manually from
 the extension process:
+
+> Task 1697 note: the `BeebeebFileProviderDomain` helper (DomainRegistration.swift)
+> was retired. The same operations are available today via `BeebeebFileProviderCtl`
+> (see above) — `install`, `remove`, `signal-root` — driven by the containing app
+> or by hand during development. The Swift snippets below are the historical
+> in-app flow.
 
 ```swift
 BeebeebFileProviderDomain.install { error in
