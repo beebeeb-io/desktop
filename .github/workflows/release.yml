@@ -250,20 +250,22 @@ jobs:
 
       # Windows Authenticode signing (task 1617): Azure Artifact Signing,
       # certificate profile beebeeb-publictrust, publisher CN=Initlabs B.V.
-      # azure/login provides the identifier env vars (AZURE_CLIENT_ID /
-      # AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID); the signing credential itself
-      # is the scoped AZURE_CLIENT_SECRET consumed by the dlib's
-      # EnvironmentCredential (see sign-artifact.ps1 and task 1617 for why
-      # OIDC-only auth was measured unworkable). Dispatch this workflow from
-      # main.
-      - name: Azure login for Artifact Signing (OIDC)
-        if: runner.os == 'Windows'
-        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
+      # Auth is the ambient az login (AzureCliCredential inside the dlib's
+      # DefaultAzureCredential). TIMING CONSTRAINT (measured, runs 5-7):
+      # azure/login's OIDC client assertion is valid ~5 minutes and the az
+      # CLI exchanges it once for an access token it caches ~1h — so the
+      # login step sits AFTER the cargo pre-build step below and the first
+      # sign call happens ~2 minutes after login (tauri build then only
+      # rebuilds the frontend and bundles). Compiling cargo BETWEEN login
+      # and sign fails with AADSTS700024 (assertion expired at first
+      # exchange). Dispatch this workflow from main.
+      #
+      # The expensive part of tauri build is the cargo compile (~12 min) —
+      # run it BEFORE the login step so the pre-build is a warm cache and
+      # tauri build's own cargo invocation is a no-op. Both this step and
+      # the pre-build must stay AFTER every config-mutating step above
+      # (version + signCommand injection) so build.rs sees the final inputs
+      # and nothing triggers a recompile between here and the sign.
       - name: Enable Azure Artifact Signing (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -284,6 +286,25 @@ jobs:
           grep -F 'sign-artifact.ps1' src-tauri/tauri.conf.json
           echo "BEEBEEB_REQUIRE_SIGNING=1" >> "$GITHUB_ENV"
 
+      - name: Pre-build cargo artifacts (Windows, before az login)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Through the Tauri CLI (not raw cargo) so the build.rs inputs
+          # (TAURI_CONFIG env etc.) match tauri-action's invocation exactly
+          # and its cargo run is a no-op; --no-bundle skips packaging (and
+          # therefore signing - the az login has not happened yet).
+          bun run tauri build --no-bundle --target x86_64-pc-windows-msvc -- --locked
+
+      - name: Azure login for Artifact Signing (OIDC)
+        if: runner.os == 'Windows'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Validate release config
         if: runner.os == 'macOS'
         run: bash scripts/macos-release-preflight.sh
@@ -301,13 +322,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           MACOS_APP_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_APP_PROVISION_PROFILE_BASE64 }}
           MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64 }}
-          # Windows Authenticode uses a scoped client secret (app
-          # beebeeb-desktop-release, role = Artifact Signing Certificate Profile
-          # Signer on the beebeebsigning account only). OIDC-only was measured
-          # unworkable here (assertion expiry vs compile time; task 1617).
+          # Windows Authenticode is NOT certificate-based and needs no signing secret:
+          # the ambient az login (set up two steps above, close to sign time)
+          # drives the Artifact Signing dlib. See the timing-constraint comment
+          # above.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
           tauriScript: bun run tauri
           # -v: the bundler hides the custom sign command's output otherwise
