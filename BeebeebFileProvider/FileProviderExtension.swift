@@ -422,8 +422,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             // Task 1698: the trash container is a SYSTEM container — creating
             // inside it is not a server operation (an "undelete" would be a
             // reparent back OUT, never a create). Refuse honestly.
+            // PR #100 review (Codex P2): a deliberate policy refusal —
+            // definitive (daemonRejected), not a transient unavailability.
             if itemTemplate.parentItemIdentifier == .trashContainer {
-                throw BeebeebIPCError.invalidResponse(
+                throw BeebeebIPCError.daemonRejected(
                     "Beebeeb cannot create items inside the Trash."
                 )
             }

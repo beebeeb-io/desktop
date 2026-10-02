@@ -4,6 +4,16 @@ import Foundation
 enum BeebeebIPCError: LocalizedError {
     case daemonUnavailable
     case invalidResponse(String)
+    /// PR #100 review (Codex P2): the daemon (or this extension's own policy)
+    /// actively REFUSED the request — the reply carried an explicit rejection
+    /// ("Beebeeb cannot create items inside the Trash.", a permission/
+    /// write-policy denial, ...). Definitive: restarting or unlocking the
+    /// daemon cannot make the request valid, so it must NEVER ride the
+    /// transient `serverUnreachable` class (Finder would retry forever and
+    /// report an unrelated availability error). Daemon-side retryable
+    /// conditions retry inside the daemon's own operation queue, so a
+    /// definitive classification here does not strand transfers.
+    case daemonRejected(String)
     case invalidIdentifier
     /// The daemon accepted the connection but sent nothing for `seconds`
     /// (task 1670 issue 3: previously a stall looked like "not valid JSON").
@@ -16,6 +26,8 @@ enum BeebeebIPCError: LocalizedError {
         case .daemonUnavailable:
             return "Open Beebeeb and unlock your vault."
         case .invalidResponse(let message):
+            return message
+        case .daemonRejected(let message):
             return message
         case .invalidIdentifier:
             return "This item's identifier could not be used for a Finder operation."
@@ -65,6 +77,11 @@ extension BeebeebIPCError: CustomNSError {
             // malformed identifier can never succeed on retry, so transient
             // classification would only churn the system.
             return NSFileProviderError.cannotSynchronize.rawValue
+        case .daemonRejected:
+            // PR #100 review (Codex P2): a deliberate refusal (trash-create
+            // guard, permission/write-policy denial) — definitive, with the
+            // daemon's own message as the user-facing text.
+            return NSFileProviderError.cannotSynchronize.rawValue
         case .timedOut:
             // The daemon is there but not answering: same category as it
             // being unreachable.
@@ -81,7 +98,7 @@ extension BeebeebIPCError: CustomNSError {
         switch self {
         case .daemonUnavailable, .invalidResponse, .timedOut:
             return true
-        case .invalidIdentifier, .cancelled:
+        case .daemonRejected, .invalidIdentifier, .cancelled:
             return false
         }
     }
@@ -289,7 +306,7 @@ final class XPCBridge {
         ])
 
         if let error = response["Error"] as? [String: Any] {
-            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "daemon returned an error")
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "daemon returned an error")
         }
         guard let payload = response["FileProviderItems"] as? [String: Any],
               let rawItems = payload["items"] as? [[String: Any]] else {
@@ -317,7 +334,7 @@ final class XPCBridge {
         ])
 
         if let error = response["Error"] as? [String: Any] {
-            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "item lookup failed")
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "item lookup failed")
         }
         guard let payload = response["FileStatus"] as? [String: Any],
               let item = Self.decodeItem(payload) else {
@@ -354,7 +371,7 @@ final class XPCBridge {
             onProgress: onProgress
         )
         if let error = response["Error"] as? [String: Any] {
-            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "hydration failed")
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "hydration failed")
         }
     }
 
@@ -473,7 +490,7 @@ final class XPCBridge {
         }
         let response = try sendRequest(["ListChanges": payload])
         if let error = response["Error"] as? [String: Any] {
-            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "change enumeration failed")
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "change enumeration failed")
         }
         return Self.decodeChanges(response)
     }
@@ -504,7 +521,7 @@ final class XPCBridge {
     func syncAnchor() throws -> String? {
         let response = try sendRequest(["GetSyncAnchor": [String: Any]()])
         if let error = response["Error"] as? [String: Any] {
-            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "anchor lookup failed")
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "anchor lookup failed")
         }
         guard let payload = response["FileProviderSyncAnchor"] as? [String: Any] else {
             throw BeebeebIPCError.invalidResponse("daemon response did not include FileProviderSyncAnchor")
@@ -563,7 +580,7 @@ final class XPCBridge {
 
     private func decodeWriteResponse(_ response: [String: Any]) throws -> WriteQueueResult {
         if let error = response["Error"] as? [String: Any] {
-            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "Finder write failed")
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "Finder write failed")
         }
         guard let payload = response["WriteQueued"] as? [String: Any] else {
             throw BeebeebIPCError.invalidResponse("daemon response did not include WriteQueued")

@@ -2491,15 +2491,14 @@ impl EngineBridge {
                 // Task 1698: a Trashing row keeps its marker (viewing a file
                 // from the macOS Trash view must not un-trash it in the
                 // replica); everything else completes as `Local`.
-                let pre_hydrate_status = self
-                    .db
-                    .get_file(file_id)
-                    .ok()
-                    .flatten()
-                    .map(|entry| entry.status)
-                    .unwrap_or(FileStatus::Local);
+                // PR #100 review (Codex P1): the pre-hydrate status is the
+                // row's status BEFORE the flip to `Downloading` — re-reading
+                // the DB here always saw `Downloading`, so a Trashing row
+                // completed as `Local` and reparented itself out of the trash
+                // view. `DownloadingStatusGuard::arm` captured exactly that
+                // pre-flip status when it armed above — reuse it.
                 self.db
-                    .set_status(file_id, hydrate_final_status(pre_hydrate_status))?;
+                    .set_status(file_id, hydrate_final_status(downloading_guard.restore.clone()))?;
                 let downloaded_bytes = self.transfers.get(file_id).map(|t| t.total).unwrap_or(0);
                 transfer.finish();
                 self.record_transfer_done(crate::transfer_progress::Direction::Down, file_id, downloaded_bytes);
@@ -5645,7 +5644,20 @@ fn apply_sync_op(
         // recorded. This is the convergence path that replaced prune_absent's
         // 0802 sweep (flipped by task 1698).
         "file_trash" => match bridge.db().get_file(id)? {
-            Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {}
+            Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {
+                // PR #100 review (Codex P1): the root may already be parked
+                // `Trashing` by the LOCAL trash flow — `queue_finder_delete`
+                // parks ONLY the folder row, its descendants stay unmarked
+                // until this server echo arrives. This echo IS that arrival:
+                // mark the still-unmarked subtree (mark_subtree_trashing
+                // no-ops the parked root and every already-Trashing row, so
+                // no duplicate change rows) — otherwise prune_absent's
+                // immediate-parent protection cannot cover grandchildren and
+                // they drop out of the trash view.
+                let marked = bridge.db().mark_subtree_trashing(id)?;
+                remove_pruned_placeholders(sync_root, &marked);
+                applied.extend(marked.iter().map(|row| row.file_id.clone()));
+            }
             Some(_) => {
                 // Mark the subtree Trashing (the trash view), remove the
                 // on-disk placeholders exactly as the delete path did (the
@@ -5711,8 +5723,15 @@ fn apply_sync_op(
             if let Some(row) = bridge.db().get_file(id)?
                 && row.status == crate::state_db::FileStatus::Trashing
             {
-                bridge.db().set_status(id, FileStatus::CloudOnly)?;
-                applied.push(id.to_string());
+                // PR #100 review (Codex P1): the restore must take the ENTIRE
+                // held subtree out of the trash view, not just the root row —
+                // the authoritative re-snapshot preserves `Trashing` rows by
+                // design, so it can never repair the descendants (they would
+                // linger in the Trash view; direct children even become
+                // top-level trash entries after the parent leaves).
+                let flipped = bridge.db().untrash_subtree(id)?;
+                remove_pruned_placeholders(sync_root, &flipped);
+                applied.extend(flipped.iter().map(|r| r.file_id.clone()));
             }
             bridge.db().request_resnapshot()?;
             tracing::info!(

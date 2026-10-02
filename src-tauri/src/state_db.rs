@@ -1222,6 +1222,99 @@ impl StateDb {
         Ok(marked)
     }
 
+    /// PR #100 review (Codex P1): the trash view's inverse of
+    /// [`Self::mark_subtree_trashing`] — a restored FOLDER must take its
+    /// whole held subtree out of the trash view, not just the root row (the
+    /// authoritative re-snapshot preserves `Trashing` rows by design, so it
+    /// can never repair the descendants). Flips every `Trashing` row in the
+    /// subtree (the row itself plus, for a folder, every descendant matched
+    /// by PATH PREFIX — same shape as `mark_subtree_trashing`) to `CloudOnly`,
+    /// records a `Modified` change per actual flip, and returns the flipped
+    /// rows deepest-first (children before parent). Rows not in `Trashing`
+    /// are left untouched; a no-op flip records no change row. Same subtree
+    /// matching contract as `mark_subtree_trashing` (children always stored
+    /// leading-slash-free, the folder possibly leading-slash-first, task
+    /// 0806), and the same caller contract: the caller removes on-disk
+    /// placeholders and reports the returned ids for the working-set signal.
+    pub fn untrash_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+
+        let root: Option<PrunedRow> = {
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut rows = stmt.query(params![file_id])?;
+            if let Some(row) = rows.next()? {
+                Some(PrunedRow {
+                    file_id: row.get(0)?,
+                    path: row.get(1)?,
+                    is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                })
+            } else {
+                None
+            }
+        };
+        let Some(root) = root else {
+            tx.rollback()?;
+            return Ok(Vec::new());
+        };
+
+        let mut flipped: Vec<PrunedRow> = Vec::new();
+        let mut flip = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
+            // Flip only Trashing rows: the restore must not touch live rows
+            // that happen to sit in the subtree (e.g. a child the local
+            // flow never parked), and a no-op must not mint a change row.
+            let status: String = tx
+                .query_row(
+                    "SELECT status FROM files WHERE file_id = ?1",
+                    params![row.file_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+            if status != FileStatus::Trashing.as_str() {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE files SET status = ?1 WHERE file_id = ?2",
+                params![FileStatus::CloudOnly.as_str(), row.file_id],
+            )?;
+            record_file_change_conn(&tx, &row.file_id, FpChangeKind::Modified, None)?;
+            Ok(true)
+        };
+
+        if root.is_dir {
+            let root_path = root.path.trim_matches('/').to_string();
+            if !root_path.is_empty() {
+                let descendants: Vec<PrunedRow> = {
+                    let mut dstmt = tx.prepare(
+                        "SELECT file_id, path, item_kind FROM files
+                         WHERE namespace = 'my_files'
+                           AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                         ORDER BY length(path) DESC, path DESC",
+                    )?;
+                    let drows = dstmt.query_map(params![root_path], |r| {
+                        Ok(PrunedRow {
+                            file_id: r.get(0)?,
+                            path: r.get(1)?,
+                            is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                        })
+                    })?;
+                    drows.collect::<Result<Vec<_>>>()?
+                };
+                for d in descendants {
+                    if flip(&tx, &d)? {
+                        flipped.push(d);
+                    }
+                }
+            }
+        }
+        if flip(&tx, &root)? {
+            flipped.push(root);
+        }
+        tx.commit()?;
+        Ok(flipped)
+    }
+
     pub fn delete_file_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {        let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
@@ -3148,6 +3241,10 @@ impl StateDb {
         rows.collect()
     }
 
+    /// Register hydrated content as cached and stamp the row `local` — EXCEPT
+    /// statuses that mean something else right now (`uploading`, `conflict`,
+    /// `error`, and since the trash ruling `trashing`: a row opened from the
+    /// macOS Trash view keeps its marker even after its content lands).
     pub fn mark_cached(&self, file_id: &str, cache_path: &str, cache_bytes: i64, opened_at: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
@@ -3156,7 +3253,7 @@ impl StateDb {
                  cache_bytes = ?3,
                  last_opened_at = ?4,
                  status = CASE
-                    WHEN status IN ('uploading', 'conflict', 'error') THEN status
+                    WHEN status IN ('uploading', 'conflict', 'error', 'trashing') THEN status
                     ELSE 'local'
                  END
              WHERE file_id = ?1",
