@@ -1593,6 +1593,12 @@ fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[Stri
             tracing::warn!(reason, error = %e, "signaling the File Provider working set failed (best-effort)");
         }
     }
+    // Best-effort log hygiene: the replica can only have consumed changes
+    // from the last ~week (it polls on every signal), so anything older is
+    // safe to drop. NEVER touches fp_sync_anchor (the replica's cursor).
+    if let Err(e) = db.sweep_file_changes(now_secs() - 7 * 24 * 3600) {
+        tracing::debug!(error = %e, "change-log sweep failed (best-effort)");
+    }
 }
 
 /// Non-macOS stub: Windows CFAPI refreshes placeholders natively and Linux
