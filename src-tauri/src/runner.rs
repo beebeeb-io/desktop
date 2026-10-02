@@ -43,8 +43,8 @@ use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
 use crate::engine_status::{Activity, StatusTracker, compute_activity, tick_outcome};
 use crate::engine_bridge::{
-    ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick,
-    sync_tick_outcome, SyncTickOutcome,
+    ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error,
+    sync_tick_outcome,
 };
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};

@@ -5625,7 +5625,7 @@ mod tests {
     // failing (no fp_changes table, no API) before the implementation.
     // ------------------------------------------------------------------
 
-    use super::{FileChange, FpChangeKind};
+    use super::FpChangeKind;
 
     fn change_entry() -> FileEntry {
         FileEntry {
