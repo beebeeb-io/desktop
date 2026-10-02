@@ -1,18 +1,18 @@
 # macOS Settings dialogs — design ruling (task 1683 slice-4 follow-up)
 
-**Status:** ruling — pending Guus’s review
-**Date:** 2 Oct 2026
+**Status:** ruling — approved by Guus (“Approve + do red/danger follow-up”); follow-ups shipped in PR #104
+**Date:** 2 Oct 2026 · amended 3 Oct 2026 (follow-ups shipped — see the amendment note at the end)
 **Design source:** `design/hifi/macos-settings-dialogs.html`
 **Context:** decision file `.claude/tasks/decisions/1683-s4-undrawn-and-unbacked.md`, question 1: the three Settings dialogs built in slice 4 follow the existing `Modal` styling — acceptable as-is, or do they need their own dialog treatment before slice 6 flips the window on?
 
 ## Verdict (question 1)
 
-**All three dialogs are acceptable as built.** The shared `Modal` (title, close button, body, footer, Esc/backdrop dismiss, focus trap) is the right anatomy for a Settings window; no bespoke dialog treatment is needed. No app code changes are required for slice 6 to turn the window on. One treatment follow-up is recommended and queued for a later slice:
+**All three dialogs are acceptable as built.** The shared `Modal` (title, close button, body, footer, Esc/backdrop dismiss, focus trap) is the right anatomy for a Settings window; no bespoke dialog treatment is needed. No app code changes are required for slice 6 to turn the window on. The recommended follow-ups shipped on 2 Oct 2026 as PR #104:
 
-1. **Sign out confirm button should be destructive red**, not amber-primary (details in “Destructive-action treatment” below). One-line change: a `danger` prop on `ConfirmSheet`.
-2. **Enter should trigger the confirm action** in the two confirmation dialogs (not built today). Queued with it.
+1. **Sign out confirm button is destructive red**, not amber-primary (details in “Destructive-action treatment” below). Shipped: a `danger` prop on `ConfirmSheet` + the `ms-btn--danger` variant with the fixed ink `--red-ink` (paper on red measures ≈3.9:1 in light theme, below the 4.5:1 requirement; `--red-ink` measures 5.10:1 light / 6.13:1 dark, matching `design.css`’s fixed-ink contract).
+2. **Enter triggers the focused confirm action** in the two confirmation dialogs (shipped: the Return handler lives on the confirm button itself; Enter on open lands on the close button, so a stray Return cancels — it can never confirm).
 
-If no further work is wanted, record the outcome as **“approved as built”** with the Sign-out follow-up noted.
+The hifi file reflects the shipped state.
 
 ## Visual language
 
@@ -21,9 +21,9 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
 ## Dialog 1 — Choose folders (Sync tab)
 
 - **Purpose:** pick which synced folders stay fully on this Mac instead of downloading on open.
-- **Trigger:** Sync tab row **Keep on this Mac** → button **Choose folders…** (disabled when nothing is uploaded yet — `keep.kind === 'unreported'` — or there are no folders).
+- **Trigger:** Sync tab row **Keep on this Mac** → button **Choose folders…** (disabled when nothing is uploaded yet — `keep.kind === 'unreported'` — or there are no folders; the `unreported` state shows the hint “Not available in this version yet.”, no count label, and the disabled chooser — count and enabled chooser belong to the `ready` state only).
 - **Copy (exact, built):**
-  - Row: “Keep on this Mac”, count label “3 of 12” (example), button “Choose folders…”
+  - Row: “Keep on this Mac”, count label “3 folders” (example, `ready` state), button “Choose folders…”
   - Dialog title: “Keep on this Mac”
   - Body: “Folders you choose stay on this Mac. Everything else downloads when you open it.”
   - Rows: folder name, optional `where` path hint, a switch per folder.
@@ -36,7 +36,7 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
 ## Dialog 2 — Repair Beebeeb in Finder (Sync tab)
 
 - **Purpose:** confirm before `reset_macos_integration` removes Beebeeb’s Finder location and turns off Open-at-login.
-- **Trigger:** Sync tab, Finder row with `kind === 'added'` → button **Repair…** (busy label **Repairing…** while running).
+- **Trigger:** Sync tab, Finder row with `kind === 'added'` → button **Repair…** (busy label **Repairing…** while running). After a failed run the trigger is enabled again — `runRepair` returns the phase to `idle` before setting `repairFailed`, so the busy label is only visible while the run is in flight.
 - **Copy (exact, built):**
   - Title: “Repair Beebeeb in Finder?”
   - Body: “Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. **You can add it back afterwards.**”
@@ -44,7 +44,7 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
   - Failure note (inline in the Sync pane): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”
 - **Actions:** primary confirm **Repair**; **Cancel** dismisses. Dismiss-on-confirm already: the dialog closes when Repair runs; the busy state lives on the trigger button.
 - **Destructive-action treatment:** **amber-primary, deliberately.** Repair is reversible — the body says you can add it back — so it is a caution, not a destruction. Red is reserved for irreversible actions. Keep as built.
-- **Keyboard:** Esc cancels (built). Enter should trigger Repair once Enter handling is added; focus starts on the close button, which keeps a stray Return harmless until then.
+- **Keyboard:** Esc cancels (built). Enter triggers the focused Repair confirm (built, PR #104 — handler on the confirm button; Enter on open lands on the close button, so a stray Return cancels).
 - **Modal mapping:** `ConfirmSheet` (Modal 400, footer Cancel + primary confirm). Nothing changes.
 
 ## Dialog 3 — Sign out of this Mac (Account tab)
@@ -57,20 +57,20 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
   - Buttons: “Cancel” / “Sign out”
   - Failure toast: “Couldn’t sign out”
 - **Actions:** confirm **Sign out**; **Cancel** dismisses. Failure is a toast (transient), consistent with the popover spec ruling.
-- **Destructive-action treatment:** **the one recommended change.** Signing out stops sync on this Mac — a destructive consequence. The confirm button should render as `ms-btn--danger` (red fill `--red`, paper text) instead of amber-primary, so its weight matches Repair’s caution level being exceeded: Repair is reversible and amber; Sign out is not offered as reversible and should be red. Because confirmations keep the safe action first, order stays Cancel → Sign out; the red fill is the guard, and Enter (once wired) must land on **Cancel**, not the red button, on open.
-- **Keyboard:** Esc cancels (built). Enter should trigger the confirm only when the person tabs to it — never on open. Initial focus on the close button (built) satisfies this until Enter handling lands.
-- **Modal mapping:** `ConfirmSheet` (Modal 400). **Queued change:** add `danger?: boolean` to `ConfirmSheet`; when set, the confirm button gets `ms-btn--danger`. In `MacSettings.tsx` pass `danger` on the Sign-out sheet. Nothing else changes.
+- **Destructive-action treatment:** **the shipped change (PR #104).** Signing out stops sync on this Mac — a destructive consequence. The confirm button renders as `ms-btn--danger` (red fill `--red`, fixed ink `--red-ink` — paper text fails 4.5:1 on red) instead of amber-primary, so its weight matches Repair’s caution level being exceeded: Repair is reversible and amber; Sign out is not offered as reversible and is red. Because confirmations keep the safe action first, order stays Cancel → Sign out; the red fill is the guard, and Enter (built, PR #104) resolves to **Cancel** on open — the handler lives on the confirm button, not the dialog.
+- **Keyboard:** Esc cancels (built). Enter triggers the confirm only when the confirm button is focused — never on open (built, PR #104: handler on the confirm button; initial focus on the close button).
+- **Modal mapping:** `ConfirmSheet` (Modal 400). **Shipped (PR #104):** `danger?: boolean` on `ConfirmSheet`; when set, the confirm button gets `ms-btn--danger` (`--red-ink` text). `MacSettings.tsx` passes `danger` on the Sign-out sheet. Nothing else changes.
 
 ## Keyboard rules (summary)
 
 | Key | Confirmations (Repair, Sign out) | Choose folders |
 | --- | --- | --- |
 | Esc | Cancel — dismiss, no action (built) | Close (built) |
-| Enter | Trigger confirm (queued; not built) | No-op |
+| Enter | Trigger the focused confirm (built, PR #104) | No-op |
 | Tab | Focus trap as built; initial focus = close button | Same |
 
-Destructive-Enter rule: on open, Enter must resolve to **Cancel** (or nothing), never the red confirm. Initial focus on the close button satisfies this today; preserve it when Enter handling is added.
+Destructive-Enter rule: on open, Enter must resolve to **Cancel** (or nothing), never the red confirm. As built (PR #104) the Return handler lives on the confirm button itself and initial focus is the close button, so both halves hold at once.
 
 ## What this pass does not change
 
-No `src/`, `src-tauri/` or test files are touched. The queued follow-ups (Sign-out `danger` prop, Enter handling) are recorded here and in the hifi file for a future app slice.
+No `src/`, `src-tauri/` or test files are touched. The follow-ups recorded here (Sign-out `danger` prop, Enter handling) shipped as PR #104; this document and the hifi file were amended on 3 Oct 2026 to reflect the shipped state (danger ink = fixed `--red-ink`; focused-Enter contract; reachable Repair post-failure and `unreported` states).

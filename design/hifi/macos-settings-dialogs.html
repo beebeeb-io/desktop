@@ -9,7 +9,7 @@
   --ink:oklch(0.18 0.01 70);--ink-2:oklch(0.34 0.012 75);--ink-3:oklch(0.52 0.01 78);--ink-4:oklch(0.68 0.008 80);
   --amber:oklch(0.82 0.17 84);--amber-deep:oklch(0.66 0.15 72);--amber-soft:oklch(0.94 0.06 90);--amber-bg:oklch(0.97 0.03 92);
   --amber-ink:oklch(0.18 0.01 70);
-  --red:oklch(0.62 0.21 25);--err-bg:oklch(0.965 0.025 25);--err-line:oklch(0.86 0.06 25);
+  --red:oklch(0.62 0.21 25);--red-ink:oklch(0.14 0.01 25);--err-bg:oklch(0.965 0.025 25);--err-line:oklch(0.86 0.06 25);
   --ok-bg:oklch(0.965 0.03 155);--ok-line:oklch(0.86 0.07 155);--ok-icon:oklch(0.56 0.14 155);
   --shadow-3:0 4px 10px rgba(24,20,10,0.06),0 24px 48px -12px rgba(24,20,10,0.12);
   --win-scrim:rgba(24,20,10,0.38);
@@ -105,7 +105,7 @@ figcaption b{font-weight:600}
 .ms-btn:hover:not(:disabled){background:var(--paper-2)}
 .ms-btn--primary{border-color:var(--amber);background:var(--amber);color:var(--amber-ink)}
 .ms-btn--primary:hover:not(:disabled){background:var(--amber);filter:brightness(.96)}
-.ms-btn--danger{border-color:var(--red);background:var(--red);color:var(--paper)}
+.ms-btn--danger{border-color:var(--red);background:var(--red);color:var(--red-ink)}
 .ms-btn--danger:hover:not(:disabled){background:var(--red);filter:brightness(1.08)}
 .ms-btn:disabled{opacity:.55;cursor:default}
 .ms-btn--lg{height:30px;padding:0 14px;font-size:12px}
@@ -159,7 +159,7 @@ figcaption b{font-weight:600}
 <header>
   <span class="eyebrow">Task 1683 · slice-4 follow-up · design for review · 2 Oct 2026</span>
   <h1>The three Settings dialogs, drawn</h1>
-  <p class="lede">Choose folders, Repair and Sign out were built in slice 4 on the shared <code>Modal</code> and never drawn. This page renders them exactly as built, in the Settings-window visual language, and marks the one treatment worth changing: the <strong>Sign out</strong> confirm button should be destructive red, not amber.</p>
+  <p class="lede">Choose folders, Repair and Sign out were built in slice 4 on the shared <code>Modal</code> and never drawn. This page renders them exactly as built, in the Settings-window visual language, and reflects the shipped state: the <strong>Sign out</strong> confirm button is destructive red (<code>ms-btn--danger</code>, PR #104), and Return triggers the focused confirm button.</p>
   <blockquote>These dialogs follow existing Modal styling — do we accept that, or want their own dialog treatment before slice 6 flips the window on?<cite>Decision file question 1 · 1683-s4-undrawn-and-unbacked</cite></blockquote>
 </header>
 
@@ -173,14 +173,14 @@ figcaption b{font-weight:600}
       <p class="rec"><span class="tag">Approved as built</span>Confirmation with Cancel/Repair is right. Repair is recoverable (you can add Beebeeb back), so amber-primary for the confirm button is defensible and stays.</p>
       <p class="alt">Copy stays exactly as written. Failure feedback already goes inline in the pane, per the toast-vs-inline ruling.</p></li>
     <li class="q" id="q3"><div class="q-head"><span class="q-n">3</span><h3>Sign out</h3></div>
-      <p class="rec"><span class="tag red">Follow-up</span>Approve as built for slice 6, with one change queued: the confirm button should be destructive red (<code>ms-btn--danger</code>), not amber-primary. Signing out stops sync on this Mac — that is a destructive action and deserves the red treatment.</p>
-      <p class="alt">Copy stays as built. This is a one-line app change (add a <code>danger</code> variant to <code>ConfirmSheet</code>), not a redesign.</p></li>
+      <p class="rec"><span class="tag red">Shipped</span>Approve as built, with the queued change now shipped: the confirm button is destructive red (<code>ms-btn--danger</code>, fixed ink <code>--red-ink</code> — paper on red fails 4.5:1), not amber-primary. Signing out stops sync on this Mac — that is a destructive action and deserves the red treatment.</p>
+      <p class="alt">Copy stays as built. The change shipped as PR #104 (danger variant on <code>ConfirmSheet</code> + <code>--red-ink</code> token), not a redesign.</p></li>
   </ol>
 </section>
 
 <section aria-labelledby="s-signout">
   <div><h2 id="s-signout">1 · Sign out — confirmation</h2>
-  <p class="sub">Opened from the Account tab row <em>“Sign out of this Mac”</em> by the <strong>Sign out…</strong> button. Drawn twice: the recommended destructive treatment, and today’s built amber treatment for comparison. Both use the same copy.</p></div>
+  <p class="sub">Opened from the Account tab row <em>“Sign out of this Mac”</em> by the <strong>Sign out…</strong> button. Drawn twice: the shipped destructive treatment (PR #104), and the pre-#104 amber treatment kept for comparison. Both use the same copy.</p></div>
   <div class="grid2">
     <figure class="shot">
       <div class="stage">
@@ -190,7 +190,7 @@ figcaption b{font-weight:600}
           <div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--danger">Sign out</button></div>
         </div>
       </div>
-      <figcaption><b>Recommended</b><span>Confirm button in destructive red. Scrim shown behind, as in the window.</span></figcaption>
+      <figcaption><b>Shipped (PR #104)</b><span>Confirm button in destructive red with the fixed ink <code>--red-ink</code> (paper on red fails 4.5:1). Scrim shown behind, as in the window.</span></figcaption>
     </figure>
     <figure class="shot">
       <div class="stage">
@@ -200,7 +200,7 @@ figcaption b{font-weight:600}
           <div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--primary">Sign out</button></div>
         </div>
       </div>
-      <figcaption><b>As built today</b><span>Amber-primary confirm. Acceptable short-term; swap to red when the <code>ConfirmSheet</code> gains a <code>danger</code> prop.</span></figcaption>
+      <figcaption><b>Pre-#104 amber (comparison only)</b><span>Amber-primary confirm — superseded on 2 Oct 2026 when <code>ConfirmSheet</code> gained the <code>danger</code> prop (PR #104). Kept here for comparison.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -229,11 +229,11 @@ figcaption b{font-weight:600}
           </div>
           <div class="ms-card">
             <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Finder</span><span class="ms-row-hint">Added by hand — Repair fixes this</span></span>
-              <span class="ms-row-control"><button type="button" class="ms-btn" disabled>Repairing…</button></span></div>
+              <span class="ms-row-control"><button type="button" class="ms-btn">Repair</button></span></div>
           </div>
         </div>
       </div>
-      <figcaption><b>After a failed repair</b><span>Inline note in the Sync pane (not a toast — blocking result), trigger button busy. All as built.</span></figcaption>
+      <figcaption><b>After a failed repair</b><span>Inline note in the Sync pane (not a toast — blocking result). As built, the trigger is enabled again: <code>runRepair</code> returns the phase to idle before the failure note appears, so the busy <em>Repairing…</em> label is only visible while the run is in flight.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -271,13 +271,13 @@ figcaption b{font-weight:600}
             <div>
               <div class="group-title">SYNC</div>
               <div class="ms-card">
-                <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Keep on this Mac</span><span class="ms-row-hint">Folders you pin never download on demand</span></span>
-                  <span class="ms-row-control"><span class="ms-count">3 of 12</span><button type="button" class="ms-btn" disabled>Choose folders…</button></span></div>
+                <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Keep on this Mac</span><span class="ms-row-hint">Not available in this version yet.</span></span>
+                  <span class="ms-row-control"><button type="button" class="ms-btn" disabled>Choose folders…</button></span></div>
               </div>
             </div>
           </div>
         </div>
-        <figcaption><b>Disabled trigger</b><span>The button is disabled when nothing is uploaded yet (<code>unreported</code>) — opacity .55, no tooltip in the built version.</span></figcaption>
+        <figcaption><b>Disabled trigger</b><span>As built, <code>unreported</code> (the server hasn't reported pin support) shows the hint <em>Not available in this version yet.</em>, no count label, and the disabled chooser — opacity .55, no tooltip. A ready state shows the count (<em>3 folders</em>) and enables the chooser; the two never combine.</span></figcaption>
       </figure>
       <figure class="shot">
         <div class="stage stage--plain">
@@ -295,11 +295,11 @@ figcaption b{font-weight:600}
     <thead><tr><th scope="col">Key</th><th scope="col">Confirmations (Repair, Sign out)</th><th scope="col">Choose folders</th></tr></thead>
     <tbody>
       <tr><th scope="row"><span class="kbd">Esc</span></th><td>Cancel — dismiss, no action (built).</td><td>Close (built).</td></tr>
-      <tr><th scope="row"><span class="kbd">Enter</span> / <span class="kbd">Return</span></th><td>Trigger the confirm button when focus is anywhere in the dialog — <strong>not built yet</strong>; recommended follow-up. Never fires on Choose folders.</td><td>No-op on the sheet itself. <span class="kbd">Space</span> toggles the focused switch; a failed save closes nothing.</td></tr>
+      <tr><th scope="row"><span class="kbd">Enter</span> / <span class="kbd">Return</span></th><td>The focused confirm button triggers itself on Return — <strong>built</strong> (handler lives on the confirm button only, PR #104). Enter on open lands on the close button, so a stray Return cancels — it can never confirm. Never fires on Choose folders.</td><td>No-op on the sheet itself. <span class="kbd">Space</span> toggles the focused switch; a failed save closes nothing.</td></tr>
       <tr><th scope="row"><span class="kbd">Tab</span></th><td colspan="2">Focus trap as built (header close → body controls → footer buttons). Initial focus: the close button, unless a caller passes <code>initialFocusRef</code>.</td></tr>
     </tbody>
   </table></div>
-  <p class="sub">On a destructive confirm, <span class="kbd">Enter</span> must land on <em>Cancel</em>, not the red button, when the dialog opens — a stray Return must not sign a person out. The focused control is the close button today, which satisfies this; keep it when Enter handling lands.</p>
+  <p class="sub">On a destructive confirm, <span class="kbd">Enter</span> must land on <em>Cancel</em>, not the red button, when the dialog opens — a stray Return must not sign a person out. As built (PR #104) the Return handler lives on the confirm button itself and initial focus is the close button, so both halves hold at once.</p>
 </section>
 
 <section aria-labelledby="s-modal">
