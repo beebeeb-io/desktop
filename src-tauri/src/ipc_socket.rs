@@ -1460,6 +1460,27 @@ fn file_provider_change_payloads(
                     .get_file(&change.file_id)
                     .ok()
                     .flatten()
+                    .filter(|entry| {
+                        // Task 1701 + Codex P1 (PR #99 review): shared content
+                        // is webapp-only by ruling
+                        // (.claude/tasks/decisions/finder-sidebar-single-root.md).
+                        // A live `SharedWithMe` row has a nil contract parent,
+                        // so its ride-along payload would fall back to
+                        // FP_ROOT_APPLE; the Swift materialized filter treats a
+                        // root parent as always materialized (and fails open
+                        // while the set is unknown), which would surface shared
+                        // files directly beneath "Beebeeb". Report the change
+                        // row with NO item — the Swift enumerator skips
+                        // payload-less rows, identical to a row that vanished.
+                        db.get_file_contract_state(&entry.file_id)
+                            .ok()
+                            .flatten()
+                            .map(|contract| {
+                                contract.namespace
+                                    != crate::state_db::Namespace::SharedWithMe
+                            })
+                            .unwrap_or(true)
+                    })
                     .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
             },
             file_id: change.file_id,
@@ -1888,6 +1909,54 @@ mod tests {
         assert_eq!(
             item.parent_identifier, FP_ROOT_APPLE,
             "the change feed must present a top-level item as a child of the ROOT container — the Swift materialized-set filter keys off this parent"
+        );
+    }
+
+    #[test]
+    fn test_1701_change_feed_excludes_live_shared_with_me_rows_from_payloads() {
+        // Codex P1 (PR #99 review): a shared root's contract is `SharedWithMe`
+        // with a nil parent (engine_bridge shared-root ingestion), so the
+        // change feed's FP_ROOT_APPLE fallback would parent its didUpdate
+        // payload onto the ROOT container. The Swift materialized-set filter
+        // treats a root parent as always materialized — and fails OPEN while
+        // the set is unknown — so a shared file would surface directly beneath
+        // "Beebeeb", breaking the 1701 ruling (shared content is webapp-only:
+        // .claude/tasks/decisions/finder-sidebar-single-root.md). Live shared
+        // rows must therefore ride the change feed with NO item payload (the
+        // Swift enumerator skips payload-less rows, exactly like a row that
+        // vanished); the change row itself still reports and advances the
+        // anchor.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_shared_root(&db, "shared-live", "Shared with me/Docs", PERMISSION_READ);
+        db.record_file_change("shared-live", crate::state_db::FpChangeKind::Modified, None)
+            .unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "mine-live".into(),
+            path: "/mine.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.record_file_change("mine-live", crate::state_db::FpChangeKind::Modified, None)
+            .unwrap();
+
+        let (changes, _) = db.list_file_changes_paged(None, 100).unwrap().unwrap();
+        let payloads = file_provider_change_payloads(&db, changes);
+        let shared = payloads.iter().find(|p| p.file_id == "shared-live").unwrap();
+        assert!(
+            shared.item.is_none(),
+            "a live SharedWithMe row must not carry an item payload — its FP_ROOT_APPLE fallback would surface it beneath the root"
+        );
+        let mine = payloads.iter().find(|p| p.file_id == "mine-live").unwrap();
+        assert!(
+            mine.item.is_some(),
+            "a live MyFiles row keeps its ride-along payload"
         );
     }
 
