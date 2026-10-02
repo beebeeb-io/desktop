@@ -346,6 +346,47 @@ fn anchor_bytes(seq: i64) -> Vec<u8> {
     seq.to_string().into_bytes()
 }
 
+/// Append one change to `fp_changes` and advance the persistent anchor
+/// cursor, on an existing connection (the public [`StateDb::record_file_change`]
+/// and the mutating row operations below share this).
+fn record_file_change_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    file_id: &str,
+    kind: FpChangeKind,
+    old_parent_id: Option<String>,
+) -> Result<()> {
+    // The NEW parent is whatever the row says NOW. `parent_id` lives in the
+    // files column (written by set_file_contract_state).
+    let new_parent_id: Option<String> = conn
+        .query_row(
+            "SELECT parent_id FROM files WHERE file_id = ?1",
+            params![file_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        // Deleted rows no longer exist: the change must still carry the
+        // parent it was deleted FROM (the materialized-set filter reads it),
+        // which the caller passes as old_parent_id.
+        .or_else(|| old_parent_id.clone());
+    conn.execute(
+        "INSERT INTO fp_changes (seq, file_id, kind, old_parent_id, new_parent_id, recorded_at)
+         VALUES (0, ?1, ?2, ?3, ?4, 0)",
+        params![file_id, kind.as_str(), old_parent_id, new_parent_id],
+    )?;
+    let seq = conn.last_insert_rowid();
+    conn.execute("UPDATE fp_changes SET seq = ?1 WHERE id = ?1", params![seq])?;
+    // The anchor cursor tracks the log tip even before any consumer reads:
+    // `list_file_changes` never rewinds it, so a poll that races a write
+    // cannot lose changes.
+    conn.execute(
+        "INSERT INTO fp_sync_anchor (domain_id, last_anchor) VALUES ('__default__', ?1)
+         ON CONFLICT(domain_id) DO UPDATE SET last_anchor = MAX(last_anchor, excluded.last_anchor)",
+        params![seq],
+    )?;
+    Ok(())
+}
+
 /// A row removed by [`StateDb::prune_absent`] (task 0806). Carries the minimum
 /// needed to locate and delete the row's on-disk Cloud Files placeholder on
 /// Windows: the `file_id` (for logging / dedupe), the server-relative `path`
@@ -891,6 +932,28 @@ impl StateDb {
     /// the entire row except the primary key.
     pub fn upsert_file(&self, e: &FileEntry) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        // Task 1697: capture the OLD row before the upsert so the change log
+        // can (a) tell created from modified, (b) skip no-op re-upserts — the
+        // metadata sweeps re-upsert every row every tick, and recording every
+        // one would advance the anchor with no real change — and (c) carry
+        // the old parent for reparent detection.
+        let old: Option<(String, String, i64, i64, i64, Option<String>)> = conn
+            .query_row(
+                "SELECT path, status, size_bytes, modified_at, remote_updated_at, parent_id
+                 FROM files WHERE file_id = ?1",
+                params![e.file_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
         conn.execute(
             "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -909,6 +972,33 @@ impl StateDb {
                 e.remote_updated_at
             ],
         )?;
+        let changed = match &old {
+            None => true,
+            Some((path, status, size, modified_at, remote_updated_at, _)) => {
+                path != &e.path
+                    || status != e.status.as_str()
+                    || *size != e.size_bytes
+                    || *modified_at != e.modified_at
+                    || *remote_updated_at != e.remote_updated_at
+            }
+        };
+        if changed {
+            // A path change is a rename OR a move; Reparented carries the old
+            // parent so the materialized-set filter can test old-OR-new
+            // (Apple's Replicated contract). Created/Modified need no old
+            // parent.
+            let (kind, old_parent): (FpChangeKind, Option<String>) = match &old {
+                None => (FpChangeKind::Created, None),
+                Some((old_path, _, _, _, _, old_parent)) => {
+                    if old_path != &e.path {
+                        (FpChangeKind::Reparented, old_parent.clone())
+                    } else {
+                        (FpChangeKind::Modified, None)
+                    }
+                }
+            };
+            record_file_change_conn(&conn, &e.file_id, kind, old_parent)?;
+        }
         Ok(())
     }
 
@@ -995,7 +1085,18 @@ impl StateDb {
 
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        // Task 1697: capture the parent BEFORE the delete — the change row is
+        // what tells the replica's materialized filter where the item was.
+        let old_parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_id FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
         conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+        record_file_change_conn(&conn, file_id, FpChangeKind::Deleted, old_parent)?;
         Ok(())
     }
 
@@ -1038,6 +1139,20 @@ impl StateDb {
         };
 
         let mut removed: Vec<PrunedRow> = Vec::new();
+        // Task 1697: capture each removed row's parent BEFORE its delete —
+        // the change log must tell the replica's materialized filter where
+        // each deleted item lived. (parent_id read per row inside the tx.)
+        let old_parent_of = |tx: &rusqlite::Transaction, file_id: &str| -> Option<String> {
+            tx.query_row(
+                "SELECT parent_id FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+        };
         if root.is_dir {
             // Normalize BOTH ends (`trim_matches`), matching `placeholder_path_under`
             // / `safe_join_under_root`: a folder row can be stored leading-slash-
@@ -1065,13 +1180,17 @@ impl StateDb {
                     drows.collect::<Result<Vec<_>>>()?
                 };
                 for d in descendants {
+                    let old_parent = old_parent_of(&tx, &d.file_id);
                     tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
+                    record_file_change_conn(&tx, &d.file_id, FpChangeKind::Deleted, old_parent)?;
                     removed.push(d);
                 }
             }
         }
 
+        let root_old_parent = old_parent_of(&tx, &root.file_id);
         tx.execute("DELETE FROM files WHERE file_id = ?1", params![root.file_id])?;
+        record_file_change_conn(&tx, &root.file_id, FpChangeKind::Deleted, root_old_parent)?;
         removed.push(root);
         tx.commit()?;
         Ok(removed)
@@ -1578,14 +1697,36 @@ impl StateDb {
                     };
                     for d in descendants {
                         if removed_ids.insert(d.file_id.clone()) {
+                            let old_parent = tx
+                                .query_row(
+                                    "SELECT parent_id FROM files WHERE file_id = ?1",
+                                    params![d.file_id],
+                                    |row| row.get::<_, Option<String>>(0),
+                                )
+                                .optional()
+                                .ok()
+                                .flatten()
+                                .flatten();
                             tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
+                            record_file_change_conn(&tx, &d.file_id, FpChangeKind::Deleted, old_parent)?;
                             pruned.push(d);
                         }
                     }
                 }
             }
 
+            let old_parent = tx
+                .query_row(
+                    "SELECT parent_id FROM files WHERE file_id = ?1",
+                    params![row.file_id],
+                    |row2| row2.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .flatten();
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![row.file_id])?;
+            record_file_change_conn(&tx, &row.file_id, FpChangeKind::Deleted, old_parent)?;
             pruned.push(row);
         }
         tx.commit()?;
@@ -1597,10 +1738,23 @@ impl StateDb {
     /// when they want create-or-update semantics.
     pub fn set_status(&self, file_id: &str, status: FileStatus) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        // Task 1697: a status flip changes the item's metadata (isUploaded
+        // gating etc.) — record it so the replica's metadata version moves.
+        // A no-op flip records nothing (compare first).
+        let old_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         conn.execute(
             "UPDATE files SET status = ?1 WHERE file_id = ?2",
             params![status.as_str(), file_id],
         )?;
+        if old_status.as_deref() != Some(status.as_str()) {
+            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
+        }
         Ok(())
     }
 
@@ -1695,6 +1849,10 @@ impl StateDb {
             "UPDATE files SET size_bytes = ?1 WHERE file_id = ?2",
             params![size_bytes.max(0), file_id],
         )?;
+        // Task 1697: a size change moves the metadata version — record it.
+        if updated > 0 {
+            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
+        }
         Ok(updated)
     }
 
@@ -1796,6 +1954,26 @@ impl StateDb {
 
     pub fn set_file_contract_state(&self, state: &FileContractState) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        // Task 1697: the contract write is what moves an item BETWEEN
+        // containers (parent change) — record a reparent with the old parent
+        // so the materialized filter can test old-or-new. Other contract
+        // metadata changes (kind, current_version, content_type) record a
+        // plain modified. A no-op write records nothing.
+        let old: Option<(Option<String>, String, String, i64)> = conn
+            .query_row(
+                "SELECT parent_id, item_kind, content_type, current_version
+                 FROM files WHERE file_id = ?1",
+                params![state.file_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
         conn.execute(
             "UPDATE files SET
                namespace = ?2,
@@ -1837,6 +2015,17 @@ impl StateDb {
                 state.owner_email,
             ],
         )?;
+        if let Some((old_parent, old_kind, old_content_type, old_version)) = old {
+            let parent_changed = old_parent != state.parent_id;
+            let metadata_changed = old_kind != state.item_kind.as_str()
+                || old_content_type != state.content_type.clone().unwrap_or_default()
+                || old_version != state.current_version;
+            if parent_changed {
+                record_file_change_conn(&conn, &state.file_id, FpChangeKind::Reparented, old_parent)?;
+            } else if metadata_changed {
+                record_file_change_conn(&conn, &state.file_id, FpChangeKind::Modified, None)?;
+            }
+        }
         Ok(())
     }
 
@@ -1894,41 +2083,7 @@ impl StateDb {
     /// BEFORE `delete_file` — see `delete_file_for_fp`).
     pub fn record_file_change(&self, file_id: &str, kind: FpChangeKind, old_parent_id: Option<String>) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let tx = conn.unchecked_transaction()?;
-        // The NEW parent is whatever the row says NOW. `parent_id` lives in the
-        // files column (written by set_file_contract_state); for rows with no
-        // contract yet, fall back to the path-derived container the caller
-        // knows about — for the daemon's own writes the caller passes
-        // old_parent_id and the row is already correct.
-        let new_parent_id: Option<String> = tx
-            .query_row(
-                "SELECT parent_id FROM files WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten()
-            // Deleted rows no longer exist: the change must still carry the
-            // parent it was deleted FROM (the materialized-set filter reads
-            // it), which the caller passes as old_parent_id.
-            .or_else(|| old_parent_id.clone());
-        tx.execute(
-            "INSERT INTO fp_changes (seq, file_id, kind, old_parent_id, new_parent_id, recorded_at)
-             VALUES (0, ?1, ?2, ?3, ?4, 0)",
-            params![file_id, kind.as_str(), old_parent_id, new_parent_id],
-        )?;
-        let seq = tx.last_insert_rowid();
-        tx.execute("UPDATE fp_changes SET seq = ?1 WHERE id = ?1", params![seq])?;
-        // The anchor cursor tracks the log tip even before any consumer reads:
-        // `list_file_changes` never rewinds it, so a poll that races a write
-        // cannot lose changes.
-        tx.execute(
-            "INSERT INTO fp_sync_anchor (domain_id, last_anchor) VALUES ('__default__', ?1)
-             ON CONFLICT(domain_id) DO UPDATE SET last_anchor = MAX(last_anchor, excluded.last_anchor)",
-            params![seq],
-        )?;
-        tx.commit()?;
-        Ok(())
+        record_file_change_conn(&conn, file_id, kind, old_parent_id)
     }
 
     /// Changes after `since_anchor`, ALL of them, with the anchor to persist
@@ -5566,18 +5721,22 @@ mod tests {
         seed_child(&db, "old-parent", "/docs", ItemKind::Folder);
         seed_child(&db, "new-parent", "/archive", ItemKind::Folder);
         db.record_file_change("child-1", FpChangeKind::Created, None).unwrap();
-        // The move itself re-parents the row (what a real reparent does)…
+        // The move itself re-parents the row (what a real reparent does) —
+        // `set_file_contract_state` records the Reparented change itself now.
         db.set_file_contract_state(&FileContractState {
             parent_id: Some("new-parent".into()),
             ..db.get_file_contract_state("child-1").unwrap().unwrap()
         })
         .unwrap();
-        // …then the change is recorded.
-        db.record_file_change("child-1", FpChangeKind::Reparented, Some("old-parent".into())).unwrap();        let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
+        let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
         let reparent = changes
             .iter()
-            .find(|change| change.file_id == "child-1" && change.kind == FpChangeKind::Reparented)
-            .expect("the reparented change must come back");
+            .find(|change| {
+                change.file_id == "child-1"
+                    && change.kind == FpChangeKind::Reparented
+                    && change.old_parent_id.as_deref() == Some("old-parent")
+            })
+            .expect("the real reparent (old parent = old-parent) must come back");
         assert_eq!(reparent.old_parent_id.as_deref(), Some("old-parent"), "old parent for materialized-set filtering");
         assert_eq!(reparent.new_parent_id.as_deref(), Some("new-parent"), "new parent read from the files row at record time");
     }
@@ -5604,9 +5763,22 @@ mod tests {
     #[test]
     fn change_log_paging_returns_every_change_exactly_once() {
         let db = StateDb::open(":memory:").unwrap();
+        // Raw upserts only: each one records its own Created change (the
+        // wired behavior). No contracts — parent/contract writes would add
+        // their own changes and shift the page math.
         for i in 0..250 {
-            seed_child(&db, &format!("f-{i}"), &format!("/f-{i}"), ItemKind::File);
-            db.record_file_change(&format!("f-{i}"), FpChangeKind::Created, None).unwrap();
+            db.upsert_file(&FileEntry {
+                file_id: format!("f-{i}"),
+                path: format!("/f-{i}"),
+                status: FileStatus::Local,
+                size_bytes: 5,
+                modified_at: 1,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
         }
         let mut seen = std::collections::HashSet::new();
         let mut pages = 0;

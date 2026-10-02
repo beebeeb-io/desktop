@@ -827,10 +827,9 @@ fn list_changes_request(since_anchor: Option<&str>) -> Vec<u8> {
 }
 
 async fn seed_two_changes(fx: &IpcFixture) {
+    // The upserts record their own Created changes now (task 1697 wiring).
     fx.db.upsert_file(&fp_item("fp-a", "/a.txt", ItemKind::File)).unwrap();
     fx.db.upsert_file(&fp_item("fp-b", "/b.txt", ItemKind::File)).unwrap();
-    fx.db.record_file_change("fp-a", crate::state_db::FpChangeKind::Created, None).unwrap();
-    fx.db.record_file_change("fp-b", crate::state_db::FpChangeKind::Created, None).unwrap();
 }
 
 #[test]
@@ -873,7 +872,6 @@ fn list_changes_pages_with_resume_tokens_without_losing_or_repeating() {
         for i in 0..250 {
             let id = format!("fp-{i:03}");
             fx.db.upsert_file(&fp_item(&id, &format!("/{id}"), ItemKind::File)).unwrap();
-            fx.db.record_file_change(&id, crate::state_db::FpChangeKind::Created, None).unwrap();
         }
     });
     fx.rt.block_on(async {
@@ -916,11 +914,35 @@ fn list_changes_reports_deletes_with_the_old_parent() {
     let fx = IpcFixture::start(|_| {});
     fx.rt.block_on(async {
         fx.db.upsert_file(&fp_item("fp-gone", "/gone.txt", ItemKind::File)).unwrap();
-        fx.db.record_file_change("fp-gone", crate::state_db::FpChangeKind::Created, None).unwrap();
+        // delete_file records the Deleted change itself, capturing the row's
+        // parent BEFORE the delete (task 1697 wiring). Put the row under
+        // parent-9 first so the change carries it.
+        fx.db.set_file_contract_state(&crate::state_db::FileContractState {
+            file_id: "fp-gone".into(),
+            parent_id: Some("parent-9".into()),
+            ..crate::state_db::FileContractState {
+                file_id: String::new(),
+                namespace: crate::state_db::Namespace::MyFiles,
+                parent_id: None,
+                shared_root_id: None,
+                share_id: None,
+                owner_email: None,
+                permission_bits: 0,
+                item_kind: ItemKind::File,
+                content_type: None,
+                current_version: 0,
+                current_object_version_id: None,
+                local_base_version: 0,
+                local_hash: None,
+                cache_path: None,
+                cache_bytes: 0,
+                pin_state: crate::state_db::PinState::Inherit,
+                inherited_pin_state: crate::state_db::PinState::Unpinned,
+                last_sync_at: 0,
+            }
+        })
+        .unwrap();
         fx.db.delete_file("fp-gone").unwrap();
-        fx.db
-            .record_file_change("fp-gone", crate::state_db::FpChangeKind::Deleted, Some("parent-9".into()))
-            .unwrap();
         let reply = send_one(&fx, list_changes_request(None)).await;
         let changes = reply["FileProviderChanges"]["changes"].as_array().unwrap();
         let deletion = changes.iter().find(|c| c["kind"] == "deleted").expect("the delete");
@@ -951,5 +973,31 @@ fn an_unparsable_anchor_gets_an_error_not_a_crash() {
     fx.rt.block_on(async {
         let reply = send_one(&fx, list_changes_request(Some("garbage-anchor"))).await;
         assert!(reply.get("Error").is_some(), "an expired/garbage anchor is an error: {reply}");
+    });
+}
+
+#[test]
+fn list_changes_ride_along_full_item_payloads_for_updates() {
+    // The replica's didUpdateItems needs the FULL item; a second GetFileStatus
+    // round-trip per change would triple the polling cost. The change payload
+    // carries it for created/modified/reparented rows while the row still
+    // exists, and nothing for deletions (or for rows that vanished between
+    // the change and the poll — the Swift enumerator skips those).
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        fx.db.upsert_file(&fp_item("fp-ride", "/ride.txt", ItemKind::File)).unwrap();
+        fx.db.upsert_file(&fp_item("fp-live", "/live.txt", ItemKind::File)).unwrap();
+        fx.db.delete_file("fp-ride").unwrap();
+        let reply = send_one(&fx, list_changes_request(None)).await;
+        let changes = reply["FileProviderChanges"]["changes"].as_array().unwrap();
+        let updated = changes.iter().find(|c| c["kind"] == "created" && c["file_id"] == "fp-live").expect("the live created change");
+        let item = updated["item"].as_object().expect("created rows carry the full item payload");
+        assert_eq!(item["identifier"], "fp-live");
+        assert_eq!(item["status"], "local");
+        // A created change whose row has since been deleted rides no item.
+        let vanished = changes.iter().find(|c| c["kind"] == "created" && c["file_id"] == "fp-ride").expect("the vanished created change");
+        assert!(vanished["item"].is_null(), "a row gone since the change yields no item");
+        let deleted = changes.iter().find(|c| c["kind"] == "deleted").expect("the deleted change");
+        assert!(deleted["item"].is_null(), "deletions carry no item payload");
     });
 }

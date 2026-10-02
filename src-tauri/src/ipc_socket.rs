@@ -198,6 +198,11 @@ pub struct FileProviderChangePayload {
     pub old_parent_id: Option<String>,
     #[serde(default)]
     pub new_parent_id: Option<String>,
+    /// The FULL item payload for created/modified/reparented rows (absent for
+    /// deletions) so the replica's `didUpdateItems` needs no second
+    /// round-trip. `#[serde(default)]` keeps the decoder tolerant.
+    #[serde(default)]
+    pub item: Option<FileProviderItemPayload>,
 }
 
 const FP_ROOT: &str = "__fp_root__";
@@ -1123,6 +1128,22 @@ async fn handle_connection(
                         changes: changes
                             .into_iter()
                             .map(|change| FileProviderChangePayload {
+                                item: match change.kind {
+                                    // Deleted rows are gone; the replica only
+                                    // needs the identifier. For every other
+                                    // kind the FULL item payload rides along
+                                    // so `didUpdateItems` needs no second
+                                    // round-trip. A row that vanished since
+                                    // the change was recorded yields no item
+                                    // (the Swift enumerator skips it; its
+                                    // later `deleted` row reports the exit).
+                                    crate::state_db::FpChangeKind::Deleted => None,
+                                    _ => db
+                                        .get_file(&change.file_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|entry| file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES)),
+                                },
                                 file_id: change.file_id,
                                 kind: change.kind.as_str().to_string(),
                                 old_parent_id: change.old_parent_id,

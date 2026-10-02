@@ -1167,7 +1167,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
-                        signal_file_provider_working_set("shared_roots_changed", &outcome.removed_shared_file_ids);
+                        signal_file_provider_working_set(&db, "shared_roots_changed", &outcome.removed_shared_file_ids);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -1199,7 +1199,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
                             Ok(outcome) => {
                                 let completed = outcome.completed_op_ids.len() as u32;
-                                signal_file_provider_working_set("operations_applied", &outcome.invalidated_item_ids);
+                                signal_file_provider_working_set(&db, "operations_applied", &outcome.invalidated_item_ids);
                                 if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
                                     tracing::info!(
                                         paused = outcome.paused_op_ids.len(),
@@ -1530,6 +1530,37 @@ async fn run_known_folder_mirror(sync_root: &Path) {
     }
 }
 
+/// Pure decision core for the materialized-set signal filter (task 1697,
+/// audit P0 item 4): a batch is worth a working-set signal when at least one
+/// changed item's old-or-new parent is in the materialized set, or when the
+/// materialized set is unknown/empty — Apple's documented fallback ("if the
+/// extension doesn't keep track of the materialized set… the working set is
+/// the entire dataset"), which fails OPEN so changes can never be lost to a
+/// missing filter.
+///
+/// `changed_parent_ids`: the parent folder id of each changed item (None =
+/// unknown — vault-root items, deletions whose row is already gone). The
+/// namespace roots and the real root are always materialized (they are
+/// presented without ever entering the system's materialized-set
+/// enumeration), so `None` parents always signal.
+pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], materialized: &[String]) -> bool {
+    if materialized.is_empty() {
+        return !changed_parent_ids.is_empty();
+    }
+    let materialized: std::collections::HashSet<&str> =
+        materialized.iter().map(String::as_str).collect();
+    changed_parent_ids.iter().any(|parent| match parent {
+        None => true,
+        Some(parent_id) => {
+            parent_id.starts_with("namespace:")
+                || parent_id == "__fp_root__"
+                || parent_id == "NSFileProviderRootContainerItemIdentifier"
+                || parent_id == "rootContainer"
+                || materialized.contains(parent_id.as_str())
+        }
+    })
+}
+
 /// Task 1697: the daemon's ONLY replica-refresh channel. Under
 /// `NSFileProviderReplicatedExtension` the system honors signals for the
 /// WORKING SET alone (`.rootContainer` is ignored by design); the extension's
@@ -1538,8 +1569,20 @@ async fn run_known_folder_mirror(sync_root: &Path) {
 /// with a real signal through the ObjC FFI bridge. macOS-only and
 /// best-effort: a failed signal is logged and never fails the tick.
 #[cfg(target_os = "macos")]
-fn signal_file_provider_working_set(reason: &str, item_ids: &[String]) {
+fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) {
     if !crate::macos_file_provider::should_signal_working_set(item_ids) {
+        return;
+    }
+    // Audit P0 item 4: filter the signal to changes whose old-or-new parent
+    // is materialized (the set the extension publishes via ReportMaterialized).
+    // Fail-open on empty/unknown (see working_set_signal_needed).
+    let parents: Vec<Option<String>> = item_ids
+        .iter()
+        .map(|id| db.get_file(id).ok().flatten().map(|entry| entry.parent_id).flatten())
+        .collect();
+    let materialized = db.materialized_containers().unwrap_or_default();
+    if !working_set_signal_needed(&parents, &materialized) {
+        tracing::debug!(reason, items = item_ids.len(), "no materialized parent changed; skipping the working-set signal");
         return;
     }
     match crate::macos_file_provider::signal_working_set() {
@@ -1555,8 +1598,8 @@ fn signal_file_provider_working_set(reason: &str, item_ids: &[String]) {
 /// Non-macOS stub: Windows CFAPI refreshes placeholders natively and Linux
 /// FUSE is an unmounted prototype.
 #[cfg(not(target_os = "macos"))]
-fn signal_file_provider_working_set(reason: &str, item_ids: &[String]) {
-    let _ = (reason, item_ids);
+fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) {
+    let _ = (db, reason, item_ids);
 }
 
 fn now_secs() -> i64 {
@@ -1888,6 +1931,47 @@ mod tests {
         // change that bypasses the gate fails here too.
         assert!(crate::macos_file_provider::should_signal_working_set(&["f-1".to_string()]));
         assert!(!crate::macos_file_provider::should_signal_working_set(&[]));
+    }
+
+    // Task 1697 audit P0 item 4: working-set signals filtered to changes
+    // whose old-or-new parent is materialized. RED-first: written against the
+    // unmodified working-set signal path and seen failing (the pure fn did
+    // not exist) before it landed.
+
+    #[test]
+    fn working_set_signal_filter_skips_batches_with_no_materialized_parent() {
+        assert!(
+            !working_set_signal_needed(&[Some("folder-9".into()), Some("folder-8".into())], &["folder-1".into()]),
+            "no changed parent is materialized: no signal"
+        );
+        assert!(
+            working_set_signal_needed(&[Some("folder-1".into())], &["folder-1".into()]),
+            "a materialized parent changed: signal"
+        );
+        assert!(
+            working_set_signal_needed(&[Some("folder-9".into()), Some("folder-1".into())], &["folder-1".into()]),
+            "ANY changed parent materialized: signal"
+        );
+    }
+
+    #[test]
+    fn working_set_signal_filter_fails_open_when_the_set_is_unknown() {
+        assert!(
+            working_set_signal_needed(&[Some("folder-9".into())], &[]),
+            "an untracked materialized set = the whole dataset (fail open)"
+        );
+        assert!(
+            !working_set_signal_needed(&[], &[]),
+            "an empty batch never signals"
+        );
+    }
+
+    #[test]
+    fn working_set_signal_filter_always_signals_namespace_and_unknown_parents() {
+        let materialized = vec!["folder-1".to_string()];
+        assert!(working_set_signal_needed(&[Some("namespace:my_files".into())], &materialized));
+        assert!(working_set_signal_needed(&[Some("NSFileProviderRootContainerItemIdentifier".into())], &materialized));
+        assert!(working_set_signal_needed(&[None], &materialized), "unknown parent (a deletion whose row is gone) fails open");
     }
 
     #[test]
