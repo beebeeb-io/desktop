@@ -244,6 +244,7 @@ pub fn decode_os_state(attrs: u32, current_status: FileStatus) -> (Option<FileSt
 #[derive(Debug, Clone, PartialEq)]
 pub enum OperationKind {
     HydrateFile,
+
     PinTree,
     UploadVersion,
     UploadFile,
@@ -285,6 +286,64 @@ impl OperationKind {
             _ => OperationKind::UploadFile,
         }
     }
+}
+
+/// Task 1697: what changed about an item, for the File Provider change log.
+/// `Reparented` exists because the materialized-set filter (Apple's contract,
+/// `NSFileProviderReplicatedExtension.h`) tests "old OR new parent is
+/// materialized" for a MOVE — a plain `Modified` row cannot carry the old
+/// parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FpChangeKind {
+    Created,
+    Modified,
+    Deleted,
+    Reparented,
+}
+
+impl FpChangeKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            FpChangeKind::Created => "created",
+            FpChangeKind::Modified => "modified",
+            FpChangeKind::Deleted => "deleted",
+            FpChangeKind::Reparented => "reparented",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "created" => Some(FpChangeKind::Created),
+            "modified" => Some(FpChangeKind::Modified),
+            "deleted" => Some(FpChangeKind::Deleted),
+            "reparented" => Some(FpChangeKind::Reparented),
+            _ => None,
+        }
+    }
+}
+
+/// One change-log row returned by [`StateDb::list_file_changes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    /// Opaque, strictly-ascending change-log cursor (also what `seq` stores).
+    pub seq: i64,
+    pub file_id: String,
+    pub kind: FpChangeKind,
+    /// Parent BEFORE the change (recorded at record time; survives the row).
+    pub old_parent_id: Option<String>,
+    /// Parent AFTER the change — read from the `files` row at record time.
+    /// For a `Deleted` item this is the parent it was deleted FROM (the row is
+    /// already gone by the time the consumer reads the log). The Swift
+    /// enumerator maps this onto `parentItemIdentifier`.
+    pub new_parent_id: Option<String>,
+}
+
+/// The sync-anchor wire encoding for change-log sequence `seq`: decimal ASCII
+/// of the rowid. Strictly ascending by construction (`seq` is an AUTOINCREMENT
+/// rowid), lexicographically ordered while under 10 digits, and far inside
+/// Apple's 500-byte anchor budget.
+fn anchor_bytes(seq: i64) -> Vec<u8> {
+    seq.to_string().into_bytes()
 }
 
 /// A row removed by [`StateDb::prune_absent`] (task 0806). Carries the minimum
@@ -715,6 +774,37 @@ impl StateDb {
                 occurred_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_transfer_activity_recent ON transfer_activity(occurred_at DESC, id DESC);
+            -- Task 1697 (File Provider FPFS conformance): the daemon-side change
+            -- log the replica's enumerator pages through. `id` is the change
+            -- cursor: an AUTOINCREMENT rowid, so anchors are monotonic and
+            -- compact (<= 500 bytes as decimal ASCII). `seq` mirrors `id` so the
+            -- sweep can leave the anchor row while pruning consumed changes.
+            -- `old_parent_id`/`new_parent_id` drive the materialized-set filter
+            -- (old OR new parent materialized, per Apple's Replicated contract).
+            -- A change is never rewritten once appended; readers page by cursor.
+            CREATE TABLE IF NOT EXISTS fp_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seq INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                old_parent_id TEXT,
+                new_parent_id TEXT,
+                recorded_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fp_changes_seq ON fp_changes(seq);
+            -- The persistent, monotonic sync-anchor cursor the replica reads
+            -- back after process death (keyed per domain id; one domain today).
+            CREATE TABLE IF NOT EXISTS fp_sync_anchor (
+                domain_id TEXT PRIMARY KEY,
+                last_anchor INTEGER NOT NULL
+            );
+            -- The materialized container set: folders the SYSTEM reports as
+            -- materialized on disk (via the extension's App Group journal,
+            -- tracked here so the working-set filter can run daemon-side).
+            CREATE TABLE IF NOT EXISTS fp_materialized (
+                container_id TEXT PRIMARY KEY,
+                updated_at INTEGER NOT NULL
+            );
         ",
         )?;
         ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -746,6 +836,9 @@ impl StateDb {
         // Task 0811: additive backup-origin tag. Existing rows migrate to NULL
         // (untagged → treated as normal ops, never purged by a folder disable).
         ensure_column(&conn, "operation_queue", "backup_source_key", "TEXT")?;
+        // Task 1697: which local write created the row (watcher paths set this;
+        // Finder-queue paths do not) — the change-log recorder reads it.
+        ensure_column(&conn, "files", "creator_for_fp", "TEXT")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
@@ -1781,6 +1874,254 @@ impl StateDb {
         } else {
             Ok(None)
         }
+    }
+
+    // ── File Provider change log + sync anchor (task 1697) ────────────────────
+    //
+    // The replica's enumerator (`NSFileProviderReplicatedExtension`) needs a
+    // daemon-side change cursor to answer `enumerateChanges(for:from:)` and
+    // `currentSyncAnchor`. Every mutating row operation funnels through
+    // `record_file_change`, which appends to `fp_changes` and advances the
+    // persistent `fp_sync_anchor` cursor. Anchors are the change-log rowid:
+    // strictly ascending, compact (decimal ASCII ≤ 500 bytes for any realistic
+    // history), stable across a no-op poll, and durable across process death
+    // (they live in state.db, next to the log they point into).
+
+    /// Append one change to the log and advance the persistent anchor cursor.
+    /// `old_parent_id` is only meaningful for [`FpChangeKind::Reparented`] (and
+    /// informational elsewhere); the NEW parent is read from the current
+    /// `files` row when it exists (for `Deleted` it was captured by the caller
+    /// BEFORE `delete_file` — see `delete_file_for_fp`).
+    pub fn record_file_change(&self, file_id: &str, kind: FpChangeKind, old_parent_id: Option<String>) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        // The NEW parent is whatever the row says NOW. `parent_id` lives in the
+        // files column (written by set_file_contract_state); for rows with no
+        // contract yet, fall back to the path-derived container the caller
+        // knows about — for the daemon's own writes the caller passes
+        // old_parent_id and the row is already correct.
+        let new_parent_id: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            // Deleted rows no longer exist: the change must still carry the
+            // parent it was deleted FROM (the materialized-set filter reads
+            // it), which the caller passes as old_parent_id.
+            .or_else(|| old_parent_id.clone());
+        tx.execute(
+            "INSERT INTO fp_changes (seq, file_id, kind, old_parent_id, new_parent_id, recorded_at)
+             VALUES (0, ?1, ?2, ?3, ?4, 0)",
+            params![file_id, kind.as_str(), old_parent_id, new_parent_id],
+        )?;
+        let seq = tx.last_insert_rowid();
+        tx.execute("UPDATE fp_changes SET seq = ?1 WHERE id = ?1", params![seq])?;
+        // The anchor cursor tracks the log tip even before any consumer reads:
+        // `list_file_changes` never rewinds it, so a poll that races a write
+        // cannot lose changes.
+        tx.execute(
+            "INSERT INTO fp_sync_anchor (domain_id, last_anchor) VALUES ('__default__', ?1)
+             ON CONFLICT(domain_id) DO UPDATE SET last_anchor = MAX(last_anchor, excluded.last_anchor)",
+            params![seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Changes after `since_anchor`, ALL of them, with the anchor to persist
+    /// afterwards. The daemon RPC adds paging on top of this (see
+    /// [`Self::list_file_changes_paged`]); this all-at-once form is the unit
+    /// level the change-log tests pin.
+    ///
+    /// Returns `(changes, Some(next_anchor))` — or `(vec![], Some(anchor))`
+    /// unchanged when the caller is already up to date — and `None` (no rows)
+    /// never happens for the default domain: a fresh, empty log reports an
+    /// empty anchor. `next_anchor` moves only when changes were delivered.
+    pub fn list_file_changes(&self, since_anchor: Option<&[u8]>) -> Result<Option<(Vec<FileChange>, Option<Vec<u8>>)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let since: i64 = match since_anchor {
+            None => 0,
+            Some(bytes) => std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| text.parse::<i64>().ok())
+                .ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "fp sync anchor is not a recognisable cursor (expired)".into(),
+                    )
+                })?,
+        };
+        let tip: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)",
+                [],
+                |row| row.get(0),
+            )?;
+        if tip <= since {
+            // Up to date: echo the caller's anchor (or nil at genesis) and
+            // deliver nothing. The anchor must not move — a stable anchor on a
+            // no-op poll is what tells the system `moreComing: false` is honest.
+            return Ok(Some((Vec::new(), since_anchor.map(|bytes| bytes.to_vec()))));
+        }
+        let mut stmt = conn.prepare(
+            "SELECT seq, file_id, kind, old_parent_id, new_parent_id
+             FROM fp_changes WHERE seq > ?1 ORDER BY seq ASC",
+        )?;
+        let changes = stmt
+            .query_map(params![since], |row| {
+                Ok(FileChange {
+                    seq: row.get(0)?,
+                    file_id: row.get(1)?,
+                    kind: FpChangeKind::from_str(&row.get::<_, String>(2)?)
+                        .ok_or_else(|| {
+                            rusqlite::Error::InvalidColumnType(
+                                2,
+                                "kind".to_string(),
+                                rusqlite::types::Type::Text,
+                            )
+                        })?,
+                    old_parent_id: row.get(3)?,
+                    new_parent_id: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let next_anchor = anchor_bytes(tip);
+        Ok(Some((changes, Some(next_anchor))))
+    }
+
+    /// Paged variant of [`Self::list_file_changes`]: at most `limit` changes
+    /// per call; `next_anchor` is `Some(next_cursor_bytes)` while MORE changes
+    /// remain (resume token for the next page) and `None` when the batch
+    /// completes the change window. The resume token IS the anchor: paging
+    /// consumes the same monotonic cursor, so a client that stops mid-window
+    /// resumes exactly where it stopped, and a client that never resumes
+    /// cannot lose data (the anchor only advances when it re-polls from nil).
+    pub fn list_file_changes_paged(
+        &self,
+        since_anchor: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Option<(Vec<FileChange>, Option<Vec<u8>>)>> {
+        let limit = limit.max(1);
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let since: i64 = match since_anchor {
+            None => 0,
+            Some(bytes) => std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| text.parse::<i64>().ok())
+                .ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "fp sync anchor is not a recognisable cursor (expired)".into(),
+                    )
+                })?,
+        };
+        let mut stmt = conn.prepare(
+            "SELECT seq, file_id, kind, old_parent_id, new_parent_id
+             FROM fp_changes WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+        )?;
+        let changes = stmt
+            .query_map(params![since, limit as i64], |row| {
+                Ok(FileChange {
+                    seq: row.get(0)?,
+                    file_id: row.get(1)?,
+                    kind: FpChangeKind::from_str(&row.get::<_, String>(2)?)
+                        .ok_or_else(|| {
+                            rusqlite::Error::InvalidColumnType(
+                                2,
+                                "kind".to_string(),
+                                rusqlite::types::Type::Text,
+                            )
+                        })?,
+                    old_parent_id: row.get(3)?,
+                    new_parent_id: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if changes.len() < limit {
+            // Short page. It is a COMPLETED batch when it reaches the log tip
+            // (or the tip is at/below the caller's cursor) — otherwise the
+            // caller still needs a resume token to fetch the rest.
+            let tip: i64 = conn.query_row(
+                "SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)",
+                [],
+                |row| row.get(0),
+            )?;
+            let reached_tip = changes
+                .last()
+                .map(|change| change.seq >= tip)
+                .unwrap_or(tip <= since);
+            if reached_tip {
+                // Up to date AND the batch ends here: the anchor is the log
+                // tip — "you are now current as of tip". Only a completely
+                // empty log (no anchor ever minted) reports None.
+                let anchor = if tip > 0 { Some(anchor_bytes(tip)) } else { since_anchor.map(|bytes| bytes.to_vec()) };
+                return Ok(Some((changes, anchor)));
+            }
+            let next = changes.last().map(|change| change.seq).unwrap_or(since);
+            return Ok(Some((changes, Some(anchor_bytes(next)))));
+        }
+        // Full page: there may be more — resume from the last delivered seq.
+        let next = changes.last().map(|change| change.seq).unwrap_or(since);
+        Ok(Some((changes, Some(anchor_bytes(next)))))
+    }
+
+    /// Delete consumed change rows recorded before `before_epoch` (the sweep
+    /// runs on a delay so a slow replica can still page through recent
+    /// history). NEVER touches `fp_sync_anchor`: the replica's cursor position
+    /// must survive even after the changes it points past are gone.
+    pub fn sweep_file_changes(&self, before_epoch: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM fp_changes WHERE recorded_at < ?1", params![before_epoch])
+    }
+
+    /// The persistent anchor cursor (per domain; one default domain today).
+    /// `currentSyncAnchor` is served from here after extension process death.
+    pub fn fp_last_anchor(&self) -> Result<Option<Vec<u8>>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let value: Option<i64> = conn
+            .query_row(
+                "SELECT last_anchor FROM fp_sync_anchor WHERE domain_id = '__default__'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.map(anchor_bytes))
+    }
+
+    /// Number of live rows whose contract parent is `folder_id` (task 1697:
+    /// the File Provider `childItemCount`). Counts every row regardless of
+    /// status — a folder's cloud-only children still show in Finder.
+    pub fn child_item_count(&self, folder_id: &str) -> Result<i64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE parent_id = ?1",
+            params![folder_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Record the materialized containers the system reported. Idempotent; the
+    /// full set is written each time the extension reports it.
+    pub fn set_materialized_containers(&self, container_ids: &[String]) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM fp_materialized", [])?;
+        for id in container_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO fp_materialized (container_id, updated_at) VALUES (?1, 0)",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn materialized_containers(&self) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT container_id FROM fp_materialized ORDER BY container_id ASC")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
     }
 
     pub fn list_contract_states_by_namespace(&self, namespace: Namespace) -> Result<Vec<FileContractState>> {
@@ -5106,5 +5447,230 @@ mod tests {
         assert!(!db.has_pending_trash("never-seen").unwrap());
         db.remove_operation("t1").unwrap();
         assert!(!db.has_pending_trash("trashed").unwrap(), "gone once the op is removed");
+    }
+
+    // ------------------------------------------------------------------
+    // Task 1697: per-domain change log + monotonic anchor (state_db).
+    // RED-first: these were written against unmodified code and were seen
+    // failing (no fp_changes table, no API) before the implementation.
+    // ------------------------------------------------------------------
+
+    use super::{FileChange, FpChangeKind};
+
+    fn change_entry() -> FileEntry {
+        FileEntry {
+            file_id: "ch-1".into(),
+            path: "/docs/report.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 10,
+            modified_at: 100,
+            content_hash: None,
+            remote_updated_at: 100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        }
+    }
+
+    fn seed_child(db: &StateDb, file_id: &str, path: &str, kind: ItemKind) {
+        seed_child_under(db, file_id, path, kind, None);
+    }
+
+    fn seed_child_under(
+        db: &StateDb,
+        file_id: &str,
+        path: &str,
+        kind: ItemKind,
+        parent_id: Option<&str>,
+    ) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: 5,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: kind.clone(),
+        })
+        .unwrap();
+        // parent_id is a contract-owned column (upsert_file never writes it);
+        // the contract write is what puts the row in its real parent folder.
+        let parent = parent_id.map(str::to_string);
+        db.set_file_contract_state(&FileContractState {
+            file_id: file_id.into(),
+            namespace: Namespace::MyFiles,
+            parent_id: parent,
+            shared_root_id: None,
+            share_id: None,
+            owner_email: None,
+            permission_bits: 0,
+            item_kind: kind.clone(),
+            content_type: None,
+            current_version: 1,
+            current_object_version_id: None,
+            local_base_version: 0,
+            local_hash: None,
+            cache_path: None,
+            cache_bytes: 0,
+            pin_state: PinState::Inherit,
+            inherited_pin_state: PinState::Unpinned,
+            last_sync_at: 0,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn change_log_anchors_are_monotonic_across_batches() {
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+        db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
+        let first = db.list_file_changes(None).unwrap();
+        let (_, anchor_1) = first.expect("changes since nil");
+        let anchor_1 = anchor_1.expect("an anchor after real changes");
+        assert!(
+            anchor_1.len() <= 500,
+            "anchor must stay within Apple's 500-byte budget, got {} bytes",
+            anchor_1.len()
+        );
+        assert!(!anchor_1.is_empty(), "the anchor after changes must not be empty");
+
+        db.record_file_change("f-1", FpChangeKind::Modified, None).unwrap();
+        let (_, anchor_2) = db.list_file_changes(Some(&anchor_1)).unwrap().expect("changes since anchor 1");
+        let anchor_2 = anchor_2.expect("an anchor after further changes");
+        assert!(
+            anchor_2 > anchor_1,
+            "anchors must sort strictly ascending so 'anchor_1 > anchor_2' can never be true (got {:?} then {:?})",
+            anchor_1,
+            anchor_2
+        );
+    }
+
+    #[test]
+    fn change_log_anchor_is_stable_when_nothing_changed() {
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+        db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
+        let (_, anchor_1) = db.list_file_changes(None).unwrap().unwrap();
+        let anchor_1 = anchor_1.unwrap();
+        // Nothing happened since: the anchor must be stable and the batch empty.
+        let (changes, anchor_2) = db.list_file_changes(Some(&anchor_1)).unwrap().unwrap();
+        assert!(changes.is_empty(), "no changes since the fresh anchor: {changes:?}");
+        assert_eq!(anchor_2.as_deref(), Some(anchor_1.as_ref()), "a no-op poll must not move the anchor");
+    }
+
+    #[test]
+    fn change_log_reports_old_and_new_parent_for_reparents() {
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child_under(&db, "child-1", "/docs/child-1", ItemKind::File, Some("old-parent"));
+        seed_child(&db, "old-parent", "/docs", ItemKind::Folder);
+        seed_child(&db, "new-parent", "/archive", ItemKind::Folder);
+        db.record_file_change("child-1", FpChangeKind::Created, None).unwrap();
+        // The move itself re-parents the row (what a real reparent does)…
+        db.set_file_contract_state(&FileContractState {
+            parent_id: Some("new-parent".into()),
+            ..db.get_file_contract_state("child-1").unwrap().unwrap()
+        })
+        .unwrap();
+        // …then the change is recorded.
+        db.record_file_change("child-1", FpChangeKind::Reparented, Some("old-parent".into())).unwrap();        let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
+        let reparent = changes
+            .iter()
+            .find(|change| change.file_id == "child-1" && change.kind == FpChangeKind::Reparented)
+            .expect("the reparented change must come back");
+        assert_eq!(reparent.old_parent_id.as_deref(), Some("old-parent"), "old parent for materialized-set filtering");
+        assert_eq!(reparent.new_parent_id.as_deref(), Some("new-parent"), "new parent read from the files row at record time");
+    }
+
+    #[test]
+    fn change_log_records_deletes_with_the_old_parent() {
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child_under(&db, "child-1", "/docs/child-1", ItemKind::File, Some("parent-1"));
+        seed_child(&db, "parent-1", "/docs", ItemKind::Folder);
+        db.record_file_change("child-1", FpChangeKind::Created, None).unwrap();
+        db.delete_file("child-1").unwrap();
+        // The row is gone; the recorder must have captured the parent
+        // (from the files row) BEFORE the delete — the caller passes it as
+        // old_parent_id and record_file_change pins it as the change's parent
+        // when the row no longer exists.
+        db.record_file_change("child-1", FpChangeKind::Deleted, Some("parent-1".into())).unwrap();
+        let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
+        let deletion = changes
+            .iter()
+            .find(|change| change.file_id == "child-1" && change.kind == FpChangeKind::Deleted)
+            .expect("the deleted change must come back");
+        assert_eq!(deletion.new_parent_id.as_deref(), Some("parent-1"), "deleted items report their old parent as new_parent_id");
+    }
+    #[test]
+    fn change_log_paging_returns_every_change_exactly_once() {
+        let db = StateDb::open(":memory:").unwrap();
+        for i in 0..250 {
+            seed_child(&db, &format!("f-{i}"), &format!("/f-{i}"), ItemKind::File);
+            db.record_file_change(&format!("f-{i}"), FpChangeKind::Created, None).unwrap();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut pages = 0;
+        let mut cursor: Option<Vec<u8>> = None;
+        loop {
+            let (changes, anchor) = db.list_file_changes_paged(cursor.as_deref(), 100).unwrap().unwrap();
+            assert!(changes.len() <= 100, "a page must honor the limit, got {}", changes.len());
+            for change in &changes {
+                assert!(seen.insert((change.file_id.clone(), change.kind)), "a change came back twice: {:?}", change);
+            }
+            pages += 1;
+            match anchor {
+                Some(a) if a == cursor.clone().unwrap_or_default() => {
+                    // The up-to-date marker echoes the caller's own cursor —
+                    // the window is complete.
+                    break;
+                }
+                Some(a) => {
+                    assert!(a > cursor.clone().unwrap_or_default(), "paging anchors must strictly increase");
+                    cursor = Some(a);
+                }
+                None => break,
+            }
+            assert!(pages < 10, "250 changes at 100/page must take 3 pages, not spin forever");
+        }
+        assert_eq!(seen.len(), 250, "every change must be delivered exactly once");
+        // 3 delivery pages + 1 final round trip whose echoed anchor breaks
+        // the loop.
+        assert_eq!(pages, 4, "3 delivery pages + 1 up-to-date round trip, got {pages}");
+    }
+
+    #[test]
+    fn change_log_is_per_domain_and_sweeps_only_old_rows() {
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+        db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
+        let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
+        let anchor = anchor.unwrap();
+        // Sweeping everything older than now prunes the consumed change but
+        // must never touch the anchor row (the replica's cursor survives).
+        db.sweep_file_changes(2_000_000_000).unwrap();
+        let (changes, anchor_after) = db.list_file_changes(Some(&anchor)).unwrap().unwrap();
+        assert!(changes.is_empty(), "swept changes are no longer deliverable: {changes:?}");
+        assert_eq!(anchor_after.as_deref(), Some(anchor.as_ref()), "the anchor survives the sweep");
+        // After the sweep the log is empty (tip = 0), so a from-nil listing
+        // starts a FRESH enumeration — the sweep means "history older than the
+        // cutoff is gone", not "the anchor resets". The persistent anchor ROW
+        // (fp_last_anchor) is what must survive for currentSyncAnchor:
+        assert_eq!(db.fp_last_anchor().unwrap().as_deref(), Some(anchor.as_ref()),
+            "the persistent anchor survives the sweep (crash recovery reads it)");
+    }
+
+    #[test]
+    fn change_log_anchor_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+        db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
+        let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
+        let anchor = anchor.unwrap();
+        drop(db);
+        let db = StateDb::open(&path).unwrap();
+        let (_, reopened) = db.list_file_changes(Some(&anchor)).unwrap().unwrap();
+        assert_eq!(reopened.as_deref(), Some(anchor.as_ref()), "the anchor and consumed state must survive process death");
     }
 }
