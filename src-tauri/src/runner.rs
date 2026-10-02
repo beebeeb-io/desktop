@@ -1570,6 +1570,11 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
             parent_id == "__fp_root__"
                 || parent_id == "NSFileProviderRootContainerItemIdentifier"
                 || parent_id == "rootContainer"
+                // Task 1698: the trash container is a SYSTEM container —
+                // always materialized, symmetric with the Swift
+                // WorkingSetStore.alwaysMaterializedIdentifiers().
+                || parent_id == "NSFileProviderTrashContainerItemIdentifier"
+                || parent_id == "trashContainer"
                 || materialized.contains(parent_id.as_str())
         }
     })

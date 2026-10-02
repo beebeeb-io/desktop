@@ -84,10 +84,6 @@ pub enum IpcRequest {
         file_id: String,
         base_version_identifier: Option<String>,
     },
-    SetRecursivePin {
-        file_id: String,
-        pinned: bool,
-    },
     RecordOpenedFile {
         file_id: String,
         cache_path: String,
@@ -145,10 +141,6 @@ pub enum IpcResponse {
     FileProviderSyncAnchor {
         anchor: Option<String>,
     },
-    PinUpdated {
-        changed_item_ids: Vec<String>,
-        hydrate_operations: usize,
-    },
     CacheCleanup {
         evicted_file_ids: Vec<String>,
     },
@@ -186,6 +178,13 @@ pub struct FileProviderItemPayload {
     /// Its change alone means "refresh metadata, keep the cached content".
     #[serde(default)]
     pub metadata_version: Option<String>,
+    /// Task 1698: the row's effective pin state (own `pin_state`, else
+    /// `inherited_pin_state`). Swift maps it to
+    /// `.downloadEagerlyAndKeepDownloaded`; the root's `.downloadLazily`
+    /// governs everything else. The cross-device pin backend is task 1683 —
+    /// the pin set is this device's own today (deviation 1, task 1698).
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// One change-log row crossing the IPC bridge (task 1697).
@@ -207,6 +206,12 @@ pub struct FileProviderChangePayload {
 
 const FP_ROOT: &str = "__fp_root__";
 const FP_ROOT_APPLE: &str = "NSFileProviderRootContainerItemIdentifier";
+/// Task 1698: the SYSTEM trash container (macOS Trash / `supportsSyncingTrash`,
+/// default YES — ruling `.claude/tasks/decisions/finder-trash-full-sync.md`).
+/// Trashed items are presented as children of THIS container, outside the
+/// single-root ruling (the trash view is system-managed, not a synthetic
+/// folder under "Beebeeb").
+pub(crate) const FP_TRASH_APPLE: &str = "NSFileProviderTrashContainerItemIdentifier";
 // Task 1701: the OTHER namespace constants (`my_files`, `offline`,
 // `conflicts`) are gone with the synthetic containers. This one survives as
 // a WRITE-path guard only: a stale Finder client can still drop onto a
@@ -228,8 +233,8 @@ const CAP_ADD_SUBITEMS: u32 = 1 << 4;
 /// without it.
 const CAP_REPARENT: u32 = 1 << 5;
 /// `.allowsTrashing` on the Swift side (task 1697). Bit 6, same numbering both
-/// sides. Trash SEMANTICS (trashContainer handling) are task 1698; this bit
-/// only advertises the capability so Finder stops blocking drag-to-Trash.
+/// sides. Trash SEMANTICS landed in task 1698 (ruling: full trash sync —
+/// the trash-container reparent maps to the server trash op).
 const CAP_TRASH: u32 = 1 << 6;
 
 /// The macOS App Group shared between the containing app
@@ -1053,24 +1058,14 @@ async fn handle_connection(
                 forget_dedup_for_item(&write_dedup, &file_id);
                 write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier))
             }
-            IpcRequest::SetRecursivePin { file_id, pinned } => {
-                // `set_recursive_pin` takes `sync_root` for the Windows pin-state
-                // path; this module is `#![cfg(unix)]`, so it is never compiled on
-                // Windows and the parameter is unused here. Resolve the real root
-                // from config so the call is honest; fall back to the engine-internal
-                // dir if unavailable (the value is never dereferenced on unix).
-                let sync_root = crate::config::DesktopConfig::load()
-                    .ok()
-                    .and_then(|cfg| cfg.sync_root)
-                    .unwrap_or_default();
-                match bridge.set_recursive_pin(&sync_root, &file_id, pinned) {
-                    Ok(outcome) => IpcResponse::PinUpdated {
-                        changed_item_ids: outcome.changed_item_ids,
-                        hydrate_operations: outcome.hydrate_operations,
-                    },
-                    Err(e) => IpcResponse::Error { message: e.to_string() },
-                }
-            }
+            // Task 1698: the `SetRecursivePin` IPC RPC is RETIRED — it had no
+            // caller (audit G13): the File Provider extension never sent it
+            // and the pinning surface is the Tauri `set_recursive_pin`
+            // command (Onboarding / Mac Settings), which calls
+            // `EngineBridge::set_recursive_pin` directly. Task 1698 replaces
+            // the concept with per-item `contentPolicy` (`.pinned` on the
+            // payload → `.downloadEagerlyAndKeepDownloaded`); the pin STATE
+            // itself stays on `files.pin_state` (task 1683 owns the backend).
             IpcRequest::RecordOpenedFile {
                 file_id,
                 cache_path,
@@ -1206,8 +1201,9 @@ async fn hydrate_over_ipc(
     // extension / FUSE mount) writes either under the sync root or
     // into the per-file temp cache, so both are allowed roots; if
     // no sync root is configured yet, only the temp dir is.
-    // Resolve sync_root the same way the SetRecursivePin handler
-    // resolves it.
+    // Resolve sync_root from config (the way the retired `SetRecursivePin`
+    // handler used to); on unix the value is only compared against, never
+    // dereferenced by Windows-specific code.
     //
     // Task 1670: on macOS, `temp_root` above is THIS (sandboxed)
     // process's own private container temp dir — the File Provider
@@ -1447,7 +1443,7 @@ fn write_outcome_response(
 /// payload rides along so `didUpdateItems` needs no second round-trip. A row
 /// that vanished since the change was recorded yields no item (the Swift
 /// enumerator skips it; its later `deleted` row reports the exit).
-fn file_provider_change_payloads(
+pub(crate) fn file_provider_change_payloads(
     db: &crate::state_db::StateDb,
     changes: Vec<crate::state_db::FileChange>,
 ) -> Vec<FileProviderChangePayload> {
@@ -1492,6 +1488,21 @@ fn file_provider_change_payloads(
 }
 
 fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -> Vec<FileProviderItemPayload> {
+    // Task 1698: the SYSTEM trash container lists the trash view — the
+    // Trashing rows that are TOP of trash (their parent row is not itself
+    // Trashing; the children of a trashed folder enumerate INSIDE that
+    // folder, mirroring the server trash's shape).
+    if is_trash_container(container_id) {
+        return db
+            .list_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| {
+                entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry)
+            })
+            .map(|entry| file_entry_payload_for_db(db, &entry, FP_TRASH_APPLE))
+            .collect();
+    }
     if is_file_provider_root(container_id) {
         // Task 1701 (ruling: `.claude/tasks/decisions/finder-sidebar-single-root.md`):
         // Finder shows ONE root folder — "Beebeeb", the user's own files,
@@ -1502,10 +1513,15 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
         // now (webapp only); Offline/Conflicts data is untouched — it simply
         // stops being a synthetic Finder folder (native offline affordances
         // are task 1698, conflicts the dialog design pass).
+        //
+        // Task 1698: Trashing rows are excluded — a trashed item left "Beebeeb"
+        // (the system reparented it into the trash container); surfacing it at
+        // the root would duplicate it in Finder.
         return db
             .list_files()
             .unwrap_or_default()
             .into_iter()
+            .filter(|entry| entry.status != crate::state_db::FileStatus::Trashing)
             .filter(|entry| {
                 is_top_level_path(&entry.path)
                     && db
@@ -1521,6 +1537,16 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
 
     // Real folders: children by the contract's parent (the server's parent
     // UUID, which is what `files.parent_id` stores).
+    //
+    // Task 1698: Trashing children are listed only when the CONTAINER itself
+    // is trashed (they are the trash view's folder contents); a live folder
+    // stops listing children the moment they move to the trash container.
+    let container_is_trashed = db
+        .get_file(container_id)
+        .ok()
+        .flatten()
+        .map(|entry| entry.status == crate::state_db::FileStatus::Trashing)
+        .unwrap_or(false);
     db.list_files()
         .unwrap_or_default()
         .into_iter()
@@ -1532,8 +1558,28 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
                 .as_deref()
                 == Some(container_id)
         })
+        .filter(move |entry| {
+            container_is_trashed || entry.status != crate::state_db::FileStatus::Trashing
+        })
         .map(|entry| file_entry_payload_for_db(db, &entry, container_id))
         .collect()
+}
+
+/// Task 1698: is `entry`'s PARENT row itself in `Trashing`? A child inside a
+/// trashed folder stays parented to the folder (trash-view content); a row
+/// whose parent row is NOT trashed is TOP of trash — presented directly under
+/// the trash container.
+fn parent_row_is_trashing(db: &crate::state_db::StateDb, entry: &crate::state_db::FileEntry) -> bool {
+    entry
+        .parent_id
+        .as_deref()
+        .and_then(|parent_id| db.get_file(parent_id).ok().flatten())
+        .map(|parent| parent.status == crate::state_db::FileStatus::Trashing)
+        .unwrap_or(false)
+}
+
+fn is_trash_container(container_id: &str) -> bool {
+    container_id == FP_TRASH_APPLE || container_id == "trashContainer"
 }
 
 /// Task 1694 rule (lead decision, 2026-10-01): every LIVE folder accepts
@@ -1585,6 +1631,13 @@ fn file_entry_payload_for_db(
     if entry.is_dir() {
         payload.child_item_count = Some(db.child_item_count(&entry.file_id).unwrap_or(0));
     }
+    // Task 1698 (trash ruling): a Trashing row that is TOP of trash (its
+    // parent row is not itself Trashing) is presented under the SYSTEM trash
+    // container, wherever it used to live. Children of a trashed folder keep
+    // their real parent so the trash view mirrors the server trash's shape.
+    if entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry) {
+        payload.parent_identifier = FP_TRASH_APPLE.to_string();
+    }
     payload
 }
 
@@ -1619,7 +1672,7 @@ fn file_entry_payload(
     // The contract branch zeroes `capabilities` above, so the folder
     // add-subitems grant is re-applied here, after the permission rebuild
     // (task 1694). Task 1697: live items may also be reparented and trashed
-    // (drag-move / drag-to-Trash; trash SEMANTICS are task 1698).
+    // (drag-move / drag-to-Trash; trash semantics: task 1698 ruling).
     let capabilities = with_folder_add_subitems(kind, &entry.status, capabilities);
 
     // Task 1697: version split. contentVersion changes only when the content
@@ -1661,6 +1714,10 @@ fn file_entry_payload(
         child_item_count: None,
         content_version: Some(content_version),
         metadata_version: Some(metadata_version),
+        pinned: matches!(
+            contract.effective_pin_state(),
+            crate::state_db::PinState::Pinned
+        ),
     }
 }
 
@@ -1715,6 +1772,8 @@ fn file_entry_payload_without_contract(
         child_item_count: None,
         content_version: Some(content_version),
         metadata_version: Some(metadata_version),
+        // No contract = no pin state to resolve (fail-safe: unpinned).
+        pinned: false,
     }
 }
 
@@ -1729,8 +1788,9 @@ fn capabilities_for_status(status: &crate::state_db::FileStatus) -> u32 {
         | crate::state_db::FileStatus::Trashing => CAP_READ,
         crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
         // Task 1697: live items may be reparented (drag-move) and trashed.
-        // Trash SEMANTICS remain 1698's decision; the capability only stops
-        // Finder from blocking the gesture outright.
+        // Trash semantics: task 1698 ruling (the trash-container reparent maps
+        // to the server trash op); the capability only stops Finder from
+        // blocking the gesture outright.
         crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
             CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE | CAP_REPARENT | CAP_TRASH
         }
@@ -2894,5 +2954,193 @@ mod tests {
             before.content_version, before.metadata_version,
             "the two versions are distinct identities"
         );
+    }
+
+    // ── Task 1698 part 1: contentPolicy pin mapping ─────────────────────────
+
+    #[test]
+    fn test_1698_pinned_payload_carries_effective_pin_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // Own pin: the row's own pin_state = Pinned.
+        let entry = live_file_entry(FileStatus::Local);
+        db.upsert_file(&entry).unwrap();
+        let mut contract = live_contract();
+        contract.pin_state = crate::state_db::PinState::Pinned;
+        db.set_file_contract_state(&contract).unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        assert!(payload.pinned, "a row whose OWN pin_state is Pinned must report pinned=true");
+
+        // Inherited pin: own state Inherit + inherited_pin_state = Pinned.
+        let child = FileEntry {
+            file_id: "1698-child".into(),
+            path: "/docs/report.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 10,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_200,
+            parent_id: Some("1697-item".into()),
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file(&child).unwrap();
+        let mut child_contract = live_contract();
+        child_contract.file_id = "1698-child".into();
+        child_contract.parent_id = Some("1697-item".into());
+        child_contract.pin_state = crate::state_db::PinState::Inherit;
+        child_contract.inherited_pin_state = crate::state_db::PinState::Pinned;
+        db.set_file_contract_state(&child_contract).unwrap();
+        let child_payload = file_entry_payload_for_db(&db, &child, FP_ROOT_APPLE);
+        assert!(
+            child_payload.pinned,
+            "the EFFECTIVE pin state (inherit resolution) must drive pinned=true"
+        );
+
+        // Unpinned: own Inherit + inherited Unpinned (the default).
+        let mut unpinned_contract = live_contract();
+        unpinned_contract.pin_state = crate::state_db::PinState::Inherit;
+        unpinned_contract.inherited_pin_state = crate::state_db::PinState::Unpinned;
+        db.set_file_contract_state(&unpinned_contract).unwrap();
+        let unpinned_payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        assert!(!unpinned_payload.pinned, "an unpinned row must report pinned=false");
+    }
+
+    // ── Task 1698 part 2: trash container payloads ───────────────────────────
+
+    #[test]
+    fn test_1698_trash_container_enumerates_trashing_items_with_trash_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // A locally-trashed item parked in `Trashing` (the trash-view row).
+        let mut entry = live_file_entry(FileStatus::Trashing);
+        entry.path = "/doomed.txt".into();
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&live_contract()).unwrap();
+
+        // The trash container lists it, parented at the trash container.
+        let items = list_file_provider_items(&db, FP_TRASH_APPLE);
+        assert_eq!(items.len(), 1, "the trash container must enumerate the Trashing row: {:?}", items.iter().map(|i| i.filename.clone()).collect::<Vec<_>>());
+        assert_eq!(
+            items[0].parent_identifier, FP_TRASH_APPLE,
+            "a trash-container child must be parented at the trash container"
+        );
+
+        // The ROOT must NOT surface it (it moved out of "Beebeeb").
+        let root_items = list_file_provider_items(&db, FP_ROOT_APPLE);
+        assert!(
+            !root_items.iter().any(|i| i.identifier == "1697-item"),
+            "a Trashing item must not be enumerated under the root"
+        );
+    }
+
+    #[test]
+    fn test_1698_children_of_a_trashed_folder_stay_inside_the_folder() {
+        // The ruling: the trash view mirrors the server trash. A trashed
+        // FOLDER's children (also trashed server-side by the cascade) must
+        // still enumerate INSIDE the folder (their parent row is Trashing),
+        // not as siblings of the folder at the trash root.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut folder = live_file_entry(FileStatus::Trashing);
+        folder.file_id = "1698-folder".into();
+        folder.path = "/Trashed-Project".into();
+        folder.item_kind = ItemKind::Folder;
+        db.upsert_file(&folder).unwrap();
+        let mut folder_contract = live_contract();
+        folder_contract.file_id = "1698-folder".into();
+        folder_contract.item_kind = ItemKind::Folder;
+        db.set_file_contract_state(&folder_contract).unwrap();
+
+        let mut child = live_file_entry(FileStatus::Trashing);
+        child.file_id = "1698-child".into();
+        child.path = "/Trashed-Project/leaf.txt".into();
+        db.upsert_file(&child).unwrap();
+        let mut child_contract = live_contract();
+        child_contract.file_id = "1698-child".into();
+        child_contract.parent_id = Some("1698-folder".into());
+        db.set_file_contract_state(&child_contract).unwrap();
+
+        // Top-of-trash: only the FOLDER (the child's parent row is Trashing).
+        let items = list_file_provider_items(&db, FP_TRASH_APPLE);
+        assert_eq!(
+            items.iter().map(|i| i.identifier.clone()).collect::<Vec<_>>(),
+            vec!["1698-folder"],
+            "only the top-of-trash folder is a direct trash-container child, got {:?}",
+            items.iter().map(|i| i.identifier.clone()).collect::<Vec<_>>()
+        );
+        // The folder's own enumeration (the system enumerates the trashed
+        // folder's container) still lists the child.
+        let children = list_file_provider_items(&db, "1698-folder");
+        assert_eq!(children.len(), 1, "a trashed folder's children must still enumerate inside it");
+        assert_eq!(children[0].parent_identifier, "1698-folder", "the child stays parented inside the trashed folder");
+    }
+
+    #[test]
+    fn test_1698_live_container_enumeration_excludes_trashing_children() {
+        // A LIVE folder must not list its just-trashed child (the item moved
+        // to the trash container); the trash container lists it instead.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut folder = live_file_entry(FileStatus::Local);
+        folder.file_id = "1698-folder".into();
+        folder.path = "/Projects".into();
+        folder.item_kind = ItemKind::Folder;
+        db.upsert_file(&folder).unwrap();
+        let mut folder_contract = live_contract();
+        folder_contract.file_id = "1698-folder".into();
+        folder_contract.item_kind = ItemKind::Folder;
+        db.set_file_contract_state(&folder_contract).unwrap();
+
+        let mut child = live_file_entry(FileStatus::Trashing);
+        child.file_id = "1698-child".into();
+        child.path = "/Projects/leaf.txt".into();
+        db.upsert_file(&child).unwrap();
+        let mut child_contract = live_contract();
+        child_contract.file_id = "1698-child".into();
+        child_contract.parent_id = Some("1698-folder".into());
+        db.set_file_contract_state(&child_contract).unwrap();
+
+        let children = list_file_provider_items(&db, "1698-folder");
+        assert!(
+            children.is_empty(),
+            "a LIVE folder must not enumerate its Trashing children, got {:?}",
+            children.iter().map(|i| i.identifier.clone()).collect::<Vec<_>>()
+        );
+        let items = list_file_provider_items(&db, FP_TRASH_APPLE);
+        assert_eq!(items.len(), 1, "the trashed child is enumerated in the trash container");
+        assert_eq!(items[0].parent_identifier, FP_TRASH_APPLE);
+    }
+
+    #[test]
+    fn test_1698_change_payload_maps_trashing_status_to_trash_container() {
+        // Ruling step 3: the change feed presents a Trashing item as a child
+        // of the trash container, so the working set moves it into macOS
+        // Trash without a content re-download.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let entry = live_file_entry(FileStatus::Local);
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&live_contract()).unwrap();
+        // The trash: a status flip records a `Modified` change (set_status).
+        db.set_status("1697-item", FileStatus::Trashing).unwrap();
+
+        let changes = db
+            .list_file_changes_paged(None, 100)
+            .unwrap()
+            .unwrap()
+            .0;
+        let payloads = file_provider_change_payloads(&db, changes);
+        // The LAST change is the status flip (set_status); its payload must
+        // carry the Trashing status under the trash container.
+        let payload = payloads
+            .last()
+            .and_then(|change| change.item.as_ref())
+            .expect("the status-flip change carries the item");
+        assert_eq!(payload.status, "trashing", "the flip's payload carries the Trashing status");
+        assert_eq!(
+            payload.parent_identifier, FP_TRASH_APPLE,
+            "the change feed must present a Trashing item under the trash container"
+        );
+        assert_eq!(payload.identifier, "1697-item");
     }
 }

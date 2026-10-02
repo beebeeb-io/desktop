@@ -5,10 +5,39 @@ import UniformTypeIdentifiers
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private let ipc = XPCBridge()
     private let domain: NSFileProviderDomain
+    /// Task 1698 (error truth): a transient failure reported to the system
+    /// leaves the replica throttled until we signal the error resolved after a
+    /// successful operation (see `TransientErrorTracker`).
+    private let transientErrors = TransientErrorTracker()
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
         super.init()
+    }
+
+    /// Task 1698: remember a transient failure so the next success can clear
+    /// the system's throttling for it. Called from every completion path that
+    /// reports an error to the system.
+    private func noteFailure(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSFileProviderErrorDomain,
+           nsError.code == NSFileProviderError.serverUnreachable.rawValue {
+            transientErrors.record(nsError)
+        }
+    }
+
+    /// Task 1698: after a successful operation, tell the system that the
+    /// previously reported transient error (if any) is resolved. Best-effort:
+    /// the signal only cancels throttling; a failure to send it is harmless.
+    private func signalErrorResolvedIfPending() {
+        guard let pending = transientErrors.takePending() else {
+            return
+        }
+        NSFileProviderManager(for: domain)?.signalErrorResolved(pending) { error in
+            if let error {
+                NSLog("BeebeebFileProvider: signalErrorResolved failed: \(error)")
+            }
+        }
     }
 
     func item(
@@ -20,13 +49,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         do {
             // Task 1701: no synthetic namespace lookup any more — every
             // identifier is either the root (answered locally by
-            // `XPCBridge.item`) or a real item served by the daemon. A stale
-            // cached namespace identifier from a pre-1701 replica now fails
-            // the daemon lookup honestly instead of resurrecting a folder
-            // that no longer exists.
+            // `XPCBridge.item`), the trash container (a SYSTEM container,
+            // answered locally — task 1698), or a real item served by the
+            // daemon. A stale cached namespace identifier from a pre-1701
+            // replica now fails the daemon lookup honestly instead of
+            // resurrecting a folder that no longer exists.
             let model = try ipc.item(identifier: identifier)
             completionHandler(FileProviderItem(model: model), nil)
+            signalErrorResolvedIfPending()
         } catch {
+            noteFailure(error)
             completionHandler(nil, error)
         }
         progress.completedUnitCount = 1
@@ -156,6 +188,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 cleanupStagedPlaintext()
 
                 completionHandler(handoffURL, FileProviderItem(model: model), nil)
+                signalErrorResolvedIfPending()
             } catch {
                 // Nothing was ever handed to the system on this path —
                 // `hydrateFile` failed, the item lookup failed, or the handoff
@@ -170,6 +203,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     // rather than a failure.
                     completionHandler(nil, nil, NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError, userInfo: nil))
                 } else {
+                    noteFailure(error)
                     completionHandler(nil, nil, error)
                 }
             }
@@ -310,6 +344,69 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return destinationURL
     }
 
+    // MARK: - 1698 trash routing (ruling: full sync)
+
+    /// Where a user-initiated MOVE (reparent) must land. The trash container
+    /// is special: the Finder-side trash IS a reparent to
+    /// `.trashContainer`, and it maps to the server's EXISTING trash
+    /// operation (`TrashFile` → `DELETE /files/{id}` sets `is_trashed=TRUE`)
+    /// — never a metadata move (the server has no trash-container parent).
+    static func modifyRoute(newParent: NSFileProviderItemIdentifier) -> ModifyRoute {
+        newParent == .trashContainer ? .serverTrash : .metadataUpdate
+    }
+
+    enum ModifyRoute: Equatable {
+        case metadataUpdate
+        case serverTrash
+    }
+
+    /// The `deleteItem` disposition. Apple's Replicated contract:
+    /// "This is called when the user deletes an item that was already in the
+    /// Trash... Unless NSFileProviderDeleteItemRecursive is passed, the
+    /// deletion of a directory should be non-recursive. If the deletion
+    /// targets a non-empty directory, the extension must reject with
+    /// NSFileProviderErrorDirectoryNotEmpty." A child count the daemon did
+    /// not send (older daemon) fails OPEN — the ruling's reject rule needs a
+    /// count to be provable.
+    static func deleteDisposition(
+        isFolder: Bool,
+        childItemCount: Int64?,
+        recursive: Bool
+    ) -> DeleteDisposition {
+        if isFolder, !recursive, let count = childItemCount, count > 0 {
+            return .directoryNotEmpty
+        }
+        return .queueServerTrash
+    }
+
+    enum DeleteDisposition: Equatable {
+        case queueServerTrash
+        case directoryNotEmpty
+    }
+
+    /// The server trash / permanent-delete path for one item. The DAEMON
+    /// decides the outcome: an unknown item is an idempotent `Ignored`
+    /// (ruling: "unknown items report success"), a known item queues the
+    /// `TrashFile` op (for an in-trash item the server-side re-trash is an
+    /// idempotent no-op — see the task's deviation on delete-forever).
+    private func queueServerTrash(
+        identifier: NSFileProviderItemIdentifier,
+        baseVersion: NSFileProviderItemVersion,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        do {
+            _ = try ipc.queueDeleteItem(
+                itemIdentifier: identifier,
+                baseVersionIdentifier: Self.versionIdentifier(baseVersion)
+            )
+            completionHandler(nil)
+            signalErrorResolvedIfPending()
+        } catch {
+            noteFailure(error)
+            completionHandler(error)
+        }
+    }
+
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
         fields: NSFileProviderItemFields,
@@ -322,6 +419,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         do {
             let contentType = itemTemplate.contentType
             let kind: BeebeebItemKind = contentType?.conforms(to: .folder) == true ? .folder : .file
+            // Task 1698: the trash container is a SYSTEM container — creating
+            // inside it is not a server operation (an "undelete" would be a
+            // reparent back OUT, never a create). Refuse honestly.
+            // PR #100 review (Codex P2): a deliberate policy refusal —
+            // definitive (daemonRejected), not a transient unavailability.
+            if itemTemplate.parentItemIdentifier == .trashContainer {
+                throw BeebeebIPCError.daemonRejected(
+                    "Beebeeb cannot create items inside the Trash."
+                )
+            }
             let result = try ipc.queueCreateItem(
                 parentIdentifier: itemTemplate.parentItemIdentifier,
                 filename: itemTemplate.filename,
@@ -336,7 +443,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             } else {
                 completionHandler(nil, [], true, nil)
             }
+            signalErrorResolvedIfPending()
         } catch {
+            noteFailure(error)
             completionHandler(nil, [], false, error)
         }
         progress.completedUnitCount = 1
@@ -354,6 +463,28 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
         do {
+            // Task 1698 (trash ruling): a reparent INTO the trash container
+            // is the Finder-side TRASH — map it to the server's existing
+            // trash operation. The daemon parks the row `Trashing`, so the
+            // change feed immediately presents the item under the trash
+            // container (matching what the system just did in its own
+            // replica), and the queued op converges the server side.
+            if Self.modifyRoute(newParent: item.parentItemIdentifier) == .serverTrash
+                && changedFields.rawValue & NSFileProviderItemFields.parentItemIdentifier.rawValue != 0
+            {
+                queueServerTrash(
+                    identifier: item.itemIdentifier,
+                    baseVersion: version
+                ) { error in
+                    if let error {
+                        completionHandler(nil, [], false, error)
+                    } else {
+                        completionHandler(nil, [], true, nil)
+                    }
+                }
+                progress.completedUnitCount = 1
+                return progress
+            }
             let contentType = item.contentType
             let kind: BeebeebItemKind = contentType?.conforms(to: .folder) == true ? .folder : .file
             let result = try ipc.queueModifyItem(
@@ -373,13 +504,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             } else {
                 completionHandler(nil, [], true, nil)
             }
+            signalErrorResolvedIfPending()
         } catch {
+            noteFailure(error)
             completionHandler(nil, [], false, error)
         }
         progress.completedUnitCount = 1
         return progress
     }
 
+    /// Async variant of the server-trash queue for the modifyItem path (the
+    /// work runs off the callback queue; the Progress completes immediately).
     func deleteItem(
         identifier: NSFileProviderItemIdentifier,
         baseVersion version: NSFileProviderItemVersion,
@@ -388,16 +523,40 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-        do {
-            _ = try ipc.queueDeleteItem(
-                itemIdentifier: identifier,
-                baseVersionIdentifier: Self.versionIdentifier(version)
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            // Apple's contract: deleteItem fires for items ALREADY in the
+            // Trash ("delete forever"). The lookup only feeds the
+            // directoryNotEmpty proof; every actual outcome is the daemon's
+            // call: an unknown item is an idempotent `Ignored` (ruling:
+            // success), a known item queues the server trash op (an
+            // in-trash item's re-trash is an idempotent server no-op — the
+            // "delete forever" gap is recorded as task 1698's deviation 2).
+            var childItemCount: Int64?
+            var isFolder = false
+            if let model = try? ipc.item(identifier: identifier) {
+                isFolder = model.kind == .folder
+                childItemCount = model.childItemCount
+            }
+            guard Self.deleteDisposition(
+                isFolder: isFolder,
+                childItemCount: childItemCount,
+                recursive: options.contains(.recursive)
+            ) != .directoryNotEmpty else {
+                completionHandler(NSError(
+                    domain: NSFileProviderErrorDomain,
+                    code: NSFileProviderError.directoryNotEmpty.rawValue,
+                    userInfo: [NSLocalizedDescriptionKey: "This folder still has items inside. Delete them first, or empty the Trash."]
+                ))
+                progress.completedUnitCount = 1
+                return
+            }
+            queueServerTrash(
+                identifier: identifier,
+                baseVersion: version,
+                completionHandler: completionHandler
             )
-            completionHandler(nil)
-        } catch {
-            completionHandler(error)
+            progress.completedUnitCount = 1
         }
-        progress.completedUnitCount = 1
         return progress
     }
 

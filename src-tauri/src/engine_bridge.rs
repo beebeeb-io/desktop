@@ -1601,13 +1601,25 @@ impl EngineBridge {
         if self.is_stopping() {
             anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
         }
-        let item_contract = self.ensure_item_allows_shared_write(file_id, "delete")?;
+        // Task 1698 (trash ruling): an UNKNOWN item is an idempotent success
+        // ("unknown items report success") — the item may have been deleted
+        // remotely already, or the replica converged past it. Queueing a
+        // doomed server call would retry a guaranteed 404 for hours.
+        let item_contract = match self.ensure_item_allows_shared_write(file_id, "delete")? {
+            contract if contract.is_none() && self.db.get_file(file_id)?.is_none() => {
+                tracing::info!(file_id = %file_id, "finder delete: unknown item — idempotent success");
+                return Ok(FinderWriteOutcome::Ignored {
+                    message: "the item is already gone from Beebeeb".to_string(),
+                });
+            }
+            contract => contract,
+        };
         let mut payload = serde_json::json!({
             "operation": "trash",
             "base_version_identifier": base_version_identifier,
         });
         apply_shared_context(&mut payload, item_contract.as_ref());
-        self.enqueue_finder_operation(
+        let outcome = self.enqueue_finder_operation(
             OperationKind::TrashFile,
             Some(file_id.to_string()),
             None,
@@ -1618,7 +1630,18 @@ impl EngineBridge {
             item_contract
                 .as_ref()
                 .and_then(|contract| contract.current_object_version_id.clone()),
-        )
+        )?;
+        // Task 1698: park the row `Trashing` AFTER a successful enqueue, so
+        // the change feed immediately presents the item under the trash
+        // container (ruling step 2) while the server trash converges. A
+        // failed enqueue leaves the row untouched (nothing hidden without a
+        // queued op). Idempotent for the watcher path, which parks first.
+        if let Some(entry) = self.db.get_file(file_id)?
+            && entry.status != crate::state_db::FileStatus::Trashing
+        {
+            self.db.set_status(file_id, crate::state_db::FileStatus::Trashing)?;
+        }
+        Ok(outcome)
     }
 
     /// Single, parent-aware classifier shared by every local-write trigger
@@ -2465,7 +2488,17 @@ impl EngineBridge {
                     return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 }
 
-                self.db.set_status(file_id, FileStatus::Local)?;
+                // Task 1698: a Trashing row keeps its marker (viewing a file
+                // from the macOS Trash view must not un-trash it in the
+                // replica); everything else completes as `Local`.
+                // PR #100 review (Codex P1): the pre-hydrate status is the
+                // row's status BEFORE the flip to `Downloading` — re-reading
+                // the DB here always saw `Downloading`, so a Trashing row
+                // completed as `Local` and reparented itself out of the trash
+                // view. `DownloadingStatusGuard::arm` captured exactly that
+                // pre-flip status when it armed above — reuse it.
+                self.db
+                    .set_status(file_id, hydrate_final_status(downloading_guard.restore.clone()))?;
                 let downloaded_bytes = self.transfers.get(file_id).map(|t| t.total).unwrap_or(0);
                 transfer.finish();
                 self.record_transfer_done(crate::transfer_progress::Direction::Down, file_id, downloaded_bytes);
@@ -3966,6 +3999,18 @@ impl Drop for DownloadingStatusGuard<'_> {
         if self.armed {
             let _ = self.db.set_status(self.file_id, self.restore.clone());
         }
+    }
+}
+
+/// Task 1698: the status a SUCCESSFUL hydrate leaves the row in. A `Trashing`
+/// row (the user is viewing a file from the macOS Trash view) must KEEP its
+/// marker — flipping it to `Local` would reparent the item back under its
+/// folder in the replica's working set (the trash view would lose it). Any
+/// other row completes normally as `Local` (the content is now on disk).
+pub(crate) fn hydrate_final_status(previous: FileStatus) -> FileStatus {
+    match previous {
+        FileStatus::Trashing => FileStatus::Trashing,
+        _ => FileStatus::Local,
     }
 }
 
@@ -5583,58 +5628,81 @@ fn apply_sync_op(
     }
 
     match op.op_type.as_str() {
-        "file_trash" | "file_delete" => {
-            // Reconcile a REMOTE deletion (another client trashed/deleted this).
-            // Look up the row first: we need its status (to NOT clobber the local
-            // 0802 delete path) and, on Windows, its path/kind to remove the
-            // on-disk placeholder — not just the DB row (task 0806).
-            match bridge.db().get_file(id)? {
-                // 0802 distinction: a `Trashing` row is the LOCAL→server delete in
-                // flight (the user already removed the on-disk placeholder; the
-                // queued TrashFile op owns this row). This op is the server echo of
-                // that very delete — let the 0802 path converge it (the TrashFile op
-                // deletes the row on success). Removing the placeholder here would be
-                // a no-op (already gone), and we must NOT re-handle it, so skip —
-                // and do NOT collect the id either: the local queue's own
-                // completion signals it via `operations_applied`.
-                Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {}
-                Some(_) => {
-                    // Remove the row (and, for a folder, its orphaned descendants by
-                    // path-prefix — the server trash is NOT recursive, task 0807) in
-                    // one transaction, children-before-parent. The DB row is gone
-                    // BEFORE we touch the placeholder, so the watcher's handle_delete
-                    // can't queue a redundant server trash.
-                    let removed = bridge.db().delete_file_subtree(id)?;
-                    remove_pruned_placeholders(sync_root, &removed);
-                    // The subtree's rows left the mirror: Finder must drop them (T3).
-                    applied.push(id.to_string());
-                    applied.extend(removed.iter().map(|row| row.file_id.clone()));
-                }
-                // No row for the folder itself — the folder was absent from
-                // this desktop's snapshot (already trashed when the snapshot
-                // ran), but its CHILDREN may have been ingested and stored with
-                // `parent_id = id`.  Sweep those orphaned children by
-                // `parent_id` so they don't linger as ghost placeholders in
-                // Explorer (task 0828).  The sweep is scoped strictly to
-                // descendants of `id` and is a no-op when none are found.
-                None => {
-                    let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
-                    if !orphans.is_empty() {
-                        tracing::info!(
-                            folder_id = %id,
-                            count = orphans.len(),
-                            "sync_tick: trashed folder had no local row but \
-                             {} orphaned child(ren) — pruned (task 0828)",
-                            orphans.len()
-                        );
-                        remove_pruned_placeholders(sync_root, &orphans);
-                        // The orphaned children left the mirror (T3); the folder
-                        // itself never existed locally, so it contributes nothing.
-                        applied.extend(orphans.iter().map(|row| row.file_id.clone()));
-                    }
+        // Task 1698 (trash ruling — full sync): the two server-side deletion
+        // kinds now mean different things locally.
+        //
+        // `file_trash` — the server TRASH (is_trashed=TRUE, recoverable): the
+        // mirror flips the subtree to `Trashing` (the macOS Trash view) and
+        // keeps the rows; each flipped row records a `Modified` change so the
+        // replica moves it into the trash container. A `Trashing` row is the
+        // server echo of the LOCAL delete-in-flight (0802) — the row already
+        // IS the trash view, nothing to flip.
+        //
+        // `file_delete` — the server PERMANENT delete (password-confirmed in
+        // the app/web, or the retention janitor): the mirror row leaves the
+        // trash view for good — the row is deleted and a `deleted` change is
+        // recorded. This is the convergence path that replaced prune_absent's
+        // 0802 sweep (flipped by task 1698).
+        "file_trash" => match bridge.db().get_file(id)? {
+            Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {
+                // PR #100 review (Codex P1): the root may already be parked
+                // `Trashing` by the LOCAL trash flow — `queue_finder_delete`
+                // parks ONLY the folder row, its descendants stay unmarked
+                // until this server echo arrives. This echo IS that arrival:
+                // mark the still-unmarked subtree (mark_subtree_trashing
+                // no-ops the parked root and every already-Trashing row, so
+                // no duplicate change rows) — otherwise prune_absent's
+                // immediate-parent protection cannot cover grandchildren and
+                // they drop out of the trash view.
+                let marked = bridge.db().mark_subtree_trashing(id)?;
+                remove_pruned_placeholders(sync_root, &marked);
+                applied.extend(marked.iter().map(|row| row.file_id.clone()));
+            }
+            Some(_) => {
+                // Mark the subtree Trashing (the trash view), remove the
+                // on-disk placeholders exactly as the delete path did (the
+                // item is hidden locally — that part of 0802 stands), and
+                // report the ids so the working-set signal fires.
+                let marked = bridge.db().mark_subtree_trashing(id)?;
+                remove_pruned_placeholders(sync_root, &marked);
+                applied.push(id.to_string());
+                applied.extend(marked.iter().map(|row| row.file_id.clone()));
+            }
+            None => {
+                let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
+                if !orphans.is_empty() {
+                    tracing::info!(
+                        folder_id = %id,
+                        count = orphans.len(),
+                        "sync_tick: trashed folder had no local row but \
+                         {} orphaned child(ren) — pruned (task 0828)",
+                        orphans.len()
+                    );
+                    remove_pruned_placeholders(sync_root, &orphans);
+                    // The orphaned children left the mirror (T3); the folder
+                    // itself never existed locally, so it contributes nothing.
+                    applied.extend(orphans.iter().map(|row| row.file_id.clone()));
                 }
             }
-        }
+        },
+        "file_delete" => match bridge.db().get_file(id)? {
+            Some(_) => {
+                // The item is GONE server-side (irreversible): drop the row —
+                // Trashing rows leave the trash view, live rows leave the tree
+                // (unchanged 0806 behavior for a live row).
+                let removed = bridge.db().delete_file_subtree(id)?;
+                remove_pruned_placeholders(sync_root, &removed);
+                applied.push(id.to_string());
+                applied.extend(removed.iter().map(|row| row.file_id.clone()));
+            }
+            None => {
+                let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
+                if !orphans.is_empty() {
+                    remove_pruned_placeholders(sync_root, &orphans);
+                    applied.extend(orphans.iter().map(|row| row.file_id.clone()));
+                }
+            }
+        },
         "file_restore" => {
             // The restore payload is only `{ id }` (server `routes/files.rs`), so
             // the un-trashed row's full metadata is NOT recoverable from the op.
@@ -5645,6 +5713,26 @@ fn apply_sync_op(
             // file permanently invisible on THIS device. Request a re-bootstrap
             // on the next tick: the authoritative snapshot re-materialises the
             // restored row. Cheap and matches the existing gap-recovery design.
+            //
+            // Task 1698 (trash ruling): when we still HOLD the row — it stayed
+            // in the mirror as `Trashing` (the trash view) instead of being
+            // pruned — the restore flips it back OUT of the trash view
+            // directly: `CloudOnly` (placeholder re-mints; content
+            // re-downloads on open), and the flip is reported so the replica
+            // reparents the item out of the trash container.
+            if let Some(row) = bridge.db().get_file(id)?
+                && row.status == crate::state_db::FileStatus::Trashing
+            {
+                // PR #100 review (Codex P1): the restore must take the ENTIRE
+                // held subtree out of the trash view, not just the root row —
+                // the authoritative re-snapshot preserves `Trashing` rows by
+                // design, so it can never repair the descendants (they would
+                // linger in the Trash view; direct children even become
+                // top-level trash entries after the parent leaves).
+                let flipped = bridge.db().untrash_subtree(id)?;
+                remove_pruned_placeholders(sync_root, &flipped);
+                applied.extend(flipped.iter().map(|r| r.file_id.clone()));
+            }
             bridge.db().request_resnapshot()?;
             tracing::info!(
                 file_id = %id,
@@ -6862,6 +6950,9 @@ mod tests {
     fn test_delete_maps_to_trash_operation() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
+        // Task 1698: an UNKNOWN item is now an idempotent Ignored (ruling:
+        // "unknown items report success") — a delete needs a real row.
+        seed_bridge_entry(&bridge, "file-1", "file-1.txt", None, FileStatus::Local, false, 10);
 
         let outcome = bridge
             .queue_finder_delete("file-1", Some("9:1700000000:100".into()))
@@ -9845,10 +9936,13 @@ mod tests {
 
     #[test]
     fn tick1697_apply_sync_op_collects_remote_delete_subtree_ids() {
-        // A server-side trash of a folder removes the folder AND its descendants;
-        // both must be reported so Finder drops them. The hierarchy is
-        // PATH-based (the descendant sweep is a path-prefix match), so the
-        // child must be seeded under the folder's path.
+        // FLIPPED BY TASK 1698 (trash ruling — full sync): a server-side trash
+        // of a folder no longer removes rows — it flips the folder AND its
+        // descendants to `Trashing` (the macOS trash view mirrors the server
+        // trash), reporting both ids so the replica moves the subtree into the
+        // trash container. The hierarchy is PATH-based (the descendant sweep
+        // is a path-prefix match), so the child must be seeded under the
+        // folder's path.
         let dir = tempfile::tempdir().unwrap();
         let mk = [9u8; 32];
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
@@ -9864,8 +9958,15 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
-        assert!(bridge.db().get_file(folder).unwrap().is_none(), "the trash must have removed the row");
-        assert!(bridge.db().get_file(child).unwrap().is_none(), "the trash must have removed the descendant");
+        assert!(bridge.db().get_file(folder).unwrap().is_some(), "the trash keeps the folder (trash view)");
+        assert!(bridge.db().get_file(child).unwrap().is_some(), "the trash keeps the descendant (trash view)");
+        for id in [folder, child] {
+            assert_eq!(
+                bridge.db().get_file(id).unwrap().unwrap().status,
+                FileStatus::Trashing,
+                "{id} must be Trashing"
+            );
+        }
         assert!(applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
             "remote delete must report the folder AND its descendants: {applied:?}");
     }
@@ -9965,9 +10066,18 @@ mod tests {
             apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
         }
 
+        // Task 1698: the trash no longer removes the row — it flips it
+        // `Trashing` (trash view) and the restore flips it straight back
+        // (`CloudOnly`). Two fast trash+restore cycles converge to
+        // CloudOnly with the resnapshot still requested.
         assert!(
-            bridge.db().get_file(file).unwrap().is_none(),
-            "trash ops remove the row until the forced snapshot re-materialises it"
+            bridge.db().get_file(file).unwrap().is_some(),
+            "the trash view keeps the row alive (1698); restore keeps it alive"
+        );
+        assert_eq!(
+            bridge.db().get_file(file).unwrap().unwrap().status,
+            FileStatus::CloudOnly,
+            "the last restore in the batch un-trashed the row"
         );
         assert!(
             bridge.db().take_needs_resnapshot().unwrap(),
@@ -10302,10 +10412,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sync_tick_snapshot_absent_prunes_trashing_row_after_propagation() {
-        // task 0802 — CONVERGENCE end-to-end: once the trash propagates the file
-        // is ABSENT from the snapshot, and the op-less `Trashing` row is pruned —
-        // final convergence with the (already-removed) on-disk placeholder.
+    async fn test_sync_tick_snapshot_absent_keeps_trashing_row_trash_view() {
+        // task 0802 — FLIPPED BY TASK 1698 (trash ruling, full sync): once the
+        // trash propagates the file is ABSENT from the snapshot — and it STAYS
+        // absent forever, because the snapshot never lists trashed files. The
+        // op-less `Trashing` row is now the macOS TRASH VIEW: prune_absent
+        // must keep it. Removal converges through the server's `file_delete`
+        // (permanent) / `file_restore` ops instead (see the 1698 tests).
         let dir = tempfile::tempdir().unwrap();
         let mk = [7u8; 32];
         let trashing = "44444444-0000-4000-8000-000000000004";
@@ -10339,9 +10452,11 @@ mod tests {
         server.finish();
 
         assert!(bridge.db().get_file(kept).unwrap().is_some());
-        assert!(
-            bridge.db().get_file(trashing).unwrap().is_none(),
-            "an op-less Trashing row absent from the snapshot must be pruned (convergence)"
+        let row = bridge.db().get_file(trashing).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            FileStatus::Trashing,
+            "an op-less Trashing row absent from the snapshot is the trash view — it survives"
         );
     }
 
@@ -10388,14 +10503,16 @@ mod tests {
         assert_eq!(requests[0].path, "/api/v1/sync/snapshot");
         assert_eq!(requests[1].path, "/api/v1/sync/ops?since=1");
 
-        // Convergence: keep + created present, doomed gone, cursor at 3 — exactly
-        // a fresh snapshot of the post-op tree.
+        // Convergence: keep + created present, doomed is in the TRASH VIEW
+        // (task 1698: the trash mirrors the server trash — the row survives
+        // as `Trashing`, not deleted), cursor at 3.
         assert!(bridge.db().get_file(keep).unwrap().is_some());
         assert!(bridge.db().get_file(created).unwrap().is_some(), "file_create applied");
         assert_eq!(bridge.db().get_file(created).unwrap().unwrap().path, "fresh.txt");
-        assert!(
-            bridge.db().get_file(doomed).unwrap().is_none(),
-            "file_trash removed the row"
+        assert_eq!(
+            bridge.db().get_file(doomed).unwrap().unwrap().status,
+            FileStatus::Trashing,
+            "file_trash put the row in the trash view (Trashing), it was NOT deleted"
         );
         assert_eq!(
             bridge.db().get_sync_cursor().unwrap(),
@@ -10674,13 +10791,19 @@ mod tests {
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), mk);
 
         sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
-        sync_tick(&bridge, dir.path()).await.unwrap(); // ops: trash + restore (deletes, schedules re-snapshot)
-        // After the ops tick, the trash removed the row and the restore could not
-        // rebuild it from {id} alone — it is gone for THIS tick, but a re-snapshot
-        // is pending.
+        sync_tick(&bridge, dir.path()).await.unwrap(); // ops: trash + restore
+        // Task 1698: the trash put the row in the TRASH VIEW (`Trashing`) and
+        // the restore flipped it straight back out (`CloudOnly`) — the row
+        // never disappeared; a re-snapshot is still pending to refresh its
+        // authoritative metadata.
         assert!(
-            bridge.db().get_file(file).unwrap().is_none(),
-            "trash removed the row; restore can't rebuild it from {{id}} alone"
+            bridge.db().get_file(file).unwrap().is_some(),
+            "the trash-then-restore round trip keeps the row (1698 trash view)"
+        );
+        assert_eq!(
+            bridge.db().get_file(file).unwrap().unwrap().status,
+            FileStatus::CloudOnly,
+            "restore un-trashes the row"
         );
         sync_tick(&bridge, dir.path()).await.unwrap(); // re-snapshot re-materialises the row
 
@@ -11769,5 +11892,285 @@ mod tests {
         );
 
         server.stop_and_count();
+    }
+
+    // ── Task 1698 part 2: trash semantics (ruling: full sync) ────────────────
+
+    #[test]
+    fn test_1698_hydrate_final_status_keeps_the_trashing_marker() {
+        // Opening a trashed file from the trash view hydrates it; the marker
+        // must survive (a `Local` flip would move the item OUT of the trash
+        // container in the replica).
+        assert_eq!(
+            hydrate_final_status(FileStatus::Trashing),
+            FileStatus::Trashing,
+            "a Trashing row stays Trashing after a successful hydrate"
+        );
+        assert_eq!(hydrate_final_status(FileStatus::CloudOnly), FileStatus::Local);
+        assert_eq!(hydrate_final_status(FileStatus::Downloading), FileStatus::Local);
+    }
+
+    #[test]
+    // `file_provider_change_payloads`/`FP_TRASH_APPLE` live in `ipc_socket`,
+    // which is `#[cfg(unix)]` (lib.rs) — this test compiles out on Windows.
+    #[cfg(unix)]
+    fn test_1698_queue_finder_delete_parks_trashing_immediately() {
+        // The Finder-side trash: `queue_finder_delete` parks the row
+        // `Trashing` AFTER enqueueing the op, so the change feed immediately
+        // presents the item under the trash container (ruling step 2), while
+        // a failed enqueue leaves the row untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let file = "qfd00000-0000-4000-8000-000000000001";
+        seed_bridge_entry(&bridge, file, "doomed.txt", None, FileStatus::Local, false, 10);
+
+        let outcome = bridge.queue_finder_delete(file, None).unwrap();
+        assert!(matches!(outcome, crate::engine_bridge::FinderWriteOutcome::Queued { .. }));
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Trashing, "the row parks Trashing right away");
+        assert_eq!(
+            bridge.db().list_due_operations(now_secs()).unwrap().len(),
+            1,
+            "the server trash op is queued"
+        );
+        let changes = bridge.db().list_file_changes_paged(None, 100).unwrap().unwrap().0;
+        let payloads = crate::ipc_socket::file_provider_change_payloads(bridge.db(), changes);
+        let last = payloads.last().and_then(|change| change.item.as_ref()).unwrap();
+        assert_eq!(last.status, "trashing");
+        assert_eq!(last.parent_identifier, crate::ipc_socket::FP_TRASH_APPLE);
+    }
+
+    #[test]
+    fn test_1698_queue_finder_delete_unknown_item_is_an_idempotent_success() {
+        // Ruling: "unknown items report success" — the item may have been
+        // deleted remotely already. No op is queued, no row is touched.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let outcome = bridge
+            .queue_finder_delete("does0000-0000-4000-8000-000000000000", None)
+            .unwrap();
+        assert!(
+            matches!(outcome, crate::engine_bridge::FinderWriteOutcome::Ignored { .. }),
+            "an unknown item must be an Ignored (idempotent success), got {outcome:?}"
+        );
+        assert!(
+            bridge.db().list_due_operations(now_secs()).unwrap().is_empty(),
+            "no trash op is queued for an unknown item"
+        );
+    }
+
+    #[test]
+    fn test_1698_remote_file_trash_echo_marks_subtree_trashing_not_deleted() {
+        // Ruling step 3: a REMOTE trash (another device trashed the file) is
+        // the server trash — the mirror must flip the subtree to `Trashing`
+        // (trash view), NOT delete the rows.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let folder = "fold0000-0000-4000-8000-000000000001";
+        let child = "chil0000-0000-4000-8000-000000000002";
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::CloudOnly, true, 10);
+        seed_bridge_entry(&bridge, child, "docs/notes.txt", Some(folder), FileStatus::CloudOnly, false, 10);
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 4,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": folder }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        assert!(applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
+            "the flip reports the folder AND its descendants for the working-set signal: {applied:?}");
+        for id in [folder, child] {
+            let row = bridge.db().get_file(id).unwrap().expect("the row SURVIVES (trash view)");
+            assert_eq!(row.status, FileStatus::Trashing, "{id} must be Trashing, not deleted");
+        }
+    }
+
+    #[test]
+    fn test_1698_file_delete_echo_removes_trashing_rows_permanently() {
+        // `file_delete` = server-side PERMANENT delete (app trash view / web /
+        // retention janitor). A Trashing row must leave the trash view: the
+        // row is deleted and a `deleted` change is recorded.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let file = "perm0000-0000-4000-8000-000000000001";
+        seed_bridge_entry(&bridge, file, "doomed.txt", None, FileStatus::Trashing, false, 10);
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 5,
+            op_type: "file_delete".into(),
+            payload: serde_json::json!({ "id": file }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        assert!(bridge.db().get_file(file).unwrap().is_none(), "the permanently-deleted row leaves the mirror");
+        assert!(applied.contains(&file.to_string()), "the removal is reported for the working set");
+        let changes = bridge.db().list_file_changes_paged(None, 100).unwrap().unwrap().0;
+        assert!(
+            changes.iter().any(|change| change.file_id == file && change.kind == crate::state_db::FpChangeKind::Deleted),
+            "a `deleted` change must reach the feed so the replica drops the item"
+        );
+    }
+
+    #[test]
+    fn test_1698_file_restore_echo_un_trashes_the_row() {
+        // Un-trashing (ruling: reparent back out of the trash container → the
+        // server's existing restore path). A Trashing row flips back to
+        // CloudOnly (placeholder re-mints; content re-downloads on open).
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let file = "rest0000-0000-4000-8000-000000000001";
+        seed_bridge_entry(&bridge, file, "restored.txt", None, FileStatus::Trashing, false, 10);
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 6,
+            op_type: "file_restore".into(),
+            payload: serde_json::json!({ "id": file }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        let row = bridge.db().get_file(file).unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::CloudOnly, "the restored row leaves the trash view");
+        assert!(applied.contains(&file.to_string()), "the flip is reported for the working set");
+    }
+
+    #[test]
+    fn test_1698_review_hydrate_keeps_a_trashed_row_trashed_after_a_successful_open() {
+        // PR #100 review (Codex P1, engine_bridge.rs ~2500): the pre-hydrate
+        // status must be the row's status BEFORE the flip to `Downloading`.
+        // The trash-view scenario — the user opens a file from the macOS
+        // Trash — re-read the DB AFTER `hydrate_file_with_progress` had
+        // already flipped the row, so it always saw `Downloading`,
+        // `hydrate_final_status` returned `Local`, and the item reparented
+        // itself OUT of the trash view (the `Trashing` marker lost).
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [7u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 2);
+        let bridge =
+            test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "trash-view.txt", None, FileStatus::Trashing, 8);
+        let dest = dir.path().join("trash-view.txt");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                bridge
+                    .hydrate_file_with_progress(TEST_FILE_ID, &dest, &[dir.path()], None)
+                    .await
+            })
+            .unwrap();
+        server.finish();
+        let row = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            FileStatus::Trashing,
+            "opening a file from the macOS Trash view must NOT un-trash it"
+        );
+    }
+
+    #[test]
+    fn test_1698_review_trash_echo_marks_descendants_of_an_already_parked_folder() {
+        // PR #100 review (Codex P1, engine_bridge.rs ~5648): Finder trashing a
+        // folder parks ONLY the folder row (`queue_finder_delete`); the
+        // server's `file_trash` echo is what marks the descendants. The
+        // parked-root early return discarded the echo entirely, so nested
+        // rows stayed unmarked — and `prune_absent` protects only children
+        // whose IMMEDIATE parent is `Trashing`, so grandchildren could drop
+        // out of the trash view. The echo must still mark the unmarked
+        // subtree when the root is already parked.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let folder = "park0000-0000-4000-8000-000000000001";
+        let child = "park0000-0000-4000-8000-000000000002";
+        let grandchild = "park0000-0000-4000-8000-000000000003";
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::Trashing, true, 10);
+        seed_bridge_entry(
+            &bridge,
+            child,
+            "docs/notes.txt",
+            Some(folder),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
+        seed_bridge_entry(
+            &bridge,
+            grandchild,
+            "docs/notes/attachment.bin",
+            Some(child),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 7,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": folder }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        for id in [folder, child, grandchild] {
+            let row = bridge.db().get_file(id).unwrap().unwrap();
+            assert_eq!(row.status, FileStatus::Trashing, "{id} must be in the trash view");
+        }
+        assert!(
+            applied.contains(&grandchild.to_string()) && applied.contains(&child.to_string()),
+            "newly marked rows are reported for the working-set signal: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn test_1698_review_restore_un_trashes_the_entire_held_subtree() {
+        // PR #100 review (Codex P1, engine_bridge.rs ~5715): a restored FOLDER
+        // must take its whole held subtree out of the trash view, not just the
+        // root row. The authoritative re-snapshot preserves `Trashing` rows by
+        // design, so it can never repair the descendants — they would linger
+        // in the Trash view, and direct children would even become top-level
+        // trash entries after the parent leaves.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let folder = "rest0000-0000-4000-8000-000000000001";
+        let child = "rest0000-0000-4000-8000-000000000002";
+        let grandchild = "rest0000-0000-4000-8000-000000000003";
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::Trashing, true, 10);
+        seed_bridge_entry(
+            &bridge,
+            child,
+            "docs/notes.txt",
+            Some(folder),
+            FileStatus::Trashing,
+            false,
+            10,
+        );
+        seed_bridge_entry(
+            &bridge,
+            grandchild,
+            "docs/notes/attachment.bin",
+            Some(child),
+            FileStatus::Trashing,
+            false,
+            10,
+        );
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 8,
+            op_type: "file_restore".into(),
+            payload: serde_json::json!({ "id": folder }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        for id in [folder, child, grandchild] {
+            let row = bridge.db().get_file(id).unwrap().unwrap();
+            assert_eq!(
+                row.status,
+                FileStatus::CloudOnly,
+                "{id} must leave the trash view with the restored folder"
+            );
+        }
+        assert!(
+            applied.contains(&grandchild.to_string()) && applied.contains(&folder.to_string()),
+            "every flipped row is reported for the working-set signal: {applied:?}"
+        );
     }
 }

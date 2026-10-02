@@ -1130,8 +1130,192 @@ impl StateDb {
     /// live rows, so the hierarchy is path-based. A FILE row (or an unknown id)
     /// simply removes the single row. Returns an empty vec if the id is unknown.
     /// One transaction so a concurrent reader never sees a half-pruned subtree.
-    pub fn delete_file_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {
+    /// Task 1698 (trash ruling — full sync): mark `file_id` and, for a folder,
+    /// its whole path-prefix subtree as `Trashing` — the local mirror of the
+    /// server's trash (`DELETE /files/{id}` sets `is_trashed=TRUE`; the
+    /// server trash is the ONE trash model). Every flipped row records a
+    /// `Modified` change so the replica moves it into the trash container
+    /// (the payload builder parents top-of-trash rows there). Rows already
+    /// `Trashing` are left untouched (no duplicate changes). Returns the
+    /// affected rows (path + kind, `PrunedRow` shape) so the caller can still
+    /// remove on-disk placeholders the way the delete path did.
+    pub fn mark_subtree_trashing(&self, file_id: &str) -> Result<Vec<PrunedRow>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+
+        // Same shape as `delete_file_subtree`: the row itself, plus (for a
+        // folder) every descendant matched by PATH PREFIX — children always
+        // stored leading-slash-free, the folder possibly leading-slash-first
+        // (task 0806). Deepest-first ordering keeps the returned rows in the
+        // children-before-parent order the placeholder remover expects.
+        let root: Option<PrunedRow> = {
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut rows = stmt.query(params![file_id])?;
+            if let Some(row) = rows.next()? {
+                Some(PrunedRow {
+                    file_id: row.get(0)?,
+                    path: row.get(1)?,
+                    is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                })
+            } else {
+                None
+            }
+        };
+        let Some(root) = root else {
+            tx.rollback()?;
+            return Ok(Vec::new());
+        };
+
+        let mut marked: Vec<PrunedRow> = Vec::new();
+        let mut mark = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
+            // Flip only when it changes anything: a no-op flip must not mint
+            // a duplicate change row (same contract as `set_status`).
+            let status: String = tx
+                .query_row(
+                    "SELECT status FROM files WHERE file_id = ?1",
+                    params![row.file_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+            if status == FileStatus::Trashing.as_str() {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE files SET status = ?1 WHERE file_id = ?2",
+                params![FileStatus::Trashing.as_str(), row.file_id],
+            )?;
+            record_file_change_conn(&tx, &row.file_id, FpChangeKind::Modified, None)?;
+            Ok(true)
+        };
+
+        if root.is_dir {
+            let root_path = root.path.trim_matches('/').to_string();
+            if !root_path.is_empty() {
+                let descendants: Vec<PrunedRow> = {
+                    let mut dstmt = tx.prepare(
+                        "SELECT file_id, path, item_kind FROM files
+                         WHERE namespace = 'my_files'
+                           AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                         ORDER BY length(path) DESC, path DESC",
+                    )?;
+                    let drows = dstmt.query_map(params![root_path], |r| {
+                        Ok(PrunedRow {
+                            file_id: r.get(0)?,
+                            path: r.get(1)?,
+                            is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                        })
+                    })?;
+                    drows.collect::<Result<Vec<_>>>()?
+                };
+                for d in descendants {
+                    if mark(&tx, &d)? {
+                        marked.push(d);
+                    }
+                }
+            }
+        }
+        if mark(&tx, &root)? {
+            marked.push(root);
+        }
+        tx.commit()?;
+        Ok(marked)
+    }
+
+    /// PR #100 review (Codex P1): the trash view's inverse of
+    /// [`Self::mark_subtree_trashing`] — a restored FOLDER must take its
+    /// whole held subtree out of the trash view, not just the root row (the
+    /// authoritative re-snapshot preserves `Trashing` rows by design, so it
+    /// can never repair the descendants). Flips every `Trashing` row in the
+    /// subtree (the row itself plus, for a folder, every descendant matched
+    /// by PATH PREFIX — same shape as `mark_subtree_trashing`) to `CloudOnly`,
+    /// records a `Modified` change per actual flip, and returns the flipped
+    /// rows deepest-first (children before parent). Rows not in `Trashing`
+    /// are left untouched; a no-op flip records no change row. Same subtree
+    /// matching contract as `mark_subtree_trashing` (children always stored
+    /// leading-slash-free, the folder possibly leading-slash-first, task
+    /// 0806), and the same caller contract: the caller removes on-disk
+    /// placeholders and reports the returned ids for the working-set signal.
+    pub fn untrash_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+
+        let root: Option<PrunedRow> = {
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut rows = stmt.query(params![file_id])?;
+            if let Some(row) = rows.next()? {
+                Some(PrunedRow {
+                    file_id: row.get(0)?,
+                    path: row.get(1)?,
+                    is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                })
+            } else {
+                None
+            }
+        };
+        let Some(root) = root else {
+            tx.rollback()?;
+            return Ok(Vec::new());
+        };
+
+        let mut flipped: Vec<PrunedRow> = Vec::new();
+        let mut flip = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
+            // Flip only Trashing rows: the restore must not touch live rows
+            // that happen to sit in the subtree (e.g. a child the local
+            // flow never parked), and a no-op must not mint a change row.
+            let status: String = tx
+                .query_row(
+                    "SELECT status FROM files WHERE file_id = ?1",
+                    params![row.file_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+            if status != FileStatus::Trashing.as_str() {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE files SET status = ?1 WHERE file_id = ?2",
+                params![FileStatus::CloudOnly.as_str(), row.file_id],
+            )?;
+            record_file_change_conn(&tx, &row.file_id, FpChangeKind::Modified, None)?;
+            Ok(true)
+        };
+
+        if root.is_dir {
+            let root_path = root.path.trim_matches('/').to_string();
+            if !root_path.is_empty() {
+                let descendants: Vec<PrunedRow> = {
+                    let mut dstmt = tx.prepare(
+                        "SELECT file_id, path, item_kind FROM files
+                         WHERE namespace = 'my_files'
+                           AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                         ORDER BY length(path) DESC, path DESC",
+                    )?;
+                    let drows = dstmt.query_map(params![root_path], |r| {
+                        Ok(PrunedRow {
+                            file_id: r.get(0)?,
+                            path: r.get(1)?,
+                            is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                        })
+                    })?;
+                    drows.collect::<Result<Vec<_>>>()?
+                };
+                for d in descendants {
+                    if flip(&tx, &d)? {
+                        flipped.push(d);
+                    }
+                }
+            }
+        }
+        if flip(&tx, &root)? {
+            flipped.push(root);
+        }
+        tx.commit()?;
+        Ok(flipped)
+    }
+
+    pub fn delete_file_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {        let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
         // Look up the row to delete (its path + kind drives the subtree prune).
@@ -1405,8 +1589,13 @@ impl StateDb {
         // Find every direct child whose parent_id matches the absent folder.
         // Using `parent_id` (not path-prefix) because we have no path to start
         // from — that is precisely the condition that triggered this call.
+        // Task 1698: `Trashing` children are NOT swept — they are the server
+        // trash's content (each has its own `file_trash` op converging it
+        // into the trash view); deleting them would erase trash-view rows.
         let direct_children: Vec<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1")?;
+            let mut stmt = tx.prepare(
+                "SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1 AND status != 'trashing'",
+            )?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
@@ -1625,12 +1814,22 @@ impl StateDb {
         // snapshot). Everything else is off-limits per the doc above. We now also
         // pull `path` + `item_kind` so the caller can locate the on-disk
         // placeholder and (for a folder) we can prune its orphaned descendants.
+        //
+        // Task 1698 (trash ruling): `Trashing` rows are the macOS Trash view
+        // and the snapshot NEVER lists trashed files — absence is now their
+        // steady state, not a convergence signal. Rows whose PARENT row is
+        // `Trashing` are that trash view's folder content (same server trash)
+        // and are equally protected. Removal converges through the server's
+        // `file_delete` (permanent) / `file_restore` ops instead.
         let candidates: Vec<PrunedRow> = {
             let mut stmt = tx.prepare(
                 "SELECT file_id, path, item_kind FROM files
                  WHERE namespace = 'my_files'
                    AND status != 'uploading'
+                   AND status != 'trashing'
                    AND remote_updated_at < ?1
+                   AND (parent_id IS NULL OR parent_id NOT IN
+                        (SELECT file_id FROM files WHERE status = 'trashing'))
                    AND file_id NOT IN (
                        SELECT file_id FROM operation_queue WHERE file_id IS NOT NULL
                    )",
@@ -1694,10 +1893,15 @@ impl StateDb {
                         // precede their parent dirs in the returned order. Descendants
                         // with a pending op / mid-upload are NOT excluded here: their
                         // parent is gone server-side, so the orphan must go too —
-                        // any stale queued op against it is moot.
+                        // any stale queued op against it is moot. Task 1698:
+                        // `Trashing` descendants are NOT excluded here by a pending
+                        // op, but ARE excluded by STATUS — they are the server
+                        // trash's content (recoverable), not dead rows; deleting
+                        // them would erase the trash view's folder contents.
                         let mut dstmt = tx.prepare(
                             "SELECT file_id, path, item_kind FROM files
                              WHERE namespace = 'my_files'
+                               AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                              ORDER BY length(path) DESC, path DESC",
                         )?;
@@ -3037,6 +3241,10 @@ impl StateDb {
         rows.collect()
     }
 
+    /// Register hydrated content as cached and stamp the row `local` — EXCEPT
+    /// statuses that mean something else right now (`uploading`, `conflict`,
+    /// `error`, and since the trash ruling `trashing`: a row opened from the
+    /// macOS Trash view keeps its marker even after its content lands).
     pub fn mark_cached(&self, file_id: &str, cache_path: &str, cache_bytes: i64, opened_at: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
@@ -3045,7 +3253,7 @@ impl StateDb {
                  cache_bytes = ?3,
                  last_opened_at = ?4,
                  status = CASE
-                    WHEN status IN ('uploading', 'conflict', 'error') THEN status
+                    WHEN status IN ('uploading', 'conflict', 'error', 'trashing') THEN status
                     ELSE 'local'
                  END
              WHERE file_id = ?1",
@@ -4925,14 +5133,16 @@ mod tests {
     }
 
     #[test]
-    fn prune_absent_deletes_trashing_row_absent_from_snapshot_after_op_cleared() {
-        // task 0802 — CONVERGENCE: the server-authoritative path. After
-        // `api.trash_file` succeeds the TrashFile op is REMOVED (the `Trashing`
-        // status, not the op, is now the durable marker). Later the trash finally
-        // propagates and the file is ABSENT from `/sync/snapshot`. At that point
-        // the op-less `Trashing` row MUST be pruned — there is no `operation_queue`
-        // row to protect it and `prune_absent` has no blanket "skip Trashing" rule
-        // — giving final convergence with the (already-removed) on-disk placeholder.
+    fn prune_absent_keeps_trashing_row_absent_from_snapshot_trash_view() {
+        // task 0802 — FLIPPED BY TASK 1698 (trash ruling, RED-first): after
+        // `api.trash_file` succeeds the TrashFile op is REMOVED (the
+        // `Trashing` status, not the op, is the durable marker). The file is
+        // ABSENT from `/sync/snapshot` — and under the 1698 ruling it stays
+        // ABSENT forever (the snapshot never lists trashed files), but the
+        // row IS the macOS Trash view now. prune_absent must NOT delete it:
+        // convergence to removal flows through the server's `file_delete` op
+        // (permanent delete), `file_restore`, or the retention janitor — the
+        // same server trash model, no second one invented.
         let dir = tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         // Trashing row, NO pending op (op was dropped on a successful trash).
@@ -4942,14 +5152,62 @@ mod tests {
         let seen: HashSet<String> = ["still-here".to_string()].into_iter().collect();
         let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
 
-        assert_eq!(
-            pruned.iter().map(|r| r.file_id.clone()).collect::<Vec<_>>(),
-            vec!["trashed-gone".to_string()]
+        assert!(
+            pruned.is_empty(),
+            "a Trashing row absent from the snapshot must NOT be pruned (it is the trash view): {pruned:?}"
         );
         assert!(
-            db.get_file("trashed-gone").unwrap().is_none(),
-            "an op-less Trashing row absent from the snapshot must be pruned (final convergence)"
+            db.get_file("trashed-gone").unwrap().is_some(),
+            "a Trashing row absent from the snapshot is the TRASH VIEW (task 1698): the row survives. \
+             Convergence to removal now flows through the server's file_delete op (permanent delete), \
+             the file_restore op, or the retention janitor — NOT prune_absent."
         );
+    }
+
+    #[test]
+    fn prune_absent_keeps_children_of_trashing_rows_trash_view_content() {
+        // Task 1698: a child inside a trashed folder is the trash view's
+        // folder content — the server cascade_trash trashed it too, so the
+        // row must survive a snapshot that no longer lists either of them.
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "trashed-dir".into(),
+            path: "trashed-dir".into(),
+            status: FileStatus::Trashing,
+            size_bytes: 0,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 10,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        })
+        .unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "trashed-child".into(),
+            path: "trashed-dir/leaf.txt".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 10,
+            parent_id: Some("trashed-dir".into()),
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        // `upsert_file` does NOT write the parent linkage — the contract does.
+        let mut contract = db.get_file_contract_state("trashed-child").unwrap().unwrap();
+        contract.parent_id = Some("trashed-dir".into());
+        db.set_file_contract_state(&contract).unwrap();
+
+        let seen: HashSet<String> = ["still-here".to_string()].into_iter().collect();
+        let pruned = db.prune_absent(&seen, FAR_FUTURE).unwrap();
+        assert!(
+            pruned.is_empty(),
+            "trash-view rows (parent + content) must survive the prune: {pruned:?}"
+        );
+        assert!(db.get_file("trashed-dir").unwrap().is_some());
+        assert!(db.get_file("trashed-child").unwrap().is_some());
     }
 
     #[test]

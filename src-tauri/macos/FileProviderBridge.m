@@ -4,7 +4,13 @@
 #include <string.h>
 
 static NSString *BeebeebDomainIdentifier = @"io.beebeeb.app.domain";
-static NSString *BeebeebDomainDisplayName = @"Drive";
+// Task 1698 part 3 (1696 G8): the domain's display name is "Beebeeb" — the
+// app's name and what the system DB + Finder sidebar already show. The old
+// "Drive" was the zombie domain's residue (1696 forensics: we registered
+// "Drive" while the system showed "Beebeeb"). Which side wins on an existing
+// registration is device-verifiable only (addDomain updates the stored
+// domain); the registered truth is now the app's own name.
+static NSString *BeebeebDomainDisplayName = @"Beebeeb";
 
 static void BeebeebCopyMessage(NSString *message, char *buffer, unsigned long buffer_len) {
     if (buffer == NULL || buffer_len == 0) {
@@ -23,8 +29,16 @@ static void BeebeebCopyError(NSError *error, char *buffer, unsigned long buffer_
 }
 
 static NSFileProviderDomain *BeebeebDomain(void) {
-    return [[NSFileProviderDomain alloc] initWithIdentifier:BeebeebDomainIdentifier
-                                               displayName:BeebeebDomainDisplayName];
+    NSFileProviderDomain *domain = [[NSFileProviderDomain alloc] initWithIdentifier:BeebeebDomainIdentifier
+                                                            displayName:BeebeebDomainDisplayName];
+    // Task 1698 part 2 (ruling: full trash sync): macOS 13+ surfaces the
+    // system trash container as Finder's Trash when this is YES. It IS the
+    // default, but it is set explicitly so the ruling is visible in code and
+    // survives any future default change.
+    if (@available(macOS 13.0, *)) {
+        domain.supportsSyncingTrash = YES;
+    }
+    return domain;
 }
 
 static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain,
@@ -302,6 +316,73 @@ int beebeeb_fp_signal_working_set(char *error_buffer, unsigned long error_buffer
                                error_buffer_len);
             return -1;
         }
+        if (found_error != nil) {
+            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            return -1;
+        }
+        return 0;
+    }
+}
+
+// Task 1698 part 3 (closes 1696 / audit G8): enumerate EVERY registered
+// File Provider domain identifier so the (signed) app can sweep the zombie
+// domains left by earlier bundle ids. The identifiers are returned
+// newline-separated in `ids_buffer`; the return value is the domain count,
+// or -1 on error (error_buffer set). Requires app identity: an unsigned CLI
+// context gets -2001 through here as a normal -1 error.
+int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len,
+                            char *error_buffer, unsigned long error_buffer_len) {
+    @autoreleasepool {
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSArray<NSFileProviderDomain *> *found_domains = nil;
+        __block NSError *found_error = nil;
+
+        [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
+            found_domains = domains;
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+        if (found_error != nil) {
+            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            return -1;
+        }
+
+        NSMutableString *joined = [NSMutableString string];
+        for (NSFileProviderDomain *domain in found_domains) {
+            if (joined.length > 0) {
+                [joined appendString:@"\n"];
+            }
+            [joined appendString:domain.identifier ?: @""];
+        }
+        BeebeebCopyMessage(joined, ids_buffer, ids_buffer_len);
+        return (int)found_domains.count;
+    }
+}
+
+// Task 1698 part 3: remove ONE domain by identifier (the sweep's per-domain
+// primitive — the Rust side owns the filtering decision and never passes our
+// own identifier here). Returns: 0 = removed (or already gone), -1 = error
+// (error_buffer set).
+int beebeeb_fp_remove_domain_by_id(const char *identifier, char *error_buffer, unsigned long error_buffer_len) {
+    @autoreleasepool {
+        if (identifier == NULL) {
+            BeebeebCopyMessage(@"no domain identifier given", error_buffer, error_buffer_len);
+            return -1;
+        }
+        NSString *domain_id = [NSString stringWithUTF8String:identifier];
+        NSFileProviderDomain *domain = [[NSFileProviderDomain alloc] initWithIdentifier:domain_id
+                                                                            displayName:domain_id];
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+
+        [NSFileProviderManager removeDomain:domain completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
         if (found_error != nil) {
             BeebeebCopyError(found_error, error_buffer, error_buffer_len);
             return -1;

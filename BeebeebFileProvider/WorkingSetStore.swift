@@ -86,9 +86,14 @@ enum WorkingSetStore {
     /// Container identifiers that are ALWAYS treated as materialized.
     /// Task 1701: only the root container — Finder shows ONE root
     /// ("Beebeeb"); the synthetic namespace roots that used to sit beside it
-    /// in this set are gone.
+    /// in this set are gone. Task 1698: the trash container joins it — a
+    /// SYSTEM container (never entering the system's materialized-set
+    /// enumeration), so changes parented at it are always reported.
     static func alwaysMaterializedIdentifiers() -> Set<String> {
-        [NSFileProviderItemIdentifier.rootContainer.rawValue]
+        [
+            NSFileProviderItemIdentifier.rootContainer.rawValue,
+            NSFileProviderItemIdentifier.trashContainer.rawValue,
+        ]
     }
 
     /// Apple's Replicated contract (`NSFileProviderReplicatedExtension.h`):

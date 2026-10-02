@@ -27,6 +27,14 @@ struct BeebeebProviderItem: Codable {
     let contentVersion: String?
     /// metadataVersion: changes on rename/move/status — no re-download.
     let metadataVersion: String?
+    /// Task 1698: the item's effective pin state (the daemon resolves
+    /// pin_state + inherited_pin_state). Drives `contentPolicy`:
+    /// `.downloadEagerlyAndKeepDownloaded` on pinned items (a pinned folder's
+    /// children inherit it), the root's `.downloadLazily` governs everything
+    /// else. The cross-device pin BACKEND is task 1683 — today the pin set is
+    /// this device's own (`files.pin_state`), so the mapping is real but its
+    /// inputs are local-only (task 1698 deviation 1).
+    let pinned: Bool
 
     static let read = 1 << 0
     static let write = 1 << 1
@@ -40,7 +48,8 @@ struct BeebeebProviderItem: Codable {
     /// CAP_REPARENT. Without it Finder blocks dragging an item OUT (a move).
     static let reparent = 1 << 5
     /// .allowsTrashing — task 1697. Bit 6, same numbering as Rust's CAP_TRASH.
-    /// Trash SEMANTICS (trashContainer handling) are task 1698's decision.
+    /// Trash SEMANTICS (trashContainer handling) landed in task 1698 (ruling:
+    /// full trash sync — see FileProviderExtension's modifyRoute/deleteItem).
     static let trash = 1 << 6
 
     /// The memberwise constructor with defaults for the 1697 fields, so
@@ -59,7 +68,8 @@ struct BeebeebProviderItem: Codable {
         modifiedAt: Date? = nil,
         childItemCount: Int64? = nil,
         contentVersion: String? = nil,
-        metadataVersion: String? = nil
+        metadataVersion: String? = nil,
+        pinned: Bool = false
     ) {
         self.identifier = identifier
         self.parentIdentifier = parentIdentifier
@@ -75,6 +85,7 @@ struct BeebeebProviderItem: Codable {
         self.childItemCount = childItemCount
         self.contentVersion = contentVersion
         self.metadataVersion = metadataVersion
+        self.pinned = pinned
     }
 
     /// Task 1701 (ruling: one root, no synthetic split): the SINGLE root
@@ -93,6 +104,26 @@ struct BeebeebProviderItem: Codable {
             contentType: nil,
             status: "local",
             capabilities: read | addSubItems,
+            versionIdentifier: nil
+        )
+    }
+
+    /// Task 1698 (trash ruling): the SYSTEM trash container. Apple's
+    /// `supportsSyncingTrash` (default YES) makes macOS surface it as the
+    /// Trash; its contents come from the daemon's trash-container
+    /// enumeration (Trashing rows). The container itself is a system
+    /// container — answered locally, always materialized, never
+    /// created/renamed/deleted by us, so READ only.
+    static func trashContainer() -> BeebeebProviderItem {
+        BeebeebProviderItem(
+            identifier: NSFileProviderItemIdentifier.trashContainer.rawValue,
+            parentIdentifier: NSFileProviderItemIdentifier.trashContainer.rawValue,
+            filename: "Trash",
+            kind: .folder,
+            sizeBytes: 0,
+            contentType: nil,
+            status: "local",
+            capabilities: read,
             versionIdentifier: nil
         )
     }
@@ -176,6 +207,22 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
 
     var isMostRecentVersionDownloaded: Bool {
         isDownloaded
+    }
+
+    /// Task 1698 (contentPolicy, macOS 13+; our minimum is 14.0). The system
+    /// evicts only items reported `isUploaded` with no local edits, so a
+    /// materialized+uploaded item the user PINNED must say "keep me":
+    /// `.downloadEagerlyAndKeepDownloaded`. The root (always here, never a
+    /// system-managed item) reports `.downloadLazily` — dataless until opened
+    /// is the single-root default. Everything else inherits.
+    var contentPolicy: NSFileProviderContentPolicy {
+        if model.identifier == NSFileProviderItemIdentifier.rootContainer.rawValue {
+            return .downloadLazily
+        }
+        if model.pinned {
+            return .downloadEagerlyAndKeepDownloaded
+        }
+        return .inherited
     }
 
     var capabilities: NSFileProviderItemCapabilities {

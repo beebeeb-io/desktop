@@ -566,9 +566,13 @@ async fn http_bridge_nested_hydration_thumbnails_and_cleanup_twice() {
             }
             f.trash_subtree();
             sync_tick(&bridge, f.root.path()).await.unwrap();
-            assert_eq!(bridge.db().list_files().unwrap().len(), 10);
+            // Task 1698 (trash ruling — full sync): a remote trash no longer
+            // removes the mirror rows — the trashed subtree flips `Trashing`
+            // (the macOS trash view mirrors the server trash).
+            assert_eq!(bridge.db().list_files().unwrap().len(), 12);
             for n in [8, 9] {
-                assert!(bridge.db().get_file(&id(n)).unwrap().is_none());
+                let row = bridge.db().get_file(&id(n)).unwrap().expect("trash keeps the row (trash view)");
+                assert_eq!(row.status, crate::state_db::FileStatus::Trashing);
             }
             f.expire("alice");
             assert!(
