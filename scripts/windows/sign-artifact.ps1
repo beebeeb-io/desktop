@@ -7,10 +7,16 @@
   sidecars, the NSIS installer and its uninstaller, the MSI). Publisher is the
   validated organization behind the certificate profile: CN=Initlabs B.V.
 
-  Authentication is ambient Azure auth (Azure CLI login) - the Microsoft
-  Artifact Signing dlib acquires the token itself via DefaultAzureCredential.
-  In CI, `azure/login` (OIDC federated credential) provides that login. There
-  are no signing credentials in this repo, in env vars, or in CI secrets.
+  Authentication is a scoped client secret (GitHub secret AZURE_CLIENT_SECRET,
+  app registration beebeeb-desktop-release whose ONLY Azure role is
+  "Artifact Signing Certificate Profile Signer" on the beebeebsigning
+  account): DefaultAzureCredential's EnvironmentCredential resolves it first,
+  deterministically. OIDC-only auth was tried first and failed twice with
+  measured evidence (task 1617): ambient credentials (IMDS probing) hung the
+  dlib ~33 min, and azure/login's OIDC assertion expires after ~5 minutes
+  while the build signs ~19 minutes later (AADSTS700024). Rotation: the
+  secret expires after 1 year (created 2026-10-01) — rotate via
+  `az ad app credential reset`.
 
   Identity validation id: 3177670b-59dd-4d4b-acc5-8f10e8916fec (decision 1499).
   Service coordinates are non-secret defaults, overridable by env:
@@ -116,35 +122,6 @@ function Install-ArtifactSigningDlib {
 if (-not (Test-Path -LiteralPath $FilePath)) {
   Stop-Signing "sign-artifact: file not found: $FilePath"
 }
-
-function Ensure-AzFreshLogin {
-  # azure/login's OIDC client assertion is valid for ~5 minutes, but the build
-  # signs ~19 minutes after the login step (release compile time). By sign
-  # time the az CLI cache holds an EXPIRED assertion and the dlib's
-  # AzureCliCredential fails with AADSTS700024 (measured in release run 5).
-  # Re-login az right here with a FRESH GitHub OIDC token, fetched using this
-  # job's own id-token permission. No long-lived secret involved.
-  $reqToken = $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN
-  $reqUrl = $env:ACTIONS_ID_TOKEN_REQUEST_URL
-  $clientId = $env:AZURE_CLIENT_ID
-  $tenantId = $env:AZURE_TENANT_ID
-  if (-not $reqToken -or -not $reqUrl -or -not $clientId -or -not $tenantId) {
-    Stop-Signing "sign-artifact: OIDC re-login prerequisites missing (ACTIONS_ID_TOKEN_REQUEST_* / AZURE_CLIENT_ID / AZURE_TENANT_ID) - is the build job's id-token permission set and azure/login configured?"
-  }
-  Write-Host "sign-artifact: refreshing az login with a fresh GitHub OIDC token..."
-  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-  $resp = Invoke-RestMethod -Method Get `
-    -Headers @{ Authorization = "Bearer $reqToken" } `
-    -Uri ($reqUrl + $(if ($reqUrl.Contains('?')) { '&' } else { '?' }) + 'audience=api://AzureADTokenExchange') `
-    -TimeoutSec 60
-  if (-not $resp.value) { Stop-Signing "sign-artifact: GitHub OIDC token fetch returned no token" }
-  & az login --service-principal -u $clientId -t $tenantId --federated-token $resp.value --output none
-  if ($LASTEXITCODE -ne 0) {
-    Stop-Signing "sign-artifact: az login with the fresh federated token failed (exit $LASTEXITCODE)"
-  }
-}
-
-Ensure-AzFreshLogin
 
 $signtool = Find-SignTool
 if (-not $signtool) { Stop-Signing "sign-artifact: signtool.exe not found (install the Windows SDK)" }

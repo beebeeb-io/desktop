@@ -124,9 +124,19 @@ Service coordinates (non-secret):
 
 How a release build signs (all in `release.yml`, Windows job only):
 
-1. `azure/login` authenticates by GitHub OIDC federated credential — there is no
-   client secret or certificate anywhere. Secrets are identifiers only:
-   `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`.
+1. `azure/login` supplies the identifier env vars (`AZURE_CLIENT_ID` /
+   `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`). The signing credential is a
+   **scoped client secret** (`AZURE_CLIENT_SECRET`) on the app registration
+   `beebeeb-desktop-release` — its ONLY Azure role is "Artifact Signing
+   Certificate Profile Signer" on the `beebeebsigning` account, so a leak
+   cannot read or mutate anything, only sign binaries; it expires yearly
+   (created 2026-10-01, rotate with `az ad app credential reset`).
+   Deviation from the original OIDC-only design (2026-10-01, measured across
+   release runs 1-5): ambient OIDC credentials hung the dlib's
+   DefaultAzureCredential (IMDS probing, ~33 min) and the login-time OIDC
+   assertion expires ~5 minutes before the first sign happens (compile time),
+   failing with AADSTS700024 — EnvironmentCredential with a scoped secret is
+   the deterministic path.
 2. `scripts/windows/sign-artifact.ps1` is injected as Tauri's
    `bundle.windows.signCommand` at build time (not committed, so local bundling
    keeps working). The bundler invokes it for the app binary before packaging,
@@ -153,9 +163,10 @@ starts at zero for a freshly issued certificate (OV and EV are treated the same
 since March 2024). A first-download prompt can linger briefly.
 
 Rotation/continuity: certificates are short-lived and rotate inside Azure; the
-timestamp keeps every published signature valid indefinitely. Nothing in this
-repo or in CI secrets can impersonate the publisher — only that Azure account
-plus the GitHub workflow's OIDC subject can.
+timestamp keeps every published signature valid indefinitely. The only secret
+that can impersonate the publisher is the scoped `AZURE_CLIENT_SECRET` (signer
+role on the signing account only) — it cannot read or mutate anything else —
+plus the pre-existing `TAURI_SIGNING_PRIVATE_KEY` for the updater channel.
 
 ## macOS: local build, then backfill the manifest
 
