@@ -1931,7 +1931,13 @@ mod tests {
     // working-set signal (see `signal_file_provider_working_set`). The pure
     // decision core for that signal is tested in `macos_file_provider`.
 
+    // macOS-only like the module it exercises: `macos_file_provider` is
+    // `#[cfg(target_os = "macos")]`, so an unguarded reference breaks the
+    // Windows/Linux compile targets (caught by CI Rust check Windows +
+    // Rust test Linux on the 1697 branch; the runtime call sites above are
+    // gated with `signal_file_provider_working_set`).
     #[test]
+    #[cfg(target_os = "macos")]
     fn signal_file_provider_working_set_decision_gates_on_changed_items() {
         // Mirrors macos_file_provider::should_signal_working_set so a runner
         // change that bypasses the gate fails here too.
