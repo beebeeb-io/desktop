@@ -283,17 +283,8 @@ final class XPCBridge {
 
     func item(identifier: NSFileProviderItemIdentifier) throws -> BeebeebProviderItem {
         if identifier == .rootContainer {
-            return BeebeebProviderItem(
-                identifier: identifier.rawValue,
-                parentIdentifier: identifier.rawValue,
-                filename: "Beebeeb",
-                kind: .folder,
-                sizeBytes: 0,
-                contentType: nil,
-                status: "local",
-                capabilities: BeebeebProviderItem.read | BeebeebProviderItem.addSubItems,
-                versionIdentifier: nil
-            )
+            // Task 1701: the single "Beebeeb" root (no synthetic namespaces).
+            return .root()
         }
 
         let response = try sendRequest([

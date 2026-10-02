@@ -1551,10 +1551,13 @@ async fn run_known_folder_mirror(sync_root: &Path) {
 /// missing filter.
 ///
 /// `changed_parent_ids`: the parent folder id of each changed item (None =
-/// unknown — vault-root items, deletions whose row is already gone). The
-/// namespace roots and the real root are always materialized (they are
-/// presented without ever entering the system's materialized-set
-/// enumeration), so `None` parents always signal.
+/// unknown — vault-root items, deletions whose row is already gone). Task
+/// 1701: Finder shows ONE root ("Beebeeb"), the synthetic namespace roots
+/// are gone, and the root container is always materialized (it is presented
+/// without ever entering the system's materialized-set enumeration), so
+/// `None` parents — root-child items under the single root — always signal.
+/// A `namespace:` id can no longer occur (`normalize_parent_id` strips it
+/// from writes) and no longer signals.
 pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], materialized: &[String]) -> bool {
     if materialized.is_empty() {
         return !changed_parent_ids.is_empty();
@@ -1564,8 +1567,7 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
     changed_parent_ids.iter().any(|parent| match parent {
         None => true,
         Some(parent_id) => {
-            parent_id.starts_with("namespace:")
-                || parent_id == "__fp_root__"
+            parent_id == "__fp_root__"
                 || parent_id == "NSFileProviderRootContainerItemIdentifier"
                 || parent_id == "rootContainer"
                 || materialized.contains(parent_id.as_str())

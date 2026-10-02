@@ -83,15 +83,12 @@ enum WorkingSetStore {
 
     // MARK: - Materialized-set filter
 
-    /// Container identifiers that are ALWAYS treated as materialized: the
-    /// synthetic namespace roots are presented in the sidebar without ever
-    /// being part of the system's materialized-set enumeration.
+    /// Container identifiers that are ALWAYS treated as materialized.
+    /// Task 1701: only the root container — Finder shows ONE root
+    /// ("Beebeeb"); the synthetic namespace roots that used to sit beside it
+    /// in this set are gone.
     static func alwaysMaterializedIdentifiers() -> Set<String> {
-        var ids: Set<String> = [NSFileProviderItemIdentifier.rootContainer.rawValue]
-        for namespace in BeebeebNamespace.allCases {
-            ids.insert(namespace.identifier.rawValue)
-        }
-        return ids
+        [NSFileProviderItemIdentifier.rootContainer.rawValue]
     }
 
     /// Apple's Replicated contract (`NSFileProviderReplicatedExtension.h`):
@@ -100,10 +97,20 @@ enum WorkingSetStore {
     /// parents are both untracked is dropped — the system drops it anyway,
     /// and the container enumeration of a LATER-materialized folder covers
     /// the gap (dataless-dir traversal re-enumerates against us).
+    ///
+    /// Task 1701 exception: a row with NO parent on either side is a
+    /// ROOT-CHILD change. In state.db `files.parent_id` is NULL only for
+    /// items at the vault root (server root), so both-parents-nil means a
+    /// top-level create/modify — or a top-level DELETION, which carries no
+    /// item payload and whose old parent is gone with the row. The root is
+    /// always materialized, so report it.
     static func changeTouchesMaterialized(oldParent: String?, newParent: String?, materialized: Set<String>?) -> Bool {
         guard let materialized, !materialized.isEmpty else {
             // Fail open: an empty/unknown set means the working set is the
             // entire dataset (Apple's documented fallback) — report everything.
+            return true
+        }
+        if oldParent == nil && newParent == nil {
             return true
         }
         let always = alwaysMaterializedIdentifiers()

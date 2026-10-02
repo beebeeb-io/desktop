@@ -733,16 +733,29 @@ check("1694: addSubItems bit (1 << 4) maps to .allowsAddingSubItems") {
     )
 }
 
-check("1694: namespace model grants .allowsAddingSubItems") {
-    let namespace = BeebeebProviderItem.namespace(.myFiles)
-    let mapped = FileProviderItem(model: namespace).capabilities
+check("1701: the root container item grants .allowsReading + .allowsAddingSubItems") {
+    // Migrated from "1694: namespace model grants .allowsAddingSubItems":
+    // the synthetic namespace roots are gone (1701 ruling) and the single
+    // root — "Beebeeb" — inherits the capability contract: drops into the
+    // root must keep working (1694 semantics).
+    let root = BeebeebProviderItem.root()
+    let mapped = FileProviderItem(model: root).capabilities
     try expect(
         mapped.contains(.allowsReading),
-        "namespace must keep .allowsReading"
+        "the root must keep .allowsReading"
     )
     try expect(
         mapped.contains(.allowsAddingSubItems),
-        "sidebar namespace roots must grant .allowsAddingSubItems (task 1694), got \(mapped.rawValue)"
+        "the Beebeeb root must grant .allowsAddingSubItems (task 1694 semantics), got \(mapped.rawValue)"
+    )
+    try expect(
+        root.filename == "Beebeeb",
+        "the single root is named Beebeeb (1701 ruling), got \(root.filename)"
+    )
+    try expect(
+        root.identifier == NSFileProviderItemIdentifier.rootContainer.rawValue
+            && root.parentIdentifier == NSFileProviderItemIdentifier.rootContainer.rawValue,
+        "the root item is the root container, parented on itself"
     )
 }
 

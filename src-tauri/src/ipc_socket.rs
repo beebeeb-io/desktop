@@ -207,10 +207,13 @@ pub struct FileProviderChangePayload {
 
 const FP_ROOT: &str = "__fp_root__";
 const FP_ROOT_APPLE: &str = "NSFileProviderRootContainerItemIdentifier";
-const NAMESPACE_MY_FILES: &str = "namespace:my_files";
+// Task 1701: the OTHER namespace constants (`my_files`, `offline`,
+// `conflicts`) are gone with the synthetic containers. This one survives as
+// a WRITE-path guard only: a stale Finder client can still drop onto a
+// cached `namespace:shared_with_me` folder, and that drop must be refused
+// (read-only), not silently re-parented to the vault root by
+// `normalize_parent_id`. It is never an enumeration surface any more.
 const NAMESPACE_SHARED_WITH_ME: &str = "namespace:shared_with_me";
-const NAMESPACE_OFFLINE: &str = "namespace:offline";
-const NAMESPACE_CONFLICTS: &str = "namespace:conflicts";
 const CAP_READ: u32 = 1 << 0;
 const CAP_WRITE: u32 = 1 << 1;
 const CAP_RENAME: u32 = 1 << 2;
@@ -935,7 +938,7 @@ async fn handle_connection(
         };
         let resp = match req {
             IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
-                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, NAMESPACE_MY_FILES)),
+                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, FP_ROOT_APPLE)),
                 _ => IpcResponse::Error {
                     message: "not found".into(),
                 },
@@ -1358,7 +1361,7 @@ fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> O
     if db.has_pending_trash(&item.identifier).unwrap_or(false) {
         return None;
     }
-    let fresh = file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES);
+    let fresh = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
     if fresh.filename != item.filename {
         return None;
     }
@@ -1430,7 +1433,7 @@ fn write_outcome_response(
             item: file_id
                 .as_deref()
                 .and_then(|id| db.get_file(id).ok().flatten())
-                .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES)),
+                .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
             ignored,
             message,
         },
@@ -1457,7 +1460,7 @@ fn file_provider_change_payloads(
                     .get_file(&change.file_id)
                     .ok()
                     .flatten()
-                    .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES)),
+                    .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
             },
             file_id: change.file_id,
             kind: change.kind.as_str().to_string(),
@@ -1469,16 +1472,16 @@ fn file_provider_change_payloads(
 
 fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -> Vec<FileProviderItemPayload> {
     if is_file_provider_root(container_id) {
-        return vec![
-            namespace_payload(NAMESPACE_MY_FILES, "My files"),
-            namespace_payload(NAMESPACE_SHARED_WITH_ME, "Shared with me"),
-            namespace_payload(NAMESPACE_OFFLINE, "Offline"),
-            namespace_payload(NAMESPACE_CONFLICTS, "Conflicts"),
-        ];
-    }
-
-    match container_id {
-        NAMESPACE_MY_FILES => db
+        // Task 1701 (ruling: `.claude/tasks/decisions/finder-sidebar-single-root.md`):
+        // Finder shows ONE root folder — "Beebeeb", the user's own files,
+        // matching the Windows app. The root container's children are the
+        // user's REAL top-level tree; the synthetic `My files` /
+        // `Shared with me` / `Offline` / `Conflicts` namespace containers are
+        // no longer enumerated. Shared items are not a Finder surface for
+        // now (webapp only); Offline/Conflicts data is untouched — it simply
+        // stops being a synthetic Finder folder (native offline affordances
+        // are task 1698, conflicts the dialog design pass).
+        return db
             .list_files()
             .unwrap_or_default()
             .into_iter()
@@ -1491,70 +1494,25 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
                         .map(|contract| contract.namespace == crate::state_db::Namespace::MyFiles)
                         .unwrap_or(true)
             })
-            .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES))
-            .collect(),
-        NAMESPACE_OFFLINE => db
-            .list_by_status(crate::state_db::FileStatus::Local)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_OFFLINE))
-            .collect(),
-        NAMESPACE_CONFLICTS => db
-            .list_by_status(crate::state_db::FileStatus::Conflict)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_CONFLICTS))
-            .collect(),
-        NAMESPACE_SHARED_WITH_ME => db
-            .list_contract_states_by_namespace(crate::state_db::Namespace::SharedWithMe)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|contract| contract.parent_id.is_none())
-            .filter_map(|contract| {
-                db.get_file(&contract.file_id)
-                    .ok()
-                    .flatten()
-                    // Through the _for_db wrapper so dates/child counts are
-                    // stamped here too (task 1697).
-                    .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_SHARED_WITH_ME))
-            })
-            .collect(),
-        _ => db
-            .list_files()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|entry| {
-                db.get_file_contract_state(&entry.file_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|contract| contract.parent_id)
-                    .as_deref()
-                    == Some(container_id)
-            })
-            .map(|entry| file_entry_payload_for_db(db, &entry, container_id))
-            .collect(),
+            .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE))
+            .collect();
     }
-}
 
-fn namespace_payload(identifier: &str, filename: &str) -> FileProviderItemPayload {
-    FileProviderItemPayload {
-        identifier: identifier.to_string(),
-        parent_identifier: FP_ROOT_APPLE.to_string(),
-        filename: filename.to_string(),
-        kind: "namespace".to_string(),
-        size_bytes: 0,
-        content_type: Some("public.folder".to_string()),
-        status: "local".to_string(),
-        capabilities: CAP_READ | CAP_ADD_SUBITEMS,
-        version_identifier: None,
-        // Namespaces are containers the system never materializes children
-        // under directly — no meaningful count, no dates, no version split.
-        created_at: None,
-        modified_at: None,
-        child_item_count: None,
-        content_version: None,
-        metadata_version: None,
-    }
+    // Real folders: children by the contract's parent (the server's parent
+    // UUID, which is what `files.parent_id` stores).
+    db.list_files()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| {
+            db.get_file_contract_state(&entry.file_id)
+                .ok()
+                .flatten()
+                .and_then(|contract| contract.parent_id)
+                .as_deref()
+                == Some(container_id)
+        })
+        .map(|entry| file_entry_payload_for_db(db, &entry, container_id))
+        .collect()
 }
 
 /// Task 1694 rule (lead decision, 2026-10-01): every LIVE folder accepts
@@ -1934,7 +1892,13 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_namespace_lists_roots_with_permission_capabilities() {
+    fn test_1701_shared_root_folder_payload_keeps_read_only_caps_with_add_subitems() {
+        // Migrated from `test_shared_namespace_lists_roots_with_permission_
+        // capabilities` (task 1694/1697): the `namespace:shared_with_me`
+        // container is NO LONGER an enumeration surface (1701 ruling — shared
+        // files live in the webapp), so the intent moves to the payload
+        // builder itself: a shared root is a LIVE folder, and its capability
+        // contract is unchanged should the system ever hold it.
         let dir = tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         seed_shared_root(&db, "read-root", "Shared with me/Read only", PERMISSION_READ);
@@ -1945,20 +1909,20 @@ mod tests {
             PERMISSION_READ | PERMISSION_WRITE,
         );
 
-        let items = list_file_provider_items(&db, NAMESPACE_SHARED_WITH_ME);
-        assert_eq!(items.len(), 2);
-        let read_only = items.iter().find(|item| item.identifier == "read-root").unwrap();
-        assert_eq!(read_only.kind, "folder");
+        let read_only = db.get_file("read-root").unwrap().unwrap();
+        let payload = file_entry_payload_for_db(&db, &read_only, FP_ROOT_APPLE);
+        assert_eq!(payload.kind, "folder");
         // Task 1694 (lead rule): every LIVE folder accepts adding sub-items,
         // gated only on kind+status — NOT on permission_bits. A read-only
         // shared root is still a live folder, so it carries
         // READ | ADD_SUBITEMS (unauthorized writes are rejected at the write
         // path, not by hiding the folder's drop affordance).
-        assert_eq!(read_only.capabilities, CAP_READ | CAP_ADD_SUBITEMS);
+        assert_eq!(payload.capabilities, CAP_READ | CAP_ADD_SUBITEMS);
 
-        let editable = items.iter().find(|item| item.identifier == "write-root").unwrap();
+        let editable = db.get_file("write-root").unwrap().unwrap();
+        let payload = file_entry_payload_for_db(&db, &editable, FP_ROOT_APPLE);
         assert_eq!(
-            editable.capabilities & (CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE),
+            payload.capabilities & (CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE),
             CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
         );
     }
@@ -1978,21 +1942,11 @@ mod tests {
     // ── Task 1694: Finder blocks adding files to folders — add-subitems
     // capability bit ─────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_1694_namespace_payload_grants_add_subitems() {
-        // Finder refuses a drop into an item without .allowsAddingSubItems;
-        // the sidebar namespace roots ("My files", "Shared with me", …)
-        // advertised CAP_READ only, so every drop was blocked (Guus,
-        // 0.8.7-alpha, 2026-10-01). The namespace payload must grant
-        // READ | ADD_SUBITEMS.
-        let ns = namespace_payload(NAMESPACE_MY_FILES, "My files");
-        assert_eq!(
-            ns.capabilities,
-            CAP_READ | CAP_ADD_SUBITEMS,
-            "namespace payload must grant READ | ADD_SUBITEMS, got {:#b}",
-            ns.capabilities
-        );
-    }
+    // Task 1701: the namespace-payload variant of this test
+    // (`test_1694_namespace_payload_grants_add_subitems`) died WITH
+    // `namespace_payload` — the synthetic containers are no longer built, and
+    // dead code does not ship. The 1694 intent lives on in the folder payload
+    // tests below and in the 1701 shared-root test above.
 
     fn seed_1694_item(
         db: &StateDb,
@@ -2032,7 +1986,7 @@ mod tests {
             ItemKind::Folder,
         );
         let entry = db.get_file("1694-local-folder").unwrap().unwrap();
-        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(payload.kind, "folder");
         assert!(
             payload.capabilities & CAP_ADD_SUBITEMS != 0,
@@ -2056,7 +2010,7 @@ mod tests {
             ItemKind::Folder,
         );
         let entry = db.get_file("1694-cloud-folder").unwrap().unwrap();
-        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(payload.kind, "folder");
         assert!(
             payload.capabilities & CAP_ADD_SUBITEMS != 0,
@@ -2080,7 +2034,7 @@ mod tests {
             ItemKind::Folder,
         );
         let entry = db.get_file("1694-trashing-folder").unwrap().unwrap();
-        let contract_payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let contract_payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(contract_payload.kind, "folder");
         assert!(
             contract_payload.capabilities & CAP_ADD_SUBITEMS == 0,
@@ -2089,7 +2043,7 @@ mod tests {
         );
 
         let no_contract_payload =
-            file_entry_payload_without_contract(&entry, NAMESPACE_MY_FILES);
+            file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
         assert!(
             no_contract_payload.capabilities & CAP_ADD_SUBITEMS == 0,
             "a Trashing folder must NOT grant ADD_SUBITEMS in the no-contract fallback either, got {:#b}",
@@ -2111,7 +2065,7 @@ mod tests {
             ItemKind::File,
         );
         let entry = db.get_file("1694-local-file").unwrap().unwrap();
-        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(payload.kind, "file");
         assert!(
             payload.capabilities & CAP_ADD_SUBITEMS == 0,
@@ -2137,7 +2091,7 @@ mod tests {
             parent_id: None,
             item_kind: ItemKind::Folder,
         };
-        let payload = file_entry_payload_without_contract(&entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
         assert_eq!(
             payload.kind, "folder",
             "no-contract fallback must derive kind from FileEntry.item_kind, not hardcode \"file\""
@@ -2162,7 +2116,7 @@ mod tests {
             parent_id: None,
             item_kind: ItemKind::File,
         };
-        let payload = file_entry_payload_without_contract(&entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
         assert_eq!(payload.kind, "file");
         assert!(
             payload.capabilities & CAP_ADD_SUBITEMS == 0,
@@ -2744,7 +2698,7 @@ mod tests {
         let entry = live_file_entry(FileStatus::Local);
         db.upsert_file(&entry).unwrap();
         db.set_file_contract_state(&live_contract()).unwrap();
-        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(
             payload.capabilities & CAP_REPARENT,
             CAP_REPARENT,
@@ -2766,7 +2720,7 @@ mod tests {
         let entry = live_file_entry(FileStatus::CloudOnly);
         db.upsert_file(&entry).unwrap();
         db.set_file_contract_state(&live_contract()).unwrap();
-        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(payload.capabilities & CAP_REPARENT, 0, "read-only terminal states stay read-only");
         assert_eq!(payload.capabilities & CAP_TRASH, 0, "read-only terminal states stay read-only");
     }
@@ -2778,7 +2732,7 @@ mod tests {
         let entry = live_file_entry(FileStatus::Trashing);
         db.upsert_file(&entry).unwrap();
         db.set_file_contract_state(&live_contract()).unwrap();
-        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         assert_eq!(
             payload.capabilities & (CAP_REPARENT | CAP_TRASH),
             0,
@@ -2831,7 +2785,7 @@ mod tests {
             .unwrap();
         }
         let folder = db.get_file("folder-1697").unwrap().unwrap();
-        let payload = file_entry_payload_for_db(&db, &folder, NAMESPACE_MY_FILES);
+        let payload = file_entry_payload_for_db(&db, &folder, FP_ROOT_APPLE);
         assert_eq!(
             payload.child_item_count,
             Some(2),
@@ -2853,12 +2807,12 @@ mod tests {
         db.upsert_file(&entry).unwrap();
         db.set_file_contract_state(&live_contract()).unwrap();
 
-        let before = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        let before = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
         // A rename: metadata changes, content does not.
         let mut renamed = entry.clone();
         renamed.path = "/docs/report-renamed.txt".into();
         db.upsert_file(&renamed).unwrap();
-        let after = file_entry_payload_for_db(&db, &renamed, NAMESPACE_MY_FILES);
+        let after = file_entry_payload_for_db(&db, &renamed, FP_ROOT_APPLE);
         assert_eq!(
             after.content_version, before.content_version,
             "a rename must not change the content version (it would force a re-download)"
