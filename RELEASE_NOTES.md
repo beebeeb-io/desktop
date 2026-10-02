@@ -57,6 +57,14 @@ yet.
 
 ### Verification
 
+- The release test gate re-ran the full suite on CI Linux before any installer was built (run
+  https://github.com/beebeeb-io/desktop/actions/runs/36946460247 on desktop main 09b28ba — the
+  code this release ships; this amendment commit changes only `RELEASE_NOTES.md`, so the tested
+  code is unchanged): `bun test` 542 pass / 0 fail across 41 files; `cargo test --locked` —
+  library `test result: ok. 789 passed` (4 ignored), keychain integration
+  `test result: ok. 20 passed`, Windows session wiring `test result: ok. 8 passed`, Windows
+  signout cleanup `test result: ok. 3 passed`, main harness and doctests empty — 820 cargo
+  tests passed, 0 failed in total.
 - The Authenticode gate is proven red-first, with counts (evidence in workspace task 1617):
   guard self-test rejected both fixtures (unsigned bytes: `UnknownError`, 1/1; `cmd.exe`,
   Microsoft-signed `Valid` but wrong publisher, 1/1 — self-test exit 0), and the gate rejected
