@@ -861,10 +861,16 @@ export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }
 
   // Slice 6: this window is the surface the native "Check for updates…" menu item opens on
   // macOS, so it drains the pending request itself and answers inline in the About tab's row
-  // (it mounts no ManualUpdateFeedback toast).
+  // (it mounts no ManualUpdateFeedback toast). A consumed request also lands the window on
+  // the About tab — that is where the progress and result are rendered; a plain open
+  // consumes false and keeps the General tab.
   useEffect(() => connectNativeUpdateMenu(
     (callback) => listen('menu:check-for-updates', callback),
-    () => command<boolean>('consume_menu_update_check'),
+    async () => {
+      const result = await command<boolean>('consume_menu_update_check')
+      if (result.ok && result.value) setTab('about')
+      return result
+    },
     desktopUpdateCheck.check,
   ), [])
 

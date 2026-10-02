@@ -844,13 +844,19 @@ describe('MacSettings window', () => {
     // updates…" onto this window: a native menu event must make the WINDOW
     // consume the pending request (the controller then runs the check the
     // About row renders — that behavior is nativeUpdateSettings's). Wired
-    // through the real helper with a scripted transport.
+    // through the real helper with a scripted backend (the consume handler
+    // must live in the BACKEND: function-valued props are component props,
+    // not command handlers).
     let onMenu: () => void = () => {}
-    const consumes: number[] = []
-    const m = openWindow({ consume_menu_update_check: () => { consumes.push(1); return false } }, {
-      listen: (_event: string, callback: () => void) => { onMenu = callback; return Promise.resolve(() => {}) },
-      connectNativeUpdateMenu: realConnectNativeUpdateMenu,
-      desktopUpdateCheck,
+    const m = open('MacSettings', { consume_menu_update_check: () => false }, {
+      props: { initialTab: 'general' },
+      bindings: {
+        GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
+        useSettingsConfig: settingsStub,
+        listen: (_event: string, callback: () => void) => { onMenu = callback; return Promise.resolve(() => {}) },
+        connectNativeUpdateMenu: realConnectNativeUpdateMenu,
+        desktopUpdateCheck,
+      },
     })
     await m.flush()
     // The helper drains once as soon as it is listening (the cold-window case:
@@ -859,6 +865,44 @@ describe('MacSettings window', () => {
     onMenu()
     await m.flush()
     expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(2)
+  })
+
+  test('a consumed menu update-check lands the window on the About tab', async () => {
+    // "Check for updates…" must show its progress and result. The row that
+    // renders them lives in the About tab, so the window must switch there
+    // exactly when the pending menu request is consumed — not on a plain
+    // open (which consumes false and keeps the General tab).
+    const m = open('MacSettings', { consume_menu_update_check: () => true }, {
+      props: { initialTab: 'general' },
+      bindings: {
+        GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
+        useSettingsConfig: settingsStub,
+        listen: () => Promise.resolve(() => {}),
+        connectNativeUpdateMenu: realConnectNativeUpdateMenu,
+        desktopUpdateCheck: { check: async () => {} },
+      },
+    })
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(1)
+    expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([false, false, false, true])
+    expect(shown(m)).toEqual(['about'])
+  })
+
+  test('a plain open consumes nothing and stays on the General tab', async () => {
+    const m = open('MacSettings', { consume_menu_update_check: () => false }, {
+      props: { initialTab: 'general' },
+      bindings: {
+        GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
+        useSettingsConfig: settingsStub,
+        listen: () => Promise.resolve(() => {}),
+        connectNativeUpdateMenu: realConnectNativeUpdateMenu,
+        desktopUpdateCheck: { check: async () => {} },
+      },
+    })
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(1)
+    expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([true, false, false, false])
+    expect(shown(m)).toEqual(['general'])
   })
 
   test('clicking a tab swaps the panel and moves selection and the one tab stop', () => {
