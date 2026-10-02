@@ -1275,8 +1275,33 @@ async fn hydrate_over_ipc(
     };
 
     match result {
-        Some(Ok(())) => HydrateOutcome::Reply(IpcResponse::Ok {}),
-        Some(Err(e)) => HydrateOutcome::Reply(IpcResponse::Error { message: e.to_string() }),
+        Some(outcome) => {
+            // Task 1693 — root cause of the missing terminal progress frame:
+            // `report(done, total)` fires SYNCHRONOUSLY inside the hydrate
+            // future's last poll, so the final chunk's frame is queued on `rx`
+            // BEFORE the future returns Ready; the `biased` select polls the
+            // hydrate branch first, completion outranks the queued frame, and
+            // the loop above broke without ever writing it. Drain whatever the
+            // future queued before answering, so the terminal (done == total)
+            // frame always precedes the final reply, as the protocol promises
+            // (`docs/IPC_PROTOCOL.md`: progress frames stream BEFORE the reply).
+            while let Ok((done, total)) = rx.try_recv() {
+                if write_frame(write_half, &IpcResponse::HydrateProgress { done, total })
+                    .await
+                    .is_err()
+                {
+                    tracing::info!(
+                        file_id,
+                        "IPC client went away while flushing the terminal hydrate progress frames"
+                    );
+                    return HydrateOutcome::ClientGone;
+                }
+            }
+            match outcome {
+                Ok(()) => HydrateOutcome::Reply(IpcResponse::Ok {}),
+                Err(e) => HydrateOutcome::Reply(IpcResponse::Error { message: e.to_string() }),
+            }
+        }
         None => {
             // `hydrate` is dropped when this function returns.
             tracing::info!(file_id, "IPC client went away mid-hydrate; hydration cancelled");

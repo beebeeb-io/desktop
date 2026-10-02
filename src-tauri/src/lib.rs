@@ -1795,7 +1795,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct FinderInstallState {
     installed: bool,
     path: Option<String>,
@@ -2590,6 +2590,39 @@ fn open_login_items_and_extensions_settings() -> Result<(), String> {
     {
         Err("Only available on macOS.".to_string())
     }
+}
+
+/// Task 1693: the popover tests must not assert against the developer
+/// machine's REAL File Provider domain — `finder_location_state` asks the OS,
+/// a read no env-var isolation can fake. Tests install an override here (only
+/// compiled into test builds; production never writes it) and the snapshot's
+/// probe reads it through `popover_finder_probe_state`. Held behind a mutex
+/// because the tests run multi-threaded.
+///
+/// The installed value PERSISTS after a test's `ENV_LOCK` block ends — it is
+/// not cleared. That is safe because every test that reaches the Finder leg
+/// (`is_macos && logged_in && vault_unlocked`) either installs its own state
+/// first, or asserts a phase that outranks a leaked Finder failure in
+/// `surfaces/phase.rs::popover_phase` (SignedOut > SessionEnded > Locked >
+/// FinderFailed), so the leaked value cannot flip any assertion.
+#[cfg(test)]
+static POPOVER_TEST_FINDER_PROBE: std::sync::Mutex<Option<Result<FinderInstallState, String>>> =
+    std::sync::Mutex::new(None);
+
+/// The popover snapshot's Finder probe: the injected state when a test has
+/// installed one (task 1693), otherwise the real `finder_location_state`.
+/// The spawn_blocking wrapper stays at the call site, so this changes only
+/// WHAT is asked, never WHERE (off the async executor).
+fn popover_finder_probe_state() -> Result<FinderInstallState, String> {
+    #[cfg(test)]
+    if let Some(injected) = POPOVER_TEST_FINDER_PROBE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return injected;
+    }
+    finder_location_state()
 }
 
 #[tauri::command]
@@ -3800,7 +3833,8 @@ async fn popover_snapshot(
         let is_macos = cfg!(target_os = "macos");
         let (finder, finder_reason) = if is_macos && logged_in && vault_unlocked && !adding {
             // The probe asks the OS about the File Provider domain: keep it off the executor.
-            let install = tokio::task::spawn_blocking(finder_location_state)
+            // (Test builds may have injected a state at this boundary — task 1693.)
+            let install = tokio::task::spawn_blocking(popover_finder_probe_state)
                 .await
                 .map_err(|e| format!("finder state task failed: {e}"))?
                 .or_else(|_| DesktopConfig::load().map(|cfg| finder_install_state_from_config(&cfg, false, None)))?;
@@ -11434,10 +11468,34 @@ mod popover_snapshot_command_tests {
 
     const USAGE: &str = "{\"used_bytes\":84300000000,\"quota_bytes\":200000000000}";
 
+    /// Task 1693: `finder_location_state` asks the OS about the machine's REAL
+    /// File Provider domain — a read env-var isolation cannot fake, so the tests
+    /// below would assert live-machine state (at 0409f1b on this Mac they saw
+    /// `finder_failed` where CI's clean Linux runner sees `synced`). Inject a
+    /// state at the probe boundary instead. Call it inside a
+    /// `with_isolated_env` block so installs and snapshots serialize on
+    /// `ENV_LOCK`. The value stays installed after the block ends (see the
+    /// static's doc comment for why that is safe), but every finder-reading
+    /// test installs its own first, so nothing leaks into an assertion.
+    fn inject_finder_state(status: &str, reason_category: Option<&str>) {
+        *POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(FinderInstallState {
+            installed: status == "installed",
+            path: None,
+            status: status.to_string(),
+            last_error: reason_category.map(|_| "injected".to_string()),
+            last_attempt_at: None,
+            reason_category: reason_category.map(str::to_string),
+        }));
+    }
+
     #[test]
     fn the_real_command_reads_the_session_the_engine_status_and_the_storage_api() {
         let api = LoopbackApi::start("200 OK", USAGE);
         with_isolated_env(&api.base, || {
+            // Task 1693: the probe boundary is injected, so the Finder leg below
+            // is deterministic on every machine; the assertions still exercise
+            // the real `finder_setup_for` mapping and phase assembly.
+            inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
 
             let first = run_command(&app).expect("the command runs");
@@ -11447,7 +11505,7 @@ mod popover_snapshot_command_tests {
             assert_eq!(first["storage"]["used_bytes"], 84_300_000_000_i64);
             assert_eq!(first["storage"]["quota_bytes"], 200_000_000_000_i64);
             assert_eq!(first["storage"]["stale"], false);
-            assert_eq!(first["finder"]["setup"], "ready", "no Finder location to set up off macOS");
+            assert_eq!(first["finder"]["setup"], "ready", "an installed Finder state reads as ready");
             // The same shape the TypeScript side validates.
             let shared: serde_json::Value =
                 serde_json::from_str(include_str!("../../tests/fixtures/popover-snapshot.synced.json")).unwrap();
@@ -11497,6 +11555,9 @@ mod popover_snapshot_command_tests {
         // snapshot command between them. Nothing bumps the epoch by hand.
         let api = LoopbackApi::start("200 OK", USAGE);
         with_isolated_env(&api.base, || {
+            // Task 1693: injected Finder state — the real probe reads the
+            // machine's live domain and would leak it into the phase below.
+            inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
             assert_eq!(run_command(&app).unwrap()["storage"]["used_bytes"], 84_300_000_000_i64);
             assert_eq!(run_command(&app).unwrap()["phase"], "synced");
@@ -11554,11 +11615,45 @@ mod popover_snapshot_command_tests {
     fn the_real_command_survives_a_storage_api_that_answers_500() {
         let api = LoopbackApi::start("500 Internal Server Error", "{}");
         with_isolated_env(&api.base, || {
+            // Task 1693: injected Finder state — without it the phase below is
+            // whatever the machine's live File Provider domain happens to be.
+            inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
             let snapshot = run_command(&app).expect("a failing usage call must not fail the whole snapshot");
             assert_eq!(snapshot["phase"], "synced");
             assert_eq!(snapshot["storage"], serde_json::Value::Null, "no number is invented");
             assert_eq!(api.requests().len(), 1);
+        });
+    }
+
+    /// Task 1693: a FAILED Finder state reaches the snapshot through the same
+    /// injection boundary, so the finder-failed phase mapping is asserted against
+    /// the REAL command, not only `popover_data::assemble` unit tests — and the
+    /// injected reason category is a marker no production error path can
+    /// classify into (`classify_finder_install_error` only emits fixed codes), so
+    /// if the probe ever bypasses the seam and reads the machine's real domain,
+    /// this test fails loudly on any machine, domain mounted or not.
+    ///
+    /// macOS-only by construction: the command reaches the probe only inside
+    /// `is_macos && logged_in && vault_unlocked` — on Linux the injected state is
+    /// unreachable through the real command (the else branch forces `missing`),
+    /// so an un-gated copy of this test would fail on the Linux CI gate.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_injected_finder_failure_reaches_the_snapshot_not_the_real_domain() {
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            inject_finder_state("error", Some("task-1693-injected"));
+            let app = mock_app_with_account(true, true);
+            let snapshot = run_command(&app).expect("the command runs");
+            assert_eq!(snapshot["phase"], "finder_failed");
+            assert_eq!(snapshot["finder"]["setup"], "failed");
+            assert_eq!(
+                snapshot["finder"]["reason_line"], "reason: task-1693-injected",
+                "the injected marker must survive to the reason line — a live probe cannot produce it"
+            );
+            assert_eq!(snapshot["finder"]["reason"], "task-1693-injected");
+            assert_eq!(snapshot["storage"]["used_bytes"], 84_300_000_000_i64, "finder failure does not hide the storage figure");
         });
     }
 
