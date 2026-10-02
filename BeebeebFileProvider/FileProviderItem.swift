@@ -3,29 +3,8 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum BeebeebItemKind: String, Codable {
-    case namespace
     case folder
     case file
-}
-
-enum BeebeebNamespace: String, CaseIterable {
-    case myFiles = "my_files"
-    case sharedWithMe = "shared_with_me"
-    case offline
-    case conflicts
-
-    var identifier: NSFileProviderItemIdentifier {
-        NSFileProviderItemIdentifier("namespace:\(rawValue)")
-    }
-
-    var displayName: String {
-        switch self {
-        case .myFiles: return "My files"
-        case .sharedWithMe: return "Shared with me"
-        case .offline: return "Offline"
-        case .conflicts: return "Conflicts"
-        }
-    }
 }
 
 struct BeebeebProviderItem: Codable {
@@ -42,7 +21,7 @@ struct BeebeebProviderItem: Codable {
     // `decodeItem` defaults everything so an older daemon stays compatible).
     let createdAt: Date?
     let modifiedAt: Date?
-    /// Real child count for folders; `nil` for files and namespaces.
+    /// Real child count for folders; `nil` for files.
     let childItemCount: Int64?
     /// contentVersion: changes only when the content identity changes.
     let contentVersion: String?
@@ -98,14 +77,20 @@ struct BeebeebProviderItem: Codable {
         self.metadataVersion = metadataVersion
     }
 
-    static func namespace(_ namespace: BeebeebNamespace) -> BeebeebProviderItem {
+    /// Task 1701 (ruling: one root, no synthetic split): the SINGLE root
+    /// container — "Beebeeb", the user's own files, matching the Windows
+    /// app. The old synthetic namespace roots (`My files`, `Shared with me`,
+    /// `Offline`, `Conflicts`) are gone; shared files live in the webapp.
+    /// Root keeps READ | ADD_SUBITEMS (1694 semantics: drops into the root
+    /// must keep working).
+    static func root() -> BeebeebProviderItem {
         BeebeebProviderItem(
-            identifier: namespace.identifier.rawValue,
+            identifier: NSFileProviderItemIdentifier.rootContainer.rawValue,
             parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue,
-            filename: namespace.displayName,
-            kind: .namespace,
+            filename: "Beebeeb",
+            kind: .folder,
             sizeBytes: 0,
-            contentType: UTType.folder.identifier,
+            contentType: nil,
             status: "local",
             capabilities: read | addSubItems,
             versionIdentifier: nil
@@ -134,7 +119,7 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     }
 
     var contentType: UTType {
-        if model.kind == .namespace || model.kind == .folder {
+        if model.kind == .folder {
             return .folder
         }
         if let raw = model.contentType, let type = UTType(raw) {

@@ -18,12 +18,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
         do {
-            let model: BeebeebProviderItem
-            if let namespace = BeebeebNamespace.allCases.first(where: { $0.identifier == identifier }) {
-                model = .namespace(namespace)
-            } else {
-                model = try ipc.item(identifier: identifier)
-            }
+            // Task 1701: no synthetic namespace lookup any more — every
+            // identifier is either the root (answered locally by
+            // `XPCBridge.item`) or a real item served by the daemon. A stale
+            // cached namespace identifier from a pre-1701 replica now fails
+            // the daemon lookup honestly instead of resurrecting a folder
+            // that no longer exists.
+            let model = try ipc.item(identifier: identifier)
             completionHandler(FileProviderItem(model: model), nil)
         } catch {
             completionHandler(nil, error)
@@ -478,7 +479,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     observer.finishEnumerating(upTo: nil)
                 }
             } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
-                observer.didEnumerate(BeebeebNamespace.allCases.map { FileProviderItem(model: .namespace($0)) })
+                // Task 1701: the old fallback enumerated the synthetic
+                // namespace roots so the sidebar kept its shape while the
+                // daemon was down. There are no synthetic roots any more —
+                // an unreachable daemon means an honestly EMPTY listing, not
+                // a fake one.
                 observer.finishEnumerating(upTo: nil)
             } catch {
                 observer.finishEnumeratingWithError(error)
@@ -502,9 +507,9 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         return max(0, offset)
     }
 
-    /// Full listing for a container. The three arms are the pre-1697 arms
-    /// kept explicitly: the root lists namespaces, every other container asks
-    /// the daemon (which routes namespaces/folders inside `list_file_provider_items`).
+    /// Full listing for a container. The daemon routes containers inside
+    /// `list_file_provider_items` (root = the real top-level tree; real
+    /// folders = children by the contract's parent).
     private static func listModels(
         containerIdentifier: NSFileProviderItemIdentifier,
         ipc: XPCBridge
@@ -641,7 +646,8 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     /// Filtering rules per container:
     /// - `.workingSet` (the ONLY container Replicated honors): Apple's
     ///   materialized-set filter — report when old-or-new parent is
-    ///   materialized (namespace roots + the root always are).
+    ///   materialized (the root container always is; task 1701 removed the
+    ///   synthetic namespace roots that used to be always-materialized too).
     /// - Any other container: only items whose old-or-new parent IS that
     ///   container (the system also drives per-container change
     ///   enumerations; delivering unrelated items would confuse it).

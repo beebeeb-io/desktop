@@ -7,7 +7,9 @@ Modern macOS File Provider foundation for the Finder drive surface.
 This target is intentionally thin:
 
 - registers a `Beebeeb` File Provider domain from the containing app;
-- enumerates top-level namespaces: `My files`, `Shared with me`, `Offline`, `Conflicts`;
+- presents ONE root folder — `Beebeeb`, the user's own files (task 1701 ruling:
+  no synthetic `My files` / `Shared with me` / `Offline` / `Conflicts` split;
+  shared files stay in the webapp for now);
 - forwards file enumeration and hydration to the Rust daemon over the local Unix socket;
 - maps daemon permission bits to Finder read/write/rename/delete capabilities.
 
@@ -130,7 +132,8 @@ Release verification for domain survival:
 
 1. Install the signed and notarized DMG into a clean macOS user.
 2. Launch Beebeeb, sign in, unlock, and call `BeebeebFileProviderDomain.install`.
-3. Confirm Finder shows the `Beebeeb` location and top-level namespaces.
+3. Confirm Finder shows the `Beebeeb` location with the user's real top-level
+   files at its root (single root, no synthetic subfolders — task 1701).
 4. Reboot the Mac and confirm the same domain remains visible.
 5. Install a newer signed build over the old build and confirm the domain does
    not duplicate.
