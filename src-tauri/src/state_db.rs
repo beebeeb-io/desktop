@@ -346,6 +346,15 @@ fn anchor_bytes(seq: i64) -> Vec<u8> {
     seq.to_string().into_bytes()
 }
 
+/// Wall-clock seconds since the epoch (0 on a clock before 1970 — a degraded
+/// stamp beats a panic in the change-log insert path).
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Append one change to `fp_changes` and advance the persistent anchor
 /// cursor, on an existing connection (the public [`StateDb::record_file_change`]
 /// and the mutating row operations below share this).
@@ -369,10 +378,16 @@ fn record_file_change_conn<C: std::ops::Deref<Target = Connection>>(
         // parent it was deleted FROM (the materialized-set filter reads it),
         // which the caller passes as old_parent_id.
         .or_else(|| old_parent_id.clone());
+    // Task 1697 review fix: stamp the REAL insertion time. The old
+    // `recorded_at = 0` sentinel made the signal path's 7-day sweep
+    // (`sweep_file_changes(now - 7d)`) delete the ENTIRE fresh log right
+    // after asking File Provider to enumerate it — Finder received an empty
+    // feed and missed every update.
+    let recorded_at = now_secs();
     conn.execute(
         "INSERT INTO fp_changes (seq, file_id, kind, old_parent_id, new_parent_id, recorded_at)
-         VALUES (0, ?1, ?2, ?3, ?4, 0)",
-        params![file_id, kind.as_str(), old_parent_id, new_parent_id],
+         VALUES (0, ?1, ?2, ?3, ?4, ?5)",
+        params![file_id, kind.as_str(), old_parent_id, new_parent_id, recorded_at],
     )?;
     let seq = conn.last_insert_rowid();
     conn.execute("UPDATE fp_changes SET seq = ?1 WHERE id = ?1", params![seq])?;
@@ -5844,5 +5859,113 @@ mod tests {
         let db = StateDb::open(&path).unwrap();
         let (_, reopened) = db.list_file_changes(Some(&anchor)).unwrap().unwrap();
         assert_eq!(reopened.as_deref(), Some(anchor.as_ref()), "the anchor and consumed state must survive process death");
+    }
+
+    // ------------------------------------------------------------------
+    // Task 1697 review fix (T2): `record_file_change` stamped
+    // `recorded_at = 0`, so the macOS signal path's 7-day sweep
+    // (`sweep_file_changes(now - 7d)`) deleted the ENTIRE fresh log right
+    // after asking File Provider to enumerate it — Finder received an empty
+    // feed and missed every update. RED-first: these tests were run against
+    // the `recorded_at = 0` insert and were seen failing (0 fresh rows
+    // survived the sweep; recorded_at read back 0).
+    // ------------------------------------------------------------------
+
+    fn recorded_at_of(db: &StateDb, file_id: &str) -> i64 {
+        db.0.lock().expect("state_db mutex poisoned").query_row(
+            "SELECT recorded_at FROM fp_changes WHERE file_id = ?1",
+            params![file_id],
+            |row| row.get::<_, i64>(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn change_log_rows_record_the_real_insertion_time() {
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+        db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
+        let recorded_at = recorded_at_of(&db, "f-1");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        assert!(recorded_at > 0, "a recorded change must carry its real insertion time, got recorded_at={recorded_at}");
+        assert!(
+            recorded_at >= now - 60 && recorded_at <= now + 60,
+            "recorded_at={recorded_at} must be wall-clock now (~{now}), not the 0 sentinel"
+        );
+    }
+
+    #[test]
+    fn change_log_sweep_keeps_fresh_rows() {
+        // The signal path sweeps with cutoff = now - 7 days. A change
+        // recorded NOW must survive it — the sweep exists to age out history,
+        // not to wipe the feed File Provider was just asked to enumerate.
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+        db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
+        let fresh_rows: i64 = db.0.lock().expect("state_db mutex poisoned").query_row(
+            "SELECT COUNT(*) FROM fp_changes WHERE file_id = 'f-1'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(fresh_rows > 0, "the seed must have written change rows");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let deleted = db.sweep_file_changes(now - 7 * 24 * 3600).unwrap();
+        assert_eq!(deleted, 0, "fresh rows must NEVER be swept (was: every row, recorded_at=0 < cutoff)");
+        // The change is still deliverable AFTER the sweep (no pre-consume:
+        // a from-nil listing must still see it).
+        let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
+        assert!(
+            !changes.is_empty() && changes.iter().all(|change| change.file_id == "f-1"),
+            "the fresh changes are still deliverable after the sweep: {changes:?}"
+        );
+        // Invariant: the sweep never touches the anchor row.
+        assert!(db.fp_last_anchor().unwrap().is_some(), "the persistent anchor survives the sweep (crash recovery reads it)");
+    }
+
+    #[test]
+    fn change_log_sweep_deletes_rows_older_than_cutoff_and_keeps_the_boundary() {
+        // Backdated rows (direct SQL in test setup — production inserts are
+        // always fresh) must age out; the comparison is STRICT `<`, so a row
+        // recorded exactly AT the cutoff survives.
+        let db = StateDb::open(":memory:").unwrap();
+        seed_child(&db, "old-1", "/old.txt", ItemKind::File);
+        seed_child(&db, "edge-1", "/edge.txt", ItemKind::File);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let cutoff = now - 7 * 24 * 3600;
+        {
+            let conn = db.0.lock().expect("state_db mutex poisoned");
+            conn.execute(
+                "UPDATE fp_changes SET recorded_at = ?1 WHERE file_id = 'old-1'",
+                params![cutoff - 1],
+            ).unwrap();
+            conn.execute(
+                "UPDATE fp_changes SET recorded_at = ?1 WHERE file_id = 'edge-1'",
+                params![cutoff],
+            ).unwrap();
+        }
+        let count = |file_id: &str| -> i64 {
+            db.0.lock().expect("state_db mutex poisoned").query_row(
+                "SELECT COUNT(*) FROM fp_changes WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        let old_rows = count("old-1");
+        let edge_rows = count("edge-1");
+        assert!(old_rows > 0 && edge_rows > 0, "both files must have backdated change rows");
+        let deleted = db.sweep_file_changes(cutoff).unwrap();
+        assert_eq!(deleted as i64, old_rows, "strict <: only the rows strictly OLDER than the cutoff are swept");
+        assert_eq!(count("old-1"), 0, "aged-out rows are gone");
+        assert_eq!(count("edge-1"), edge_rows, "a row recorded exactly AT the cutoff survives (strict <)");
+        // Invariant: the sweep never touches the anchor row.
+        assert!(db.fp_last_anchor().unwrap().is_some(), "the anchor cursor outlives swept history");
     }
 }
