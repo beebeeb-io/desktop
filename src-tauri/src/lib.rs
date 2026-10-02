@@ -2599,12 +2599,12 @@ fn open_login_items_and_extensions_settings() -> Result<(), String> {
 /// probe reads it through `popover_finder_probe_state`. Held behind a mutex
 /// because the tests run multi-threaded.
 ///
-/// The installed value PERSISTS after a test's `ENV_LOCK` block ends — it is
-/// not cleared. That is safe because every test that reaches the Finder leg
-/// (`is_macos && logged_in && vault_unlocked`) either installs its own state
-/// first, or asserts a phase that outranks a leaked Finder failure in
-/// `surfaces/phase.rs::popover_phase` (SignedOut > SessionEnded > Locked >
-/// FinderFailed), so the leaked value cannot flip any assertion.
+/// Injections are SCOPED: `inject_finder_state` returns a `FinderProbeGuard`
+/// that restores the value the injection replaced on drop (PR #102 review —
+/// an override that outlived its test leaked into later Finder-reading tests
+/// that install none, e.g. the `#[ignore]`d real-API test asserting `synced`).
+/// Bind the guard (`let _probe = ...`) for the duration of the assertions;
+/// `#[must_use]` makes a forgotten binding a compile warning.
 #[cfg(test)]
 static POPOVER_TEST_FINDER_PROBE: std::sync::Mutex<Option<Result<FinderInstallState, String>>> =
     std::sync::Mutex::new(None);
@@ -2623,6 +2623,22 @@ fn popover_finder_probe_state() -> Result<FinderInstallState, String> {
         return injected;
     }
     finder_location_state()
+}
+
+/// Restores the probe override this injection replaced when dropped.
+/// Held behind the same mutex the static uses, because tests run
+/// multi-threaded and drops can interleave with other tests' injections.
+#[cfg(test)]
+struct FinderProbeGuard {
+    previous: Option<Result<FinderInstallState, String>>,
+}
+
+#[cfg(test)]
+impl Drop for FinderProbeGuard {
+    fn drop(&mut self) {
+        *POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()) =
+            self.previous.take();
+    }
 }
 
 #[tauri::command]
@@ -11474,11 +11490,15 @@ mod popover_snapshot_command_tests {
     /// `finder_failed` where CI's clean Linux runner sees `synced`). Inject a
     /// state at the probe boundary instead. Call it inside a
     /// `with_isolated_env` block so installs and snapshots serialize on
-    /// `ENV_LOCK`. The value stays installed after the block ends (see the
-    /// static's doc comment for why that is safe), but every finder-reading
-    /// test installs its own first, so nothing leaks into an assertion.
-    fn inject_finder_state(status: &str, reason_category: Option<&str>) {
-        *POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(FinderInstallState {
+    /// `ENV_LOCK`, and bind the returned `FinderProbeGuard` (`let _probe = …`)
+    /// for the duration of the assertions — on drop the value this call
+    /// REPLACED is restored, so nothing leaks into a later test (PR #102
+    /// review; `#[must_use]` makes a forgotten binding a compile warning).
+    #[must_use = "bind the returned guard (`let _probe = …`) or the injection is undone immediately"]
+    fn inject_finder_state(status: &str, reason_category: Option<&str>) -> FinderProbeGuard {
+        let mut slot = POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = slot.take();
+        *slot = Some(Ok(FinderInstallState {
             installed: status == "installed",
             path: None,
             status: status.to_string(),
@@ -11486,6 +11506,7 @@ mod popover_snapshot_command_tests {
             last_attempt_at: None,
             reason_category: reason_category.map(str::to_string),
         }));
+        FinderProbeGuard { previous }
     }
 
     #[test]
@@ -11495,7 +11516,7 @@ mod popover_snapshot_command_tests {
             // Task 1693: the probe boundary is injected, so the Finder leg below
             // is deterministic on every machine; the assertions still exercise
             // the real `finder_setup_for` mapping and phase assembly.
-            inject_finder_state("installed", None);
+            let _probe = inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
 
             let first = run_command(&app).expect("the command runs");
@@ -11557,7 +11578,7 @@ mod popover_snapshot_command_tests {
         with_isolated_env(&api.base, || {
             // Task 1693: injected Finder state — the real probe reads the
             // machine's live domain and would leak it into the phase below.
-            inject_finder_state("installed", None);
+            let _probe = inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
             assert_eq!(run_command(&app).unwrap()["storage"]["used_bytes"], 84_300_000_000_i64);
             assert_eq!(run_command(&app).unwrap()["phase"], "synced");
@@ -11617,7 +11638,7 @@ mod popover_snapshot_command_tests {
         with_isolated_env(&api.base, || {
             // Task 1693: injected Finder state — without it the phase below is
             // whatever the machine's live File Provider domain happens to be.
-            inject_finder_state("installed", None);
+            let _probe = inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
             let snapshot = run_command(&app).expect("a failing usage call must not fail the whole snapshot");
             assert_eq!(snapshot["phase"], "synced");
@@ -11643,7 +11664,7 @@ mod popover_snapshot_command_tests {
     fn an_injected_finder_failure_reaches_the_snapshot_not_the_real_domain() {
         let api = LoopbackApi::start("200 OK", USAGE);
         with_isolated_env(&api.base, || {
-            inject_finder_state("error", Some("task-1693-injected"));
+            let _probe = inject_finder_state("error", Some("task-1693-injected"));
             let app = mock_app_with_account(true, true);
             let snapshot = run_command(&app).expect("the command runs");
             assert_eq!(snapshot["phase"], "finder_failed");
@@ -11655,6 +11676,45 @@ mod popover_snapshot_command_tests {
             assert_eq!(snapshot["finder"]["reason"], "task-1693-injected");
             assert_eq!(snapshot["storage"]["used_bytes"], 84_300_000_000_i64, "finder failure does not hide the storage figure");
         });
+    }
+
+    /// Injections are scoped to their guards (PR #102 review): a statement-call
+/// self-neutralizes (the temporary guard drops at once); a held guard
+/// restores the value it REPLACED on drop, not a blanket None. Serialized on
+/// `ENV_LOCK` like the popover tests — this test touches the same static
+/// they hold guards over, and unsynchronized access interleaves.
+#[test]
+    fn finder_probe_injections_are_scoped_to_their_guards() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Statement-call: the temporary guard is dropped at the end of the
+        // statement, so nothing is left installed.
+        #[allow(unused_must_use)] // the statement-call IS the subject here
+        inject_finder_state("error", Some("task-1693-review-red"));
+        assert!(
+            POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+            "a statement-call injection must not leave state behind"
+        );
+
+        // Held guards unwind to the value each injection replaced.
+        let outer = inject_finder_state("installed", None);
+        {
+            let inner = inject_finder_state("error", Some("task-1693-review-red"));
+            let now = POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            assert_eq!(now.unwrap().unwrap().status, "error", "the inner injection is live");
+            drop(inner);
+        }
+        let after_inner = POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            after_inner.unwrap().unwrap().status,
+            "installed",
+            "dropping the inner guard restores the outer injection"
+        );
+        drop(outer);
+        assert!(
+            POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+            "dropping the outer guard restores the empty static"
+        );
     }
 
     #[test]
