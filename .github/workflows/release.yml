@@ -248,13 +248,14 @@ jobs:
           mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           echo "BEEBEEB_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
-      # Windows Authenticode signing (task 1617; credentials route decided in
-      # task 1499): Azure Artifact Signing, certificate profile
-      # beebeeb-publictrust, publisher CN=Initlabs B.V. Auth is GitHub OIDC via
-      # the beebeeb-desktop-release app registration's federated credential
-      # (subject repo:beebeeb-io/desktop:ref:refs/heads/main — dispatch this
-      # workflow from main). There is no certificate or signing secret anywhere:
-      # the Artifact Signing dlib acquires its token from the ambient az login.
+      # Windows Authenticode signing (task 1617): Azure Artifact Signing,
+      # certificate profile beebeeb-publictrust, publisher CN=Initlabs B.V.
+      # azure/login provides the identifier env vars (AZURE_CLIENT_ID /
+      # AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID); the signing credential itself
+      # is the scoped AZURE_CLIENT_SECRET consumed by the dlib's
+      # EnvironmentCredential (see sign-artifact.ps1 and task 1617 for why
+      # OIDC-only auth was measured unworkable). Dispatch this workflow from
+      # main.
       - name: Azure login for Artifact Signing (OIDC)
         if: runner.os == 'Windows'
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
@@ -300,11 +301,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           MACOS_APP_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_APP_PROVISION_PROFILE_BASE64 }}
           MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64 }}
-          # Windows Authenticode is NOT certificate-based: no TAURI_WINDOWS_CERTIFICATE /
-          # WINDOWS_CERTIFICATE_PASSWORD secrets exist or are needed. Signing runs
-          # through bundle.windows.signCommand + Azure Artifact Signing (OIDC) above.
+          # Windows Authenticode uses a scoped client secret (app
+          # beebeeb-desktop-release, role = Artifact Signing Certificate Profile
+          # Signer on the beebeebsigning account only). OIDC-only was measured
+          # unworkable here (assertion expiry vs compile time; task 1617).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
           tauriScript: bun run tauri
           # -v: the bundler hides the custom sign command's output otherwise
