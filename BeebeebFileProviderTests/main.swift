@@ -1,4 +1,5 @@
 import Foundation
+import FileProvider
 
 // Framing tests for BeebeebFileProvider/IPCFraming.swift (task 1670 issue 3).
 //
@@ -745,5 +746,373 @@ check("1694: namespace model grants .allowsAddingSubItems") {
     )
 }
 
+// MARK: - Task 1697: capabilities completion, item metadata, enumerator state
+
+// The two new capability bits cross the bridge with the SAME numbering as the
+// Rust payload builder (CAP_REPARENT = 1 << 5, CAP_TRASH = 1 << 6 in
+// src-tauri/src/ipc_socket.rs). Finder blocks drag-MOVE and drag-to-Trash on
+// items whose mapped NSFileProviderItemCapabilities lacks them.
+
+func item1697(capabilities: Int, kind: BeebeebItemKind = .file) -> BeebeebProviderItem {
+    BeebeebProviderItem(
+        identifier: "1697-item",
+        parentIdentifier: "namespace:my_files",
+        filename: "report.txt",
+        kind: kind,
+        sizeBytes: 120,
+        contentType: nil,
+        status: "local",
+        capabilities: capabilities,
+        versionIdentifier: "7:1700000100:120"
+    )
+}
+
+check("1697: reparent bit (1 << 5) maps to .allowsReparenting, trash bit (1 << 6) to .allowsTrashing") {
+    let live = FileProviderItem(model: item1697(capabilities: BeebeebProviderItem.read | BeebeebProviderItem.reparent | BeebeebProviderItem.trash))
+    let mapped = live.capabilities
+    try expect(mapped.contains(.allowsReparenting), "bit 1 << 5 must map to .allowsReparenting, got \(mapped.rawValue)")
+    try expect(mapped.contains(.allowsTrashing), "bit 1 << 6 must map to .allowsTrashing, got \(mapped.rawValue)")
+    try expect(mapped.contains(.allowsReading), "the read bit must still map")
+}
+
+check("1697: a read-only item gains neither reparenting nor trashing") {
+    let readOnly = FileProviderItem(model: item1697(capabilities: BeebeebProviderItem.read))
+    let mapped = readOnly.capabilities
+    try expect(!mapped.contains(.allowsReparenting), "read-only items cannot be moved, got \(mapped.rawValue)")
+    try expect(!mapped.contains(.allowsTrashing), "read-only items cannot be trashed, got \(mapped.rawValue)")
+    try expect(mapped.contains(.allowsReading), "the read bit must still map")
+}
+
+func item1697Versions(content: String?, metadata: String?) -> BeebeebProviderItem {
+    var model = item1697(capabilities: BeebeebProviderItem.read)
+    // Rebuild with the version fields (the memberwise init takes them).
+    return BeebeebProviderItem(
+        identifier: model.identifier,
+        parentIdentifier: model.parentIdentifier,
+        filename: model.filename,
+        kind: model.kind,
+        sizeBytes: model.sizeBytes,
+        contentType: model.contentType,
+        status: model.status,
+        capabilities: model.capabilities,
+        versionIdentifier: model.versionIdentifier,
+        createdAt: nil,
+        modifiedAt: nil,
+        childItemCount: nil,
+        contentVersion: content,
+        metadataVersion: metadata
+    )
+}
+
+check("1697: itemVersion splits contentVersion from metadataVersion") {
+    let item = FileProviderItem(model: item1697Versions(content: "7:abc123", metadata: "1700000100:120:parent-1:report.txt:local"))
+    let version = item.itemVersion
+    let content = String(decoding: version.contentVersion, as: UTF8.self)
+    let metadata = String(decoding: version.metadataVersion, as: UTF8.self)
+    try expect(content == "7:abc123", "contentVersion must come from the content_version field, got \(content)")
+    try expect(metadata == "1700000100:120:parent-1:report.txt:local", "metadataVersion must come from the metadata_version field, got \(metadata)")
+    try expect(
+        version.contentVersion != version.metadataVersion,
+        "the two versions are distinct identities (before 1697 they were the same bytes)"
+    )
+}
+
+check("1697: a rename changes metadataVersion but never contentVersion") {
+    let before = FileProviderItem(model: item1697Versions(content: "7:abc123", metadata: "1700000100:120:parent-1:report.txt:local"))
+    var model = item1697Versions(content: "7:abc123", metadata: "1700000100:120:parent-1:renamed.txt:local")
+    model = BeebeebProviderItem(
+        identifier: model.identifier,
+        parentIdentifier: model.parentIdentifier,
+        filename: "renamed.txt",
+        kind: model.kind,
+        sizeBytes: model.sizeBytes,
+        contentType: model.contentType,
+        status: model.status,
+        capabilities: model.capabilities,
+        versionIdentifier: model.versionIdentifier,
+        createdAt: nil,
+        modifiedAt: nil,
+        childItemCount: nil,
+        contentVersion: model.contentVersion,
+        metadataVersion: model.metadataVersion
+    )
+    let after = FileProviderItem(model: model)
+    try expect(
+        before.itemVersion.contentVersion == after.itemVersion.contentVersion,
+        "a rename must not change the contentVersion (it would force a re-download)"
+    )
+    try expect(
+        before.itemVersion.metadataVersion != after.itemVersion.metadataVersion,
+        "a rename must change the metadataVersion"
+    )
+}
+
+check("1697: itemVersion falls back to the daemon's versionIdentifier for old payloads") {
+    let legacy = FileProviderItem(model: item1697Versions(content: nil, metadata: nil))
+    let version = legacy.itemVersion
+    let content = String(decoding: version.contentVersion, as: UTF8.self)
+    try expect(content == "7:1700000100:120", "contentVersion falls back to the pre-1697 versionIdentifier, got \(content)")
+    let metadata = String(decoding: version.metadataVersion, as: UTF8.self)
+    try expect(metadata == "local:120", "metadataVersion falls back to the legacy status:size synthesis, got \(metadata)")
+}
+
+func item1697Dates(createdAt: Date?, modifiedAt: Date?) -> FileProviderItem {
+    let model = BeebeebProviderItem(
+        identifier: "1697-dates",
+        parentIdentifier: "namespace:my_files",
+        filename: "report.txt",
+        kind: .file,
+        sizeBytes: 120,
+        contentType: nil,
+        status: "local",
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil,
+        createdAt: createdAt,
+        modifiedAt: modifiedAt,
+        childItemCount: nil,
+        contentVersion: nil,
+        metadataVersion: nil
+    )
+    return FileProviderItem(model: model)
+}
+
+check("1697: contentModificationDate comes from the payload, creationDate falls back to it") {
+    let modified = Date(timeIntervalSince1970: 1_700_000_100)
+    let item = item1697Dates(createdAt: nil, modifiedAt: modified)
+    try expect(item.contentModificationDate == modified, "contentModificationDate must surface the payload mtime")
+    try expect(item.creationDate == modified, "a missing creationDate falls back to the mtime (Apple: never leave dates blank)")
+    let blank = item1697Dates(createdAt: nil, modifiedAt: nil)
+    try expect(blank.contentModificationDate == nil && blank.creationDate == nil, "an old daemon's payload yields no dates")
+}
+
+check("1697: childItemCount surfaces the real count for folders, nil for files") {
+    let folder = FileProviderItem(model: BeebeebProviderItem(
+        identifier: "1697-folder",
+        parentIdentifier: "namespace:my_files",
+        filename: "Folder",
+        kind: .folder,
+        sizeBytes: 0,
+        contentType: nil,
+        status: "local",
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil,
+        createdAt: nil,
+        modifiedAt: nil,
+        childItemCount: 7,
+        contentVersion: nil,
+        metadataVersion: nil
+    ))
+    try expect(folder.childItemCount == 7, "the folder's real child count must surface, got \(String(describing: folder.childItemCount))")
+    let file = FileProviderItem(model: BeebeebProviderItem(
+        identifier: "1697-file",
+        parentIdentifier: "folder-1697",
+        filename: "f.txt",
+        kind: .file,
+        sizeBytes: 1,
+        contentType: nil,
+        status: "local",
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil,
+        createdAt: nil,
+        modifiedAt: nil,
+        childItemCount: 7,
+        contentVersion: nil,
+        metadataVersion: nil
+    ))
+    try expect(file.childItemCount == nil, "files have no child count")
+    let legacyFolder = FileProviderItem(model: BeebeebProviderItem(
+        identifier: "1697-legacy",
+        parentIdentifier: "namespace:my_files",
+        filename: "Old",
+        kind: .folder,
+        sizeBytes: 0,
+        contentType: nil,
+        status: "local",
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil
+    ))
+    try expect(legacyFolder.childItemCount == nil, "an old daemon reports no count (not a fake 0)")
+}
+
+// MARK: WorkingSetStore: anchor codec + persistence + materialized filter
+
+check("1697: anchor codec round-trips, empty is genesis, garbage is expired") {
+    let encoded = WorkingSetStore.encodeAnchor(42)
+    try expect(WorkingSetStore.decodeAnchor(encoded) == 42, "round-trip failed")
+    try expect(encoded.count <= 500, "Apple caps the anchor at 500 bytes, got \(encoded.count)")
+    try expect(WorkingSetStore.decodeAnchor(Data()) == 0, "an empty anchor is the beginning of the log")
+    try expect(WorkingSetStore.decodeAnchor(Data("garbage-anchor".utf8)) == nil, "an unparseable anchor must be EXPIRED, not silently restart at 0")
+}
+
+check("1697: anchor acceptance is strictly monotonic") {
+    try expect(WorkingSetStore.anchorMonotonic(next: 5, current: nil), "the first anchor is always accepted")
+    try expect(!WorkingSetStore.anchorMonotonic(next: 5, current: 5), "an equal anchor is a no-op")
+    try expect(!WorkingSetStore.anchorMonotonic(next: 3, current: 5), "an older anchor must never rewind the replica")
+    try expect(WorkingSetStore.anchorMonotonic(next: 6, current: 5), "a later anchor advances")
+}
+
+let stateDir = FileManager.default.temporaryDirectory.appendingPathComponent("1697-state-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+let stateURL = stateDir.appendingPathComponent(WorkingSetStore.fileName)
+defer { try? FileManager.default.removeItem(at: stateDir) }
+
+check("1697: state store persists anchor + materialized containers and survives corruption") {
+    try expect(WorkingSetStore.save(WorkingSetStore.State(
+        lastAnchor: WorkingSetStore.encodeAnchor(9).base64EncodedString(),
+        materializedContainers: ["dir-b", "dir-a"]
+    ), to: stateURL), "the save must succeed in a temp dir")
+    let loaded = WorkingSetStore.load(from: stateURL)
+    try expect(loaded.materializedContainers == ["dir-a", "dir-b"], "containers must round-trip, got \(loaded.materializedContainers)")
+    try expect(loaded.lastAnchor != nil, "the anchor must round-trip")
+    try expect(WorkingSetStore.decodeAnchor(Data((loaded.lastAnchor ?? "").utf8)) == nil, "anchors persist as opaque strings; the codec parses the WIRE form")
+    // A torn/corrupt file degrades to an empty state (fail-open), never a crash.
+    try Data("not json".utf8).write(to: stateURL)
+    let corrupt = WorkingSetStore.load(from: stateURL)
+    try expect(corrupt.materializedContainers.isEmpty && corrupt.lastAnchor == nil, "corruption must read as an empty state")
+}
+
+check("1697: recordAnchor is monotonic on disk (injectable path — the real App Group container is never touched)") {
+    try expect(WorkingSetStore.save(WorkingSetStore.State(
+        lastAnchor: "v1:5",
+        materializedContainers: []
+    ), to: stateURL), "seed save")
+    try expect(!WorkingSetStore.recordAnchor("v1:3", to: stateURL), "an older anchor must be refused")
+    try expect(WorkingSetStore.load(from: stateURL).lastAnchor == "v1:5", "the persisted anchor must not rewind")
+    try expect(WorkingSetStore.recordAnchor("v1:6", to: stateURL), "a later anchor is recorded")
+    try expect(WorkingSetStore.load(from: stateURL).lastAnchor == "v1:6", "the persisted anchor advanced")
+    try expect(!WorkingSetStore.recordAnchor("garbage", to: stateURL), "an unparseable anchor is refused outright")
+}
+
+check("1697: working-set filter — namespace roots are always materialized") {
+    let materialized: Set<String> = ["some-unrelated-folder"]
+    for parent in [
+        NSFileProviderItemIdentifier.rootContainer.rawValue,
+        BeebeebNamespace.myFiles.identifier.rawValue,
+        BeebeebNamespace.sharedWithMe.identifier.rawValue,
+        BeebeebNamespace.offline.identifier.rawValue,
+        BeebeebNamespace.conflicts.identifier.rawValue,
+    ] {
+        try expect(
+            WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: parent, materialized: materialized),
+            "changes under \(parent) must always be reported"
+        )
+    }
+}
+
+check("1697: working-set filter — materialized parents pass, unknown fail, empty set fails open") {
+    let materialized: Set<String> = ["dir-1"]
+    try expect(WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: "dir-1", materialized: materialized), "a materialized parent passes")
+    try expect(!WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: "dir-9", materialized: materialized), "an unknown parent is dropped")
+    try expect(WorkingSetStore.changeTouchesMaterialized(oldParent: "dir-1", newParent: "dir-9", materialized: materialized), "Apple: old OR new parent for reparents")
+    try expect(WorkingSetStore.changeTouchesMaterialized(oldParent: "dir-9", newParent: "dir-1", materialized: materialized), "a move INTO a materialized folder passes")
+    try expect(WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: "dir-9", materialized: nil), "no tracked set = the whole dataset (fail open)")
+    try expect(WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: "dir-9", materialized: []), "an empty set is fail-open too")
+}
+
+check("1697: changeBelongsToContainer — per-container filtering (old-or-new parent)") {
+    func change(kind: String, itemParent: String?, oldParent: String?, newParent: String?) -> XPCBridge.DaemonChange {
+        XPCBridge.DaemonChange(
+            fileID: "moved-1",
+            kind: kind,
+            oldParentID: oldParent,
+            newParentID: newParent,
+            item: itemParent.map { parent in
+                BeebeebProviderItem(
+                    identifier: "moved-1",
+                    parentIdentifier: parent,
+                    filename: "f.txt",
+                    kind: .file,
+                    sizeBytes: 1,
+                    contentType: nil,
+                    status: "local",
+                    capabilities: BeebeebProviderItem.read,
+                    versionIdentifier: nil
+                )
+            }
+        )
+    }
+    let materialized: Set<String> = ["dir-1"]
+    try expect(
+        FileProviderEnumerator.changeBelongsToContainer(
+            change(kind: "modified", itemParent: "dir-1", oldParent: nil, newParent: nil),
+            container: .workingSet,
+            materialized: materialized
+        ),
+        "workingSet: item payload's parent is materialized"
+    )
+    try expect(
+        !FileProviderEnumerator.changeBelongsToContainer(
+            change(kind: "modified", itemParent: "dir-9", oldParent: nil, newParent: nil),
+            container: .workingSet,
+            materialized: materialized
+        ),
+        "workingSet: unrelated parent filtered"
+    )
+    try expect(
+        FileProviderEnumerator.changeBelongsToContainer(
+            change(kind: "modified", itemParent: "dir-1", oldParent: nil, newParent: nil),
+            container: NSFileProviderItemIdentifier("dir-1"),
+            materialized: materialized
+        ),
+        "container: the item's parent IS the container"
+    )
+    try expect(
+        !FileProviderEnumerator.changeBelongsToContainer(
+            change(kind: "modified", itemParent: "dir-9", oldParent: nil, newParent: nil),
+            container: NSFileProviderItemIdentifier("dir-1"),
+            materialized: materialized
+        ),
+        "container: unrelated items filtered"
+    )
+    try expect(
+        FileProviderEnumerator.changeBelongsToContainer(
+            change(kind: "reparented", itemParent: "dir-9", oldParent: "dir-1", newParent: "dir-9"),
+            container: NSFileProviderItemIdentifier("dir-1"),
+            materialized: materialized
+        ),
+        "container: a reparent OUT of the container is reported so its view drops the item"
+    )
+}
+
+check("1697: page tokens — system initial pages decode to offset 0, minted tokens resume, garbage restarts") {
+    try expect(FileProviderEnumerator.pageOffset(NSFileProviderPage(Data(NSFileProviderPage.initialPageSortedByName as NSData))) == 0, "InitialPageSortedByName is a fresh start")
+    try expect(FileProviderEnumerator.pageOffset(NSFileProviderPage(Data(NSFileProviderPage.initialPageSortedByDate as NSData))) == 0, "InitialPageSortedByDate is a fresh start")
+    try expect(FileProviderEnumerator.pageOffset(NSFileProviderPage(Data())) == 0, "an empty page is a fresh start")
+    let token = Data("beebeeb-page:120".utf8)
+    try expect(FileProviderEnumerator.pageOffset(NSFileProviderPage(token)) == 120, "a minted resume token names its offset")
+    try expect(FileProviderEnumerator.pageOffset(NSFileProviderPage(Data("corrupt".utf8))) == 0, "corrupt tokens restart (idempotent), never fail")
+}
+
+check("1697: XPCBridge decodes the change page (anchor + kinds + items)") {
+    let bridge = XPCBridge()
+    let page = bridge.test_decodeChangesPayload([
+        "FileProviderChanges": [
+            "changes": [
+                ["file_id": "f-1", "kind": "created", "new_parent_id": "dir-1",
+                 "item": ["identifier": "f-1", "parent_identifier": "dir-1", "filename": "a.txt",
+                          "kind": "file", "size_bytes": 3, "status": "cloud_only", "capabilities": 1]],
+                ["file_id": "f-2", "kind": "deleted", "old_parent_id": "dir-1"],
+            ],
+            "next_anchor": "v1:9",
+        ],
+    ])
+    try expect(page.changes.count == 2, "both changes decode")
+    try expect(page.changes[0].item?.filename == "a.txt", "created rows carry the full item payload")
+    try expect(page.changes[1].item == nil && page.changes[1].oldParentID == "dir-1", "deletions carry the old parent")
+    try expect(page.nextAnchor == "v1:9", "the anchor to persist comes back")
+    let empty = bridge.test_decodeChangesPayload([:])
+    try expect(empty.changes.isEmpty && empty.nextAnchor == nil, "a response without FileProviderChanges reads as empty")
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)
+
+// MARK: - Test hooks (task 1697)
+
+// Exposes XPCBridge's change-page decoder so the harness can pin the wire
+// shape without a socket. Not for production use.
+extension XPCBridge {
+    func test_decodeChangesPayload(_ dictionary: [String: Any]) -> ChangesPage {
+        Self.decodeChanges(dictionary)
+    }
+}

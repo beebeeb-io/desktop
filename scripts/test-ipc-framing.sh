@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-EXPECTED_TESTS=37
+EXPECTED_TESTS=53
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -89,11 +89,19 @@ LOG="$OUT_DIR/run.log"
 # plain swiftc still works and the add-subitems capability mapping
 # (BeebeebProviderItem flags -> NSFileProviderItemCapabilities) is now under
 # test, not just the framing.
+#
+# task 1697: WorkingSetStore.swift (anchor codec, materialized-set filter,
+# App Group state) and FileProviderExtension.swift + XPCBridge.swift (the
+# enumerator's paging/anchor/change-filter decisions) join too, all pure
+# Foundation/Darwin at heart.
 
 xcrun swiftc \
   -o "$BIN" \
   BeebeebFileProvider/IPCFraming.swift \
   BeebeebFileProvider/FileProviderItem.swift \
+  BeebeebFileProvider/WorkingSetStore.swift \
+  BeebeebFileProvider/XPCBridge.swift \
+  BeebeebFileProvider/FileProviderExtension.swift \
   BeebeebFileProviderTests/main.swift
 
 code=0

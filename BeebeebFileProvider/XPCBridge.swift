@@ -426,6 +426,86 @@ final class XPCBridge {
         return try decodeWriteResponse(sendRequest(["QueueFinderDelete": payload]))
     }
 
+    // MARK: - Change feed + sync anchor (task 1697)
+
+    /// One daemon change-log row, as the replica's `enumerateChanges` consumes
+    /// it. `item` is the FULL item payload for created/modified/reparented
+    /// rows (so the enumerator can `didUpdateItems` without a second lookup)
+    /// and nil for deletions.
+    struct DaemonChange {
+        let fileID: String
+        /// created | modified | deleted | reparented
+        let kind: String
+        let oldParentID: String?
+        let newParentID: String?
+        let item: BeebeebProviderItem?
+    }
+
+    struct ChangesPage {
+        let changes: [DaemonChange]
+        /// The anchor to persist + finish with. `nil` only when the log is
+        /// empty (nothing was ever recorded).
+        let nextAnchor: String?
+    }
+
+    /// One page of the daemon's change log, ordered oldest-first, resuming
+    /// after `sinceAnchor` (nil = from the retained beginning). The reply
+    /// carries the anchor to persist; paging stops when the reply's anchor
+    /// equals the request's.
+    func listChanges(sinceAnchor: String?, limit: Int) throws -> ChangesPage {
+        var payload: [String: Any] = ["limit": limit]
+        if let sinceAnchor {
+            payload["since_anchor"] = sinceAnchor
+        }
+        let response = try sendRequest(["ListChanges": payload])
+        if let error = response["Error"] as? [String: Any] {
+            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "change enumeration failed")
+        }
+        return Self.decodeChanges(response)
+    }
+
+    /// The `FileProviderChanges` payload decoder, internal so the framing
+    /// harness can pin the wire shape without a socket (mirror via the test
+    /// extension in BeebeebFileProviderTests/main.swift).
+    static func decodeChanges(_ response: [String: Any]) -> ChangesPage {
+        guard let changes = response["FileProviderChanges"] as? [String: Any] else {
+            return ChangesPage(changes: [], nextAnchor: nil)
+        }
+        let rawChanges = changes["changes"] as? [[String: Any]] ?? []
+        let decoded = rawChanges.map { raw -> DaemonChange in
+            let item = (raw["item"] as? [String: Any]).flatMap(Self.decodeItem)
+            return DaemonChange(
+                fileID: raw["file_id"] as? String ?? "",
+                kind: raw["kind"] as? String ?? "",
+                oldParentID: raw["old_parent_id"] as? String,
+                newParentID: raw["new_parent_id"] as? String,
+                item: item
+            )
+        }
+        return ChangesPage(changes: decoded, nextAnchor: changes["next_anchor"] as? String)
+    }
+
+    /// The daemon's persistent change-log cursor — what `currentSyncAnchor`
+    /// reports after extension process death. `nil` when nothing ever changed.
+    func syncAnchor() throws -> String? {
+        let response = try sendRequest(["GetSyncAnchor": [String: Any]()])
+        if let error = response["Error"] as? [String: Any] {
+            throw BeebeebIPCError.invalidResponse(error["message"] as? String ?? "anchor lookup failed")
+        }
+        guard let payload = response["FileProviderSyncAnchor"] as? [String: Any] else {
+            throw BeebeebIPCError.invalidResponse("daemon response did not include FileProviderSyncAnchor")
+        }
+        return payload["anchor"] as? String
+    }
+
+    /// Publish the materialized container set the system reported, so the
+    /// daemon can filter working-set signals to materialized parents.
+    /// Best-effort: a failure is swallowed (the signal is a performance hint,
+    /// not a correctness requirement).
+    func reportMaterializedContainers(_ containerIDs: [String]) {
+        _ = try? sendRequest(["ReportMaterialized": ["container_ids": containerIDs]])
+    }
+
     private static func decodeItem(_ dictionary: [String: Any]) -> BeebeebProviderItem? {
         guard let identifier = dictionary["identifier"] as? String,
               let parentIdentifier = dictionary["parent_identifier"] as? String,
@@ -434,6 +514,15 @@ final class XPCBridge {
               let kind = BeebeebItemKind(rawValue: kindRaw),
               let status = dictionary["status"] as? String else {
             return nil
+        }
+
+        // Task 1697: all new fields default when absent (older daemons), and
+        // zero timestamps mean "the daemon doesn't know" -> no date.
+        func date(_ key: String) -> Date? {
+            guard let seconds = (dictionary[key] as? NSNumber)?.doubleValue, seconds > 0 else {
+                return nil
+            }
+            return Date(timeIntervalSince1970: seconds)
         }
 
         return BeebeebProviderItem(
@@ -445,7 +534,12 @@ final class XPCBridge {
             contentType: dictionary["content_type"] as? String,
             status: status,
             capabilities: (dictionary["capabilities"] as? NSNumber)?.intValue ?? BeebeebProviderItem.read,
-            versionIdentifier: dictionary["version_identifier"] as? String
+            versionIdentifier: dictionary["version_identifier"] as? String,
+            createdAt: date("created_at"),
+            modifiedAt: date("modified_at"),
+            childItemCount: (dictionary["child_item_count"] as? NSNumber)?.int64Value,
+            contentVersion: dictionary["content_version"] as? String,
+            metadataVersion: dictionary["metadata_version"] as? String
         )
     }
 

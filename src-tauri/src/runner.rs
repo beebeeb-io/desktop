@@ -1167,11 +1167,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
-                        emit_file_provider_invalidation(
-                            &app,
-                            "shared_roots_changed",
-                            outcome.removed_shared_file_ids,
-                        );
+                        signal_file_provider_working_set("shared_roots_changed", &outcome.removed_shared_file_ids);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -1203,13 +1199,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
                             Ok(outcome) => {
                                 let completed = outcome.completed_op_ids.len() as u32;
-                                if !outcome.invalidated_item_ids.is_empty() {
-                                    emit_file_provider_invalidation(
-                                        &app,
-                                        "operations_applied",
-                                        outcome.invalidated_item_ids,
-                                    );
-                                }
+                                signal_file_provider_working_set("operations_applied", &outcome.invalidated_item_ids);
                                 if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
                                     tracing::info!(
                                         paused = outcome.paused_op_ids.len(),
@@ -1540,18 +1530,33 @@ async fn run_known_folder_mirror(sync_root: &Path) {
     }
 }
 
-pub(crate) fn file_provider_invalidation_payload(reason: &str, item_ids: Vec<String>) -> serde_json::Value {
-    serde_json::json!({
-        "reason": reason,
-        "item_ids": item_ids,
-    })
+/// Task 1697: the daemon's ONLY replica-refresh channel. Under
+/// `NSFileProviderReplicatedExtension` the system honors signals for the
+/// WORKING SET alone (`.rootContainer` is ignored by design); the extension's
+/// enumerator then pulls the daemon's change log via `ListChanges`. This
+/// replaces the dead `file-provider-invalidate` Tauri event (zero consumers)
+/// with a real signal through the ObjC FFI bridge. macOS-only and
+/// best-effort: a failed signal is logged and never fails the tick.
+#[cfg(target_os = "macos")]
+fn signal_file_provider_working_set(reason: &str, item_ids: &[String]) {
+    if !crate::macos_file_provider::should_signal_working_set(item_ids) {
+        return;
+    }
+    match crate::macos_file_provider::signal_working_set() {
+        Ok(outcome) => {
+            tracing::debug!(reason, items = item_ids.len(), ?outcome, "signaled the File Provider working set");
+        }
+        Err(e) => {
+            tracing::warn!(reason, error = %e, "signaling the File Provider working set failed (best-effort)");
+        }
+    }
 }
 
-fn emit_file_provider_invalidation(app: &AppHandle, reason: &str, item_ids: Vec<String>) {
-    let payload = file_provider_invalidation_payload(reason, item_ids);
-    if let Err(e) = app.emit("file-provider-invalidate", payload) {
-        tracing::warn!(error = %e, "failed to emit file-provider-invalidate event");
-    }
+/// Non-macOS stub: Windows CFAPI refreshes placeholders natively and Linux
+/// FUSE is an unmounted prototype.
+#[cfg(not(target_os = "macos"))]
+fn signal_file_provider_working_set(reason: &str, item_ids: &[String]) {
+    let _ = (reason, item_ids);
 }
 
 fn now_secs() -> i64 {
@@ -1873,17 +1878,17 @@ mod tests {
     }
 
     #[test]
-    fn test_file_provider_invalidation_payload_contains_only_reason_and_ids() {
-        let payload = file_provider_invalidation_payload(
-            "operations_applied",
-            vec!["file-a".to_string(), "shared-root".to_string()],
-        );
+    // Task 1697: the retired `file-provider-invalidate` Tauri event and its
+    // payload builder are gone — the only replica-refresh channel is the
+    // working-set signal (see `signal_file_provider_working_set`). The pure
+    // decision core for that signal is tested in `macos_file_provider`.
 
-        assert_eq!(payload["reason"], "operations_applied");
-        assert_eq!(payload["item_ids"][0], "file-a");
-        assert_eq!(payload["item_ids"][1], "shared-root");
-        assert!(payload.get("path").is_none());
-        assert!(payload.get("token").is_none());
+    #[test]
+    fn signal_file_provider_working_set_decision_gates_on_changed_items() {
+        // Mirrors macos_file_provider::should_signal_working_set so a runner
+        // change that bypasses the gate fails here too.
+        assert!(crate::macos_file_provider::should_signal_working_set(&["f-1".to_string()]));
+        assert!(!crate::macos_file_provider::should_signal_working_set(&[]));
     }
 
     #[test]
