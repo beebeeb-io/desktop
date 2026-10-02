@@ -24,6 +24,16 @@ pub enum IpcRequest {
         file_id: String,
         dest_path: String,
     },
+    /// Task 1670: polled by the macOS File Provider extension WHILE a
+    /// `HydrateFile` call for the same `file_id` is in flight on a separate
+    /// connection, so `fetchContents` can drive `Progress.completedUnitCount`
+    /// / `totalUnitCount` from real bytes instead of leaving Finder's
+    /// download pie at nothing for the whole (possibly multi-minute) wait.
+    /// See [`EngineBridge::hydrate_progress`]'s doc comment for who writes
+    /// this state and when it is cleared.
+    GetHydrateProgress {
+        file_id: String,
+    },
     ListFileProviderItems {
         container_id: String,
     },
@@ -63,6 +73,36 @@ pub enum IpcRequest {
     GetSyncSummary,
 }
 
+/// Task 1670: coarse, machine-readable classification riding alongside
+/// `IpcResponse::Error`'s free-text `message`, so `BeebeebIPCError`
+/// (`XPCBridge.swift`) can bridge a daemon-reported business error to a
+/// SPECIFIC `NSFileProviderError` code instead of the same generic
+/// `.cannotSynchronize` every daemon error used to collapse to. Serialized
+/// as a lowercase string (`"not_found"`, …) — see each `IpcRequest` arm in
+/// [`handle_connection`] for which of these each error path actually uses;
+/// an arm that hasn't been classified yet falls back to `Internal`, which is
+/// the ORIGINAL (safe, pre-task-1670-round-6) behavior, not a regression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcErrorCode {
+    /// Default/fallback: an internal failure with no more specific
+    /// classification available at the call site. Maps to
+    /// `NSFileProviderError.cannotSynchronize` client-side — identical to
+    /// every daemon error's mapping before this enum existed.
+    #[default]
+    Internal,
+    /// The referenced item does not exist (or no longer does).
+    NotFound,
+    /// The request was refused by a security check this daemon itself
+    /// enforces (e.g. a hydration destination outside an allowed root) —
+    /// distinct from `NotFound`/`Internal` so a future client-side mapping
+    /// can tell "your request was rejected" apart from "something broke".
+    PermissionDenied,
+    /// The request itself was malformed before it reached any business
+    /// logic (e.g. a hostile File Provider item identifier).
+    InvalidRequest,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcResponse {
     FileStatus(FileProviderItemPayload),
@@ -72,6 +112,23 @@ pub enum IpcResponse {
     Ok,
     Error {
         message: String,
+        /// `#[serde(default)]`: an OLD daemon binary talking to a NEW
+        /// extension (or a hand-written test fixture) never sends this
+        /// field; deserializing it as `Internal` reproduces the exact
+        /// mapping every daemon error had before this field existed, so
+        /// this is a compatible default, not a silently-wrong guess.
+        #[serde(default)]
+        code: IpcErrorCode,
+    },
+    /// Task 1670: answers `GetHydrateProgress`. `in_progress: false` means
+    /// either the hydration hasn't started yet (the poller raced the very
+    /// first chunk) or has already finished (success or error) — the caller
+    /// distinguishes those two by whether its own `HydrateFile` call has
+    /// returned yet, not from this response.
+    HydrateProgress {
+        in_progress: bool,
+        bytes_done: u64,
+        total_bytes: u64,
     },
     WriteQueued {
         item: Option<FileProviderItemPayload>,
@@ -90,6 +147,26 @@ pub enum IpcResponse {
     CacheCleanup {
         evicted_file_ids: Vec<String>,
     },
+}
+
+impl IpcResponse {
+    /// Build an `Error` response with the default (`Internal`) code —
+    /// shorthand for the many call sites that have no more specific
+    /// classification available, replacing the old bare
+    /// `IpcResponse::Error { message: e.to_string() }` literal.
+    fn error(message: impl Into<String>) -> Self {
+        IpcResponse::Error {
+            message: message.into(),
+            code: IpcErrorCode::Internal,
+        }
+    }
+
+    fn error_with_code(message: impl Into<String>, code: IpcErrorCode) -> Self {
+        IpcResponse::Error {
+            message: message.into(),
+            code,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -778,43 +855,104 @@ async fn handle_connection(
         }
     }
 
-    let mut buf = vec![0u8; 65536];
     loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        // Task 1670 root cause: this used to be a single
+        // `stream.read(&mut buf).await` into a fixed buffer, with whatever
+        // arrived treated as the complete request — see [`read_framed_message`]'s
+        // doc comment for why that silently truncated real, oversized
+        // requests/responses (proven for `ListFileProviderItems` from the
+        // unified log) instead of just this comment's say-so.
+        let payload = match read_framed_message(&mut stream).await {
+            Ok(None) => break, // clean close between requests — nothing left to answer
+            Ok(Some(p)) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "IPC read framing error; closing connection");
+                break;
+            }
         };
-        let req: IpcRequest = match serde_json::from_slice(&buf[..n]) {
+        let req: IpcRequest = match serde_json::from_slice(&payload) {
             Ok(r) => r,
             Err(e) => {
-                let err = serde_json::to_vec(&IpcResponse::Error { message: e.to_string() }).unwrap();
-                let _ = stream.write_all(&err).await;
+                let err = serde_json::to_vec(&IpcResponse::error(e.to_string())).unwrap();
+                if write_framed_message(&mut stream, &err).await.is_err() {
+                    break;
+                }
                 continue;
             }
         };
-        let resp = match req {
-            IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
-                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, NAMESPACE_MY_FILES)),
-                _ => IpcResponse::Error {
-                    message: "not found".into(),
-                },
-            },
-            IpcRequest::ListFileProviderItems { container_id } => IpcResponse::FileProviderItems {
-                items: list_file_provider_items(&db, &container_id),
-            },
-            IpcRequest::HydrateFile { file_id, dest_path } => {
-                // Task 1670 round 2: `file_id` here is the raw File Provider
-                // item identifier straight off the wire — reject it before it
-                // is trusted for anything else in this arm. See
-                // `macos_validate_hydrate_item_identifier`'s doc comment.
-                #[cfg(target_os = "macos")]
-                let identifier_check = macos_validate_hydrate_item_identifier(&file_id);
-                #[cfg(not(target_os = "macos"))]
-                let identifier_check: Result<(), &'static str> = Ok(());
 
-                if let Err(msg) = identifier_check {
-                    IpcResponse::Error { message: msg.to_string() }
-                } else {
+        // Task 1670: dispatch on its own spawned task, `.await`ed here, so a
+        // PANIC inside a handler — a bug, never something a client can
+        // trigger on purpose, but one that used to just drop the connection
+        // (the peer's own `read()` then saw a bare EOF and reported "daemon
+        // response was not valid JSON", masking the real failure entirely)
+        // — still produces a real, validly-framed `IpcResponse::Error`
+        // instead of silently vanishing. This is what "the daemon always
+        // answers with valid JSON, including errors" means in practice, not
+        // just for the ordinary `Err` arms already handled below.
+        let resp = match tokio::spawn(dispatch_ipc_request(req, db.clone(), bridge.clone())).await {
+            Ok(resp) => resp,
+            Err(join_err) => {
+                tracing::error!(error = %join_err, "IPC request handler panicked");
+                IpcResponse::error("internal error handling this request")
+            }
+        };
+        if write_framed_message(&mut stream, &serde_json::to_vec(&resp).unwrap())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+/// The actual request → response dispatch, split out of [`handle_connection`]
+/// so it can be `tokio::spawn`ed per request (see that function's doc
+/// comment for why) — this needs to be `'static`, hence owned `Arc` clones
+/// rather than the borrows the inline `match` used before task 1670.
+async fn dispatch_ipc_request(
+    req: IpcRequest,
+    db: std::sync::Arc<crate::state_db::StateDb>,
+    bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
+) -> IpcResponse {
+    match req {
+        IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
+            Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, NAMESPACE_MY_FILES)),
+            _ => IpcResponse::error_with_code("not found", IpcErrorCode::NotFound),
+        },
+        // Task 1670: see `IpcRequest::GetHydrateProgress`'s doc comment.
+        // `in_progress: false` covers BOTH "never started" and "already
+        // finished" — the poller only ever calls this while its own
+        // `HydrateFile` call is still outstanding, so neither case is ever
+        // mistaken for "hydration is stuck at 0 bytes forever".
+        IpcRequest::GetHydrateProgress { file_id } => match bridge.hydrate_progress(&file_id) {
+            Some(p) => IpcResponse::HydrateProgress {
+                in_progress: true,
+                bytes_done: p.bytes_done,
+                total_bytes: p.total_bytes,
+            },
+            None => IpcResponse::HydrateProgress {
+                in_progress: false,
+                bytes_done: 0,
+                total_bytes: 0,
+            },
+        },
+        IpcRequest::ListFileProviderItems { container_id } => IpcResponse::FileProviderItems {
+            items: list_file_provider_items(&db, &container_id),
+        },
+        IpcRequest::HydrateFile { file_id, dest_path } => {
+            // Task 1670 round 2: `file_id` here is the raw File Provider
+            // item identifier straight off the wire — reject it before it
+            // is trusted for anything else in this arm. See
+            // `macos_validate_hydrate_item_identifier`'s doc comment.
+            #[cfg(target_os = "macos")]
+            let identifier_check = macos_validate_hydrate_item_identifier(&file_id);
+            #[cfg(not(target_os = "macos"))]
+            let identifier_check: Result<(), &'static str> = Ok(());
+
+            if let Err(msg) = identifier_check {
+                IpcResponse::error_with_code(msg.to_string(), IpcErrorCode::InvalidRequest)
+            } else {
                 // `dest_path` arrives straight off the wire (untrusted). Bound
                 // it to the caller's legitimate destinations before handing it
                 // to `hydrate_file`, which decrypts vault plaintext to disk
@@ -863,143 +1001,227 @@ async fn handle_connection(
                 allowed_roots.push(temp_root.as_path());
                 #[cfg(target_os = "macos")]
                 allowed_roots.push(macos_hydrate_dir.as_path());
-                let result = bridge.hydrate_file(&file_id, dest, &allowed_roots).await;
-                match result {
+                // Task 1670: `hydrate_file` runs for as long as the real
+                // download + decrypt takes (potentially minutes for a large
+                // file) — this arm is `tokio::spawn`ed per-request by
+                // `handle_connection`, so it never blocks the accept loop or
+                // any OTHER connection's requests, including this same
+                // client's own concurrent `GetHydrateProgress` polls (each
+                // poll opens its own fresh connection — see
+                // `XPCBridge.sendRequest`).
+                match bridge.hydrate_file(&file_id, dest, &allowed_roots).await {
                     Ok(_) => IpcResponse::Ok,
-                    Err(e) => IpcResponse::Error { message: e.to_string() },
-                }
+                    Err(e) => {
+                        // Task 1670: this specific literal is OUR OWN,
+                        // fixed message (`hydrate_dest_is_allowed`'s
+                        // containment check in `engine_bridge.rs`) — matching
+                        // it here recognizes a KNOWN case this codebase
+                        // itself produces, not sniffing arbitrary/untrusted
+                        // text for a guess.
+                        let code = if e.to_string().contains("not within an allowed root") {
+                            IpcErrorCode::PermissionDenied
+                        } else {
+                            IpcErrorCode::Internal
+                        };
+                        IpcResponse::error_with_code(e.to_string(), code)
+                    }
                 }
             }
-            IpcRequest::QueueFinderCreate {
-                parent_id,
+        }
+        IpcRequest::QueueFinderCreate {
+            parent_id,
+            filename,
+            kind,
+            contents_path,
+            content_type,
+        } => {
+            if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
+                return IpcResponse::error_with_code(
+                    "Shared with me is read-only at the namespace root",
+                    IpcErrorCode::PermissionDenied,
+                );
+            }
+            let target = crate::engine_bridge::FinderWriteTarget {
+                file_id: None,
+                parent_id: normalize_parent_id(parent_id),
                 filename,
-                kind,
+                // OS-extension IPC supplies the leaf name only; keep the
+                // leaf-as-path fallback (queue_finder_create defaults
+                // rel_path → filename). The macOS/Linux extensions thread
+                // their own nesting via parent_id, not a relative path.
+                rel_path: None,
+                kind: parse_write_kind(&kind),
                 contents_path,
                 content_type,
-            } => {
-                if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
-                    return write_ipc_response(
-                        &mut stream,
-                        IpcResponse::Error {
-                            message: "Shared with me is read-only at the namespace root".into(),
-                        },
-                    )
-                    .await;
-                }
-                let target = crate::engine_bridge::FinderWriteTarget {
-                    file_id: None,
-                    parent_id: normalize_parent_id(parent_id),
-                    filename,
-                    // OS-extension IPC supplies the leaf name only; keep the
-                    // leaf-as-path fallback (queue_finder_create defaults
-                    // rel_path → filename). The macOS/Linux extensions thread
-                    // their own nesting via parent_id, not a relative path.
-                    rel_path: None,
-                    kind: parse_write_kind(&kind),
-                    contents_path,
-                    content_type,
-                    base_version_identifier: None,
-                };
-                write_outcome_response(&db, bridge.queue_finder_create(target))
-            }
-            IpcRequest::QueueFinderModify {
-                file_id,
-                parent_id,
+                base_version_identifier: None,
+            };
+            write_outcome_response(&db, bridge.queue_finder_create(target))
+        }
+        IpcRequest::QueueFinderModify {
+            file_id,
+            parent_id,
+            filename,
+            kind,
+            contents_path,
+            content_type,
+            base_version_identifier,
+        } => {
+            let target = crate::engine_bridge::FinderWriteTarget {
+                file_id: Some(file_id),
+                parent_id: normalize_parent_id(parent_id),
                 filename,
-                kind,
+                // Modify is metadata/version only; no new-file path key.
+                rel_path: None,
+                kind: parse_write_kind(&kind),
                 contents_path,
                 content_type,
                 base_version_identifier,
-            } => {
-                let target = crate::engine_bridge::FinderWriteTarget {
-                    file_id: Some(file_id),
-                    parent_id: normalize_parent_id(parent_id),
-                    filename,
-                    // Modify is metadata/version only; no new-file path key.
-                    rel_path: None,
-                    kind: parse_write_kind(&kind),
-                    contents_path,
-                    content_type,
-                    base_version_identifier,
-                };
-                write_outcome_response(&db, bridge.queue_finder_modify(target))
+            };
+            write_outcome_response(&db, bridge.queue_finder_modify(target))
+        }
+        IpcRequest::QueueFinderDelete {
+            file_id,
+            base_version_identifier,
+        } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
+        IpcRequest::SetRecursivePin { file_id, pinned } => {
+            // `set_recursive_pin` takes `sync_root` for the Windows pin-state
+            // path; this module is `#![cfg(unix)]`, so it is never compiled on
+            // Windows and the parameter is unused here. Resolve the real root
+            // from config so the call is honest; fall back to the engine-internal
+            // dir if unavailable (the value is never dereferenced on unix).
+            let sync_root = crate::config::DesktopConfig::load()
+                .ok()
+                .and_then(|cfg| cfg.sync_root)
+                .unwrap_or_default();
+            match bridge.set_recursive_pin(&sync_root, &file_id, pinned) {
+                Ok(outcome) => IpcResponse::PinUpdated {
+                    changed_item_ids: outcome.changed_item_ids,
+                    hydrate_operations: outcome.hydrate_operations,
+                },
+                Err(e) => IpcResponse::error(e.to_string()),
             }
-            IpcRequest::QueueFinderDelete {
-                file_id,
-                base_version_identifier,
-            } => write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier)),
-            IpcRequest::SetRecursivePin { file_id, pinned } => {
-                // `set_recursive_pin` takes `sync_root` for the Windows pin-state
-                // path; this module is `#![cfg(unix)]`, so it is never compiled on
-                // Windows and the parameter is unused here. Resolve the real root
-                // from config so the call is honest; fall back to the engine-internal
-                // dir if unavailable (the value is never dereferenced on unix).
-                let sync_root = crate::config::DesktopConfig::load()
-                    .ok()
-                    .and_then(|cfg| cfg.sync_root)
-                    .unwrap_or_default();
-                match bridge.set_recursive_pin(&sync_root, &file_id, pinned) {
-                    Ok(outcome) => IpcResponse::PinUpdated {
-                        changed_item_ids: outcome.changed_item_ids,
-                        hydrate_operations: outcome.hydrate_operations,
-                    },
-                    Err(e) => IpcResponse::Error { message: e.to_string() },
-                }
-            }
-            IpcRequest::RecordOpenedFile {
-                file_id,
-                cache_path,
-                cache_bytes,
-            } => match bridge.record_smart_cache_open(&file_id, std::path::Path::new(&cache_path), cache_bytes) {
+        }
+        IpcRequest::RecordOpenedFile {
+            file_id,
+            cache_path,
+            cache_bytes,
+        } => match bridge.record_smart_cache_open(&file_id, std::path::Path::new(&cache_path), cache_bytes) {
+            Ok(outcome) => IpcResponse::CacheCleanup {
+                evicted_file_ids: outcome.evicted_file_ids,
+            },
+            Err(e) => IpcResponse::error(e.to_string()),
+        },
+        IpcRequest::EnforceSmartCache {
+            max_unpinned_cache_bytes,
+            disk_pressure_min_free_bytes,
+        } => {
+            let policy = crate::engine_bridge::CachePolicy {
+                max_unpinned_cache_bytes: max_unpinned_cache_bytes
+                    .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().max_unpinned_cache_bytes),
+                disk_pressure_min_free_bytes: disk_pressure_min_free_bytes
+                    .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().disk_pressure_min_free_bytes),
+            };
+            match bridge.enforce_smart_cache(policy) {
                 Ok(outcome) => IpcResponse::CacheCleanup {
                     evicted_file_ids: outcome.evicted_file_ids,
                 },
-                Err(e) => IpcResponse::Error { message: e.to_string() },
-            },
-            IpcRequest::EnforceSmartCache {
-                max_unpinned_cache_bytes,
-                disk_pressure_min_free_bytes,
-            } => {
-                let policy = crate::engine_bridge::CachePolicy {
-                    max_unpinned_cache_bytes: max_unpinned_cache_bytes
-                        .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().max_unpinned_cache_bytes),
-                    disk_pressure_min_free_bytes: disk_pressure_min_free_bytes
-                        .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().disk_pressure_min_free_bytes),
-                };
-                match bridge.enforce_smart_cache(policy) {
-                    Ok(outcome) => IpcResponse::CacheCleanup {
-                        evicted_file_ids: outcome.evicted_file_ids,
-                    },
-                    Err(e) => IpcResponse::Error { message: e.to_string() },
-                }
+                Err(e) => IpcResponse::error(e.to_string()),
             }
-            IpcRequest::GetSyncSummary => {
-                let syncing = db
-                    .list_by_status(crate::state_db::FileStatus::Downloading)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
-                let cloud_only = db
-                    .list_by_status(crate::state_db::FileStatus::CloudOnly)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
-                let conflicts = db
-                    .list_by_status(crate::state_db::FileStatus::Conflict)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
-                IpcResponse::SyncSummary {
-                    syncing,
-                    cloud_only,
-                    conflicts,
-                }
+        }
+        IpcRequest::GetSyncSummary => {
+            let syncing = db
+                .list_by_status(crate::state_db::FileStatus::Downloading)
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let cloud_only = db
+                .list_by_status(crate::state_db::FileStatus::CloudOnly)
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let conflicts = db
+                .list_by_status(crate::state_db::FileStatus::Conflict)
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            IpcResponse::SyncSummary {
+                syncing,
+                cloud_only,
+                conflicts,
             }
-            IpcRequest::SetFileStatus { .. } => IpcResponse::Ok,
-        };
-        let _ = stream.write_all(&serde_json::to_vec(&resp).unwrap()).await;
+        }
+        IpcRequest::SetFileStatus { .. } => IpcResponse::Ok,
     }
 }
 
-async fn write_ipc_response(stream: &mut UnixStream, response: IpcResponse) {
-    let _ = stream.write_all(&serde_json::to_vec(&response).unwrap()).await;
+/// Task 1670: hard ceiling on one framed IPC message (request OR response).
+/// Guards against unbounded allocation from a malformed length prefix (a
+/// corrupted peer, or — before this task's framing fix — exactly the kind of
+/// garbage a partial/interleaved read used to produce). 64 MiB comfortably
+/// covers every real message this protocol sends — the largest is a full
+/// `ListFileProviderItems` folder listing; individual file CONTENTS never
+/// cross this socket (hydration writes decrypted bytes straight to disk,
+/// never returns them over IPC).
+const MAX_IPC_MESSAGE_BYTES: u32 = 64 * 1024 * 1024;
+
+/// Read one length-prefixed message: a 4-byte big-endian `u32` byte count,
+/// followed by exactly that many payload bytes.
+///
+/// Task 1670 root cause: the code this replaces did a SINGLE
+/// `stream.read(&mut buf).await` into a fixed buffer and treated whatever
+/// arrived as the complete message — but a `SOCK_STREAM` Unix domain socket
+/// delivers a byte STREAM, not discrete messages, so the kernel is free to
+/// hand a `read()` call only PART of a logical write. Proven for real: the
+/// unified log capture at `.claude/tasks/_qa-evidence/1670/device-086/`
+/// shows exactly this — `enumerateItemsFromPage` (a `ListFileProviderItems`
+/// response, which can be large for a folder with many items) failing
+/// `BeebeebIPCError.invalidResponse("daemon response was not valid JSON")`
+/// repeatedly, on the SAME code shape this file's `XPCBridge.sendRequest`
+/// mirrored on the Swift side (single fixed-buffer `read()`, no framing).
+/// This function (and its write-side counterpart [`write_framed_message`])
+/// instead read/write an explicit length prefix and loop via
+/// `read_exact`/`write_all` until the WHOLE message has moved, regardless of
+/// how many underlying syscalls that takes.
+///
+/// Returns `Ok(None)` for a clean close between messages (zero bytes ever
+/// arrived for this call — the normal end of a request/response exchange),
+/// distinct from `Err` (a partial header or partial payload: the connection
+/// closed or errored mid-message, a real protocol violation worth logging
+/// rather than silently swallowing).
+async fn read_framed_message<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    // Read the first byte alone so a clean "nothing more was ever sent"
+    // close (0 bytes) is distinguishable from a truncated header (1-3 bytes
+    // then EOF) — `read_exact` alone reports both as the same
+    // `UnexpectedEof`, which would make a normal end-of-connection log a
+    // scary-looking warning on every single request.
+    let first = stream.read(&mut len_buf[..1]).await?;
+    if first == 0 {
+        return Ok(None);
+    }
+    stream.read_exact(&mut len_buf[1..]).await?;
+    let len = u32::from_be_bytes(len_buf);
+    if len > MAX_IPC_MESSAGE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("IPC message of {len} bytes exceeds the {MAX_IPC_MESSAGE_BYTES}-byte limit"),
+        ));
+    }
+    let mut payload = vec![0u8; len as usize];
+    stream.read_exact(&mut payload).await?;
+    Ok(Some(payload))
+}
+
+/// Write one length-prefixed message — the send-side counterpart of
+/// [`read_framed_message`]. `write_all` already loops internally until every
+/// byte is accepted by the kernel, so the length prefix is the only piece
+/// this adds; without it a reader has no way to know where one message ends
+/// and (on a connection that carries more than one) the next begins.
+async fn write_framed_message<W: tokio::io::AsyncWrite + Unpin>(stream: &mut W, payload: &[u8]) -> std::io::Result<()> {
+    let len: u32 = payload
+        .len()
+        .try_into()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "IPC payload too large to frame"))?;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(payload).await?;
+    Ok(())
 }
 
 fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
@@ -1044,7 +1266,7 @@ fn write_outcome_response(
             ignored,
             message,
         },
-        Err(e) => IpcResponse::Error { message: e.to_string() },
+        Err(e) => IpcResponse::error(e.to_string()),
     }
 }
 
