@@ -1435,5 +1435,180 @@ check("1698-E9: the daemon's rejection text is the user-facing message") {
     )
 }
 
+// MARK: - Task 1699: sync-state badges (NSFileProviderItemDecorating)
+
+// The daemon's per-item `status` (state_db.rs FileStatus::as_str: cloud_only,
+// downloading, local, uploading, conflict, error, trashing) crosses the bridge
+// as a plain string. macOS renders only the FIRST decoration in a category
+// (Badge), so the mapping is intentionally AT MOST ONE identifier per item;
+// if statuses ever compose, the documented priority is
+// error > conflict > trashing > uploading > downloading.
+func item1699(status: String, kind: BeebeebItemKind = .file, contentType: String? = nil) -> BeebeebProviderItem {
+    BeebeebProviderItem(
+        identifier: "1699-item",
+        parentIdentifier: "NSFileProviderRootContainerItemIdentifier",
+        filename: "photo.jpg",
+        kind: kind,
+        sizeBytes: 2048,
+        contentType: contentType,
+        status: status,
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil
+    )
+}
+
+check("1699-D1: each sync state maps to exactly one badge identifier; plain states map none") {
+    try expect(
+        BeebeebProviderItem.decorationIdentifier(forStatus: "error") == BeebeebProviderItem.decorationError,
+        "error → error badge, got \(String(describing: BeebeebProviderItem.decorationIdentifier(forStatus: "error")))"
+    )
+    try expect(
+        BeebeebProviderItem.decorationIdentifier(forStatus: "conflict") == BeebeebProviderItem.decorationConflict,
+        "conflict → conflict badge"
+    )
+    try expect(
+        BeebeebProviderItem.decorationIdentifier(forStatus: "trashing") == BeebeebProviderItem.decorationTrashing,
+        "trashing → trashing badge"
+    )
+    try expect(
+        BeebeebProviderItem.decorationIdentifier(forStatus: "uploading") == BeebeebProviderItem.decorationUploading,
+        "uploading → uploading badge"
+    )
+    try expect(
+        BeebeebProviderItem.decorationIdentifier(forStatus: "downloading") == BeebeebProviderItem.decorationDownloading,
+        "downloading → downloading badge"
+    )
+    for plain in ["local", "cloud_only", "nonsense"] {
+        try expect(
+            BeebeebProviderItem.decorationIdentifier(forStatus: plain) == nil,
+            "\(plain) must carry NO badge, got \(String(describing: BeebeebProviderItem.decorationIdentifier(forStatus: plain)))"
+        )
+    }
+}
+
+check("1699-D2: FileProviderItem.decorations surfaces the model's badge; a plain local item has none") {
+    let uploading = FileProviderItem(model: item1699(status: "uploading"))
+    try expect(
+        uploading.decorations == [NSFileProviderItemDecorationIdentifier(BeebeebProviderItem.decorationUploading)],
+        "an uploading item must carry exactly the uploading badge, got \(String(describing: uploading.decorations))"
+    )
+    let local = FileProviderItem(model: item1699(status: "local"))
+    try expect(local.decorations == nil, "a fully-synced local item must carry no badge, got \(String(describing: local.decorations))")
+}
+
+check("1699-D3: the five badge identifiers are distinct and share the io.beebeeb.app.decoration namespace") {
+    let ids = [
+        BeebeebProviderItem.decorationError,
+        BeebeebProviderItem.decorationConflict,
+        BeebeebProviderItem.decorationTrashing,
+        BeebeebProviderItem.decorationUploading,
+        BeebeebProviderItem.decorationDownloading,
+    ]
+    try expect(Set(ids).count == 5, "five distinct identifiers, got \(ids)")
+    for id in ids {
+        try expect(id.hasPrefix("io.beebeeb.app.decoration."), "identifier \(id) must live in the extension's declared namespace (Info.plist NSFileProviderDecorations)")
+    }
+}
+
+// MARK: - Task 1699: thumbnails (NSFileProviderThumbnailing)
+
+// The pure decision helpers the (untestable-headless) fetchThumbnails method
+// is built from: variant bucket, pixel budget and eligibility. The daemon's
+// bucket picker (ipc_socket.rs thumbnail_variant, mirroring the Windows
+// provider) is ≤96 "small", ≤256 "medium", else "large".
+
+check("1699-T1: variant buckets mirror the daemon's picker (≤96 small, ≤256 medium, else large)") {
+    try expect(FileProviderExtension.thumbnailVariant(maxDimension: 1) == "small", "1 → small")
+    try expect(FileProviderExtension.thumbnailVariant(maxDimension: 96) == "small", "96 → small (bucket edge)")
+    try expect(FileProviderExtension.thumbnailVariant(maxDimension: 97) == "medium", "97 → medium")
+    try expect(FileProviderExtension.thumbnailVariant(maxDimension: 256) == "medium", "256 → medium (bucket edge)")
+    try expect(FileProviderExtension.thumbnailVariant(maxDimension: 257) == "large", "257 → large")
+    try expect(FileProviderExtension.thumbnailVariant(maxDimension: UInt32.max) == "large", "huge request → large")
+}
+
+check("1699-T2: requestedSize points → a 2x pixel budget, larger side governs, clamped, deterministic") {
+    try expect(FileProviderExtension.thumbnailMaxDimension(requestedSize: CGSize(width: 22, height: 22)) == 44, "22pt @2x = 44px")
+    try expect(FileProviderExtension.thumbnailMaxDimension(requestedSize: CGSize(width: 200, height: 100)) == 400, "the LARGER side governs (200pt @2x = 400px)")
+    try expect(FileProviderExtension.thumbnailMaxDimension(requestedSize: CGSize(width: 9999, height: 9999)) == 1024, "an absurd request clamps to the 1024px budget")
+    try expect(FileProviderExtension.thumbnailMaxDimension(requestedSize: .zero) == 256, "a sizeless request falls back to the 256px default (never 0)")
+}
+
+check("1699-T3: only files with an image/video/movie content type are thumbnail-eligible") {
+    try expect(!FileProviderExtension.thumbnailEligible(kind: .folder, contentType: "public.folder"), "folders are never thumbnail-eligible")
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "public.jpeg"), "images are eligible")
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "public.movie"), "movies are eligible")
+    try expect(!FileProviderExtension.thumbnailEligible(kind: .file, contentType: "public.plain-text"), "documents are not")
+    try expect(!FileProviderExtension.thumbnailEligible(kind: .file, contentType: nil), "an unknown content type is not (the daemon only has image/video thumbnails)")
+    try expect(!FileProviderExtension.thumbnailEligible(kind: .file, contentType: "not a uti"), "an unparseable content type is not")
+    // Task 1699 review (PR #103, thread PRRT_kwDOSLX6Xs6oeNfK, P1): the sync
+    // pipeline stores MIME content types (`image/png`, engine_bridge.rs
+    // guess_mime_type), not UTIs. `UTType(raw)` only parses UTI identifiers,
+    // so the old guard made EVERY synced media ineligible and thumbnails
+    // never fetched. MIME must convert via `UTType(mimeType:)`, with the
+    // UTI parse retained as the fallback.
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "image/png"), "MIME image content types (what the sync pipeline stores) are eligible")
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "video/mp4"), "MIME video content types are eligible")
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "public.png"), "UTI identifiers still parse (fallback retained)")
+}
+
+check("1699-T4: the FetchThumbnail request carries file_id + dest_path + max_dimension") {
+    let payload = try requestPayload(
+        XPCBridge.thumbnailRequest(fileID: "abc-123", destinationPath: "/staging/thumb.bin", maxDimension: 128),
+        "FetchThumbnail"
+    )
+    try expect(payload["file_id"] as? String == "abc-123", "file_id must ride the payload, got \(String(describing: payload["file_id"]))")
+    try expect(payload["dest_path"] as? String == "/staging/thumb.bin", "dest_path must ride the payload")
+    try expect((payload["max_dimension"] as? NSNumber)?.uint32Value == 128, "max_dimension must ride the payload")
+}
+
+check("1699-T5: ThumbnailWritten decodes the byte count; Error is daemonRejected; a bare reply is invalidResponse") {
+    let size = try XPCBridge.decodeThumbnailReply(["ThumbnailWritten": ["size_bytes": 1234]])
+    try expect(size == 1234, "size_bytes must decode, got \(size)")
+    do {
+        _ = try XPCBridge.decodeThumbnailReply(["Error": ["message": "thumbnail fetch failed: 404"]])
+        throw TestFailure(description: "an Error reply must throw daemonRejected")
+    } catch let error as BeebeebIPCError {
+        guard case .daemonRejected = error else {
+            throw TestFailure(description: "an Error reply must be daemonRejected, got \(error)")
+        }
+    }
+    do {
+        _ = try XPCBridge.decodeThumbnailReply(["Ok": [String: Any]()])
+        throw TestFailure(description: "a reply without ThumbnailWritten must throw invalidResponse")
+    } catch let error as BeebeebIPCError {
+        guard case .invalidResponse = error else {
+            throw TestFailure(description: "a bare reply must be invalidResponse, got \(error)")
+        }
+    }
+}
+
+check("1699-T6: the thumbnail timeout stays between the metadata and hydrate ceilings") {
+    try expect(IPCFraming.thumbnailTimeoutSeconds == 60, "pinned at 60s, got \(IPCFraming.thumbnailTimeoutSeconds)")
+    try expect(
+        IPCFraming.thumbnailTimeoutSeconds > IPCFraming.metadataTimeoutSeconds
+            && IPCFraming.thumbnailTimeoutSeconds < IPCFraming.hydrateTimeoutSeconds,
+        "a thumbnail is more than a metadata lookup but nowhere near a whole-file download"
+    )
+}
+
+check("1699-P1: pendingItemsDidChange hands control back promptly (a system→extension callback)") {
+    // macOS 11.3+ (V3_1): the SYSTEM calls this when its pending set
+    // refreshes — it tracks pending items itself (enumeratorForPendingItems).
+    // The honest implementation logs and completes immediately; this test
+    // pins that the completion handler is always invoked (a hung callback
+    // would stall the system's pending-set bookkeeping).
+    let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier("1699-pending"), displayName: "Beebeeb")
+    let extension1699 = FileProviderExtension(domain: domain)
+    let group = DispatchGroup()
+    group.enter()
+    var calledBack = false
+    extension1699.pendingItemsDidChange {
+        calledBack = true
+        group.leave()
+    }
+    try expect(group.wait(timeout: .now() + 2) == .success, "pendingItemsDidChange must call its completion handler promptly")
+    try expect(calledBack, "the completion handler must have run")
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

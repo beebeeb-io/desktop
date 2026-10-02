@@ -301,7 +301,9 @@ fn an_oversized_request_is_refused_with_an_error_then_the_connection_closes() {
 fn success_is_an_object_on_the_wire_not_a_bare_string() {
     // JSONSerialization on the Swift side rejects a top-level string, which is
     // what turned every SUCCESSFUL hydrate into "daemon response was not valid
-    // JSON". Pin the shape both in isolation and over the socket.
+    // JSON". Pin the shape both in isolation and over the socket. (The probe
+    // was `SetFileStatus` until task 1699 retired it; `ReportMaterialized`
+    // with an empty list is the remaining `Ok {}` RPC.)
     assert_eq!(
         serde_json::to_string(&crate::ipc_socket::IpcResponse::Ok {}).unwrap(),
         r#"{"Ok":{}}"#
@@ -309,10 +311,7 @@ fn success_is_an_object_on_the_wire_not_a_bare_string() {
     let fx = IpcFixture::start(|_| {});
     fx.rt.block_on(async {
         let mut client = fx.connect().await;
-        client
-            .write_all(b"{\"SetFileStatus\":{\"file_id\":\"x\",\"status\":\"local\"}}\n")
-            .await
-            .unwrap();
+        client.write_all(b"{\"ReportMaterialized\":{\"container_ids\":[]}}\n").await.unwrap();
         let line = read_line(&mut client).await;
         assert_eq!(String::from_utf8(line).unwrap(), r#"{"Ok":{}}"#);
     });
@@ -977,6 +976,159 @@ fn an_unparsable_anchor_gets_an_error_not_a_crash() {
     fx.rt.block_on(async {
         let reply = send_one(&fx, list_changes_request(Some("garbage-anchor"))).await;
         assert!(reply.get("Error").is_some(), "an expired/garbage anchor is an error: {reply}");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Task 1699: FetchThumbnail RPC + retirement of the never-called smart-cache
+// stubs (SetFileStatus / RecordOpenedFile / EnforceSmartCache, audit G13).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retired_rpcs_are_refused_and_the_connection_survives() {
+    // Task 1699 audit G13: SetFileStatus (a no-op stub the extension never
+    // sent), RecordOpenedFile and EnforceSmartCache (smart-cache bookkeeping
+    // with no File Provider caller — the daemon enforces the cache limit
+    // internally) are RETIRED from the wire. An unknown variant must be
+    // refused per-request (Error reply) without taking the connection down,
+    // exactly like any other deserialization failure.
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        let client = fx.connect().await;
+        let mut lines = LineReader::new(client);
+        for request in [
+            r#"{"SetFileStatus":{"file_id":"x","status":"local"}}"#,
+            r#"{"RecordOpenedFile":{"file_id":"x","cache_path":"/tmp/x","cache_bytes":1}}"#,
+            r#"{"EnforceSmartCache":{"max_unpinned_cache_bytes":null,"disk_pressure_min_free_bytes":null}}"#,
+        ] {
+            lines.client.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+            let reply = parse(&lines.next_line().await);
+            let message = reply["Error"]["message"].as_str().unwrap_or_default().to_string();
+            assert!(message.contains("unknown variant"), "retired RPC must be refused, got {reply}");
+        }
+        lines.client.write_all(b"\"GetSyncSummary\"\n").await.unwrap();
+        let next = parse(&lines.next_line().await);
+        assert!(next.get("SyncSummary").is_some(), "connection must still be usable: {next}");
+    });
+}
+
+#[test]
+fn thumbnail_variant_buckets_match_the_windows_picker() {
+    // The variant picker mirrors windows_cf/thumbnail_provider.rs: a
+    // requested max dimension of <=96 px gets the "small" server variant,
+    // <=256 px "medium", anything larger "large".
+    assert_eq!(crate::ipc_socket::thumbnail_variant(1), "small");
+    assert_eq!(crate::ipc_socket::thumbnail_variant(96), "small");
+    assert_eq!(crate::ipc_socket::thumbnail_variant(97), "medium");
+    assert_eq!(crate::ipc_socket::thumbnail_variant(256), "medium");
+    assert_eq!(crate::ipc_socket::thumbnail_variant(257), "large");
+    assert_eq!(crate::ipc_socket::thumbnail_variant(u32::MAX), "large");
+}
+
+#[test]
+fn persist_thumbnail_plaintext_writes_atomically_inside_allowed_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = vec![dir.path().to_path_buf()];
+    let dest = dir.path().join("thumb.bin");
+    let bytes = b"thumbnail-plaintext";
+    let written = crate::ipc_socket::persist_thumbnail_plaintext(&dest, &roots, bytes).unwrap();
+    assert_eq!(written, bytes.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes, "the renamed file must carry the plaintext");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "thumbnail staging plaintext must be owner-only");
+    let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().filter_map(|e| e.ok()).collect();
+    assert_eq!(entries.len(), 1, "no `.part` staging leftovers may remain");
+}
+
+#[test]
+fn persist_thumbnail_plaintext_rejects_destinations_outside_allowed_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = std::env::temp_dir().join("1699-persist-outside-thumb.bin");
+    let roots = vec![dir.path().to_path_buf()];
+    let err = crate::ipc_socket::persist_thumbnail_plaintext(&outside, &roots, b"x").unwrap_err();
+    assert!(err.to_string().contains("allowed root"), "got {err}");
+    assert!(!outside.exists(), "nothing may be written outside an allowed root");
+}
+
+// Task 1699 review (PR #103, thread PRRT_kwDOSLX6Xs6oeNfW, P1): the staging
+// write must never FOLLOW a pre-created `<dest>.part` symlink. The old plain
+// `File::create(&staging)` did: a caller that can reach the IPC socket plants
+// `<dest>.part` as a symlink to an arbitrary daemon-accessible file, the
+// parent-only containment check passes, and the plaintext truncates/overwrites
+// the target outside every allowed root. The anchored staging writer (task
+// 1247 / 1670-round-3 pattern: O_NOFOLLOW descent + fresh temp leaf +
+// anchored renameat) can only REPLACE a planted path, never write through it.
+#[test]
+fn persist_thumbnail_plaintext_never_writes_through_a_planted_staging_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("victim.txt");
+    std::fs::write(&outside, b"DO-NOT-TOUCH").unwrap();
+    let dest = dir.path().join("thumb.bin");
+    let staging = dir.path().join("thumb.bin.part");
+    std::os::unix::fs::symlink(&outside, &staging).unwrap();
+    let roots = vec![dir.path().to_path_buf()];
+    let written = crate::ipc_socket::persist_thumbnail_plaintext(&dest, &roots, b"payload")
+        .expect("a normal dest inside an allowed root must still succeed");
+    assert_eq!(written, b"payload".len() as u64);
+    assert_eq!(
+        std::fs::read(&outside).unwrap(),
+        b"DO-NOT-TOUCH",
+        "the pre-created staging symlink must never divert the write outside the allowed roots"
+    );
+    let meta = std::fs::symlink_metadata(&dest).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "the published dest must be a REAL file, not the planted symlink moved into place"
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+}
+
+#[test]
+fn fetch_thumbnail_rejects_destination_outside_allowed_roots() {
+    // The dest_path arrives straight off the wire (untrusted), exactly like
+    // HydrateFile's: it must be bounded to the allowed roots BEFORE the
+    // daemon does anything else with the request.
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        let mut client = fx.connect().await;
+        client
+            .write_all(
+                b"{\"FetchThumbnail\":{\"file_id\":\"00000000-0000-0000-0000-000000000001\",\"dest_path\":\"/tmp/1699-fpfs-outside/thumb.bin\",\"max_dimension\":256}}\n",
+            )
+            .await
+            .unwrap();
+        let reply = parse(&read_line(&mut client).await);
+        let message = reply["Error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("allowed root"), "got {reply}");
+    });
+}
+
+#[test]
+fn fetch_thumbnail_reports_daemon_side_failures_without_writing_the_dest() {
+    // The fixture's ApiClient points at an unreachable port, so a request
+    // that survives identifier + destination validation must surface the
+    // daemon-side failure as an Error reply and leave NO file at dest —
+    // the extension must never read a stale or partial staging file.
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        let dest = std::env::temp_dir().join("1699-thumb-should-not-exist.bin");
+        let _ = std::fs::remove_file(&dest);
+        let request = format!(
+            "{{\"FetchThumbnail\":{{\"file_id\":\"00000000-0000-0000-0000-000000000001\",\"dest_path\":\"{}\",\"max_dimension\":256}}}}\n",
+            dest.display()
+        );
+        let mut client = fx.connect().await;
+        client.write_all(request.as_bytes()).await.unwrap();
+        let reply = parse(&read_line(&mut client).await);
+        let message = reply["Error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("thumbnail") && !message.contains("unknown variant"),
+            "the arm must reach the daemon-side fetch, got {reply}"
+        );
+        assert!(!dest.exists(), "a failed fetch must not leave a staging file");
+        let _ = std::fs::remove_file(&dest);
     });
 }
 

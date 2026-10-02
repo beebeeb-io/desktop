@@ -17,10 +17,6 @@ pub enum IpcRequest {
     GetFileStatus {
         file_id: String,
     },
-    SetFileStatus {
-        file_id: String,
-        status: String,
-    },
     /// Task 1697: the replica enumerator's change feed. `since_anchor` is the
     /// opaque sync-anchor cursor from a previous `FileProviderChanges` reply
     /// (or absent at genesis). Paged: at most 100 changes per reply, with
@@ -84,14 +80,16 @@ pub enum IpcRequest {
         file_id: String,
         base_version_identifier: Option<String>,
     },
-    RecordOpenedFile {
+    /// Task 1699: fetch the server's encrypted thumbnail variant for one
+    /// file, decrypt it, and stage the plaintext at `dest_path` (bounded to
+    /// the allowed roots, written `.part` + rename). The extension reads the
+    /// staging file back and deletes it, mirroring the hydrate flow.
+    FetchThumbnail {
         file_id: String,
-        cache_path: String,
-        cache_bytes: i64,
-    },
-    EnforceSmartCache {
-        max_unpinned_cache_bytes: Option<i64>,
-        disk_pressure_min_free_bytes: Option<u64>,
+        dest_path: String,
+        /// Requested maximum pixel dimension; picks the server variant
+        /// (`thumbnail_variant`, mirroring the Windows Cloud Files picker).
+        max_dimension: u32,
     },
     GetSyncSummary,
 }
@@ -141,8 +139,12 @@ pub enum IpcResponse {
     FileProviderSyncAnchor {
         anchor: Option<String>,
     },
-    CacheCleanup {
-        evicted_file_ids: Vec<String>,
+    /// Task 1699: `FetchThumbnail` succeeded; the decrypted thumbnail
+    /// plaintext was staged atomically at the requested destination.
+    /// `size_bytes` is the plaintext byte count (the extension reads the
+    /// staging file back and deletes it).
+    ThumbnailWritten {
+        size_bytes: u64,
     },
 }
 
@@ -1066,32 +1068,67 @@ async fn handle_connection(
             // the concept with per-item `contentPolicy` (`.pinned` on the
             // payload → `.downloadEagerlyAndKeepDownloaded`); the pin STATE
             // itself stays on `files.pin_state` (task 1683 owns the backend).
-            IpcRequest::RecordOpenedFile {
+            //
+            // Task 1699 (audit G13): three more never-called RPCs are
+            // RETIRED from the wire — `SetFileStatus` (a no-op stub the
+            // extension never sent), `RecordOpenedFile` and
+            // `EnforceSmartCache` (smart-cache bookkeeping with no File
+            // Provider caller; the daemon enforces the cache limit itself
+            // via `EngineBridge::enforce_configured_cache_limit`, and
+            // `IpcResponse::CacheCleanup` went with them). Unknown variants
+            // are refused per-request by the deserialization error path
+            // above without dropping the connection; see
+            // `retired_rpcs_are_refused_and_the_connection_survives`.
+            IpcRequest::FetchThumbnail {
                 file_id,
-                cache_path,
-                cache_bytes,
-            } => match bridge.record_smart_cache_open(&file_id, std::path::Path::new(&cache_path), cache_bytes) {
-                Ok(outcome) => IpcResponse::CacheCleanup {
-                    evicted_file_ids: outcome.evicted_file_ids,
-                },
-                Err(e) => IpcResponse::Error { message: e.to_string() },
-            },
-            IpcRequest::EnforceSmartCache {
-                max_unpinned_cache_bytes,
-                disk_pressure_min_free_bytes,
+                dest_path,
+                max_dimension,
             } => {
-                let policy = crate::engine_bridge::CachePolicy {
-                    max_unpinned_cache_bytes: max_unpinned_cache_bytes
-                        .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().max_unpinned_cache_bytes),
-                    disk_pressure_min_free_bytes: disk_pressure_min_free_bytes
-                        .unwrap_or_else(|| crate::engine_bridge::CachePolicy::default().disk_pressure_min_free_bytes),
+                // `file_id` is a raw item identifier straight off the wire;
+                // validate it exactly like the hydrate arm does before it is
+                // trusted for anything else.
+                #[cfg(target_os = "macos")]
+                let identifier_check = macos_validate_hydrate_item_identifier(&file_id);
+                #[cfg(not(target_os = "macos"))]
+                let identifier_check: Result<(), &'static str> = Ok(());
+                let validated = match identifier_check {
+                    Err(msg) => Err(IpcResponse::Error { message: msg.to_string() }),
+                    Ok(()) => {
+                        // `dest_path` arrives straight off the wire
+                        // (untrusted). Bound it to the caller's legitimate
+                        // destinations — the same allowed roots as
+                        // `HydrateFile` (sync root, temp dir, and on macOS
+                        // the shared App Group hydrate-cache directory) —
+                        // BEFORE any fetch runs, and keep the plaintext
+                        // staging write atomic (`.part` + rename).
+                        let allowed_roots = thumbnail_allowed_roots();
+                        let dest = std::path::PathBuf::from(&dest_path);
+                        match thumbnail_destination_error(&dest, &allowed_roots) {
+                            Some(message) => Err(IpcResponse::Error { message }),
+                            None => {
+                                // `fetch_thumbnail_to_memory` is async (HTTP
+                                // + decrypt); the staging write that follows
+                                // is a small blocking file write, which the
+                                // other dispatch arms also do inline.
+                                let fetched = bridge
+                                    .fetch_thumbnail_to_memory(&file_id, thumbnail_variant(max_dimension))
+                                    .await;
+                                match fetched {
+                                    Ok(plaintext) => match persist_thumbnail_plaintext(&dest, &allowed_roots, &plaintext) {
+                                        Ok(size_bytes) => Ok(IpcResponse::ThumbnailWritten { size_bytes }),
+                                        Err(e) => Ok(IpcResponse::Error {
+                                            message: format!("thumbnail fetch failed: {e}"),
+                                        }),
+                                    },
+                                    Err(e) => Ok(IpcResponse::Error {
+                                        message: format!("thumbnail fetch failed: {e}"),
+                                    }),
+                                }
+                            }
+                        }
+                    }
                 };
-                match bridge.enforce_smart_cache(policy) {
-                    Ok(outcome) => IpcResponse::CacheCleanup {
-                        evicted_file_ids: outcome.evicted_file_ids,
-                    },
-                    Err(e) => IpcResponse::Error { message: e.to_string() },
-                }
+                validated.unwrap_or_else(|resp| resp)
             }
             IpcRequest::GetSyncSummary => {
                 let syncing = db
@@ -1154,7 +1191,6 @@ async fn handle_connection(
                     message: e.to_string(),
                 },
             },
-            IpcRequest::SetFileStatus { .. } => IpcResponse::Ok {},
         };
         if write_frame(&mut write_half, &resp).await.is_err() {
             break;
@@ -1847,6 +1883,106 @@ fn filename_from_path(path: &str) -> String {
 fn is_top_level_path(path: &str) -> bool {
     let trimmed = path.trim_matches('/');
     !trimmed.is_empty() && !trimmed.contains('/')
+}
+
+/// Task 1699: mirror of the Windows Cloud Files thumbnail variant picker
+/// (`windows_cf/thumbnail_provider.rs`): the requested maximum pixel
+/// dimension maps to the smallest server variant that satisfies it. The
+/// server serves three encrypted variants (small/medium/large) per file.
+pub(crate) fn thumbnail_variant(max_dimension: u32) -> &'static str {
+    if max_dimension <= 96 {
+        "small"
+    } else if max_dimension <= 256 {
+        "medium"
+    } else {
+        "large"
+    }
+}
+
+/// The destinations a `FetchThumbnail` staging write may land in — the same
+/// allowed roots as `HydrateFile` (task 1247): the configured sync root, this
+/// process's temp dir, and on macOS the shared App Group hydrate-cache
+/// directory (ensured to exist, owner-only and backup-excluded, and swept for
+/// crash-orphaned staging files first — the extension deletes its staging
+/// file right after reading it, so the sweep stays a crash backstop).
+fn thumbnail_allowed_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
+        roots.push(root);
+    }
+    roots.push(std::env::temp_dir());
+    #[cfg(target_os = "macos")]
+    {
+        let dir = macos_hydrate_cache_dir();
+        if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
+        }
+        if let Err(e) = macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now()) {
+            tracing::warn!(error = %e, dir = %dir.display(), "hydrate-cache TTL sweep failed (best-effort)");
+        }
+        roots.push(dir);
+    }
+    roots
+}
+
+/// `Some(error reply message)` when `dest` is not safely stageable: its
+/// parent must exist (nothing is created outside an allowed root) and
+/// canonicalize to a path under one of the allowed roots. Both sides are
+/// canonicalized so macOS `/var` ↔ `/private/var` symlinks cannot split the
+/// check (mirrors the hydrate containment semantics).
+fn thumbnail_destination_error(dest: &std::path::Path, allowed_roots: &[std::path::PathBuf]) -> Option<String> {
+    let parent = dest.parent()?;
+    let canonical_parent = match parent.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return Some(format!(
+                "thumbnail destination {} is not under an allowed root (parent does not exist)",
+                dest.display()
+            ));
+        }
+    };
+    let contained = allowed_roots.iter().any(|root| match root.canonicalize() {
+        Ok(canonical_root) => canonical_parent == canonical_root || canonical_parent.starts_with(&canonical_root),
+        Err(_) => false,
+    });
+    if contained {
+        None
+    } else {
+        Some(format!("thumbnail destination {} is not under an allowed root", dest.display()))
+    }
+}
+
+/// Stage decrypted thumbnail plaintext at `dest` atomically: write a
+/// fresh temp leaf, force owner-only permissions, then rename onto `dest` —
+/// the extension can never observe a partial thumbnail, and a crash leaves
+/// only the temp file for the TTL sweep to collect. Returns the plaintext byte
+/// count. Caller has already validated containment
+/// ([`thumbnail_destination_error`]); this is defense in depth for the same
+/// rule and refuses to write outside the allowed roots regardless.
+///
+/// Task 1699 review (PR #103 thread PRRT_kwDOSLX6Xs6oeNfW, P1): this used to
+/// be a plain `File::create` on `<dest>.part` after the parent-only
+/// containment check — but `File::create` FOLLOWS a pre-created symlink, so a
+/// socket client could plant `<dest>.part` → arbitrary file and have the
+/// daemon truncate it outside every allowed root. Delegates to the
+/// fd-anchored staging writer (`write_hydrated_plaintext`, tasks 1247/1670),
+/// which descends O_NOFOLLOW from a trusted root fd, stages under a fresh
+/// random temp leaf, and publishes with an anchored `renameat` — it can
+/// REPLACE a planted path but can never WRITE THROUGH one. The temp shape
+/// (`.{leaf}.{uuid}.part`) is the same one the macOS TTL sweep is proven to
+/// leave alone while in flight.
+pub(crate) fn persist_thumbnail_plaintext(
+    dest: &std::path::Path,
+    allowed_roots: &[std::path::PathBuf],
+    plaintext: &[u8],
+) -> anyhow::Result<u64> {
+    if thumbnail_destination_error(dest, allowed_roots).is_some() {
+        anyhow::bail!("thumbnail destination {} is not under an allowed root", dest.display());
+    }
+    let root_paths: Vec<&std::path::Path> = allowed_roots.iter().map(|p| p.as_path()).collect();
+    crate::engine_bridge::write_hydrated_plaintext(dest, &root_paths, plaintext)
+        .map(|_| plaintext.len() as u64)
+        .map_err(|e| anyhow::anyhow!("could not stage thumbnail at {}: {e}", dest.display()))
 }
 
 #[cfg(test)]

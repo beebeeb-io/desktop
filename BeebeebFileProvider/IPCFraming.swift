@@ -67,6 +67,15 @@ enum IPCFraming {
     /// upload again.
     static let stagedCopyTimeoutSeconds = 600
 
+    /// FetchThumbnail (task 1699): one small encrypted thumbnail variant
+    /// (a few KiB — the server stores three fixed-size variants, not the
+    /// original image) downloaded, decrypted and atomically staged by the
+    /// daemon before it replies. Not a whole-file download — 60 s is 2x the
+    /// metadata ceiling and leaves room for a stalled network round trip,
+    /// while a wedged daemon still surfaces quickly to every icon Finder is
+    /// painting. Far below hydrate's 600 s ceiling.
+    static let thumbnailTimeoutSeconds = 60
+
     /// Timeout for a write-queue request: long only when the daemon has file
     /// contents to copy; a folder create, a rename or a delete stays on the
     /// short metadata timeout so a wedged daemon still fails fast.

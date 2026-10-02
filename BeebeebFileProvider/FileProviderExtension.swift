@@ -931,6 +931,146 @@ extension FileProviderExtension {
     }
 }
 
+// Task 1699: `pendingItemsDidChange` (macOS 11.3+, V3_1). The DIRECTION is
+// system → extension: the system calls this when ITS set of pending items
+// (uploads/downloads in flight) has refreshed — it tracks the pending set
+// itself (`NSFileProviderManager.enumeratorForPendingItems`) and needs no
+// computation from us to know when it changed. An implementation may use the
+// moment to, say, notify a companion app via its own IPC; today there is no
+// consumer for that, so the honest implementation logs and completes
+// immediately — Apple budgets only "a few seconds" for the callback, and a
+// slow or hung one stalls the system's pending-set bookkeeping.
+extension FileProviderExtension {
+    func pendingItemsDidChange(completionHandler: @escaping () -> Void) {
+        NSLog("BeebeebFileProvider: pendingItemsDidChange (the system's pending set refreshed)")
+        completionHandler()
+    }
+}
+
+// Task 1699: `NSFileProviderThumbnailing`. The server has generated encrypted
+// thumbnails for images/videos since task 1692 (three fixed-size variants:
+// small/medium/large). The daemon fetches + decrypts one variant and stages
+// the plaintext (FetchThumbnail IPC, mirroring hydrate's staging handoff);
+// this extension reads it back, deletes the staging copy and hands the Data
+// to the system. Thumbnail cache invalidation rides `itemVersion
+// .contentVersion` (a changed contentVersion forces a re-download AND
+// invalidates the thumbnail cache — no extra plumbing needed here, and the
+// contentVersion format is deliberately NOT touched by this task).
+extension FileProviderExtension: NSFileProviderThumbnailing {
+    func fetchThumbnails(
+        for itemIdentifiers: [NSFileProviderItemIdentifier],
+        requestedSize: CGSize,
+        perThumbnailCompletionHandler: @escaping (NSFileProviderItemIdentifier, Data?, Error?) -> Void,
+        completionHandler: @escaping (Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: Int64(max(itemIdentifiers.count, 1)))
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let maxDimension = Self.thumbnailMaxDimension(requestedSize: requestedSize)
+            for identifier in itemIdentifiers {
+                if progress.isCancelled {
+                    break
+                }
+                do {
+                    let model = try ipc.item(identifier: identifier)
+                    if Self.thumbnailEligible(kind: model.kind, contentType: model.contentType) {
+                        switch XPCBridge.hydrateDestinationURL(for: identifier) {
+                        case .failure(let error):
+                            perThumbnailCompletionHandler(identifier, nil, error)
+                        case .success(let stagingURL):
+                            do {
+                                _ = try ipc.fetchThumbnail(
+                                    itemIdentifier: identifier,
+                                    destinationURL: stagingURL,
+                                    maxDimension: maxDimension
+                                )
+                                let data = try Data(contentsOf: stagingURL)
+                                // The staging copy is ours alone (never handed
+                                // to the system — same ownership rule as
+                                // fetchContents' round-4 fix); delete it now.
+                                try? FileManager.default.removeItem(at: stagingURL)
+                                perThumbnailCompletionHandler(identifier, data, nil)
+                            } catch {
+                                try? FileManager.default.removeItem(at: stagingURL)
+                                perThumbnailCompletionHandler(identifier, nil, error)
+                            }
+                        }
+                    } else {
+                        // Honestly "no thumbnail": folders and non-image/video
+                        // content types have none to give. Not an error.
+                        perThumbnailCompletionHandler(identifier, nil, nil)
+                    }
+                } catch {
+                    perThumbnailCompletionHandler(identifier, nil, error)
+                }
+                progress.completedUnitCount += 1
+            }
+            if progress.isCancelled {
+                completionHandler(CocoaError(.userCancelled))
+            } else {
+                completionHandler(nil)
+            }
+        }
+        return progress
+    }
+
+    // MARK: - Thumbnail decision helpers (pure, harness-tested)
+
+    /// The pixel budget for a requested point size. Finder sizes are in
+    /// points; the server's variants are fixed pixel sizes, so a budget in
+    /// PIXELS is what the bucket picker needs. Assumption (documented):
+    /// 2x (Retina) — Finder on this Mac's target hardware asks for retina
+    /// imagery; a 1x display only makes us fetch a slightly larger variant
+    /// than strictly needed, never a worse image. The LARGER side governs
+    /// (icons are square-ish; a thumbnail is square-cropped server-side).
+    /// Clamped to 1024 (the server's largest variant is a few hundred
+    /// pixels — a bigger budget only risks decode memory) and defaulted to
+    /// 256 for zero/non-finite requests (never 0).
+    static func thumbnailMaxDimension(requestedSize: CGSize, scale: CGFloat = 2) -> UInt32 {
+        let points = max(requestedSize.width, requestedSize.height)
+        guard points.isFinite, points > 0 else {
+            return 256
+        }
+        return UInt32(min((points * scale).rounded(.up), 1024))
+    }
+
+    /// Which encrypted variant to fetch. Buckets mirror the daemon's
+    /// `thumbnail_variant` (ipc_socket.rs), which mirrors the Windows
+    /// provider (windows_cf/thumbnail_provider.rs): ≤96 "small", ≤256
+    /// "medium", else "large".
+    static func thumbnailVariant(maxDimension: UInt32) -> String {
+        if maxDimension <= 96 {
+            return "small"
+        }
+        if maxDimension <= 256 {
+            return "medium"
+        }
+        return "large"
+    }
+
+    /// The daemon only has thumbnails for images and videos (task 1692).
+    /// Folders, documents and anything without a parseable content type are
+    /// NOT eligible — the caller answers "no thumbnail" without an IPC
+    /// round trip, instead of surfacing a daemon-side error for every icon.
+    ///
+    /// Task 1699 review (PR #103 thread PRRT_kwDOSLX6Xs6oeNfK, P1): the sync
+    /// pipeline stores MIME content types (`image/png` — `guess_mime_type` in
+    /// engine_bridge.rs, forwarded verbatim by the FileProvider payload), so
+    /// a plain `UTType(raw)` identifier parse rejected EVERY synced media
+    /// file and no thumbnail was ever fetched. MIME converts via
+    /// `UTType(mimeType:)`; the UTI parse stays as the fallback for callers
+    /// that do carry a UTI (e.g. the system enumerator's own payloads).
+    static func thumbnailEligible(kind: BeebeebItemKind, contentType: String?) -> Bool {
+        guard kind == .file, let raw = contentType else {
+            return false
+        }
+        let type = UTType(raw) ?? UTType(mimeType: raw)
+        guard let type else {
+            return false
+        }
+        return type.conforms(to: .image) || type.conforms(to: .movie) || type.conforms(to: .video)
+    }
+}
+
 /// The observer we pass to the SYSTEM's materialized-set enumerator. Collects
 /// identifiers; folders are what the filter tracks.
 final class MaterializedSetCollector: NSObject, NSFileProviderEnumerationObserver {

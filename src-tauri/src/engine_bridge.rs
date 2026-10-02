@@ -4226,7 +4226,7 @@ fn record_hydration_cache_state(
 /// sees a regular in-root leaf), and `O_TRUNC` would overwrite the linked inode.
 /// Noted in the task file.
 #[cfg(unix)]
-fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::io::AsRawFd;
     use std::path::Component;
@@ -4335,7 +4335,7 @@ fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8
 }
 
 #[cfg(not(unix))]
-fn write_hydrated_plaintext(dest_path: &Path, _allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_hydrated_plaintext(dest_path: &Path, _allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
     std::fs::write(dest_path, buf)
 }
 

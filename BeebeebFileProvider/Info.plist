@@ -51,6 +51,79 @@
 	<dict>
 		<key>NSExtensionFileProviderDocumentGroup</key>
 		<string>R8352WDJJR.io.beebeeb.app.fileprovider</string>
+		<!--
+		  NSExtensionFileProviderAppliesChangesAtomically is deliberately
+		  NOT declared (task 1699). The write queue converges changes
+		  server-side asynchronously: a crash mid-upload leaves the item
+		  row in a partially-converged "uploading" state, and the 1684
+		  idempotency keys make retries safe but not atomic. Staging is
+		  atomic (tmp+rename), but that protects the content handoff, not
+		  change application. Declaring this key would promise the system
+		  batch-atomic application we cannot guarantee, so we omit it.
+		-->
+		<!--
+		  Sync-state badges (task 1699). Identifiers match
+		  BeebeebProviderItem.decorationIdentifier(forStatus:) in
+		  FileProviderItem.swift; BadgeImageType UTIs are declared under
+		  UTImportedTypeDeclarations below and resolve to icon files in
+		  Contents/Resources (badge-*.png). Category "Badge": macOS renders
+		  at most the FIRST badge per item, so FileProviderItem maps each
+		  status to exactly one decoration (priority: error > conflict >
+		  trashing > uploading > downloading).
+		-->
+		<key>NSFileProviderDecorations</key>
+		<array>
+			<dict>
+				<key>Identifier</key>
+				<string>io.beebeeb.app.decoration.error</string>
+				<key>BadgeImageType</key>
+				<string>io.beebeeb.app.badge.error</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Sync problem</string>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>io.beebeeb.app.decoration.conflict</string>
+				<key>BadgeImageType</key>
+				<string>io.beebeeb.app.badge.conflict</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Conflicted copy</string>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>io.beebeeb.app.decoration.trashing</string>
+				<key>BadgeImageType</key>
+				<string>io.beebeeb.app.badge.trashing</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Moving to Trash</string>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>io.beebeeb.app.decoration.uploading</string>
+				<key>BadgeImageType</key>
+				<string>io.beebeeb.app.badge.uploading</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Uploading</string>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>io.beebeeb.app.decoration.downloading</string>
+				<key>BadgeImageType</key>
+				<string>io.beebeeb.app.badge.downloading</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Downloading</string>
+			</dict>
+		</array>
 		<key>NSExtensionFileProviderDownloadPipelineDepth</key>
 		<integer>8</integer>
 		<key>NSExtensionFileProviderSupportsEnumeration</key>
@@ -62,6 +135,79 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
 	</dict>
+
+    <!--
+      Badge icon types (task 1699). Each decoration's BadgeImageType
+      resolves to one of these imported UTIs; UTTypeIconFile names the
+      PNG shipped in Contents/Resources by
+      scripts/build-fileprovider-extension.sh. Conforming to
+      com.apple.icon-decoration.badge is what lets the system look the
+      icon up at render time. These are generated placeholder icons
+      (flat circle, deterministic bytes) pending a design pass.
+    -->
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.beebeeb.app.badge.error</string>
+            <key>UTTypeDescription</key>
+            <string>Beebeeb sync-problem badge</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.icon-decoration.badge</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>badge-error</string>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.beebeeb.app.badge.conflict</string>
+            <key>UTTypeDescription</key>
+            <string>Beebeeb conflicted-copy badge</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.icon-decoration.badge</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>badge-conflict</string>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.beebeeb.app.badge.trashing</string>
+            <key>UTTypeDescription</key>
+            <string>Beebeeb moving-to-trash badge</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.icon-decoration.badge</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>badge-trashing</string>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.beebeeb.app.badge.uploading</string>
+            <key>UTTypeDescription</key>
+            <string>Beebeeb uploading badge</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.icon-decoration.badge</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>badge-uploading</string>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.beebeeb.app.badge.downloading</string>
+            <key>UTTypeDescription</key>
+            <string>Beebeeb downloading badge</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.icon-decoration.badge</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>badge-downloading</string>
+        </dict>
+    </array>
 
     <!--
       Shown to the user when macOS first asks them to grant the

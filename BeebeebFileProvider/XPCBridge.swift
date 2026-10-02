@@ -457,6 +457,64 @@ final class XPCBridge {
         return try decodeWriteResponse(sendRequest(["QueueFinderDelete": payload]))
     }
 
+    // MARK: - Thumbnails (task 1699)
+
+    /// The FetchThumbnail request shape. The daemon downloads the encrypted
+    /// variant matching `maxDimension` (small/medium/large — see
+    /// `FileProviderExtension.thumbnailVariant`, mirroring the Rust bucket
+    /// picker), decrypts it and atomically stages the PLAINTEXT at
+    /// `destinationPath` (must be under the daemon's allowed roots — the
+    /// hydrate-cache directory qualifies), then replies
+    /// `{"ThumbnailWritten":{"size_bytes":N}}`. The extension reads the file
+    /// back, deletes it, and hands the Data to the system. Mirrors hydrate's
+    /// staging handoff (docs/IPC_PROTOCOL.md, "FetchThumbnail").
+    static func thumbnailRequest(fileID: String, destinationPath: String, maxDimension: UInt32) -> [String: Any] {
+        return ["FetchThumbnail": [
+            "file_id": fileID,
+            "dest_path": destinationPath,
+            "max_dimension": maxDimension,
+        ]]
+    }
+
+    /// The `ThumbnailWritten` reply decoder, static so the framing harness
+    /// can pin the wire shape without a socket (mirror of `decodeChanges`).
+    /// An `Error` reply is a deliberate daemon-side refusal/failure (the
+    /// thumbnail could not be fetched or staged) — definitive per the
+    /// daemonRejected contract.
+    static func decodeThumbnailReply(_ response: [String: Any]) throws -> Int64 {
+        if let error = response["Error"] as? [String: Any] {
+            throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "thumbnail fetch failed")
+        }
+        guard let payload = response["ThumbnailWritten"] as? [String: Any],
+              let size = (payload["size_bytes"] as? NSNumber)?.int64Value else {
+            throw BeebeebIPCError.invalidResponse("daemon response did not include ThumbnailWritten")
+        }
+        return size
+    }
+
+    /// Fetch one thumbnail: the daemon decrypts it into `destinationURL`
+    /// (the App-Group hydrate-cache staging area, like hydrate), and the
+    /// byte count is returned (informational). Blocks the calling thread
+    /// until the daemon answers, so call it off the File Provider callback
+    /// queue. The caller owns deleting the staged file.
+    func fetchThumbnail(
+        itemIdentifier: NSFileProviderItemIdentifier,
+        destinationURL: URL,
+        maxDimension: UInt32,
+        cancellation: IPCCancellation? = nil
+    ) throws -> Int64 {
+        let response = try sendRequest(
+            Self.thumbnailRequest(
+                fileID: itemIdentifier.rawValue,
+                destinationPath: destinationURL.path,
+                maxDimension: maxDimension
+            ),
+            timeoutSeconds: IPCFraming.thumbnailTimeoutSeconds,
+            cancellation: cancellation
+        )
+        return try Self.decodeThumbnailReply(response)
+    }
+
     // MARK: - Change feed + sync anchor (task 1697)
 
     /// One daemon change-log row, as the replica's `enumerateChanges` consumes

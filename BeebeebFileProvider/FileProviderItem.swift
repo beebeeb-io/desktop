@@ -52,6 +52,39 @@ struct BeebeebProviderItem: Codable {
     /// full trash sync — see FileProviderExtension's modifyRoute/deleteItem).
     static let trash = 1 << 6
 
+    // Task 1699: NSFileProviderItemDecorating identifiers. Each MUST be
+    // declared in BeebeebFileProvider/Info.plist under
+    // NSExtension.NSFileProviderDecorations (with its badge UTI declared in
+    // UTImportedTypeDeclarations), or macOS drops the decoration silently.
+    static let decorationError = "io.beebeeb.app.decoration.error"
+    static let decorationConflict = "io.beebeeb.app.decoration.conflict"
+    static let decorationTrashing = "io.beebeeb.app.decoration.trashing"
+    static let decorationUploading = "io.beebeeb.app.decoration.uploading"
+    static let decorationDownloading = "io.beebeeb.app.decoration.downloading"
+
+    /// The sync-state badge for a daemon `status` string — at most ONE
+    /// identifier per item: macOS renders only the FIRST decoration in the
+    /// Badge category, so a list would falsely promise more than Finder can
+    /// show. Priority if statuses ever compose:
+    /// error > conflict > trashing > uploading > downloading. Plain states
+    /// (local, cloud_only) and unknown statuses carry no badge.
+    static func decorationIdentifier(forStatus status: String) -> String? {
+        switch status {
+        case "error":
+            return decorationError
+        case "conflict":
+            return decorationConflict
+        case "trashing":
+            return decorationTrashing
+        case "uploading":
+            return decorationUploading
+        case "downloading":
+            return decorationDownloading
+        default:
+            return nil
+        }
+    }
+
     /// The memberwise constructor with defaults for the 1697 fields, so
     /// existing call sites (and tests) stay unchanged.
     init(
@@ -256,5 +289,19 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
             result.insert(.allowsTrashing)
         }
         return result
+    }
+}
+
+// Task 1699: sync-state badges. The system consults `decorations` when it
+// paints the item's icon; identifiers must exist in Info.plist's
+// NSFileProviderDecorations with a UTImportedTypeDeclarations badge UTI
+// whose icon ships in the bundle (BeebeebFileProvider/Resources/*.png,
+// copied by scripts/build-fileprovider-extension.sh).
+extension FileProviderItem: NSFileProviderItemDecorating {
+    var decorations: [NSFileProviderItemDecorationIdentifier]? {
+        guard let identifier = BeebeebProviderItem.decorationIdentifier(forStatus: model.status) else {
+            return nil
+        }
+        return [NSFileProviderItemDecorationIdentifier(identifier)]
     }
 }
