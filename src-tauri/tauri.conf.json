@@ -51,6 +51,23 @@
         "decorations": true,
         "minWidth": 880,
         "minHeight": 560
+      },
+      {
+        "label": "macos-settings",
+        "title": "Beebeeb Settings",
+        "url": "index.html?window=settings-v2&platform=macos",
+        "width": 560,
+        "height": 640,
+        "minWidth": 560,
+        "minHeight": 400,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "center": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "create": false
       }
     ],
     "security": {

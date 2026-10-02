@@ -17,3 +17,13 @@ test('Settings and the always-mounted update surface use the same check controll
   expect(settings).not.toContain('await checkForDesktopUpdatesNow()')
   expect(banner).toContain('<ManualUpdateFeedback />')
 })
+
+test('the macOS Settings window drains the native menu check itself (slice 6)', () => {
+  // Slice 6 flips the Preferences/Settings menu items onto the new window,
+  // so THAT window must consume the pending request and answer inline in
+  // its About row (it mounts no ManualUpdateFeedback toast).
+  const mac = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
+  expect(mac).toContain('connectNativeUpdateMenu(')
+  expect(mac).toContain("'menu:check-for-updates'")
+  expect(mac).toContain("command<boolean>('consume_menu_update_check')")
+})

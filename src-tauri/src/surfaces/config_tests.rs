@@ -43,14 +43,19 @@ fn merged_config(target: &str) -> Value {
     config
 }
 
-const TODAYS_WINDOWS: [&str; 3] = ["tray", "windows-onboarding", "main-app"];
+// The base config's window list since slice 6 (the Settings flip): the three
+// Windows-shell windows are still declared and created at startup on every
+// platform (the P3 defect the registry-mirroring part of slice 6 owns), plus
+// `macos-settings` — which is `create: false`, so it is declared and
+// capability-covered but built only on demand by the macOS open path.
+const BASE_WINDOWS: [&str; 4] = ["tray", "windows-onboarding", "main-app", "macos-settings"];
 
 #[test]
 fn the_merge_replaces_arrays_wholesale() {
     // The semantics slice 6 relies on, proven with a synthetic patch so it does
     // not depend on what the real macOS file says today.
     let mut config = read_json(&manifest_dir().join("tauri.conf.json"));
-    assert_eq!(window_labels(&config), TODAYS_WINDOWS);
+    assert_eq!(window_labels(&config), BASE_WINDOWS);
     let patch = json!({ "app": { "windows": [ { "label": "popover" } ] } });
     json_patch::merge(&mut config, &patch);
     assert_eq!(window_labels(&config), ["popover"]);
@@ -60,9 +65,18 @@ fn the_merge_replaces_arrays_wholesale() {
 }
 
 #[test]
-fn unmerged_config_still_lists_tray_windows_onboarding_and_main_app() {
+fn unmerged_config_lists_the_shell_windows_and_the_ondemand_settings_window() {
     let base = read_json(&manifest_dir().join("tauri.conf.json"));
-    assert_eq!(window_labels(&base), TODAYS_WINDOWS);
+    assert_eq!(window_labels(&base), BASE_WINDOWS);
+    // The Settings window must never be created at startup: it is built on
+    // demand by `show_macos_settings_window` (macOS only).
+    let settings = base
+        .pointer("/app/windows")
+        .and_then(Value::as_array)
+        .and_then(|ws| ws.iter().find(|w| w.get("label").and_then(Value::as_str) == Some("macos-settings")))
+        .and_then(|w| w.get("create"))
+        .and_then(Value::as_bool);
+    assert_eq!(settings, Some(false), "macos-settings must be create: false");
 }
 
 #[test]
@@ -70,7 +84,7 @@ fn windows_and_linux_merge_to_the_unmerged_window_list() {
     // There is no tauri.windows.conf.json or tauri.linux.conf.json, so their
     // builds see the base file. If one is added it must not drop these labels.
     for target in ["windows", "linux"] {
-        assert_eq!(window_labels(&merged_config(target)), TODAYS_WINDOWS, "{target}");
+        assert_eq!(window_labels(&merged_config(target)), BASE_WINDOWS, "{target}");
     }
 }
 
@@ -87,11 +101,13 @@ fn only_the_macos_platform_file_exists() {
 }
 
 #[test]
-fn macos_merge_is_todays_window_list_until_slice_6() {
+fn macos_merge_still_creates_the_startup_windows_and_merges_the_platform_file() {
     let merged = merged_config("macos");
-    // TODAY's row: tauri.macos.conf.json declares no `windows`, so the three
-    // Windows-shell windows are still created on macOS (the P3 defect).
-    assert_eq!(window_labels(&merged), TODAYS_WINDOWS);
+    // The startup-created Windows-shell windows are still in the merged list
+    // on macOS (the P3 defect — the registry-mirroring part of slice 6 owns
+    // it). The added `macos-settings` entry is `create: false`, so the flip
+    // adds no idle webview; it is only ever built on demand.
+    assert_eq!(window_labels(&merged), BASE_WINDOWS);
     // Prove the real macOS file WAS merged and not silently skipped: its
     // template-icon patch is visible in the result, and absent from the base.
     let base = read_json(&manifest_dir().join("tauri.conf.json"));
@@ -224,13 +240,14 @@ fn review_does_not_match_the_conflict_glob() {
 
 #[test]
 fn every_window_the_shipping_config_creates_is_covered_on_every_platform() {
-    // tray, windows-onboarding, main-app (config) plus the dynamic
-    // conflict-<file_id> windows: a window with no capability cannot `invoke` or
-    // `listen`, and fails silently.
-    // macOS creates the same labels today (the P3 defect), so it is in the loop;
-    // a capability file that dropped one of them for macOS must fail here.
+    // tray, windows-onboarding, main-app and the on-demand macos-settings
+    // (config) plus the dynamic conflict-<file_id> windows: a window with no
+    // capability cannot `invoke` or `listen`, and fails silently.
+    // macOS creates the same startup labels today (the P3 defect), so it is
+    // in the loop; a capability file that dropped one of them for macOS must
+    // fail here.
     for platform in ["macOS", "windows", "linux"] {
-        let mut labels: Vec<&str> = TODAYS_WINDOWS.to_vec();
+        let mut labels: Vec<&str> = BASE_WINDOWS.to_vec();
         labels.extend(["settings", "onboarding", "conflict-7f3a-0001"]);
         assert_eq!(uncovered(platform, &labels), Vec::<String>::new(), "{platform}");
     }
