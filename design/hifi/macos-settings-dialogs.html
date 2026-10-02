@@ -1,0 +1,366 @@
+<!doctype html><html lang="en"><head><meta charset="utf8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Beebeeb macOS Settings dialogs · task 1683 slice-4 follow-up</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Design tokens: copied from src/design.css so the drawing matches the built window 1:1. */
+:root{
+  --paper:oklch(0.985 0.004 85);--paper-2:oklch(0.968 0.006 85);--paper-3:oklch(0.945 0.008 82);
+  --line:oklch(0.90 0.008 82);--line-2:oklch(0.83 0.01 80);
+  --ink:oklch(0.18 0.01 70);--ink-2:oklch(0.34 0.012 75);--ink-3:oklch(0.52 0.01 78);--ink-4:oklch(0.68 0.008 80);
+  --amber:oklch(0.82 0.17 84);--amber-deep:oklch(0.66 0.15 72);--amber-soft:oklch(0.94 0.06 90);--amber-bg:oklch(0.97 0.03 92);
+  --amber-ink:oklch(0.18 0.01 70);
+  --red:oklch(0.62 0.21 25);--red-ink:oklch(0.14 0.01 25);--err-bg:oklch(0.965 0.025 25);--err-line:oklch(0.86 0.06 25);
+  --ok-bg:oklch(0.965 0.03 155);--ok-line:oklch(0.86 0.07 155);--ok-icon:oklch(0.56 0.14 155);
+  --shadow-3:0 4px 10px rgba(24,20,10,0.06),0 24px 48px -12px rgba(24,20,10,0.12);
+  --win-scrim:rgba(24,20,10,0.38);
+  --font-sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',ui-sans-serif,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --ease:cubic-bezier(0.2,0.8,0.3,1);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:oklch(0.17 0.006 80);--paper-2:oklch(0.21 0.007 80);--paper-3:oklch(0.26 0.008 80);
+  --line:oklch(0.31 0.008 80);--line-2:oklch(0.41 0.01 80);
+  --ink:oklch(0.94 0.006 85);--ink-2:oklch(0.82 0.008 85);--ink-3:oklch(0.67 0.008 85);--ink-4:oklch(0.52 0.008 85);
+  --amber-deep:oklch(0.78 0.16 82);--amber-soft:oklch(0.36 0.08 86);--amber-bg:oklch(0.25 0.035 88);
+  --red:oklch(0.68 0.21 25);--err-bg:oklch(0.26 0.05 25);--err-line:oklch(0.38 0.08 25);
+  --ok-bg:oklch(0.26 0.04 155);--ok-line:oklch(0.38 0.07 155);--ok-icon:oklch(0.74 0.16 155);
+  --shadow-3:0 4px 10px rgba(0,0,0,0.28),0 24px 48px -12px rgba(0,0,0,0.36);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --paper:oklch(0.17 0.006 80);--paper-2:oklch(0.21 0.007 80);--paper-3:oklch(0.26 0.008 80);
+  --line:oklch(0.31 0.008 80);--line-2:oklch(0.41 0.01 80);
+  --ink:oklch(0.94 0.006 85);--ink-2:oklch(0.82 0.008 85);--ink-3:oklch(0.67 0.008 85);--ink-4:oklch(0.52 0.008 85);
+  --amber-deep:oklch(0.78 0.16 82);--amber-soft:oklch(0.36 0.08 86);--amber-bg:oklch(0.25 0.035 88);
+  --red:oklch(0.68 0.21 25);--err-bg:oklch(0.26 0.05 25);--err-line:oklch(0.38 0.08 25);
+  --ok-bg:oklch(0.26 0.04 155);--ok-line:oklch(0.38 0.07 155);--ok-icon:oklch(0.74 0.16 155);
+  --shadow-3:0 4px 10px rgba(0,0,0,0.28),0 24px 48px -12px rgba(0,0,0,0.36);
+  color-scheme:dark;
+}
+:root[data-theme="light"]{color-scheme:light}
+
+/* Review-page shell (same reading column as macos-menubar-popover.html). */
+body{margin:0;padding:32px 16px 64px;background:var(--paper-2);color:var(--ink);font:16px/1.55 var(--font-sans)}
+.wrap{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:56px}
+header{display:flex;flex-direction:column;gap:12px;max-width:68ch}
+.eyebrow{font:500 12px/1 var(--font-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+h1{font-size:clamp(28px,4vw,40px);line-height:1.1;letter-spacing:-.02em;margin:0;text-wrap:balance}
+h2{font-size:22px;letter-spacing:-.01em;margin:0 0 6px;text-wrap:balance}
+h3{font-size:16px;margin:0}
+p{margin:0}.lede{color:var(--ink-2);font-size:17px}
+blockquote{margin:0;padding:14px 16px;border-left:3px solid var(--amber);background:var(--paper);border-radius:0 8px 8px 0;font-size:15px}
+blockquote cite{display:block;margin-top:6px;font:12px var(--font-mono);color:var(--ink-3);font-style:normal}
+section{display:flex;flex-direction:column;gap:16px}
+.sub{color:var(--ink-2);max-width:68ch}
+code{font:14px var(--font-mono);background:var(--paper);border:1px solid var(--line);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
+ul.plain{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;max-width:72ch}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--line)}tr:last-child th,tr:last-child td{border-bottom:0}
+thead th{font:500 12px var(--font-mono);text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3)}
+tbody th{font-weight:500}
+
+/* Verdict cards (mirrors the “choices for you” list in the approved mockup). */
+ol.qs{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:16px}
+.q{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.q-head{display:flex;gap:10px;align-items:center}
+.q-n{font:500 13px var(--font-mono);width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--amber-bg);color:var(--amber-deep);flex:none}
+.rec{font-size:15px}.alt{font-size:14px;color:var(--ink-3)}
+.tag{display:inline-block;font:500 11px var(--font-mono);text-transform:uppercase;letter-spacing:.05em;color:var(--amber-deep);margin-right:8px}
+.tag.red{color:var(--red)}
+
+/* ── Stages: each dialog drawn floating over the Settings pane scrim, as it appears in the window. ── */
+.stage{border:1px solid var(--line);border-radius:14px;background:
+  linear-gradient(0deg,var(--win-scrim),var(--win-scrim)),
+  var(--paper-2);
+  padding:44px 20px;display:flex;justify-content:center;align-items:flex-start;gap:32px;flex-wrap:wrap}
+.stage--plain{background:var(--paper-2)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:24px}
+.shot{margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
+.shot .stage{flex:1}
+figcaption{display:flex;flex-direction:column;gap:2px;font-size:14px}figcaption span{color:var(--ink-3)}
+figcaption b{font-weight:600}
+
+/* ── The Modal, rebuilt 1:1 from src/windows/ui.tsx inline styles. ── */
+.modal{width:400px;max-width:100%;display:flex;flex-direction:column;max-height:calc(100vh - 48px);
+  background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow-3);
+  color:var(--ink);font-family:var(--font-sans);font-size:13px;line-height:18px;text-align:left}
+.modal--wide{width:440px}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px;border-bottom:1px solid var(--line)}
+.modal-title{font-size:15px;font-weight:700;letter-spacing:-.01em;min-width:0}
+.modal-x{width:26px;height:26px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line-2);border-radius:6px;background:var(--paper-2);color:var(--ink-3);
+  font:400 14px/1 var(--font-sans);cursor:pointer;padding:0}
+.modal-x:hover{color:var(--ink);background:var(--paper-3)}
+.modal-body{padding:18px 20px;overflow-y:auto}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--line)}
+.modal-foot--default{padding:12px 20px}
+.sheet-copy{margin:0 0 12px;font-size:13px;line-height:18px;color:var(--ink-2);overflow-wrap:anywhere}
+.sheet-copy:last-child{margin-bottom:0}
+
+/* ── Settings controls (from src/macSettings.css). ── */
+.ms-btn{box-sizing:border-box;height:26px;padding:0 12px;border:1px solid var(--line-2);border-radius:6px;
+  background:var(--paper);color:var(--ink);font:600 12.5px/1 var(--font-sans);white-space:nowrap;cursor:pointer}
+.ms-btn:hover:not(:disabled){background:var(--paper-2)}
+.ms-btn--primary{border-color:var(--amber);background:var(--amber);color:var(--amber-ink)}
+.ms-btn--primary:hover:not(:disabled){background:var(--amber);filter:brightness(.96)}
+.ms-btn--danger{border-color:var(--red);background:var(--red);color:var(--red-ink)}
+.ms-btn--danger:hover:not(:disabled){background:var(--red);filter:brightness(1.08)}
+.ms-btn:disabled{opacity:.55;cursor:default}
+.ms-btn--lg{height:30px;padding:0 14px;font-size:12px}
+.ms-btn:focus-visible,.ms-switch:focus-visible,.modal-x:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
+
+.ms-card{min-width:0;background:var(--paper);border:1px solid var(--line);border-radius:10px}
+.ms-card>*{border-bottom:1px solid var(--line)}
+.ms-card>:last-child{border-bottom:0}
+.ms-row{box-sizing:border-box;min-width:0;min-height:46px;padding:9px 14px;display:flex;align-items:center;gap:16px}
+.ms-row-text{flex:1 1 0;min-width:0}
+.ms-row-label{font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.ms-row-hint{margin-top:1px;font-size:11.5px;line-height:16px;color:var(--ink-3);overflow-wrap:anywhere}
+.ms-row-control{flex:0 0 auto;min-width:0;display:flex;align-items:center;gap:10px}
+.ms-count{font-size:12.5px;color:var(--ink-3);white-space:nowrap}
+.ms-folder-list{max-height:260px;overflow-x:hidden;overflow-y:auto}
+
+.ms-switch{box-sizing:border-box;position:relative;width:32px;height:20px;flex:none;padding:0;
+  border:1.5px solid var(--ink-3);border-radius:10px;background:var(--paper-2);cursor:pointer}
+.ms-switch-knob{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--ink-3)}
+.ms-switch[aria-checked="true"]{border-color:var(--ink);background:var(--ink)}
+.ms-switch[aria-checked="true"] .ms-switch-knob{left:14px;background:var(--paper)}
+.ms-switch:disabled{opacity:.55;cursor:default}
+@media (prefers-reduced-motion:no-preference){.ms-switch-knob{transition:left 120ms var(--ease)}}
+
+/* Note (inline result, drawn after a failure). */
+.ms-note{display:flex;gap:10px;padding:12px 14px;border-radius:10px;border:1px solid var(--err-line);background:var(--err-bg)}
+.ms-note--ok{border-color:var(--ok-line);background:var(--ok-bg)}
+.ms-note-disc{width:16px;height:16px;flex:none;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:var(--red);color:var(--paper);font:700 10px/1 var(--font-sans)}
+.ms-note--ok .ms-note-disc{background:var(--ok-icon)}
+.ms-note-text{flex:1 1 0;min-width:0}
+.ms-note-title{font-weight:600;overflow-wrap:anywhere}
+.ms-note-body{font-size:12.5px;line-height:17px;color:var(--ink-2);overflow-wrap:anywhere}
+
+/* Settings-pane fragments shown around the dialogs (trigger rows, toast). */
+.pane{width:440px;max-width:100%;background:var(--paper-2);border:1px solid var(--line);border-radius:10px;padding:20px 22px 22px;display:flex;flex-direction:column;gap:18px}
+.group-title{margin:0 4px 6px;font-size:11.5px;line-height:16px;font-weight:600;color:var(--ink-3)}
+.toast{width:440px;max-width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;border:1px solid var(--err-line);background:var(--err-bg);color:var(--ink);font-size:12.5px}
+
+/* Theme toggle + state toggles */
+.toggles{position:fixed;top:12px;right:12px;display:flex;gap:8px;z-index:10}
+.tbtn{height:30px;padding:0 12px;border:1px solid var(--line-2);border-radius:6px;background:var(--paper);color:var(--ink);font:600 12px var(--font-sans);cursor:pointer;box-shadow:var(--shadow-3)}
+.kbd{font:12px var(--font-mono);border:1px solid var(--line-2);border-bottom-width:2px;border-radius:4px;padding:1px 6px;background:var(--paper);white-space:nowrap}
+</style>
+</head>
+<body>
+<div class="toggles">
+  <button type="button" class="tbtn" id="themeBtn">Toggle theme</button>
+</div>
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">Task 1683 · slice-4 follow-up · design for review · 2 Oct 2026</span>
+  <h1>The three Settings dialogs, drawn</h1>
+  <p class="lede">Choose folders, Repair and Sign out were built in slice 4 on the shared <code>Modal</code> and never drawn. This page renders them exactly as built, in the Settings-window visual language, and reflects the shipped state: the <strong>Sign out</strong> confirm button is destructive red (<code>ms-btn--danger</code>, PR #104), and Return triggers the focused confirm button.</p>
+  <blockquote>These dialogs follow existing Modal styling — do we accept that, or want their own dialog treatment before slice 6 flips the window on?<cite>Decision file question 1 · 1683-s4-undrawn-and-unbacked</cite></blockquote>
+</header>
+
+<section aria-labelledby="s-verdict">
+  <div><h2 id="s-verdict">Verdict per dialog (question 1)</h2><p class="sub">All three are acceptable as built. The Modal anatomy is right for a Settings window: title, close button, body, footer, Esc to dismiss. Nothing needs its own window chrome. One recommended follow-up, no blockers for slice 6.</p></div>
+  <ol class="qs">
+    <li class="q" id="q1"><div class="q-head"><span class="q-n">1</span><h3>Choose folders</h3></div>
+      <p class="rec"><span class="tag">Approved as built</span>A settings sheet, not a confirmation — list plus switches is the correct shape, and the built copy stays.</p>
+      <p class="alt">Recommended polish for a later slice: give the switch an <span class="kbd">Enter</span>-safe focus order and mention the download-on-open behaviour (already in the built copy — keep it).</p></li>
+    <li class="q" id="q2"><div class="q-head"><span class="q-n">2</span><h3>Repair</h3></div>
+      <p class="rec"><span class="tag">Approved as built</span>Confirmation with Cancel/Repair is right. Repair is recoverable (you can add Beebeeb back), so amber-primary for the confirm button is defensible and stays.</p>
+      <p class="alt">Copy stays exactly as written. Failure feedback already goes inline in the pane, per the toast-vs-inline ruling.</p></li>
+    <li class="q" id="q3"><div class="q-head"><span class="q-n">3</span><h3>Sign out</h3></div>
+      <p class="rec"><span class="tag red">Shipped</span>Approve as built, with the queued change now shipped: the confirm button is destructive red (<code>ms-btn--danger</code>, fixed ink <code>--red-ink</code> — paper on red fails 4.5:1), not amber-primary. Signing out stops sync on this Mac — that is a destructive action and deserves the red treatment.</p>
+      <p class="alt">Copy stays as built. The change shipped as PR #104 (danger variant on <code>ConfirmSheet</code> + <code>--red-ink</code> token), not a redesign.</p></li>
+  </ol>
+</section>
+
+<section aria-labelledby="s-signout">
+  <div><h2 id="s-signout">1 · Sign out — confirmation</h2>
+  <p class="sub">Opened from the Account tab row <em>“Sign out of this Mac”</em> by the <strong>Sign out…</strong> button. Drawn twice: the shipped destructive treatment (PR #104), and the pre-#104 amber treatment kept for comparison. Both use the same copy.</p></div>
+  <div class="grid2">
+    <figure class="shot">
+      <div class="stage">
+        <div class="modal" role="dialog" aria-label="Sign out of this Mac?">
+          <div class="modal-head"><div class="modal-title">Sign out of this Mac?</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div>
+          <div class="modal-body"><p class="sheet-copy">Sync stops until you sign in again.</p></div>
+          <div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--danger">Sign out</button></div>
+        </div>
+      </div>
+      <figcaption><b>Shipped (PR #104)</b><span>Confirm button in destructive red with the fixed ink <code>--red-ink</code> (paper on red fails 4.5:1). Scrim shown behind, as in the window.</span></figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="stage">
+        <div class="modal" role="dialog" aria-label="Sign out of this Mac?">
+          <div class="modal-head"><div class="modal-title">Sign out of this Mac?</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div>
+          <div class="modal-body"><p class="sheet-copy">Sync stops until you sign in again.</p></div>
+          <div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--primary">Sign out</button></div>
+        </div>
+      </div>
+      <figcaption><b>Pre-#104 amber (comparison only)</b><span>Amber-primary confirm — superseded on 2 Oct 2026 when <code>ConfirmSheet</code> gained the <code>danger</code> prop (PR #104). Kept here for comparison.</span></figcaption>
+    </figure>
+  </div>
+</section>
+
+<section aria-labelledby="s-repair">
+  <div><h2 id="s-repair">2 · Repair Beebeeb in Finder — confirmation</h2>
+  <p class="sub">Opened from the Sync tab when the Finder row reports <em>added</em>, via the <strong>Repair…</strong> button. The confirm button stays amber: repair removes the Finder location but is reversible (“You can add it back afterwards”), so it is a caution, not a destruction. While it runs, the trigger button reads <strong>Repairing…</strong> and the dialog is already dismissed.</p></div>
+  <div class="grid2">
+    <figure class="shot">
+      <div class="stage">
+        <div class="modal" role="dialog" aria-label="Repair Beebeeb in Finder?">
+          <div class="modal-head"><div class="modal-title">Repair Beebeeb in Finder?</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div>
+          <div class="modal-body"><p class="sheet-copy">Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. You can add it back afterwards.</p></div>
+          <div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--primary">Repair</button></div>
+        </div>
+      </div>
+      <figcaption><b>Default</b><span>Exactly as built; copy unchanged.</span></figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="stage stage--plain">
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div class="ms-note">
+            <span class="ms-note-disc">!</span>
+            <span class="ms-note-text"><span class="ms-note-title">Couldn’t repair Beebeeb in Finder</span>
+            <span class="ms-note-body">Nothing was changed that you need to undo. Try again.</span></span>
+          </div>
+          <div class="ms-card">
+            <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Finder</span><span class="ms-row-hint">Added by hand — Repair fixes this</span></span>
+              <span class="ms-row-control"><button type="button" class="ms-btn">Repair</button></span></div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>After a failed repair</b><span>Inline note in the Sync pane (not a toast — blocking result). As built, the trigger is enabled again: <code>runRepair</code> returns the phase to idle before the failure note appears, so the busy <em>Repairing…</em> label is only visible while the run is in flight.</span></figcaption>
+    </figure>
+  </div>
+</section>
+
+<section aria-labelledby="s-folders">
+  <div><h2 id="s-folders">3 · Keep on this Mac — folder list</h2>
+  <p class="sub">Opened from the Sync tab row <em>“Keep on this Mac”</em> by the <strong>Choose folders…</strong> button. This is a settings sheet: changes save the moment a switch flips; there is no footer except the default Close. Drawn with three example folders, one with a path hint, one disabled while its save is in flight.</p></div>
+  <div class="grid2">
+    <figure class="shot">
+      <div class="stage">
+        <div class="modal modal--wide" role="dialog" aria-label="Keep on this Mac">
+          <div class="modal-head"><div class="modal-title">Keep on this Mac</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div>
+          <div class="modal-body">
+            <p class="sheet-copy">Folders you choose stay on this Mac. Everything else downloads when you open it.</p>
+            <div class="ms-card ms-folder-list" id="folderList">
+              <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Photos</span></span>
+                <span class="ms-row-control"><button type="button" class="ms-switch" role="switch" aria-checked="true" aria-label="Keep Photos on this Mac"><span class="ms-switch-knob"></span></button></span></div>
+              <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Screenshots</span><span class="ms-row-hint">~/Pictures/Screenshots</span></span>
+                <span class="ms-row-control"><button type="button" class="ms-switch" role="switch" aria-checked="true" aria-label="Keep Screenshots on this Mac"><span class="ms-switch-knob"></span></button></span></div>
+              <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Archive 2019</span></span>
+                <span class="ms-row-control"><button type="button" class="ms-switch" role="switch" aria-checked="false" aria-label="Keep Archive 2019 on this Mac"><span class="ms-switch-knob"></span></button></span></div>
+              <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Inbox scan</span></span>
+                <span class="ms-row-control"><button type="button" class="ms-switch" role="switch" aria-checked="true" disabled aria-label="Keep Inbox scan on this Mac"><span class="ms-switch-knob"></span></button></span></div>
+            </div>
+          </div>
+          <div class="modal-foot modal-foot--default"><button type="button" class="ms-btn ms-btn--lg">Close</button></div>
+        </div>
+      </div>
+      <figcaption><b>Default</b><span>Switches are live in this mockup — click one. Width 440; the default footer Close button comes from <code>Modal</code> itself.</span></figcaption>
+    </figure>
+    <div style="display:flex;flex-direction:column;gap:24px;min-width:min(100%,420px)">
+      <figure class="shot">
+        <div class="stage stage--plain">
+          <div class="pane">
+            <div>
+              <div class="group-title">SYNC</div>
+              <div class="ms-card">
+                <div class="ms-row"><span class="ms-row-text"><span class="ms-row-label">Keep on this Mac</span><span class="ms-row-hint">Not available in this version yet.</span></span>
+                  <span class="ms-row-control"><button type="button" class="ms-btn" disabled>Choose folders…</button></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption><b>Disabled trigger</b><span>As built, <code>unreported</code> (the server hasn't reported pin support) shows the hint <em>Not available in this version yet.</em>, no count label, and the disabled chooser — opacity .55, no tooltip. A ready state shows the count (<em>3 folders</em>) and enables the chooser; the two never combine.</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <div class="stage stage--plain">
+          <div class="toast"><span class="ms-note-disc">!</span>Couldn’t keep that folder on this Mac</div>
+        </div>
+        <figcaption><b>Failed toggle</b><span>A transient toast, per the toast-vs-inline ruling. The switch stays where it was; nothing else in the sheet moves.</span></figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="s-kbd">
+  <div><h2 id="s-kbd">Keyboard</h2><p class="sub">What the built <code>Modal</code> already does, and the one rule to add when app work is scheduled.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th scope="col">Key</th><th scope="col">Confirmations (Repair, Sign out)</th><th scope="col">Choose folders</th></tr></thead>
+    <tbody>
+      <tr><th scope="row"><span class="kbd">Esc</span></th><td>Cancel — dismiss, no action (built).</td><td>Close (built).</td></tr>
+      <tr><th scope="row"><span class="kbd">Enter</span> / <span class="kbd">Return</span></th><td>The focused confirm button triggers itself on Return — <strong>built</strong> (handler lives on the confirm button only, PR #104). Enter on open lands on the close button, so a stray Return cancels — it can never confirm. Never fires on Choose folders.</td><td>No-op on the sheet itself. <span class="kbd">Space</span> toggles the focused switch; a failed save closes nothing.</td></tr>
+      <tr><th scope="row"><span class="kbd">Tab</span></th><td colspan="2">Focus trap as built (header close → body controls → footer buttons). Initial focus: the close button, unless a caller passes <code>initialFocusRef</code>.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="sub">On a destructive confirm, <span class="kbd">Enter</span> must land on <em>Cancel</em>, not the red button, when the dialog opens — a stray Return must not sign a person out. As built (PR #104) the Return handler lives on the confirm button itself and initial focus is the close button, so both halves hold at once.</p>
+</section>
+
+<section aria-labelledby="s-modal">
+  <div><h2 id="s-modal">Mapping onto the existing Modal</h2><p class="sub">What changes in <code>src/windows/ui.tsx</code> and <code>src/MacSettings.tsx</code> — nothing in this slice; all follow-ups.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th scope="col">Dialog</th><th scope="col">Built on</th><th scope="col">Change needed</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Choose folders</th><td><code>Modal</code> width 440, default footer</td><td>None. Approved as built.</td></tr>
+      <tr><th scope="row">Repair</th><td><code>ConfirmSheet</code> (width 400)</td><td>None. Approved as built.</td></tr>
+      <tr><th scope="row">Sign out</th><td><code>ConfirmSheet</code> (width 400)</td><td>Add a <code>danger</code> prop to <code>ConfirmSheet</code> that renders the confirm button as <code>ms-btn--danger</code> (red fill, paper text). <span class="tag red">Queued</span></td></tr>
+      <tr><th scope="row">Both confirmations</th><td><code>Modal</code> key handling</td><td>Enter triggers confirm; Esc already cancels. <span class="tag">Queued</span></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="s-copy">
+  <div><h2 id="s-copy">Copy — exact strings, all unchanged</h2><p class="sub">The built strings pass review; no rewrite. Listed so future edits have a source of truth (typographic apostrophes throughout).</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th scope="col">Where</th><th scope="col">String</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Sign out · trigger row</th><td>“Sign out of this Mac” / hint “You’ll need your password to sign back in.” / button “Sign out…”</td></tr>
+      <tr><th scope="row">Sign out · dialog</th><td>Title “Sign out of this Mac?” · body “Sync stops until you sign in again.” · buttons “Cancel” / “Sign out”</td></tr>
+      <tr><th scope="row">Sign out · failure toast</th><td>“Couldn’t sign out”</td></tr>
+      <tr><th scope="row">Repair · trigger</th><td>Button “Repair…” (busy: “Repairing…”)</td></tr>
+      <tr><th scope="row">Repair · dialog</th><td>Title “Repair Beebeeb in Finder?” · body “Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. You can add it back afterwards.” · buttons “Cancel” / “Repair”</td></tr>
+      <tr><th scope="row">Repair · failure note</th><td>“Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”</td></tr>
+      <tr><th scope="row">Choose folders · trigger row</th><td>“Keep on this Mac” / count “3 of 12” (example) / button “Choose folders…”</td></tr>
+      <tr><th scope="row">Choose folders · dialog</th><td>Title “Keep on this Mac” · body “Folders you choose stay on this Mac. Everything else downloads when you open it.” · footer “Close”</td></tr>
+      <tr><th scope="row">Choose folders · failure toasts</th><td>“Couldn’t keep that folder on this Mac” / “Couldn’t stop keeping that folder”</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="s-not">
+  <div><h2 id="s-not">What is not checked yet</h2></div>
+  <ul class="plain">
+    <li>This is a browser render; nothing here has run in the real Settings window on a Mac.</li>
+    <li>Folder names, counts and paths are invented examples. All other strings are the exact built copy.</li>
+    <li>The red confirm button and Enter handling are recommendations only — nothing in <code>src/</code> changes in this pass.</li>
+  </ul>
+  <p class="sub">Spec: <code>docs/specs/2026-10-02-macos-settings-dialogs.md</code> · design file: <code>design/hifi/macos-settings-dialogs.html</code></p>
+</section>
+</div>
+<script>
+// Theme: three-way — auto → light → dark.
+const root = document.documentElement
+const btn = document.getElementById('themeBtn')
+let mode = 'auto'
+btn.addEventListener('click', () => {
+  mode = mode === 'auto' ? 'light' : mode === 'light' ? 'dark' : 'auto'
+  if (mode === 'auto') root.removeAttribute('data-theme')
+  else root.setAttribute('data-theme', mode)
+  btn.textContent = 'Theme: ' + mode
+})
+// Folder switches toggle on click, as in the app.
+document.querySelectorAll('.ms-switch:not([disabled])').forEach(sw => {
+  sw.addEventListener('click', () => {
+    sw.setAttribute('aria-checked', sw.getAttribute('aria-checked') === 'true' ? 'false' : 'true')
+  })
+})
+// Esc cancels the first dialog on the page, as the built Modal does.
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.activeElement && document.activeElement.blur() })
+</script>
+</body></html>
