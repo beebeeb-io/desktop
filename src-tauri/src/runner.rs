@@ -44,6 +44,7 @@ use crate::conflict::auto_resolution_deadline;
 use crate::engine_status::{Activity, StatusTracker, compute_activity, tick_outcome};
 use crate::engine_bridge::{
     ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick,
+    sync_tick_outcome, SyncTickOutcome,
 };
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
@@ -1167,19 +1168,15 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
-                        emit_file_provider_invalidation(
-                            &app,
-                            "shared_roots_changed",
-                            outcome.removed_shared_file_ids,
-                        );
+                        signal_file_provider_working_set(&db, "shared_roots_changed", &outcome.removed_shared_file_ids);
                     }
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, "shared root refresh failed");
                     }
                 }
-                match sync_tick(&*bridge, &sync_root).await {
-                    Ok(conflicts) => {
+                match sync_tick_outcome(&*bridge, &sync_root).await {
+                    Ok(tick) => {
                         // A successful tick is a real, authenticated API round
                         // trip — clears the auth-failure streak (task 1546
                         // finding 5) alongside every other post-tick bookkeeping
@@ -1191,7 +1188,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         // per file, fire a notification, emit a Tauri
                         // event so the settings page can refresh its
                         // counts immediately.
-                        for c in &conflicts {
+                        for c in &tick.conflicts {
                             handle_new_conflict(&app, c);
                         }
                         // Task 13 — sweep for conflicts past their 24h
@@ -1203,13 +1200,12 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
                             Ok(outcome) => {
                                 let completed = outcome.completed_op_ids.len() as u32;
-                                if !outcome.invalidated_item_ids.is_empty() {
-                                    emit_file_provider_invalidation(
-                                        &app,
-                                        "operations_applied",
-                                        outcome.invalidated_item_ids,
-                                    );
-                                }
+                                // Task 1697 review fix (T3): ONE signal per tick
+                                // carries the union of the local queue's
+                                // invalidations and the REMOTE ingestion applies —
+                                // in a mixed tick two signals would be redundant.
+                                let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &tick.applied_item_ids);
+                                signal_file_provider_working_set(&db, reason, &ids);
                                 if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
                                     tracing::info!(
                                         paused = outcome.paused_op_ids.len(),
@@ -1221,6 +1217,12 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "operation queue processing failed");
+                                // The local queue stalled, but this tick's REMOTE
+                                // ingestion may still have applied server-side
+                                // changes — Finder must hear about them anyway.
+                                if !tick.applied_item_ids.is_empty() {
+                                    signal_file_provider_working_set(&db, "remote_changes_applied", &tick.applied_item_ids);
+                                }
                                 0
                             }
                         };
@@ -1540,18 +1542,108 @@ async fn run_known_folder_mirror(sync_root: &Path) {
     }
 }
 
-pub(crate) fn file_provider_invalidation_payload(reason: &str, item_ids: Vec<String>) -> serde_json::Value {
-    serde_json::json!({
-        "reason": reason,
-        "item_ids": item_ids,
+/// Pure decision core for the materialized-set signal filter (task 1697,
+/// audit P0 item 4): a batch is worth a working-set signal when at least one
+/// changed item's old-or-new parent is in the materialized set, or when the
+/// materialized set is unknown/empty — Apple's documented fallback ("if the
+/// extension doesn't keep track of the materialized set… the working set is
+/// the entire dataset"), which fails OPEN so changes can never be lost to a
+/// missing filter.
+///
+/// `changed_parent_ids`: the parent folder id of each changed item (None =
+/// unknown — vault-root items, deletions whose row is already gone). The
+/// namespace roots and the real root are always materialized (they are
+/// presented without ever entering the system's materialized-set
+/// enumeration), so `None` parents always signal.
+pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], materialized: &[String]) -> bool {
+    if materialized.is_empty() {
+        return !changed_parent_ids.is_empty();
+    }
+    let materialized: std::collections::HashSet<&str> =
+        materialized.iter().map(String::as_str).collect();
+    changed_parent_ids.iter().any(|parent| match parent {
+        None => true,
+        Some(parent_id) => {
+            parent_id.starts_with("namespace:")
+                || parent_id == "__fp_root__"
+                || parent_id == "NSFileProviderRootContainerItemIdentifier"
+                || parent_id == "rootContainer"
+                || materialized.contains(parent_id.as_str())
+        }
     })
 }
 
-fn emit_file_provider_invalidation(app: &AppHandle, reason: &str, item_ids: Vec<String>) {
-    let payload = file_provider_invalidation_payload(reason, item_ids);
-    if let Err(e) = app.emit("file-provider-invalidate", payload) {
-        tracing::warn!(error = %e, "failed to emit file-provider-invalidate event");
+/// Task 1697: the daemon's ONLY replica-refresh channel. Under
+/// `NSFileProviderReplicatedExtension` the system honors signals for the
+/// WORKING SET alone (`.rootContainer` is ignored by design); the extension's
+/// enumerator then pulls the daemon's change log via `ListChanges`. This
+/// replaces the dead `file-provider-invalidate` Tauri event (zero consumers)
+/// with a real signal through the ObjC FFI bridge. macOS-only and
+/// best-effort: a failed signal is logged and never fails the tick.
+#[cfg(target_os = "macos")]
+fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) {
+    if !crate::macos_file_provider::should_signal_working_set(item_ids) {
+        return;
     }
+    // Audit P0 item 4: filter the signal to changes whose old-or-new parent
+    // is materialized (the set the extension publishes via ReportMaterialized).
+    // Fail-open on empty/unknown (see working_set_signal_needed).
+    let parents: Vec<Option<String>> = item_ids
+        .iter()
+        .map(|id| db.get_file(id).ok().flatten().map(|entry| entry.parent_id).flatten())
+        .collect();
+    let materialized = db.materialized_containers().unwrap_or_default();
+    if !working_set_signal_needed(&parents, &materialized) {
+        tracing::debug!(reason, items = item_ids.len(), "no materialized parent changed; skipping the working-set signal");
+        return;
+    }
+    match crate::macos_file_provider::signal_working_set() {
+        Ok(outcome) => {
+            tracing::debug!(reason, items = item_ids.len(), ?outcome, "signaled the File Provider working set");
+        }
+        Err(e) => {
+            tracing::warn!(reason, error = %e, "signaling the File Provider working set failed (best-effort)");
+        }
+    }
+    // Best-effort log hygiene: the replica can only have consumed changes
+    // from the last ~week (it polls on every signal), so anything older is
+    // safe to drop. NEVER touches fp_sync_anchor (the replica's cursor).
+    if let Err(e) = db.sweep_file_changes(now_secs() - 7 * 24 * 3600) {
+        tracing::debug!(error = %e, "change-log sweep failed (best-effort)");
+    }
+}
+
+/// Non-macOS stub: Windows CFAPI refreshes placeholders natively and Linux
+/// FUSE is an unmounted prototype.
+#[cfg(not(target_os = "macos"))]
+fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) {
+    let _ = (db, reason, item_ids);
+}
+
+/// Task 1697 review fix (T3): ONE working-set signal per tick. Merges the
+/// local operation queue's invalidations with the remote ingestion's applied
+/// ids (server-side creates/modifies/moves/deletes reached state.db without
+/// any signal before) into a single id list, and picks the reason from
+/// whichever sides contributed — a mixed tick signals ONCE, not twice. An
+/// all-empty tick keeps today's shape: an `operations_applied` call with an
+/// empty batch (the signal path no-ops on it but still runs its log sweep).
+fn tick_working_set_signal(local_invalidated: &[String], remote_applied: &[String]) -> (&'static str, Vec<String>) {
+    if local_invalidated.is_empty() && remote_applied.is_empty() {
+        return ("operations_applied", Vec::new());
+    }
+    let mut ids: Vec<String> = Vec::with_capacity(local_invalidated.len() + remote_applied.len());
+    for id in local_invalidated.iter().chain(remote_applied.iter()) {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    let reason = match (local_invalidated.is_empty(), remote_applied.is_empty()) {
+        (false, false) => "operations_applied+remote_changes_applied",
+        (false, true) => "operations_applied",
+        (true, false) => "remote_changes_applied",
+        (true, true) => unreachable!("handled above"),
+    };
+    (reason, ids)
 }
 
 fn now_secs() -> i64 {
@@ -1872,18 +1964,89 @@ mod tests {
         assert!(!health.is_expired(), "the streak must have been reset to 0, not left at 3");
     }
 
-    #[test]
-    fn test_file_provider_invalidation_payload_contains_only_reason_and_ids() {
-        let payload = file_provider_invalidation_payload(
-            "operations_applied",
-            vec!["file-a".to_string(), "shared-root".to_string()],
-        );
+    // Task 1697 review fix (T3): the per-tick signal merge decision. RED-first:
+// written against the pass-through stub and seen failing (it returned an
+// empty batch for non-empty inputs) before the merge landed.
+#[test]
+fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
+    // Local only: unchanged reason, ids pass through.
+    let (reason, ids) = tick_working_set_signal(&["f-1".to_string()], &[]);
+    assert_eq!(reason, "operations_applied");
+    assert_eq!(ids, vec!["f-1".to_string()]);
+    // Remote only: the ingestion side is named.
+    let (reason, ids) = tick_working_set_signal(&[], &["r-1".to_string()]);
+    assert_eq!(reason, "remote_changes_applied");
+    assert_eq!(ids, vec!["r-1".to_string()]);
+    // Mixed tick: ONE signal with the UNION, never two signals.
+    let (reason, ids) = tick_working_set_signal(&["f-1".to_string(), "f-2".to_string()], &["r-1".to_string(), "f-2".to_string()]);
+    assert_eq!(reason, "operations_applied+remote_changes_applied");
+    assert_eq!(ids, vec!["f-1".to_string(), "f-2".to_string(), "r-1".to_string()],
+        "the union dedupes while preserving first-seen order");
+    // Nothing changed: same shape as before the fix (empty batch; the macOS
+    // signal path no-ops on it but still runs its log sweep).
+    let (reason, ids) = tick_working_set_signal(&[], &[]);
+    assert_eq!(reason, "operations_applied");
+    assert!(ids.is_empty());
+}
 
-        assert_eq!(payload["reason"], "operations_applied");
-        assert_eq!(payload["item_ids"][0], "file-a");
-        assert_eq!(payload["item_ids"][1], "shared-root");
-        assert!(payload.get("path").is_none());
-        assert!(payload.get("token").is_none());
+    // Task 1697: the retired `file-provider-invalidate` Tauri event and its
+    // payload builder are gone — the only replica-refresh channel is the
+    // working-set signal (see `signal_file_provider_working_set`). The pure
+    // decision core for that signal is tested in `macos_file_provider`.
+
+    // macOS-only like the module it exercises: `macos_file_provider` is
+    // `#[cfg(target_os = "macos")]`, so an unguarded reference breaks the
+    // Windows/Linux compile targets (caught by CI Rust check Windows +
+    // Rust test Linux on the 1697 branch; the runtime call sites above are
+    // gated with `signal_file_provider_working_set`).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn signal_file_provider_working_set_decision_gates_on_changed_items() {
+        // Mirrors macos_file_provider::should_signal_working_set so a runner
+        // change that bypasses the gate fails here too.
+        assert!(crate::macos_file_provider::should_signal_working_set(&["f-1".to_string()]));
+        assert!(!crate::macos_file_provider::should_signal_working_set(&[]));
+    }
+
+    // Task 1697 audit P0 item 4: working-set signals filtered to changes
+    // whose old-or-new parent is materialized. RED-first: written against the
+    // unmodified working-set signal path and seen failing (the pure fn did
+    // not exist) before it landed.
+
+    #[test]
+    fn working_set_signal_filter_skips_batches_with_no_materialized_parent() {
+        assert!(
+            !working_set_signal_needed(&[Some("folder-9".into()), Some("folder-8".into())], &["folder-1".into()]),
+            "no changed parent is materialized: no signal"
+        );
+        assert!(
+            working_set_signal_needed(&[Some("folder-1".into())], &["folder-1".into()]),
+            "a materialized parent changed: signal"
+        );
+        assert!(
+            working_set_signal_needed(&[Some("folder-9".into()), Some("folder-1".into())], &["folder-1".into()]),
+            "ANY changed parent materialized: signal"
+        );
+    }
+
+    #[test]
+    fn working_set_signal_filter_fails_open_when_the_set_is_unknown() {
+        assert!(
+            working_set_signal_needed(&[Some("folder-9".into())], &[]),
+            "an untracked materialized set = the whole dataset (fail open)"
+        );
+        assert!(
+            !working_set_signal_needed(&[], &[]),
+            "an empty batch never signals"
+        );
+    }
+
+    #[test]
+    fn working_set_signal_filter_always_signals_namespace_and_unknown_parents() {
+        let materialized = vec!["folder-1".to_string()];
+        assert!(working_set_signal_needed(&[Some("namespace:my_files".into())], &materialized));
+        assert!(working_set_signal_needed(&[Some("NSFileProviderRootContainerItemIdentifier".into())], &materialized));
+        assert!(working_set_signal_needed(&[None], &materialized), "unknown parent (a deletion whose row is gone) fails open");
     }
 
     #[test]

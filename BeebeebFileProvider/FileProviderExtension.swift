@@ -421,38 +421,415 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
     func invalidate() {}
 
+    /// The change observer's suggested batch size, defaulting when the system
+    /// declines to suggest (it is an optional protocol property, imported as
+    /// `Int?`). Apple caps the system at 100× the suggestion; our default of
+    /// 100 matches the daemon's page ceiling.
+    private static func batchSize(_ observer: NSFileProviderChangeObserver) -> Int {
+        let suggested = observer.suggestedBatchSize ?? 0
+        return suggested > 0 ? min(suggested, 10_000) : 100
+    }
+
+    /// The enumeration observer's suggested page size, same optional-property
+    /// handling.
+    private static func pageSize(_ observer: NSFileProviderEnumerationObserver) -> Int {
+        let suggested = observer.suggestedPageSize ?? 0
+        return suggested > 0 ? min(suggested, 10_000) : 100
+    }
+
+    // MARK: enumerateItems — paged, stable ordering
+
+    /// Task 1697: paged enumeration. The daemon returns the container's full
+    /// listing; we slice it into pages of the SYSTEM-SUGGESTED size, sorted
+    /// by name (stable across pages: the sort happens over the WHOLE list
+    /// before slicing, so a page never reshuffles), and hand the system a
+    /// ≤500-byte resume token naming the next offset. Apple caps page data
+    /// at 500 bytes — a decimal offset trivially fits.
     func enumerateItems(
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
     ) {
-        do {
-            let models: [BeebeebProviderItem]
-            if containerIdentifier == .rootContainer {
-                models = try ipc.enumerate(containerIdentifier: containerIdentifier)
-            } else if BeebeebNamespace.allCases.contains(where: { $0.identifier == containerIdentifier }) {
-                models = try ipc.enumerate(containerIdentifier: containerIdentifier)
-            } else {
-                models = try ipc.enumerate(containerIdentifier: containerIdentifier)
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            do {
+                let models = try Self.listModels(
+                    containerIdentifier: containerIdentifier,
+                    ipc: ipc
+                )
+                // Stable ordering: sort the FULL list once. Slicing a sorted
+                // list keeps every page's ordering stable across re-paging.
+                let sorted = models.sorted { lhs, rhs in
+                    if lhs.filename.caseInsensitiveCompare(rhs.filename) != .orderedSame {
+                        return lhs.filename.caseInsensitiveCompare(rhs.filename) == .orderedAscending
+                    }
+                    return lhs.identifier < rhs.identifier
+                }
+                let start = Self.pageOffset(page)
+                let pageSize = Self.pageSize(observer)
+                let end = min(start + pageSize, sorted.count)
+                guard start < sorted.count else {
+                    observer.finishEnumerating(upTo: nil)
+                    return
+                }
+                observer.didEnumerate(sorted[start..<end].map(FileProviderItem.init(model:)))
+                if end < sorted.count {
+                    let nextPage = Data(Self.resumeTokenPrefix.utf8) + Data(String(end).utf8)
+                    observer.finishEnumerating(upTo: NSFileProviderPage(nextPage))
+                } else {
+                    observer.finishEnumerating(upTo: nil)
+                }
+            } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
+                observer.didEnumerate(BeebeebNamespace.allCases.map { FileProviderItem(model: .namespace($0)) })
+                observer.finishEnumerating(upTo: nil)
+            } catch {
+                observer.finishEnumeratingWithError(error)
             }
-
-            observer.didEnumerate(models.map(FileProviderItem.init(model:)))
-            observer.finishEnumerating(upTo: nil)
-        } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
-            observer.didEnumerate(BeebeebNamespace.allCases.map { FileProviderItem(model: .namespace($0)) })
-            observer.finishEnumerating(upTo: nil)
-        } catch {
-            observer.finishEnumeratingWithError(error)
         }
     }
 
+    private static let resumeTokenPrefix = "beebeeb-page:"
+
+    /// Decode a resume token. System-provided initial pages
+    /// (`InitialPageSortedByName`/`...ByDate`/empty) decode to offset 0; a
+    /// token we minted decodes to its offset; anything else (corrupt) also
+    /// restarts at 0 — restarting can only re-deliver already-seen items,
+    /// which is idempotent for the system, while failing the enumeration
+    /// would leave the folder permanently blank.
+    static func pageOffset(_ page: NSFileProviderPage) -> Int {
+        let text = String(decoding: Data(page as NSData), as: UTF8.self)
+        guard text.hasPrefix(resumeTokenPrefix), let offset = Int(text.dropFirst(resumeTokenPrefix.count)) else {
+            return 0
+        }
+        return max(0, offset)
+    }
+
+    /// Full listing for a container. The three arms are the pre-1697 arms
+    /// kept explicitly: the root lists namespaces, every other container asks
+    /// the daemon (which routes namespaces/folders inside `list_file_provider_items`).
+    private static func listModels(
+        containerIdentifier: NSFileProviderItemIdentifier,
+        ipc: XPCBridge
+    ) throws -> [BeebeebProviderItem] {
+        try ipc.enumerate(containerIdentifier: containerIdentifier)
+    }
+
+    // MARK: enumerateChanges — the working-set machinery (task 1697)
+
+    /// Task 1697 — the core gap. Pull the daemon's change log since the
+    /// system's anchor, report updates/deletes, and finish with the REAL
+    /// anchor. Apple (`Enum.h:170-202`): these are "really required. System
+    /// performance will be severely degraded if they are not implemented."
     func enumerateChanges(
         for observer: NSFileProviderChangeObserver,
         from syncAnchor: NSFileProviderSyncAnchor
     ) {
-        observer.finishEnumeratingChanges(upTo: NSFileProviderSyncAnchor(Data()), moreComing: false)
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            do {
+                // An unparseable anchor means the log no longer contains that
+                // cursor: the system must drop its caches and rescan
+                // (Apple's documented expiry handling), never continue.
+                guard let since = WorkingSetStore.decodeAnchor(Data(syncAnchor as NSData)) else {
+                    throw NSError(
+                        domain: NSFileProviderErrorDomain,
+                        code: NSFileProviderError.syncAnchorExpired.rawValue,
+                        userInfo: [NSLocalizedDescriptionKey: "The sync anchor is no longer valid; starting over."]
+                    )
+                }
+
+                let materialized: Set<String>? = Self.materializedContainersForFiltering()
+                let batch = Self.batchSize(observer)
+                var updates: [FileProviderItem] = []
+                var deletions: [NSFileProviderItemIdentifier] = []
+                var deliveredAny = false
+                var nextAnchor: String?
+
+                // Page through the daemon's log. Each reply's `next_anchor` is
+                // the resume token; the loop stops when the daemon reports
+                // the batch complete (its anchor stops advancing).
+                var cursor: String? = since == 0 ? nil : String(since)
+                while true {
+                    let response = try ipc.listChanges(sinceAnchor: cursor, limit: batch)
+                    for change in response.changes {
+                        guard Self.changeBelongsToContainer(
+                            change,
+                            container: containerIdentifier,
+                            materialized: materialized
+                        ) else {
+                            continue
+                        }
+                        switch change.kind {
+                        case "deleted":
+                            deletions.append(NSFileProviderItemIdentifier(change.fileID))
+                        default:
+                            // created/modified/reparented carry the full item
+                            // payload; a row that vanished between the change
+                            // and this poll has no payload — skip it (its
+                            // later `deleted` row, if any, reports the exit).
+                            if let item = change.item {
+                                updates.append(FileProviderItem(model: item))
+                            }
+                        }
+                    }
+                    deliveredAny = deliveredAny || !response.changes.isEmpty
+                    if let anchor = response.nextAnchor {
+                        nextAnchor = anchor
+                        // Stop when the daemon's anchor stops advancing (the
+                        // batch completed the window).
+                        if anchor == cursor {
+                            break
+                        }
+                        cursor = anchor
+                    } else {
+                        // Empty log: nothing was ever recorded.
+                        break
+                    }
+                }
+
+                if !updates.isEmpty {
+                    observer.didUpdate(updates)
+                }
+                if !deletions.isEmpty {
+                    observer.didDeleteItems(withIdentifiers: deletions)
+                }
+
+                if let anchor = nextAnchor {
+                    // Task 1697 review fix: the daemon's anchor is a raw
+                    // decimal rowid; the system's wire anchor must be the
+                    // encoded `v1:` form. A raw decimal handed to the system
+                    // comes back through `enumerateChanges(from:)`, fails
+                    // `decodeAnchor`, and answers `syncAnchorExpired` — a
+                    // full rescan after EVERY batch.
+                    if let wire = WorkingSetStore.encodeDaemonAnchor(anchor) {
+                        WorkingSetStore.recordAnchor(wire)
+                        observer.finishEnumeratingChanges(
+                            upTo: NSFileProviderSyncAnchor(Data(wire.utf8)),
+                            moreComing: false
+                        )
+                    } else {
+                        // Unparseable daemon anchor: do not advance the
+                        // system's cursor past what we can decode. Report
+                        // up-to-date from the starting anchor — the next
+                        // enumeration re-derives from it safely.
+                        observer.finishEnumeratingChanges(
+                            upTo: NSFileProviderSyncAnchor(Data(syncAnchor as NSData)),
+                            moreComing: false
+                        )
+                    }
+                } else if deliveredAny || nextAnchor == nil {
+                    // An empty log has no anchor yet: finish with the starting
+                    // anchor so the system's cursor does not regress, and
+                    // report up-to-date.
+                    observer.finishEnumeratingChanges(
+                        upTo: NSFileProviderSyncAnchor(Data(syncAnchor as NSData)),
+                        moreComing: false
+                    )
+                }
+            } catch {
+                observer.finishEnumeratingWithError(error)
+            }
+        }
+    }
+
+    /// The persisted materialized set, or nil when it has never been
+    /// populated (fail-open: Apple's documented "working set is the entire
+    /// dataset" fallback — report everything until the first
+    /// materialization event arrives).
+    private static func materializedContainersForFiltering() -> Set<String>? {
+        let state = WorkingSetStore.loadState()
+        return state.materializedContainers.isEmpty ? nil : state.materializedContainers
+    }
+
+    /// Filtering rules per container:
+    /// - `.workingSet` (the ONLY container Replicated honors): Apple's
+    ///   materialized-set filter — report when old-or-new parent is
+    ///   materialized (namespace roots + the root always are).
+    /// - Any other container: only items whose old-or-new parent IS that
+    ///   container (the system also drives per-container change
+    ///   enumerations; delivering unrelated items would confuse it).
+    static func changeBelongsToContainer(
+        _ change: XPCBridge.DaemonChange,
+        container: NSFileProviderItemIdentifier,
+        materialized: Set<String>?
+    ) -> Bool {
+        if container == .workingSet {
+            return WorkingSetStore.changeTouchesMaterialized(
+                oldParent: change.oldParentID,
+                newParent: change.newParentID ?? change.item?.parentIdentifier,
+                materialized: materialized
+            )
+        }
+        let containerID = container.rawValue
+        if change.newParentID == containerID || change.item?.parentIdentifier == containerID {
+            return true
+        }
+        // A reparent OUT of this container must also be reported so the
+        // container's view drops the item.
+        return change.oldParentID == containerID
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        completionHandler(NSFileProviderSyncAnchor(Data()))
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            // Daemon-sourced first (its persistent cursor is the truth); the
+            // App Group copy is the crash-recovery fallback when the daemon
+            // is unreachable — this call must never block on a dead daemon
+            // for long (sendRequest times out at metadataTimeoutSeconds).
+            var anchor: String?
+            if let daemonAnchor = try? ipc.syncAnchor() {
+                // Task 1697 review fix: encode the daemon's raw decimal rowid
+                // into the wire form BEFORE handing it to the system or
+                // persisting it — a raw decimal fails decodeAnchor on the
+                // next enumerateChanges (syncAnchorExpired → full rescan).
+                anchor = WorkingSetStore.encodeDaemonAnchor(daemonAnchor)
+                if let anchor {
+                    WorkingSetStore.recordAnchor(anchor)
+                }
+            }
+            if anchor == nil {
+                anchor = WorkingSetStore.loadState().lastAnchor
+            }
+            if let anchor {
+                completionHandler(NSFileProviderSyncAnchor(Data(anchor.utf8)))
+            } else {
+                completionHandler(nil)
+            }
+        }
+    }
+}
+
+/// Task 1697: `materializedItemsDidChange` — the system tells this extension
+/// that the set of materialized items changed. Per Apple's Replicated
+/// contract we (a) record the materialized DIRECTORIES in the App Group store
+/// so the working-set filter survives process death, (b) publish the set to
+/// the daemon (`ReportMaterialized`) so ITS signal filtering can use it, and
+/// (c) signal the working set ourselves so pending changes for the newly
+/// materialized subtree are delivered promptly.
+///
+/// The heavy work runs off the callback; the completion handler fires when
+/// the bookkeeping is done (Apple budgets "a few seconds").
+extension FileProviderExtension {
+    func materializedItemsDidChange(completionHandler: @escaping () -> Void) {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            defer { completionHandler() }
+            guard let manager = NSFileProviderManager(for: domain) else {
+                return
+            }
+            // The roles are REVERSED on this enumerator (Apple,
+            // NSFileProviderManager.h): WE call enumerateItems on the system's
+            // materialized-set enumerator and observe what it reports. Start
+            // from `NSData()` per the header (the sort-page constants do not
+            // apply).
+            let collector = MaterializedSetCollector()
+            let enumerator = manager.enumeratorForMaterializedItems()
+            var page: NSFileProviderPage = NSFileProviderPage(Data())
+            var safetyPages = 0
+            while safetyPages < 100 {
+                safetyPages += 1
+                // Task 1697 review fix: page completion is signalled by the
+                // COLLECTOR when the system's finish callback lands — NOT
+                // when `enumerateItems(for:startingAt:)` returns. Delivery
+                // happens via didEnumerate/finishEnumerating ASYNCHRONOUSLY;
+                // waiting on the method's return woke this loop early,
+                // `collector.nextPage` was still nil, the loop broke, and an
+                // EMPTY materialized set was persisted (filtering never
+                // became effective).
+                collector.beginPage()
+                let pageToSend = page
+                DispatchQueue.global(qos: .utility).async {
+                    enumerator.enumerateItems(for: collector, startingAt: pageToSend)
+                }
+                // Bounded wait: a silent/hung enumerator must not block the
+                // completion handler forever (Apple budgets "a few seconds"
+                // for this callback). A timeout breaks pagination instead of
+                // racing a still-in-flight page with the next request.
+                if collector.waitPageCompletion(timeout: .seconds(5)) == .timedOut {
+                    break
+                }
+                guard let next = collector.nextPage, !collector.finished else {
+                    break
+                }
+                page = next
+            }
+            // The materialized set enumerates ITEMS (files and folders);
+            // the filter needs the DIRECTORIES (containers).
+            let directories = collector.collectedFolderIdentifiers()
+            var state = WorkingSetStore.loadState()
+            let changed = state.materializedContainers != directories
+            state.materializedContainers = directories
+            WorkingSetStore.persist(state)
+            ipc.reportMaterializedContainers(Array(directories))
+            if changed {
+                // New materialized containers may have pending changes that
+                // were filtered out before; nudge the system to re-consult
+                // the working set. Best-effort.
+                manager.signalEnumerator(for: .workingSet) { _ in }
+            }
+        }
+    }
+}
+
+/// The observer we pass to the SYSTEM's materialized-set enumerator. Collects
+/// identifiers; folders are what the filter tracks.
+final class MaterializedSetCollector: NSObject, NSFileProviderEnumerationObserver {
+    private(set) var itemIdentifiers: [String] = []
+    private(set) var folderIdentifiers: Set<String> = []
+    private(set) var nextPage: NSFileProviderPage?
+    private(set) var finished = false
+
+    // Task 1697 review fix: the page-completion channel the pagination loop
+    // waits on. A FRESH semaphore per page: a stale signal from a page whose
+    // wait timed out can never release a later page's wait.
+    private var pageCompletion: DispatchSemaphore?
+
+    /// Arms the wait for the CURRENT page. Call before dispatching
+    /// `enumerateItems(for:startingAt:)`.
+    func beginPage() {
+        pageCompletion = DispatchSemaphore(value: 0)
+    }
+
+    /// Blocks until the system reports the page complete
+    /// (`finishEnumerating(upTo:)` / `finishEnumeratingWithError`) or the
+    /// timeout elapses. Without a begun page this reports `.timedOut`.
+    func waitPageCompletion(timeout: DispatchTimeInterval) -> DispatchTimeoutResult {
+        pageCompletion?.wait(timeout: .now() + timeout) ?? .timedOut
+    }
+
+    /// Deliverer-side hook: state is published FIRST so the woken waiter
+    /// observes a consistent page result (the signal/wait edge provides the
+    /// memory ordering).
+    private func signalPageCompletion() {
+        pageCompletion?.signal()
+    }
+
+    func didEnumerate(_ items: [NSFileProviderItem]) {
+        for item in items {
+            let id = item.itemIdentifier.rawValue
+            itemIdentifiers.append(id)
+            if item.contentType?.conforms(to: .folder) == true {
+                folderIdentifiers.insert(id)
+            }
+        }
+    }
+
+    func finishEnumerating(upTo nextPage: NSFileProviderPage?) {
+        self.nextPage = nextPage
+        finished = nextPage == nil
+        signalPageCompletion()
+    }
+
+    func finishEnumeratingWithError(_ error: Error) {
+        // A failed materialized-set enumeration degrades to the PREVIOUS
+        // in-memory set (fail-open filtering) rather than an empty one —
+        // an empty set would over-report, which is safe, but persisting an
+        // empty set over a good one could under-report later.
+        finished = true
+        nextPage = nil
+        if error is BeebeebIPCError {
+            // Not expected from the system enumerator; ignore.
+        }
+        _ = error
+        signalPageCompletion()
+    }
+
+    func collectedFolderIdentifiers() -> Set<String> {
+        folderIdentifiers
     }
 }

@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn beebeeb_fp_remove(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
 }
 
+
 /// How long `install()` waits for a freshly (re-)added domain to stabilize before
 /// giving up with a real timeout. Unchanged from the pre-1524-issue-4 behavior.
 const INSTALL_STABILIZATION_TIMEOUT_SECONDS: f64 = 10.0;
@@ -231,6 +232,44 @@ pub fn install() -> Result<InstallOutcome, String> {
 #[allow(dead_code)]
 pub fn remove() -> Result<(), String> {
     call_bridge(beebeeb_fp_remove).map(|_| ())
+}
+
+/// Result of a best-effort working-set signal (task 1697).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingSetSignalOutcome {
+    /// The system accepted the signal (or the domain is not registered —
+    /// nothing to signal is not a failure; sync continues regardless).
+    Delivered,
+    /// The signal itself failed (timeout, NSFileProviderManager error). Logged
+    /// by the caller; never blocks the sync tick that produced it.
+    Failed,
+}
+
+/// Pure decision core for the runner's signal path: an operation batch that
+/// changed items always asks for a working-set signal (Replicated honors ONLY
+/// `.workingSet`); anything else never touches the bridge.
+pub fn should_signal_working_set(changed_item_ids: &[String]) -> bool {
+    !changed_item_ids.is_empty()
+}
+
+/// Task 1697: call the FFI bridge to signal the replica's working set after
+/// the daemon applied a change batch. Best-effort by contract — a failure is
+/// returned for logging and must never fail the sync tick that produced it.
+pub fn signal_working_set() -> Result<WorkingSetSignalOutcome, String> {
+    let mut error_buffer = [0i8; 1024];
+    let code = unsafe {
+        beebeeb_fp_signal_working_set(error_buffer.as_mut_ptr(), error_buffer.len())
+    };
+    match code {
+        0 => Ok(WorkingSetSignalOutcome::Delivered),
+        -1 => Err(buffer_to_string(&error_buffer)
+            .unwrap_or_else(|| "signal the Beebeeb File Provider working set failed".to_string())),
+        other => Err(format!("beebeeb_fp_signal_working_set returned unexpected code {other}")),
+    }
+}
+
+unsafe extern "C" {
+    fn beebeeb_fp_signal_working_set(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
 }
 
 fn call_bridge(function: unsafe extern "C" fn(*mut c_char, usize) -> i32) -> Result<i32, String> {

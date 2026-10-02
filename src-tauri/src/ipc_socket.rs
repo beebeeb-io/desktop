@@ -21,6 +21,28 @@ pub enum IpcRequest {
         file_id: String,
         status: String,
     },
+    /// Task 1697: the replica enumerator's change feed. `since_anchor` is the
+    /// opaque sync-anchor cursor from a previous `FileProviderChanges` reply
+    /// (or absent at genesis). Paged: at most 100 changes per reply, with
+    /// `next_anchor` doubling as the resume token while more remain.
+    ListChanges {
+        /// Opaque cursor bytes (decimal ASCII of the change-log rowid).
+        /// Absent = enumerate from the beginning of retained history.
+        #[serde(default)]
+        since_anchor: Option<String>,
+        /// Requested page size; clamped to `[1, 100]`.
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Task 1697: the replica's `currentSyncAnchor` — served from the
+    /// daemon's persistent cursor so it survives extension process death.
+    GetSyncAnchor,
+    /// Task 1697: publish the materialized container set (from the
+    /// system's materialized-items callbacks) so the daemon can filter
+    /// working-set signals to materialized parents.
+    ReportMaterialized {
+        container_ids: Vec<String>,
+    },
     HydrateFile {
         file_id: String,
         dest_path: String,
@@ -111,6 +133,18 @@ pub enum IpcResponse {
         cloud_only: u32,
         conflicts: u32,
     },
+    /// Task 1697: one page of the change log. `next_anchor` is present while
+    /// more changes remain or after a delivered batch (the resume token /
+    /// new anchor); `None` only when the log is empty.
+    FileProviderChanges {
+        changes: Vec<FileProviderChangePayload>,
+        next_anchor: Option<String>,
+    },
+    /// Task 1697: `currentSyncAnchor` is served from the daemon's persistent
+    /// cursor so it survives extension process death.
+    FileProviderSyncAnchor {
+        anchor: Option<String>,
+    },
     PinUpdated {
         changed_item_ids: Vec<String>,
         hydrate_operations: usize,
@@ -131,6 +165,44 @@ pub struct FileProviderItemPayload {
     pub status: String,
     pub capabilities: u32,
     pub version_identifier: Option<String>,
+    /// Task 1697: server item creation time, seconds since the Unix epoch.
+    /// `#[serde(default)]` keeps the payload readable by the 0.8.8 Swift
+    /// decoder (absent -> no date).
+    #[serde(default)]
+    pub created_at: Option<i64>,
+    /// Task 1697: content modification time, seconds since the Unix epoch —
+    /// what Finder renders as "Modified".
+    #[serde(default)]
+    pub modified_at: Option<i64>,
+    /// Task 1697: real child count for folders (files: absent). The Swift
+    /// `childItemCount` was hardcoded to 0 before this field existed.
+    #[serde(default)]
+    pub child_item_count: Option<i64>,
+    /// Task 1697: content-version component of `itemVersion` — the value whose
+    /// change means "re-download + invalidate the thumbnail cache".
+    #[serde(default)]
+    pub content_version: Option<String>,
+    /// Task 1697: metadata-version component — mtime/size/parent/name identity.
+    /// Its change alone means "refresh metadata, keep the cached content".
+    #[serde(default)]
+    pub metadata_version: Option<String>,
+}
+
+/// One change-log row crossing the IPC bridge (task 1697).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileProviderChangePayload {
+    pub file_id: String,
+    /// created | modified | deleted | reparented
+    pub kind: String,
+    #[serde(default)]
+    pub old_parent_id: Option<String>,
+    #[serde(default)]
+    pub new_parent_id: Option<String>,
+    /// The FULL item payload for created/modified/reparented rows (absent for
+    /// deletions) so the replica's `didUpdateItems` needs no second
+    /// round-trip. `#[serde(default)]` keeps the decoder tolerant.
+    #[serde(default)]
+    pub item: Option<FileProviderItemPayload>,
 }
 
 const FP_ROOT: &str = "__fp_root__";
@@ -148,6 +220,14 @@ const CAP_DELETE: u32 = 1 << 3;
 /// as a plain u32 (`FileProviderItemPayload.capabilities` ↔
 /// `BeebeebProviderItem.capabilities`, Swift: `BeebeebProviderItem.addSubItems`).
 const CAP_ADD_SUBITEMS: u32 = 1 << 4;
+/// `.allowsReparenting` on the Swift side (task 1697). Bit 5, same numbering
+/// both sides of the bridge — Finder refuses a drag-MOVE out of an item
+/// without it.
+const CAP_REPARENT: u32 = 1 << 5;
+/// `.allowsTrashing` on the Swift side (task 1697). Bit 6, same numbering both
+/// sides. Trash SEMANTICS (trashContainer handling) are task 1698; this bit
+/// only advertises the capability so Finder stops blocking drag-to-Trash.
+const CAP_TRASH: u32 = 1 << 6;
 
 /// The macOS App Group shared between the containing app
 /// (`src-tauri/entitlements.plist`) and the File Provider extension
@@ -1034,6 +1114,72 @@ async fn handle_connection(
                     conflicts,
                 }
             }
+            IpcRequest::ListChanges {
+                since_anchor,
+                limit,
+            } => {
+                // Page limit: honor the caller's suggested size, clamped to a
+                // 100-change ceiling (Apple caps the system at 100x its
+                // suggestion; our ceiling keeps replies well inside the frame
+                // budget). Absent -> 100.
+                let page = limit.unwrap_or(100).clamp(1, 100) as usize;
+                match db.list_file_changes_paged(since_anchor.as_deref().map(str::as_bytes), page) {
+                    Ok(Some((changes, anchor))) => IpcResponse::FileProviderChanges {
+                        changes: changes
+                            .into_iter()
+                            .map(|change| FileProviderChangePayload {
+                                item: match change.kind {
+                                    // Deleted rows are gone; the replica only
+                                    // needs the identifier. For every other
+                                    // kind the FULL item payload rides along
+                                    // so `didUpdateItems` needs no second
+                                    // round-trip. A row that vanished since
+                                    // the change was recorded yields no item
+                                    // (the Swift enumerator skips it; its
+                                    // later `deleted` row reports the exit).
+                                    crate::state_db::FpChangeKind::Deleted => None,
+                                    _ => db
+                                        .get_file(&change.file_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|entry| file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES)),
+                                },
+                                file_id: change.file_id,
+                                kind: change.kind.as_str().to_string(),
+                                old_parent_id: change.old_parent_id,
+                                new_parent_id: change.new_parent_id,
+                            })
+                            .collect(),
+                        next_anchor: anchor.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                    },
+                    Ok(None) => IpcResponse::FileProviderChanges {
+                        changes: Vec::new(),
+                        next_anchor: None,
+                    },
+                    // An unparseable anchor means the log no longer contains
+                    // that cursor (sweep/gap): the replica must fall back to a
+                    // full enumeration, so surface a real error rather than a
+                    // silently-wrong empty reply.
+                    Err(e) => IpcResponse::Error {
+                        message: format!("sync anchor expired: {e}"),
+                    },
+                }
+            }
+            IpcRequest::GetSyncAnchor => IpcResponse::FileProviderSyncAnchor {
+                // The persistent cursor survives extension process death (it
+                // lives in state.db); nil only when nothing ever changed.
+                anchor: db
+                    .fp_last_anchor()
+                    .ok()
+                    .flatten()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            },
+            IpcRequest::ReportMaterialized { container_ids } => match db.set_materialized_containers(&container_ids) {
+                Ok(()) => IpcResponse::Ok {},
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             IpcRequest::SetFileStatus { .. } => IpcResponse::Ok {},
         };
         if write_frame(&mut write_half, &resp).await.is_err() {
@@ -1363,7 +1509,9 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
                 db.get_file(&contract.file_id)
                     .ok()
                     .flatten()
-                    .map(|entry| file_entry_payload(&entry, &contract, NAMESPACE_SHARED_WITH_ME))
+                    // Through the _for_db wrapper so dates/child counts are
+                    // stamped here too (task 1697).
+                    .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_SHARED_WITH_ME))
             })
             .collect(),
         _ => db
@@ -1394,6 +1542,13 @@ fn namespace_payload(identifier: &str, filename: &str) -> FileProviderItemPayloa
         status: "local".to_string(),
         capabilities: CAP_READ | CAP_ADD_SUBITEMS,
         version_identifier: None,
+        // Namespaces are containers the system never materializes children
+        // under directly — no meaningful count, no dates, no version split.
+        created_at: None,
+        modified_at: None,
+        child_item_count: None,
+        content_version: None,
+        metadata_version: None,
     }
 }
 
@@ -1432,10 +1587,21 @@ fn file_entry_payload_for_db(
     entry: &crate::state_db::FileEntry,
     parent_identifier: &str,
 ) -> FileProviderItemPayload {
-    match db.get_file_contract_state(&entry.file_id).ok().flatten() {
+    let mut payload = match db.get_file_contract_state(&entry.file_id).ok().flatten() {
         Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
         None => file_entry_payload_without_contract(entry, parent_identifier),
+    };
+    // Task 1697: real dates + child count, stamped where the DB is at hand.
+    // `modified_at` conflates "server updated_at" and "conflict detected at"
+    // (see the FileEntry doc comment) but is the best mtime the daemon has.
+    payload.modified_at = Some(entry.modified_at.max(entry.remote_updated_at));
+    if payload.created_at.is_none() {
+        payload.created_at = payload.modified_at;
     }
+    if entry.is_dir() {
+        payload.child_item_count = Some(db.child_item_count(&entry.file_id).unwrap_or(0));
+    }
+    payload
 }
 
 fn file_entry_payload(
@@ -1468,8 +1634,26 @@ fn file_entry_payload(
     }
     // The contract branch zeroes `capabilities` above, so the folder
     // add-subitems grant is re-applied here, after the permission rebuild
-    // (task 1694).
+    // (task 1694). Task 1697: live items may also be reparented and trashed
+    // (drag-move / drag-to-Trash; trash SEMANTICS are task 1698).
     let capabilities = with_folder_add_subitems(kind, &entry.status, capabilities);
+
+    // Task 1697: version split. contentVersion changes only when the content
+    // identity changes (server version + content hash when present);
+    // metadataVersion tracks mtime/size/parent/name so a rename no longer
+    // forces a content re-download.
+    let content_version = match &entry.content_hash {
+        Some(hash) => format!("{}:{}", contract.current_version.max(entry.remote_updated_at), hash),
+        None => format!("{}", contract.current_version.max(entry.remote_updated_at)),
+    };
+    let metadata_version = format!(
+        "{}:{}:{}:{}:{}",
+        entry.modified_at,
+        entry.size_bytes,
+        parent_identifier,
+        filename_from_path(&entry.path),
+        entry.status.as_str()
+    );
 
     FileProviderItemPayload {
         identifier: entry.file_id.clone(),
@@ -1486,6 +1670,13 @@ fn file_entry_payload(
             entry.modified_at,
             entry.size_bytes
         )),
+        // Dates/child count are stamped by `file_entry_payload_for_db`, where
+        // the DB handle is available.
+        created_at: None,
+        modified_at: None,
+        child_item_count: None,
+        content_version: Some(content_version),
+        metadata_version: Some(metadata_version),
     }
 }
 
@@ -1509,6 +1700,19 @@ fn file_entry_payload_without_contract(
         capabilities_for_status(&entry.status),
     );
 
+    // Task 1697: version split without a contract — content identity falls
+    // back to the row's remote clock (no hash available), metadata to
+    // mtime/size/parent/name.
+    let content_version = format!("{}", entry.remote_updated_at);
+    let metadata_version = format!(
+        "{}:{}:{}:{}:{}",
+        entry.modified_at,
+        entry.size_bytes,
+        parent_identifier,
+        filename_from_path(&entry.path),
+        status
+    );
+
     FileProviderItemPayload {
         identifier: entry.file_id.clone(),
         parent_identifier: parent_identifier.to_string(),
@@ -1522,6 +1726,11 @@ fn file_entry_payload_without_contract(
             "{}:{}:{}",
             entry.remote_updated_at, entry.modified_at, entry.size_bytes
         )),
+        created_at: None,
+        modified_at: None,
+        child_item_count: None,
+        content_version: Some(content_version),
+        metadata_version: Some(metadata_version),
     }
 }
 
@@ -1535,8 +1744,11 @@ fn capabilities_for_status(status: &crate::state_db::FileStatus) -> u32 {
         | crate::state_db::FileStatus::Error
         | crate::state_db::FileStatus::Trashing => CAP_READ,
         crate::state_db::FileStatus::Conflict => CAP_READ | CAP_RENAME,
+        // Task 1697: live items may be reparented (drag-move) and trashed.
+        // Trash SEMANTICS remain 1698's decision; the capability only stops
+        // Finder from blocking the gesture outright.
         crate::state_db::FileStatus::Local | crate::state_db::FileStatus::Uploading => {
-            CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE
+            CAP_READ | CAP_WRITE | CAP_RENAME | CAP_DELETE | CAP_REPARENT | CAP_TRASH
         }
     }
 }
@@ -2337,5 +2549,184 @@ mod tests {
         drop(client);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         drop(listener);
+    }
+
+    // ------------------------------------------------------------------
+    // Task 1697: capabilities completion + item metadata. RED-first: these
+    // were seen failing before the CAP_REPARENT/CAP_TRASH bits and the
+    // dates/childItemCount/version-split fields existed.
+    // ------------------------------------------------------------------
+
+    fn live_file_entry(status: FileStatus) -> FileEntry {
+        FileEntry {
+            file_id: "1697-item".into(),
+            path: "/docs/report.txt".into(),
+            status,
+            size_bytes: 120,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_200,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        }
+    }
+
+    fn live_contract() -> crate::state_db::FileContractState {
+        crate::state_db::FileContractState {
+            file_id: "1697-item".into(),
+            namespace: crate::state_db::Namespace::MyFiles,
+            parent_id: None,
+            shared_root_id: None,
+            share_id: None,
+            owner_email: None,
+            permission_bits: 0,
+            item_kind: crate::state_db::ItemKind::File,
+            content_type: None,
+            current_version: 7,
+            current_object_version_id: None,
+            local_base_version: 0,
+            local_hash: None,
+            cache_path: None,
+            cache_bytes: 0,
+            pin_state: crate::state_db::PinState::Inherit,
+            inherited_pin_state: crate::state_db::PinState::Unpinned,
+            last_sync_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_1697_local_item_payload_grants_reparent_and_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let entry = live_file_entry(FileStatus::Local);
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&live_contract()).unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(
+            payload.capabilities & CAP_REPARENT,
+            CAP_REPARENT,
+            "a live item must advertise reparenting (drag-move), got {:#b}",
+            payload.capabilities
+        );
+        assert_eq!(
+            payload.capabilities & CAP_TRASH,
+            CAP_TRASH,
+            "a live item must advertise trashing, got {:#b}",
+            payload.capabilities
+        );
+    }
+
+    #[test]
+    fn test_1697_cloud_only_item_keeps_reparent_and_trash_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let entry = live_file_entry(FileStatus::CloudOnly);
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&live_contract()).unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(payload.capabilities & CAP_REPARENT, 0, "read-only terminal states stay read-only");
+        assert_eq!(payload.capabilities & CAP_TRASH, 0, "read-only terminal states stay read-only");
+    }
+
+    #[test]
+    fn test_1697_trashing_item_keeps_reparent_and_trash_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let entry = live_file_entry(FileStatus::Trashing);
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&live_contract()).unwrap();
+        let payload = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        assert_eq!(
+            payload.capabilities & (CAP_REPARENT | CAP_TRASH),
+            0,
+            "an item on its way out cannot be moved or trashed again"
+        );
+    }
+
+    #[test]
+    fn test_1697_payload_carries_dates_and_folder_child_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "folder-1697".into(),
+            path: "/docs".into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        })
+        .unwrap();
+        // item_kind is contract-owned (upsert_file never writes it) — the
+        // contract write is what makes this row a folder.
+        db.set_file_contract_state(&crate::state_db::FileContractState {
+            file_id: "folder-1697".into(),
+            item_kind: ItemKind::Folder,
+            ..live_contract()
+        })
+        .unwrap();
+        for (id, path) in [("c-1", "/docs/a.txt"), ("c-2", "/docs/b.txt")] {
+            db.upsert_file(&FileEntry {
+                file_id: id.into(),
+                path: path.into(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 1,
+                modified_at: 1,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+            db.set_file_contract_state(&crate::state_db::FileContractState {
+                file_id: id.into(),
+                parent_id: Some("folder-1697".into()),
+                ..live_contract()
+            })
+            .unwrap();
+        }
+        let folder = db.get_file("folder-1697").unwrap().unwrap();
+        let payload = file_entry_payload_for_db(&db, &folder, NAMESPACE_MY_FILES);
+        assert_eq!(
+            payload.child_item_count,
+            Some(2),
+            "childItemCount must be the real child count, was hardcoded 0 before 1697"
+        );
+        assert!(payload.modified_at.is_some(), "modification date must be populated");
+        assert!(payload.created_at.is_some(), "creation date must be populated");
+        let file = db.get_file("c-1").unwrap().unwrap();
+        let file_payload = file_entry_payload_for_db(&db, &file, "folder-1697");
+        assert_eq!(file_payload.child_item_count, None, "files have no child count");
+    }
+
+    #[test]
+    fn test_1697_version_split_content_vs_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut entry = live_file_entry(FileStatus::Local);
+        entry.content_hash = Some("abc123".into());
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&live_contract()).unwrap();
+
+        let before = file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES);
+        // A rename: metadata changes, content does not.
+        let mut renamed = entry.clone();
+        renamed.path = "/docs/report-renamed.txt".into();
+        db.upsert_file(&renamed).unwrap();
+        let after = file_entry_payload_for_db(&db, &renamed, NAMESPACE_MY_FILES);
+        assert_eq!(
+            after.content_version, before.content_version,
+            "a rename must not change the content version (it would force a re-download)"
+        );
+        assert_ne!(
+            after.metadata_version, before.metadata_version,
+            "a rename must change the metadata version"
+        );
+        assert_ne!(
+            before.content_version, before.metadata_version,
+            "the two versions are distinct identities"
+        );
     }
 }

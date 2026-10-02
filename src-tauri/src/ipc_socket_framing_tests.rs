@@ -796,3 +796,208 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
     });
     assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1697: ListChanges — the daemon-side change log the replica's
+// enumerator pages through, over the real socket.
+// ---------------------------------------------------------------------------
+
+fn fp_item(file_id: &str, path: &str, kind: ItemKind) -> FileEntry {
+    FileEntry {
+        file_id: file_id.into(),
+        path: path.into(),
+        status: FileStatus::Local,
+        size_bytes: 3,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 1,
+        parent_id: None,
+        item_kind: kind,
+    }
+}
+
+fn list_changes_request(since_anchor: Option<&str>) -> Vec<u8> {
+    let mut body = serde_json::json!({});
+    if let Some(anchor) = since_anchor {
+        body["since_anchor"] = serde_json::json!(anchor);
+    }
+    let mut line = serde_json::to_vec(&serde_json::json!({ "ListChanges": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+async fn seed_two_changes(fx: &IpcFixture) {
+    // The upserts record their own Created changes now (task 1697 wiring).
+    fx.db.upsert_file(&fp_item("fp-a", "/a.txt", ItemKind::File)).unwrap();
+    fx.db.upsert_file(&fp_item("fp-b", "/b.txt", ItemKind::File)).unwrap();
+}
+
+#[test]
+fn list_changes_returns_created_items_and_a_nonempty_anchor() {
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(seed_two_changes(&fx));
+    fx.rt.block_on(async {
+        let reply = send_one(&fx, list_changes_request(None)).await;
+        let payload = reply
+            .get("FileProviderChanges")
+            .unwrap_or_else(|| panic!("expected FileProviderChanges, got {reply}"));
+        let changes = payload["changes"].as_array().expect("changes array");
+        assert_eq!(changes.len(), 2, "both created items: {payload}");
+        assert_eq!(changes[0]["file_id"], "fp-a");
+        assert_eq!(changes[0]["kind"], "created");
+        let anchor = payload["next_anchor"].as_str().expect("next_anchor string");
+        assert!(!anchor.is_empty(), "the anchor after real changes is never empty");
+        assert!(anchor.len() <= 500, "Apple caps the anchor at 500 bytes");
+    });
+}
+
+#[test]
+fn list_changes_from_the_fresh_anchor_delivers_nothing_and_keeps_the_anchor() {
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(seed_two_changes(&fx));
+    fx.rt.block_on(async {
+        let first = send_one(&fx, list_changes_request(None)).await;
+        let anchor = first["FileProviderChanges"]["next_anchor"].as_str().unwrap().to_string();
+        let second = send_one(&fx, list_changes_request(Some(&anchor))).await;
+        let payload = &second["FileProviderChanges"];
+        assert_eq!(payload["changes"].as_array().map(Vec::len), Some(0), "up to date: {second}");
+        assert_eq!(payload["next_anchor"].as_str(), Some(anchor.as_str()), "a no-op poll must not move the anchor");
+    });
+}
+
+#[test]
+fn list_changes_pages_with_resume_tokens_without_losing_or_repeating() {
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        for i in 0..250 {
+            let id = format!("fp-{i:03}");
+            fx.db.upsert_file(&fp_item(&id, &format!("/{id}"), ItemKind::File)).unwrap();
+        }
+    });
+    fx.rt.block_on(async {
+        let mut seen = std::collections::HashSet::new();
+        let mut pages = 0;
+        let mut cursor: Option<String> = None;
+        loop {
+            let reply = send_one(&fx, list_changes_request(cursor.as_deref())).await;
+            let payload = &reply["FileProviderChanges"];
+            let changes = payload["changes"].as_array().expect("changes array");
+            assert!(changes.len() <= 100, "page size must be honored, got {}", changes.len());
+            for change in changes {
+                let key = (
+                    change["file_id"].as_str().unwrap().to_string(),
+                    change["kind"].as_str().unwrap().to_string(),
+                );
+                assert!(seen.insert(key), "a change repeated across pages: {change}");
+            }
+            pages += 1;
+            let next = payload["next_anchor"].as_str().map(str::to_string);
+            match next {
+                Some(a) if Some(&a) == cursor.as_ref() => break, // up to date
+                Some(a) => {
+                    assert!(a > cursor.clone().unwrap_or_default(), "resume tokens strictly increase");
+                    cursor = Some(a);
+                }
+                None => break,
+            }
+            assert!(pages < 10, "250 changes at 100/page must take 3 pages");
+        }
+        assert_eq!(seen.len(), 250, "every change delivered exactly once");
+        // 3 delivery pages + 1 final round trip that reports "current" (the
+        // echoed anchor breaks the loop).
+        assert_eq!(pages, 4, "3 delivery pages + 1 up-to-date round trip, got {pages}");
+    });
+}
+
+#[test]
+fn list_changes_reports_deletes_with_the_old_parent() {
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        fx.db.upsert_file(&fp_item("fp-gone", "/gone.txt", ItemKind::File)).unwrap();
+        // delete_file records the Deleted change itself, capturing the row's
+        // parent BEFORE the delete (task 1697 wiring). Put the row under
+        // parent-9 first so the change carries it.
+        fx.db.set_file_contract_state(&crate::state_db::FileContractState {
+            file_id: "fp-gone".into(),
+            parent_id: Some("parent-9".into()),
+            ..crate::state_db::FileContractState {
+                file_id: String::new(),
+                namespace: crate::state_db::Namespace::MyFiles,
+                parent_id: None,
+                shared_root_id: None,
+                share_id: None,
+                owner_email: None,
+                permission_bits: 0,
+                item_kind: ItemKind::File,
+                content_type: None,
+                current_version: 0,
+                current_object_version_id: None,
+                local_base_version: 0,
+                local_hash: None,
+                cache_path: None,
+                cache_bytes: 0,
+                pin_state: crate::state_db::PinState::Inherit,
+                inherited_pin_state: crate::state_db::PinState::Unpinned,
+                last_sync_at: 0,
+            }
+        })
+        .unwrap();
+        fx.db.delete_file("fp-gone").unwrap();
+        let reply = send_one(&fx, list_changes_request(None)).await;
+        let changes = reply["FileProviderChanges"]["changes"].as_array().unwrap();
+        let deletion = changes.iter().find(|c| c["kind"] == "deleted").expect("the delete");
+        assert_eq!(deletion["file_id"], "fp-gone");
+        assert_eq!(deletion["new_parent_id"], "parent-9", "the materialized filter needs the old parent");
+    });
+}
+
+#[test]
+fn list_changes_reports_both_parents_for_reparents() {
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        fx.db.upsert_file(&fp_item("fp-moved", "/old/moved.txt", ItemKind::File)).unwrap();
+        fx.db.record_file_change("fp-moved", crate::state_db::FpChangeKind::Created, None).unwrap();
+        fx.db
+            .record_file_change("fp-moved", crate::state_db::FpChangeKind::Reparented, Some("old-parent".into()))
+            .unwrap();
+        let reply = send_one(&fx, list_changes_request(None)).await;
+        let changes = reply["FileProviderChanges"]["changes"].as_array().unwrap();
+        let moved = changes.iter().find(|c| c["kind"] == "reparented").expect("the reparent");
+        assert_eq!(moved["old_parent_id"], "old-parent");
+    });
+}
+
+#[test]
+fn an_unparsable_anchor_gets_an_error_not_a_crash() {
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        let reply = send_one(&fx, list_changes_request(Some("garbage-anchor"))).await;
+        assert!(reply.get("Error").is_some(), "an expired/garbage anchor is an error: {reply}");
+    });
+}
+
+#[test]
+fn list_changes_ride_along_full_item_payloads_for_updates() {
+    // The replica's didUpdateItems needs the FULL item; a second GetFileStatus
+    // round-trip per change would triple the polling cost. The change payload
+    // carries it for created/modified/reparented rows while the row still
+    // exists, and nothing for deletions (or for rows that vanished between
+    // the change and the poll — the Swift enumerator skips those).
+    let fx = IpcFixture::start(|_| {});
+    fx.rt.block_on(async {
+        fx.db.upsert_file(&fp_item("fp-ride", "/ride.txt", ItemKind::File)).unwrap();
+        fx.db.upsert_file(&fp_item("fp-live", "/live.txt", ItemKind::File)).unwrap();
+        fx.db.delete_file("fp-ride").unwrap();
+        let reply = send_one(&fx, list_changes_request(None)).await;
+        let changes = reply["FileProviderChanges"]["changes"].as_array().unwrap();
+        let updated = changes.iter().find(|c| c["kind"] == "created" && c["file_id"] == "fp-live").expect("the live created change");
+        let item = updated["item"].as_object().expect("created rows carry the full item payload");
+        assert_eq!(item["identifier"], "fp-live");
+        assert_eq!(item["status"], "local");
+        // A created change whose row has since been deleted rides no item.
+        let vanished = changes.iter().find(|c| c["kind"] == "created" && c["file_id"] == "fp-ride").expect("the vanished created change");
+        assert!(vanished["item"].is_null(), "a row gone since the change yields no item");
+        let deleted = changes.iter().find(|c| c["kind"] == "deleted").expect("the deleted change");
+        assert!(deleted["item"].is_null(), "deletions carry no item payload");
+    });
+}

@@ -5178,7 +5178,29 @@ pub struct ConflictDetected {
 ///
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
+/// Task 1697 review fix (T3): what one sync tick did. The remote ingestion
+/// path (delta ops + snapshot bootstrap) records every item id it APPLIED so
+/// the runner can signal the File Provider working set about REMOTE changes
+/// — previously only local ops (`operations_applied`) signaled, so Finder
+/// stayed blind to server-side creates/modifies/moves/deletes until an
+/// unrelated signal.
+#[derive(Debug, Default)]
+pub struct SyncTickOutcome {
+    pub conflicts: Vec<ConflictDetected>,
+    pub applied_item_ids: Vec<String>,
+}
+
 pub async fn sync_tick(
+    bridge: &EngineBridge,
+    // See `sync_tick_outcome` for the `sync_root` contract.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+) -> anyhow::Result<Vec<ConflictDetected>> {
+    Ok(sync_tick_outcome(bridge, sync_root).await?.conflicts)
+}
+
+/// The real tick body — same behavior as [`sync_tick`], plus the applied item
+/// ids for the working-set signal (T3).
+pub async fn sync_tick_outcome(
     bridge: &EngineBridge,
     // The on-disk vault root. Needed on Windows so the deletion-reconcile paths
     // (`apply_sync_op` / `apply_snapshot`) can locate and remove the on-disk Cloud
@@ -5186,12 +5208,13 @@ pub async fn sync_tick(
     // 0806). Unused on macOS/Linux (the OS extension owns the namespace there);
     // `#[cfg_attr]` silences the unused warning on those builds.
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
-) -> anyhow::Result<Vec<ConflictDetected>> {
+) -> anyhow::Result<SyncTickOutcome> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
+    let mut applied_item_ids: Vec<String> = Vec::new();
 
     // ── /sync delta engine (task 0789) ────────────────────────────────────────
     //
@@ -5235,13 +5258,15 @@ pub async fn sync_tick(
         // Never bootstrapped, or a re-snapshot was explicitly requested → full
         // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
         None => {
-            bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
-            return Ok(conflicts);
+            let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            applied_item_ids.extend(applied);
+            return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
         }
         Some(_) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
-            bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
-            return Ok(conflicts);
+            let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            applied_item_ids.extend(applied);
+            return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
         }
         Some(c) => c,
     };
@@ -5254,7 +5279,7 @@ pub async fn sync_tick(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
-            return Ok(conflicts);
+            return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
         }
     };
 
@@ -5283,28 +5308,41 @@ pub async fn sync_tick(
                     server_seq = snap.seq_id,
                     "sync_tick: cursor ahead of server op-log head; re-bootstrapping from snapshot"
                 );
-                apply_snapshot(bridge, sync_root, &snap, now_secs, fetched_at, &mut conflicts)?;
+                let applied = apply_snapshot(bridge, sync_root, &snap, now_secs, fetched_at, &mut conflicts)?;
+                applied_item_ids.extend(applied);
             }
             Ok(_) => { /* cursor still valid, nothing to do */ }
             Err(e) => {
                 tracing::warn!(error = %e, "sync_tick: snapshot freshness probe failed; retrying next tick");
             }
         }
-        return Ok(conflicts);
+        return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
     }
 
     // Apply the delta ops in order, advancing the cursor to the max seq_id.
     let mut max_seq = cursor;
     for op in &ops.ops {
-        if let Err(e) = apply_sync_op(bridge, sync_root, op, now_secs, &mut conflicts) {
-            tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
+        match apply_sync_op(bridge, sync_root, op, now_secs, &mut conflicts) {
+            Ok(applied) => applied_item_ids.extend(applied),
+            Err(e) => {
+                // A failed op applied nothing: it contributes no ids.
+                tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
+            }
         }
         max_seq = max_seq.max(op.seq_id);
     }
     if max_seq > cursor {
         bridge.db().set_sync_cursor(max_seq)?;
     }
-    Ok(conflicts)
+    Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) })
+}
+
+/// Drop duplicate ids from one tick's applied batch (an item can be applied
+/// by two ops in one delta — the signal cares that it changed, not how often).
+fn dedupe(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// Pull a fresh `/sync/snapshot` and reconcile the whole mirror against it, then
@@ -5315,7 +5353,7 @@ async fn bootstrap_from_snapshot(
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     // `now_secs` is captured at tick start, BEFORE this request — so it is the
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
@@ -5346,7 +5384,10 @@ fn apply_snapshot(
     now_secs: i64,
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
+    // Task 1697 review fix (T3): every ingested and pruned item id flows back
+    // to the tick, which signals the File Provider working set with the union.
+    let mut applied: Vec<String> = Vec::new();
     // Resolve each node's PARENT relative path. The snapshot is a flat node list
     // (each with `parent_id`); the old BFS got nesting for free by listing
     // folder-by-folder. Here we topologically order so a parent's resolved path
@@ -5397,6 +5438,7 @@ fn apply_snapshot(
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
+            applied.push(file_id.to_string());
         }
     }
 
@@ -5415,10 +5457,12 @@ fn apply_snapshot(
         // descendants of a pruned folder precede the folder), which is exactly the
         // order placeholder removal needs (leaf files before their directory).
         remove_pruned_placeholders(sync_root, &pruned);
+        // A pruned row is a REMOTE deletion Finder must see (T3).
+        applied.extend(pruned.iter().map(|row| row.file_id.clone()));
     }
 
     bridge.db().set_sync_cursor(snapshot.seq_id)?;
-    Ok(())
+    Ok(applied)
 }
 
 /// Windows: remove the on-disk Cloud Files placeholder for each row the deletion
@@ -5528,11 +5572,14 @@ fn apply_sync_op(
     op: &crate::api_client::SyncOp,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
+    // Task 1697 review fix (T3): the ids of items this op actually changed on
+    // the local mirror — what the runner's working-set signal must carry.
+    let mut applied: Vec<String> = Vec::new();
     let payload = &op.payload;
     let id = payload["id"].as_str().unwrap_or_default();
     if id.is_empty() {
-        return Ok(());
+        return Ok(applied);
     }
 
     match op.op_type.as_str() {
@@ -5547,7 +5594,9 @@ fn apply_sync_op(
                 // queued TrashFile op owns this row). This op is the server echo of
                 // that very delete — let the 0802 path converge it (the TrashFile op
                 // deletes the row on success). Removing the placeholder here would be
-                // a no-op (already gone), and we must NOT re-handle it, so skip.
+                // a no-op (already gone), and we must NOT re-handle it, so skip —
+                // and do NOT collect the id either: the local queue's own
+                // completion signals it via `operations_applied`.
                 Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {}
                 Some(_) => {
                     // Remove the row (and, for a folder, its orphaned descendants by
@@ -5557,6 +5606,9 @@ fn apply_sync_op(
                     // can't queue a redundant server trash.
                     let removed = bridge.db().delete_file_subtree(id)?;
                     remove_pruned_placeholders(sync_root, &removed);
+                    // The subtree's rows left the mirror: Finder must drop them (T3).
+                    applied.push(id.to_string());
+                    applied.extend(removed.iter().map(|row| row.file_id.clone()));
                 }
                 // No row for the folder itself — the folder was absent from
                 // this desktop's snapshot (already trashed when the snapshot
@@ -5576,6 +5628,9 @@ fn apply_sync_op(
                             orphans.len()
                         );
                         remove_pruned_placeholders(sync_root, &orphans);
+                        // The orphaned children left the mirror (T3); the folder
+                        // itself never existed locally, so it contributes nothing.
+                        applied.extend(orphans.iter().map(|row| row.file_id.clone()));
                     }
                 }
             }
@@ -5603,7 +5658,9 @@ fn apply_sync_op(
             let new_name = payload["new_name_encrypted"].as_str();
             let row = synthesize_op_row(bridge, id, op, new_name);
             let parent_rel = existing_parent_rel_path(bridge, id);
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+                applied.push(id.to_string());
+            }
         }
         "file_move" | "folder_move" => {
             // Re-parent. The op gives `new_parent_id`; the leaf name is unchanged.
@@ -5617,7 +5674,9 @@ fn apply_sync_op(
             // at the sync root. If the new parent isn't locally known yet, fall
             // back to a re-snapshot rather than mis-placing the row at root.
             let parent_rel = parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str());
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+                applied.push(id.to_string());
+            }
         }
         "file_create" | "folder_create" | "file_update" => {
             let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
@@ -5634,13 +5693,15 @@ fn apply_sync_op(
             } else {
                 parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
             };
-            process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?;
+            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+                applied.push(id.to_string());
+            }
         }
         other => {
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }
     }
-    Ok(())
+    Ok(applied)
 }
 
 /// Build a `/files`-shaped `serde_json::Value` from a sync op + the existing
@@ -9756,10 +9817,106 @@ mod tests {
             .unwrap();
     }
 
+    // ------------------------------------------------------------------
+    // Task 1697 review fix (T3): the remote ingestion path must collect the
+    // item ids it APPLIED so the runner can signal the File Provider working
+    // set about REMOTE changes — before this, only local ops signaled
+    // (`operations_applied`), so Finder stayed blind to server-side
+    // creates/modifies/moves/deletes until an unrelated signal. RED-first:
+    // written against the plumbed-but-empty collectors and seen failing (an
+    // applied op returned an empty id list) before the collection landed.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tick1697_apply_sync_op_collects_the_applied_create_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let file = "rem00000-0000-4000-8000-000000000001";
+        let op = crate::api_client::SyncOp {
+            seq_id: 3,
+            op_type: "file_create".into(),
+            payload: serde_json::json!({ "id": file, "parent_id": serde_json::Value::Null, "name_encrypted": "new.txt", "size_bytes": 10 }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        assert!(bridge.db().get_file(file).unwrap().is_some(), "the create must really have been ingested");
+        assert_eq!(applied, vec![file.to_string()], "an applied create op must report its file id for the working-set signal");
+    }
+
+    #[test]
+    fn tick1697_apply_sync_op_collects_remote_delete_subtree_ids() {
+        // A server-side trash of a folder removes the folder AND its descendants;
+        // both must be reported so Finder drops them. The hierarchy is
+        // PATH-based (the descendant sweep is a path-prefix match), so the
+        // child must be seeded under the folder's path.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+        let folder = "fold0000-0000-4000-8000-000000000001";
+        let child = "chil0000-0000-4000-8000-000000000002";
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::CloudOnly, true, 10);
+        seed_bridge_entry(&bridge, child, "docs/notes.txt", None, FileStatus::CloudOnly, false, 10);
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 4,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": folder }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        assert!(bridge.db().get_file(folder).unwrap().is_none(), "the trash must have removed the row");
+        assert!(bridge.db().get_file(child).unwrap().is_none(), "the trash must have removed the descendant");
+        assert!(applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
+            "remote delete must report the folder AND its descendants: {applied:?}");
+    }
+
+    #[test]
+    fn tick1697_apply_sync_op_trash_echo_of_local_trashing_collects_nothing() {
+        // The server echo of a LOCAL delete-in-flight must not report ids: the
+        // local queue's own completion signals those via `operations_applied`
+        // (double-signaling the same item would be redundant).
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let file = "echo0000-0000-4000-8000-000000000001";
+        seed_bridge_entry(&bridge, file, "doomed.txt", None, FileStatus::Trashing, false, 10);
+        let op = crate::api_client::SyncOp {
+            seq_id: 5,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": file }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        assert!(applied.is_empty(), "a Trashing echo applies nothing itself: {applied:?}");
+        assert!(bridge.db().get_file(file).unwrap().is_some(), "the echo must leave the row to the 0802 path");
+    }
+
+    #[test]
+    fn tick1697_apply_snapshot_collects_ingested_and_pruned_ids() {
+        // A snapshot re-bootstrap ingests nodes and prunes rows absent from it;
+        // BOTH sides are remote changes Finder must see.
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [9u8; 32];
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let kept = "keep0000-0000-4000-8000-000000000001";
+        let absent = "abse0000-0000-4000-8000-000000000002";
+        // `absent` exists locally but the snapshot below omits it → pruned.
+        seed_bridge_entry(&bridge, absent, "stale.txt", None, FileStatus::CloudOnly, false, 10);
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 9,
+            nodes: vec![snap_node(&mk, kept, "fresh.txt", None, false, 50)],
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut conflicts).unwrap();
+        assert!(bridge.db().get_file(kept).unwrap().is_some(), "the snapshot node must be ingested");
+        assert!(bridge.db().get_file(absent).unwrap().is_none(), "the row absent from the snapshot must be pruned");
+        assert!(applied.contains(&kept.to_string()), "ingested ids are collected: {applied:?}");
+        assert!(applied.contains(&absent.to_string()), "pruned (remote-deleted) ids are collected: {applied:?}");
+    }
+
     #[test]
     fn audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner() {
-        // Production mutation caught: removing a Trashing row on a file_trash echo
-        // would make the local-delete-in-flight path lose its durable owner state.
+    // Production mutation caught: removing a Trashing row on a file_trash echo
+    // would make the local-delete-in-flight path lose its durable owner state.
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
         let file = "echo0000-0000-4000-8000-000000000001";

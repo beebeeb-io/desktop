@@ -269,3 +269,43 @@ int beebeeb_fp_remove(char *error_buffer, unsigned long error_buffer_len) {
         return BeebeebRemoveDomain(error_buffer, error_buffer_len);
     }
 }
+
+// Task 1697: signal the replica's WORKING SET after the daemon applied an
+// operation batch. Under NSFileProviderReplicatedExtension the working set is
+// the ONLY container whose signal the system honors (Mgr.h: "the system will
+// ignore any other container"); the extension's enumerator then pulls the
+// daemon's change log via ListChanges. Returns: 0 = signaled (or domain not
+// registered yet — nothing to signal), -1 = error (error_buffer set).
+int beebeeb_fp_signal_working_set(char *error_buffer, unsigned long error_buffer_len) {
+    @autoreleasepool {
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            // The domain is not (yet) registered: nothing to signal is not a
+            // failure — the sync engine must keep running.
+            BeebeebCopyMessage(@"File Provider manager is unavailable for the Beebeeb domain",
+                               error_buffer,
+                               error_buffer_len);
+            return 0;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager signalEnumeratorForContainerItemIdentifier:NSFileProviderWorkingSetContainerItemIdentifier
+                                          completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        // Bounded wait: signaling is best-effort UI refresh, never sync state.
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebCopyMessage(@"Timed out signaling the Beebeeb File Provider working set",
+                               error_buffer,
+                               error_buffer_len);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            return -1;
+        }
+        return 0;
+    }
+}
