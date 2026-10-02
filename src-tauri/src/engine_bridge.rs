@@ -11892,6 +11892,9 @@ mod tests {
     }
 
     #[test]
+    // `file_provider_change_payloads`/`FP_TRASH_APPLE` live in `ipc_socket`,
+    // which is `#[cfg(unix)]` (lib.rs) — this test compiles out on Windows.
+    #[cfg(unix)]
     fn test_1698_queue_finder_delete_parks_trashing_immediately() {
         // The Finder-side trash: `queue_finder_delete` parks the row
         // `Trashing` AFTER enqueueing the op, so the change feed immediately
