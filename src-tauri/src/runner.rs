@@ -1877,7 +1877,6 @@ mod tests {
         assert!(!health.is_expired(), "the streak must have been reset to 0, not left at 3");
     }
 
-    #[test]
     // Task 1697: the retired `file-provider-invalidate` Tauri event and its
     // payload builder are gone — the only replica-refresh channel is the
     // working-set signal (see `signal_file_provider_working_set`). The pure
