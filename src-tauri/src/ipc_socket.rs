@@ -1125,31 +1125,7 @@ async fn handle_connection(
                 let page = limit.unwrap_or(100).clamp(1, 100) as usize;
                 match db.list_file_changes_paged(since_anchor.as_deref().map(str::as_bytes), page) {
                     Ok(Some((changes, anchor))) => IpcResponse::FileProviderChanges {
-                        changes: changes
-                            .into_iter()
-                            .map(|change| FileProviderChangePayload {
-                                item: match change.kind {
-                                    // Deleted rows are gone; the replica only
-                                    // needs the identifier. For every other
-                                    // kind the FULL item payload rides along
-                                    // so `didUpdateItems` needs no second
-                                    // round-trip. A row that vanished since
-                                    // the change was recorded yields no item
-                                    // (the Swift enumerator skips it; its
-                                    // later `deleted` row reports the exit).
-                                    crate::state_db::FpChangeKind::Deleted => None,
-                                    _ => db
-                                        .get_file(&change.file_id)
-                                        .ok()
-                                        .flatten()
-                                        .map(|entry| file_entry_payload_for_db(&db, &entry, NAMESPACE_MY_FILES)),
-                                },
-                                file_id: change.file_id,
-                                kind: change.kind.as_str().to_string(),
-                                old_parent_id: change.old_parent_id,
-                                new_parent_id: change.new_parent_id,
-                            })
-                            .collect(),
+                        changes: file_provider_change_payloads(&db, changes),
                         next_anchor: anchor.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
                     },
                     Ok(None) => IpcResponse::FileProviderChanges {
@@ -1460,6 +1436,35 @@ fn write_outcome_response(
         },
         Err(e) => IpcResponse::Error { message: e.to_string() },
     }
+}
+
+/// The change-feed item assembly, extracted from the `ListChanges` arm so
+/// tests can drive it without a live socket. `Deleted` rows are gone; the
+/// replica only needs the identifier. For every other kind the FULL item
+/// payload rides along so `didUpdateItems` needs no second round-trip. A row
+/// that vanished since the change was recorded yields no item (the Swift
+/// enumerator skips it; its later `deleted` row reports the exit).
+fn file_provider_change_payloads(
+    db: &crate::state_db::StateDb,
+    changes: Vec<crate::state_db::FileChange>,
+) -> Vec<FileProviderChangePayload> {
+    changes
+        .into_iter()
+        .map(|change| FileProviderChangePayload {
+            item: match change.kind {
+                crate::state_db::FpChangeKind::Deleted => None,
+                _ => db
+                    .get_file(&change.file_id)
+                    .ok()
+                    .flatten()
+                    .map(|entry| file_entry_payload_for_db(db, &entry, NAMESPACE_MY_FILES)),
+            },
+            file_id: change.file_id,
+            kind: change.kind.as_str().to_string(),
+            old_parent_id: change.old_parent_id,
+            new_parent_id: change.new_parent_id,
+        })
+        .collect()
 }
 
 fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -> Vec<FileProviderItemPayload> {
@@ -1789,6 +1794,144 @@ mod tests {
     use super::*;
     use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, PERMISSION_READ, PERMISSION_WRITE, StateDb};
     use tempfile::tempdir;
+
+    // ------------------------------------------------------------------
+    // Task 1701: Finder single root. The root container enumerates the
+    // user's REAL top-level tree; the synthetic namespace containers
+    // (`My files` / `Shared with me` / `Offline` / `Conflicts`) stop being a
+    // Finder surface. Ruling: .claude/tasks/decisions/
+    // finder-sidebar-single-root.md. RED-first: these were seen failing
+    // against the namespace-split enumeration before the root arm changed.
+    //
+    // parent_id finding (spec point 1): `files.parent_id` stores the
+    // SERVER's parent UUID, or NULL for vault-root items — never a
+    // `namespace:` id (`normalize_parent_id` strips those from Finder
+    // writes). The namespace parentage existed ONLY at payload-assembly
+    // time, as the `file_entry_payload*` fallback identifier. So no state.db
+    // remap is needed: pointing the fallback at the root container presents
+    // top-level items as the root's children.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_1701_root_container_enumerates_real_files_not_namespaces() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "1701-file".into(),
+            path: "/notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "1701-folder".into(),
+            path: "/Projects".into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        })
+        .unwrap();
+        // A shared root stays in state.db (NO data loss) but is no longer a
+        // Finder surface — the ruling sends shared files to the webapp.
+        seed_shared_root(&db, "1701-shared", "Shared with me/Team", PERMISSION_READ);
+
+        let items = list_file_provider_items(&db, FP_ROOT_APPLE);
+        let names: Vec<&str> = items.iter().map(|i| i.filename.as_str()).collect();
+        assert!(
+            items.iter().all(|i| i.kind != "namespace"),
+            "zero synthetic namespace items may be enumerated at the root, got {names:?}"
+        );
+        for synthetic in ["My files", "Shared with me", "Offline", "Conflicts"] {
+            assert!(
+                !items.iter().any(|i| i.filename == synthetic),
+                "synthetic container {synthetic:?} must not be enumerated at the root"
+            );
+        }
+        assert!(
+            items.iter().any(|i| i.identifier == "1701-file"),
+            "the user's top-level file must be a child of the root container"
+        );
+        assert!(
+            items.iter().any(|i| i.identifier == "1701-folder"),
+            "the user's top-level folder must be a child of the root container"
+        );
+        assert!(
+            !items.iter().any(|i| i.identifier == "1701-shared"),
+            "shared roots are not a Finder surface (1701 ruling: webapp only)"
+        );
+    }
+
+    #[test]
+    fn test_1701_top_level_items_are_presented_as_children_of_the_root() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "1701-file".into(),
+            path: "/notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        // With a contract whose parent is the server root (`parent_id` NULL —
+        // exactly what snapshot ingest writes for top-level rows).
+        let mut contract = db.get_file_contract_state("1701-file").unwrap().unwrap();
+        contract.namespace = Namespace::MyFiles;
+        contract.item_kind = ItemKind::File;
+        db.set_file_contract_state(&contract).unwrap();
+
+        let items = list_file_provider_items(&db, FP_ROOT_APPLE);
+        let item = items.iter().find(|i| i.identifier == "1701-file").unwrap();
+        assert_eq!(
+            item.parent_identifier, FP_ROOT_APPLE,
+            "a top-level item must be presented as a child of the ROOT container, not of a synthetic namespace"
+        );
+    }
+
+    #[test]
+    fn test_1701_change_feed_top_level_item_parents_onto_the_root() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "1701-file".into(),
+            path: "/notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.record_file_change("1701-file", crate::state_db::FpChangeKind::Modified, None)
+            .unwrap();
+
+        let (changes, _) = db.list_file_changes_paged(None, 100).unwrap().unwrap();
+        let payloads = file_provider_change_payloads(&db, changes);
+        let payload = payloads.iter().find(|p| p.file_id == "1701-file").unwrap();
+        let item = payload
+            .item
+            .as_ref()
+            .expect("a modified row carries the full item payload");
+        assert_eq!(
+            item.parent_identifier, FP_ROOT_APPLE,
+            "the change feed must present a top-level item as a child of the ROOT container — the Swift materialized-set filter keys off this parent"
+        );
+    }
 
     #[test]
     fn test_shared_namespace_lists_roots_with_permission_capabilities() {

@@ -1000,20 +1000,28 @@ check("1697-T1: a raw daemon decimal fails decodeAnchor — the bug this fixes �
     try expect(WorkingSetStore.encodeDaemonAnchor("garbage-anchor") == nil, "an unparseable daemon anchor must never be handed to the system (callers keep the starting anchor)")
 }
 
-check("1697: working-set filter — namespace roots are always materialized") {
+check("1701: working-set filter — the root container is always materialized; namespace ids are gone") {
     let materialized: Set<String> = ["some-unrelated-folder"]
-    for parent in [
-        NSFileProviderItemIdentifier.rootContainer.rawValue,
-        BeebeebNamespace.myFiles.identifier.rawValue,
-        BeebeebNamespace.sharedWithMe.identifier.rawValue,
-        BeebeebNamespace.offline.identifier.rawValue,
-        BeebeebNamespace.conflicts.identifier.rawValue,
-    ] {
+    try expect(
+        WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: NSFileProviderItemIdentifier.rootContainer.rawValue, materialized: materialized),
+        "changes under the root container must always be reported"
+    )
+    // Task 1701: the synthetic namespace ids are no longer a Finder surface
+    // (one "Beebeeb" root). A change parented to one must be dropped.
+    for ns in ["namespace:my_files", "namespace:shared_with_me", "namespace:offline", "namespace:conflicts"] {
         try expect(
-            WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: parent, materialized: materialized),
-            "changes under \(parent) must always be reported"
+            !WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: ns, materialized: materialized),
+            "\(ns) is no longer enumerated (1701): its changes must be dropped by the working-set filter"
         )
     }
+}
+
+check("1701: a top-level row with no parent on either side is a root-child change — always reported") {
+    let materialized: Set<String> = ["some-unrelated-folder"]
+    try expect(
+        WorkingSetStore.changeTouchesMaterialized(oldParent: nil, newParent: nil, materialized: materialized),
+        "files.parent_id is NULL only at the vault root: a both-parents-nil row is a root-child change (a top-level create/modify, or a deletion whose parents are both gone), and the root is always materialized"
+    )
 }
 
 check("1697: working-set filter — materialized parents pass, unknown fail, empty set fails open") {

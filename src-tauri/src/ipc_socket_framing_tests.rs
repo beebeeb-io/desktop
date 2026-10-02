@@ -185,7 +185,7 @@ fn a_reply_larger_than_64_kib_arrives_intact_and_delimited() {
     fx.rt.block_on(async {
         let mut client = fx.connect().await;
         client
-            .write_all(b"{\"ListFileProviderItems\":{\"container_id\":\"namespace:my_files\"}}\n")
+            .write_all(b"{\"ListFileProviderItems\":{\"container_id\":\"__fp_root__\"}}\n")
             .await
             .unwrap();
         let line = read_line(&mut client).await;
@@ -213,7 +213,11 @@ fn a_request_split_across_two_writes_is_parsed_as_one_request() {
         let items = reply["FileProviderItems"]["items"]
             .as_array()
             .unwrap_or_else(|| panic!("expected FileProviderItems, got {reply}"));
-        assert_eq!(items.len(), 4, "the four namespaces");
+        assert_eq!(
+            items.len(),
+            0,
+            "the root container enumerates the REAL vault tree (1701): an empty vault lists nothing — the four synthetic namespaces are gone"
+        );
     });
 }
 

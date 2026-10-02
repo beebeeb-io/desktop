@@ -2042,11 +2042,18 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
     }
 
     #[test]
-    fn working_set_signal_filter_always_signals_namespace_and_unknown_parents() {
+    fn working_set_signal_filter_always_signals_root_and_unknown_parents() {
         let materialized = vec!["folder-1".to_string()];
-        assert!(working_set_signal_needed(&[Some("namespace:my_files".into())], &materialized));
-        assert!(working_set_signal_needed(&[Some("NSFileProviderRootContainerItemIdentifier".into())], &materialized));
+        assert!(
+            working_set_signal_needed(&[Some("NSFileProviderRootContainerItemIdentifier".into())], &materialized),
+            "the single root container is always materialized"
+        );
+        assert!(working_set_signal_needed(&[Some("__fp_root__".into())], &materialized));
         assert!(working_set_signal_needed(&[None], &materialized), "unknown parent (a deletion whose row is gone) fails open");
+        assert!(
+            !working_set_signal_needed(&[Some("namespace:my_files".into())], &materialized),
+            "1701: synthetic namespace ids are no longer a Finder surface — they are not materialized parents"
+        );
     }
 
     #[test]
