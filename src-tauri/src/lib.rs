@@ -24,6 +24,8 @@ mod config;
 mod conflict;
 mod desktop_search;
 mod engine_bridge;
+#[cfg(test)]
+mod flow7_live;
 // Unix-domain-socket IPC (macOS File Provider extension + Linux FUSE). Unix
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
 // in-process (see `windows_cf`), so this module is `unix`-only.
