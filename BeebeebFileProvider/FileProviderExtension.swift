@@ -1051,8 +1051,20 @@ extension FileProviderExtension: NSFileProviderThumbnailing {
     /// Folders, documents and anything without a parseable content type are
     /// NOT eligible — the caller answers "no thumbnail" without an IPC
     /// round trip, instead of surfacing a daemon-side error for every icon.
+    ///
+    /// Task 1699 review (PR #103 thread PRRT_kwDOSLX6Xs6oeNfK, P1): the sync
+    /// pipeline stores MIME content types (`image/png` — `guess_mime_type` in
+    /// engine_bridge.rs, forwarded verbatim by the FileProvider payload), so
+    /// a plain `UTType(raw)` identifier parse rejected EVERY synced media
+    /// file and no thumbnail was ever fetched. MIME converts via
+    /// `UTType(mimeType:)`; the UTI parse stays as the fallback for callers
+    /// that do carry a UTI (e.g. the system enumerator's own payloads).
     static func thumbnailEligible(kind: BeebeebItemKind, contentType: String?) -> Bool {
-        guard kind == .file, let raw = contentType, let type = UTType(raw) else {
+        guard kind == .file, let raw = contentType else {
+            return false
+        }
+        let type = UTType(raw) ?? UTType(mimeType: raw)
+        guard let type else {
             return false
         }
         return type.conforms(to: .image) || type.conforms(to: .movie) || type.conforms(to: .video)

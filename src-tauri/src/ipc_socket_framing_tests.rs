@@ -1051,6 +1051,40 @@ fn persist_thumbnail_plaintext_rejects_destinations_outside_allowed_roots() {
     assert!(!outside.exists(), "nothing may be written outside an allowed root");
 }
 
+// Task 1699 review (PR #103, thread PRRT_kwDOSLX6Xs6oeNfW, P1): the staging
+// write must never FOLLOW a pre-created `<dest>.part` symlink. The old plain
+// `File::create(&staging)` did: a caller that can reach the IPC socket plants
+// `<dest>.part` as a symlink to an arbitrary daemon-accessible file, the
+// parent-only containment check passes, and the plaintext truncates/overwrites
+// the target outside every allowed root. The anchored staging writer (task
+// 1247 / 1670-round-3 pattern: O_NOFOLLOW descent + fresh temp leaf +
+// anchored renameat) can only REPLACE a planted path, never write through it.
+#[test]
+fn persist_thumbnail_plaintext_never_writes_through_a_planted_staging_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("victim.txt");
+    std::fs::write(&outside, b"DO-NOT-TOUCH").unwrap();
+    let dest = dir.path().join("thumb.bin");
+    let staging = dir.path().join("thumb.bin.part");
+    std::os::unix::fs::symlink(&outside, &staging).unwrap();
+    let roots = vec![dir.path().to_path_buf()];
+    let written = crate::ipc_socket::persist_thumbnail_plaintext(&dest, &roots, b"payload")
+        .expect("a normal dest inside an allowed root must still succeed");
+    assert_eq!(written, b"payload".len() as u64);
+    assert_eq!(
+        std::fs::read(&outside).unwrap(),
+        b"DO-NOT-TOUCH",
+        "the pre-created staging symlink must never divert the write outside the allowed roots"
+    );
+    let meta = std::fs::symlink_metadata(&dest).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "the published dest must be a REAL file, not the planted symlink moved into place"
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+}
+
 #[test]
 fn fetch_thumbnail_rejects_destination_outside_allowed_roots() {
     // The dest_path arrives straight off the wire (untrusted), exactly like

@@ -1540,6 +1540,15 @@ check("1699-T3: only files with an image/video/movie content type are thumbnail-
     try expect(!FileProviderExtension.thumbnailEligible(kind: .file, contentType: "public.plain-text"), "documents are not")
     try expect(!FileProviderExtension.thumbnailEligible(kind: .file, contentType: nil), "an unknown content type is not (the daemon only has image/video thumbnails)")
     try expect(!FileProviderExtension.thumbnailEligible(kind: .file, contentType: "not a uti"), "an unparseable content type is not")
+    // Task 1699 review (PR #103, thread PRRT_kwDOSLX6Xs6oeNfK, P1): the sync
+    // pipeline stores MIME content types (`image/png`, engine_bridge.rs
+    // guess_mime_type), not UTIs. `UTType(raw)` only parses UTI identifiers,
+    // so the old guard made EVERY synced media ineligible and thumbnails
+    // never fetched. MIME must convert via `UTType(mimeType:)`, with the
+    // UTI parse retained as the fallback.
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "image/png"), "MIME image content types (what the sync pipeline stores) are eligible")
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "video/mp4"), "MIME video content types are eligible")
+    try expect(FileProviderExtension.thumbnailEligible(kind: .file, contentType: "public.png"), "UTI identifiers still parse (fallback retained)")
 }
 
 check("1699-T4: the FetchThumbnail request carries file_id + dest_path + max_dimension") {

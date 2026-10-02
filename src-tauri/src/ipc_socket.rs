@@ -1952,13 +1952,25 @@ fn thumbnail_destination_error(dest: &std::path::Path, allowed_roots: &[std::pat
     }
 }
 
-/// Stage decrypted thumbnail plaintext at `dest` atomically: write
-/// `<name>.part`, force owner-only permissions, then rename onto `dest` —
+/// Stage decrypted thumbnail plaintext at `dest` atomically: write a
+/// fresh temp leaf, force owner-only permissions, then rename onto `dest` —
 /// the extension can never observe a partial thumbnail, and a crash leaves
-/// only the `.part` for the TTL sweep to collect. Returns the plaintext byte
+/// only the temp file for the TTL sweep to collect. Returns the plaintext byte
 /// count. Caller has already validated containment
 /// ([`thumbnail_destination_error`]); this is defense in depth for the same
 /// rule and refuses to write outside the allowed roots regardless.
+///
+/// Task 1699 review (PR #103 thread PRRT_kwDOSLX6Xs6oeNfW, P1): this used to
+/// be a plain `File::create` on `<dest>.part` after the parent-only
+/// containment check — but `File::create` FOLLOWS a pre-created symlink, so a
+/// socket client could plant `<dest>.part` → arbitrary file and have the
+/// daemon truncate it outside every allowed root. Delegates to the
+/// fd-anchored staging writer (`write_hydrated_plaintext`, tasks 1247/1670),
+/// which descends O_NOFOLLOW from a trusted root fd, stages under a fresh
+/// random temp leaf, and publishes with an anchored `renameat` — it can
+/// REPLACE a planted path but can never WRITE THROUGH one. The temp shape
+/// (`.{leaf}.{uuid}.part`) is the same one the macOS TTL sweep is proven to
+/// leave alone while in flight.
 pub(crate) fn persist_thumbnail_plaintext(
     dest: &std::path::Path,
     allowed_roots: &[std::path::PathBuf],
@@ -1967,31 +1979,10 @@ pub(crate) fn persist_thumbnail_plaintext(
     if thumbnail_destination_error(dest, allowed_roots).is_some() {
         anyhow::bail!("thumbnail destination {} is not under an allowed root", dest.display());
     }
-    let leaf = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("thumbnail destination {} has no usable file name", dest.display()))?;
-    let staging = dest.with_file_name(format!("{leaf}.part"));
-    let write = || -> std::io::Result<()> {
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&staging)?;
-            file.write_all(plaintext)?;
-            file.sync_all()?;
-        }
-        // The whole module is `#[cfg(unix)]`; owner-only like every other
-        // decrypted-plaintext staging file (task 1670 round 2).
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
-        std::fs::rename(&staging, dest)
-    };
-    match write() {
-        Ok(()) => Ok(plaintext.len() as u64),
-        Err(e) => {
-            let _ = std::fs::remove_file(&staging);
-            Err(anyhow::anyhow!("could not stage thumbnail at {}: {e}", dest.display()))
-        }
-    }
+    let root_paths: Vec<&std::path::Path> = allowed_roots.iter().map(|p| p.as_path()).collect();
+    crate::engine_bridge::write_hydrated_plaintext(dest, &root_paths, plaintext)
+        .map(|_| plaintext.len() as u64)
+        .map_err(|e| anyhow::anyhow!("could not stage thumbnail at {}: {e}", dest.display()))
 }
 
 #[cfg(test)]
