@@ -592,11 +592,28 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 }
 
                 if let anchor = nextAnchor {
-                    WorkingSetStore.recordAnchor(anchor)
-                    observer.finishEnumeratingChanges(
-                        upTo: NSFileProviderSyncAnchor(Data(anchor.utf8)),
-                        moreComing: false
-                    )
+                    // Task 1697 review fix: the daemon's anchor is a raw
+                    // decimal rowid; the system's wire anchor must be the
+                    // encoded `v1:` form. A raw decimal handed to the system
+                    // comes back through `enumerateChanges(from:)`, fails
+                    // `decodeAnchor`, and answers `syncAnchorExpired` — a
+                    // full rescan after EVERY batch.
+                    if let wire = WorkingSetStore.encodeDaemonAnchor(anchor) {
+                        WorkingSetStore.recordAnchor(wire)
+                        observer.finishEnumeratingChanges(
+                            upTo: NSFileProviderSyncAnchor(Data(wire.utf8)),
+                            moreComing: false
+                        )
+                    } else {
+                        // Unparseable daemon anchor: do not advance the
+                        // system's cursor past what we can decode. Report
+                        // up-to-date from the starting anchor — the next
+                        // enumeration re-derives from it safely.
+                        observer.finishEnumeratingChanges(
+                            upTo: NSFileProviderSyncAnchor(Data(syncAnchor as NSData)),
+                            moreComing: false
+                        )
+                    }
                 } else if deliveredAny || nextAnchor == nil {
                     // An empty log has no anchor yet: finish with the starting
                     // anchor so the system's cursor does not regress, and
@@ -657,9 +674,16 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             // for long (sendRequest times out at metadataTimeoutSeconds).
             var anchor: String?
             if let daemonAnchor = try? ipc.syncAnchor() {
-                anchor = daemonAnchor
-                WorkingSetStore.recordAnchor(daemonAnchor)
-            } else {
+                // Task 1697 review fix: encode the daemon's raw decimal rowid
+                // into the wire form BEFORE handing it to the system or
+                // persisting it — a raw decimal fails decodeAnchor on the
+                // next enumerateChanges (syncAnchorExpired → full rescan).
+                anchor = WorkingSetStore.encodeDaemonAnchor(daemonAnchor)
+                if let anchor {
+                    WorkingSetStore.recordAnchor(anchor)
+                }
+            }
+            if anchor == nil {
                 anchor = WorkingSetStore.loadState().lastAnchor
             }
             if let anchor {
@@ -695,18 +719,30 @@ extension FileProviderExtension {
             // apply).
             let collector = MaterializedSetCollector()
             let enumerator = manager.enumeratorForMaterializedItems()
-            let group = DispatchGroup()
             var page: NSFileProviderPage = NSFileProviderPage(Data())
             var safetyPages = 0
             while safetyPages < 100 {
                 safetyPages += 1
-                group.enter()
+                // Task 1697 review fix: page completion is signalled by the
+                // COLLECTOR when the system's finish callback lands — NOT
+                // when `enumerateItems(for:startingAt:)` returns. Delivery
+                // happens via didEnumerate/finishEnumerating ASYNCHRONOUSLY;
+                // waiting on the method's return woke this loop early,
+                // `collector.nextPage` was still nil, the loop broke, and an
+                // EMPTY materialized set was persisted (filtering never
+                // became effective).
+                collector.beginPage()
                 let pageToSend = page
                 DispatchQueue.global(qos: .utility).async {
                     enumerator.enumerateItems(for: collector, startingAt: pageToSend)
-                    group.leave()
                 }
-                _ = group.wait(timeout: .now() + 5)
+                // Bounded wait: a silent/hung enumerator must not block the
+                // completion handler forever (Apple budgets "a few seconds"
+                // for this callback). A timeout breaks pagination instead of
+                // racing a still-in-flight page with the next request.
+                if collector.waitPageCompletion(timeout: .seconds(5)) == .timedOut {
+                    break
+                }
                 guard let next = collector.nextPage, !collector.finished else {
                     break
                 }
@@ -738,6 +774,31 @@ final class MaterializedSetCollector: NSObject, NSFileProviderEnumerationObserve
     private(set) var nextPage: NSFileProviderPage?
     private(set) var finished = false
 
+    // Task 1697 review fix: the page-completion channel the pagination loop
+    // waits on. A FRESH semaphore per page: a stale signal from a page whose
+    // wait timed out can never release a later page's wait.
+    private var pageCompletion: DispatchSemaphore?
+
+    /// Arms the wait for the CURRENT page. Call before dispatching
+    /// `enumerateItems(for:startingAt:)`.
+    func beginPage() {
+        pageCompletion = DispatchSemaphore(value: 0)
+    }
+
+    /// Blocks until the system reports the page complete
+    /// (`finishEnumerating(upTo:)` / `finishEnumeratingWithError`) or the
+    /// timeout elapses. Without a begun page this reports `.timedOut`.
+    func waitPageCompletion(timeout: DispatchTimeInterval) -> DispatchTimeoutResult {
+        pageCompletion?.wait(timeout: .now() + timeout) ?? .timedOut
+    }
+
+    /// Deliverer-side hook: state is published FIRST so the woken waiter
+    /// observes a consistent page result (the signal/wait edge provides the
+    /// memory ordering).
+    private func signalPageCompletion() {
+        pageCompletion?.signal()
+    }
+
     func didEnumerate(_ items: [NSFileProviderItem]) {
         for item in items {
             let id = item.itemIdentifier.rawValue
@@ -751,6 +812,7 @@ final class MaterializedSetCollector: NSObject, NSFileProviderEnumerationObserve
     func finishEnumerating(upTo nextPage: NSFileProviderPage?) {
         self.nextPage = nextPage
         finished = nextPage == nil
+        signalPageCompletion()
     }
 
     func finishEnumeratingWithError(_ error: Error) {
@@ -764,6 +826,7 @@ final class MaterializedSetCollector: NSObject, NSFileProviderEnumerationObserve
             // Not expected from the system enumerator; ignore.
         }
         _ = error
+        signalPageCompletion()
     }
 
     func collectedFolderIdentifiers() -> Set<String> {

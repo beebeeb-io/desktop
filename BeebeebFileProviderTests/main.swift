@@ -983,6 +983,23 @@ check("1697: recordAnchor is monotonic on disk (injectable path — the real App
     try expect(!WorkingSetStore.recordAnchor("garbage", to: stateURL), "an unparseable anchor is refused outright")
 }
 
+// Task 1697 review fix (T1): the daemon speaks RAW decimal rowids ("1", "41")
+// — review thread on FileProviderExtension.swift:598. `finishEnumeratingChanges`
+// and `currentSyncAnchor` handed those raw decimals to the system; the next
+// `enumerateChanges(from:)` decodes them via `decodeAnchor`, which only accepts
+// the `v1:`-prefixed wire form → `syncAnchorExpired` → a FULL rescan after
+// EVERY batch. The boundary helper encodes the daemon value before it is
+// handed to (or persisted for) the system.
+check("1697-T1: the daemon-anchor boundary encodes the decimal rowid into the wire form") {
+    try expect(WorkingSetStore.encodeDaemonAnchor("1") == "v1:1", "the daemon's raw decimal '1' must reach the system as the 'v1:' wire form")
+    try expect(WorkingSetStore.decodeAnchor(Data((WorkingSetStore.encodeDaemonAnchor("41") ?? "").utf8)) == 41, "daemon decimal → encode → decode must round-trip (the next enumerateChanges resumes from it)")
+}
+
+check("1697-T1: a raw daemon decimal fails decodeAnchor — the bug this fixes — and garbage encodes to nil") {
+    try expect(WorkingSetStore.decodeAnchor(Data("1".utf8)) == nil, "raw '1' is NOT the wire form: handed to the system it comes back and fails decodeAnchor → syncAnchorExpired → full rescan after every batch")
+    try expect(WorkingSetStore.encodeDaemonAnchor("garbage-anchor") == nil, "an unparseable daemon anchor must never be handed to the system (callers keep the starting anchor)")
+}
+
 check("1697: working-set filter — namespace roots are always materialized") {
     let materialized: Set<String> = ["some-unrelated-folder"]
     for parent in [
@@ -1093,19 +1110,70 @@ check("1697: XPCBridge decodes the change page (anchor + kinds + items)") {
                           "kind": "file", "size_bytes": 3, "status": "cloud_only", "capabilities": 1]],
                 ["file_id": "f-2", "kind": "deleted", "old_parent_id": "dir-1"],
             ],
-            "next_anchor": "v1:9",
+            "next_anchor": "9",
         ],
     ])
     try expect(page.changes.count == 2, "both changes decode")
     try expect(page.changes[0].item?.filename == "a.txt", "created rows carry the full item payload")
     try expect(page.changes[1].item == nil && page.changes[1].oldParentID == "dir-1", "deletions carry the old parent")
-    try expect(page.nextAnchor == "v1:9", "the anchor to persist comes back")
+    try expect(page.nextAnchor == "9", "the anchor to persist comes back — the daemon's RAW decimal rowid (task 1697-T1: the extension encodes it at the boundary)")
     let empty = bridge.test_decodeChangesPayload([:])
     try expect(empty.changes.isEmpty && empty.nextAnchor == nil, "a response without FileProviderChanges reads as empty")
 }
 
-print("ipc-framing: \(passed) passed, \(failed) failed")
-exit(failed == 0 ? 0 : 1)
+// MARK: - Task 1697 review fix (T4): materialized-set page completion
+//
+// `materializedItemsDidChange` used to leave a DispatchGroup right after
+// `enumerator.enumerateItems(for:startingAt:)` RETURNED — but delivery
+// happens via didEnumerate/finishEnumerating callbacks ASYNCHRONOUSLY. The
+// 5s wait woke early, `collector.nextPage` was still nil → loop broke → an
+// EMPTY materialized set was persisted and filtering never became effective.
+// The collector now signals page completion itself and the loop waits on it.
+// Pure Foundation/Darwin: the collector class compiles into this harness,
+// and the finish callbacks can be driven by hand exactly the way the system
+// delivers them.
+
+check("1697-T4: the collector's page wait is released by the ASYNC finish callback, not by enumerateItems returning") {
+    let collector = MaterializedSetCollector()
+    collector.beginPage()
+    // Simulate the system exactly: the enumerateItems CALL returns
+    // immediately (nothing to do here), the finish callback lands later.
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+        collector.didEnumerate([])
+        collector.finishEnumerating(upTo: nil)
+    }
+    let outcome = collector.waitPageCompletion(timeout: .seconds(5))
+    try expect(outcome == .success, "the finish callback must release the page wait (a return-based wait would have woken BEFORE this)")
+    try expect(collector.finished, "finishEnumerating(upTo: nil) marks the page complete")
+    try expect(collector.nextPage == nil, "a nil next page ends pagination")
+}
+
+check("1697-T4: a paginated page delivers nextPage through the completion wait") {
+    let collector = MaterializedSetCollector()
+    collector.beginPage()
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+        collector.didEnumerate([])
+        collector.finishEnumerating(upTo: NSFileProviderPage(Data("beebeeb-page:7".utf8)))
+    }
+    let outcome = collector.waitPageCompletion(timeout: .seconds(5))
+    try expect(outcome == .success, "the finish callback releases the wait")
+    try expect(!collector.finished && collector.nextPage != nil, "a minted next page keeps pagination going")
+}
+
+check("1697-T4: the page wait is bounded (5s budget) and a stale signal never releases the NEXT page") {
+    let collector = MaterializedSetCollector()
+    collector.beginPage()
+    let started = Date()
+    let timedOut = collector.waitPageCompletion(timeout: .milliseconds(150))
+    try expect(timedOut == .timedOut, "a silent enumerator must time out, not block the completion handler forever")
+    try expect(Date().timeIntervalSince(started) >= 0.1, "the wait actually waited (bounded, not instant)")
+    // The system's late finish callback for the TIMED-OUT page arrives now;
+    // it must NOT release the wait of the page that follows.
+    collector.finishEnumerating(upTo: NSFileProviderPage(Data("beebeeb-page:9".utf8)))
+    collector.beginPage()
+    let second = collector.waitPageCompletion(timeout: .milliseconds(150))
+    try expect(second == .timedOut, "a fresh semaphore per page isolates stale signals from later waits")
+}
 
 // MARK: - Test hooks (task 1697)
 
@@ -1116,3 +1184,6 @@ extension XPCBridge {
         Self.decodeChanges(dictionary)
     }
 }
+
+print("ipc-framing: \(passed) passed, \(failed) failed")
+exit(failed == 0 ? 0 : 1)

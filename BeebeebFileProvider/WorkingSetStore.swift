@@ -54,6 +54,22 @@ enum WorkingSetStore {
         return Int64(text.dropFirst(anchorVersionPrefix.count))
     }
 
+    /// Task 1697 review fix: the daemon speaks RAW decimal rowids ("1", "41")
+    /// — but the wire anchor handed to the system must be the `v1:`-prefixed
+    /// form, the only shape `decodeAnchor` accepts. Encode the daemon value
+    /// at EVERY boundary where it reaches the system (finishEnumeratingChanges,
+    /// currentSyncAnchor) or is persisted (recordAnchor): a raw decimal that
+    /// comes back through `enumerateChanges(from:)` fails decodeAnchor →
+    /// `syncAnchorExpired` → a full rescan after EVERY batch. `nil` when the
+    /// daemon value is not a decimal rowid — callers must not advance the
+    /// system's cursor with it.
+    static func encodeDaemonAnchor(_ raw: String) -> String? {
+        guard let seq = Int64(raw, radix: 10) else {
+            return nil
+        }
+        return String(decoding: encodeAnchor(seq), as: UTF8.self)
+    }
+
     /// Should a fresh daemon anchor replace the persisted one? Only a
     /// strictly LATER cursor advances the persisted state: an equal cursor is
     /// a no-op and an older one is daemon-side data loss (a stale anchor must
