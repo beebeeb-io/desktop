@@ -12014,4 +12014,144 @@ mod tests {
         assert_eq!(row.status, FileStatus::CloudOnly, "the restored row leaves the trash view");
         assert!(applied.contains(&file.to_string()), "the flip is reported for the working set");
     }
+
+    #[test]
+    fn test_1698_review_hydrate_keeps_a_trashed_row_trashed_after_a_successful_open() {
+        // PR #100 review (Codex P1, engine_bridge.rs ~2500): the pre-hydrate
+        // status must be the row's status BEFORE the flip to `Downloading`.
+        // The trash-view scenario — the user opens a file from the macOS
+        // Trash — re-read the DB AFTER `hydrate_file_with_progress` had
+        // already flipped the row, so it always saw `Downloading`,
+        // `hydrate_final_status` returned `Local`, and the item reparented
+        // itself OUT of the trash view (the `Trashing` marker lost).
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [7u8; 32];
+        let file_key = hydration_test_key(master_key, TEST_FILE_ID);
+        let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 2);
+        let bridge =
+            test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_bridge_row(&bridge, TEST_FILE_ID, "trash-view.txt", None, FileStatus::Trashing, 8);
+        let dest = dir.path().join("trash-view.txt");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                bridge
+                    .hydrate_file_with_progress(TEST_FILE_ID, &dest, &[dir.path()], None)
+                    .await
+            })
+            .unwrap();
+        server.finish();
+        let row = bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            FileStatus::Trashing,
+            "opening a file from the macOS Trash view must NOT un-trash it"
+        );
+    }
+
+    #[test]
+    fn test_1698_review_trash_echo_marks_descendants_of_an_already_parked_folder() {
+        // PR #100 review (Codex P1, engine_bridge.rs ~5648): Finder trashing a
+        // folder parks ONLY the folder row (`queue_finder_delete`); the
+        // server's `file_trash` echo is what marks the descendants. The
+        // parked-root early return discarded the echo entirely, so nested
+        // rows stayed unmarked — and `prune_absent` protects only children
+        // whose IMMEDIATE parent is `Trashing`, so grandchildren could drop
+        // out of the trash view. The echo must still mark the unmarked
+        // subtree when the root is already parked.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let folder = "park0000-0000-4000-8000-000000000001";
+        let child = "park0000-0000-4000-8000-000000000002";
+        let grandchild = "park0000-0000-4000-8000-000000000003";
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::Trashing, true, 10);
+        seed_bridge_entry(
+            &bridge,
+            child,
+            "docs/notes.txt",
+            Some(folder),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
+        seed_bridge_entry(
+            &bridge,
+            grandchild,
+            "docs/notes/attachment.bin",
+            Some(child),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 7,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": folder }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        for id in [folder, child, grandchild] {
+            let row = bridge.db().get_file(id).unwrap().unwrap();
+            assert_eq!(row.status, FileStatus::Trashing, "{id} must be in the trash view");
+        }
+        assert!(
+            applied.contains(&grandchild.to_string()) && applied.contains(&child.to_string()),
+            "newly marked rows are reported for the working-set signal: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn test_1698_review_restore_un_trashes_the_entire_held_subtree() {
+        // PR #100 review (Codex P1, engine_bridge.rs ~5715): a restored FOLDER
+        // must take its whole held subtree out of the trash view, not just the
+        // root row. The authoritative re-snapshot preserves `Trashing` rows by
+        // design, so it can never repair the descendants — they would linger
+        // in the Trash view, and direct children would even become top-level
+        // trash entries after the parent leaves.
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let folder = "rest0000-0000-4000-8000-000000000001";
+        let child = "rest0000-0000-4000-8000-000000000002";
+        let grandchild = "rest0000-0000-4000-8000-000000000003";
+        seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::Trashing, true, 10);
+        seed_bridge_entry(
+            &bridge,
+            child,
+            "docs/notes.txt",
+            Some(folder),
+            FileStatus::Trashing,
+            false,
+            10,
+        );
+        seed_bridge_entry(
+            &bridge,
+            grandchild,
+            "docs/notes/attachment.bin",
+            Some(child),
+            FileStatus::Trashing,
+            false,
+            10,
+        );
+
+        let op = crate::api_client::SyncOp {
+            seq_id: 8,
+            op_type: "file_restore".into(),
+            payload: serde_json::json!({ "id": folder }),
+        };
+        let mut conflicts = Vec::new();
+        let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
+        for id in [folder, child, grandchild] {
+            let row = bridge.db().get_file(id).unwrap().unwrap();
+            assert_eq!(
+                row.status,
+                FileStatus::CloudOnly,
+                "{id} must leave the trash view with the restored folder"
+            );
+        }
+        assert!(
+            applied.contains(&grandchild.to_string()) && applied.contains(&folder.to_string()),
+            "every flipped row is reported for the working-set signal: {applied:?}"
+        );
+    }
 }

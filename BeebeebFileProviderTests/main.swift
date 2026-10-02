@@ -1413,5 +1413,27 @@ check("1698-E7: the daemon's real message still reaches the system (error truth)
     try expect(message?.contains("allowed root") == true, "the real message must survive the mapping, got \(message ?? "nil")")
 }
 
+check("1698-E8: daemonRejected maps to DEFINITIVE cannotSynchronize (not retried)") {
+    // PR #100 review (Codex P2): the daemon (or this extension's own policy)
+    // actively REFUSED the request — restarting or unlocking the daemon
+    // cannot make the request valid — so it must ride the definitive class,
+    // never the transient serverUnreachable one Finder would retry forever.
+    let err = BeebeebIPCError.daemonRejected("Beebeeb cannot create items inside the Trash.") as NSError
+    try expect(err.domain == NSFileProviderErrorDomain, "bridges into NSFileProviderErrorDomain, got \(err.domain)")
+    try expect(
+        err.code == NSFileProviderError.cannotSynchronize.rawValue,
+        "a daemon rejection is definitive (cannotSynchronize), got code \(err.code)"
+    )
+    try expect(!BeebeebIPCError.daemonRejected("x").isTransient, "a daemon rejection must never arm the resolved-signal")
+}
+
+check("1698-E9: the daemon's rejection text is the user-facing message") {
+    let err = BeebeebIPCError.daemonRejected("Beebeeb cannot create items inside the Trash.")
+    try expect(
+        err.errorDescription == "Beebeeb cannot create items inside the Trash.",
+        "the real message must survive the mapping, got \(err.errorDescription ?? "nil")"
+    )
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)
