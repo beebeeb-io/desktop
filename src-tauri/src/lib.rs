@@ -8446,6 +8446,39 @@ pub fn run() {
                 });
             }
 
+            // Task 1698 part 3 (closes 1696 / audit G8): sweep stale File
+            // Provider domains at every app start — signed app context only
+            // (the extension and the app both hold the identity; the
+            // unsigned CLI cannot do this and never runs this hook).
+            // Best-effort: a failure (no identity, transient NSFileProvider
+            // Manager error) is logged and never blocks startup. Idempotent:
+            // a clean registry removes nothing, and our own domain is never
+            // a candidate.
+            #[cfg(target_os = "macos")]
+            {
+                tauri::async_runtime::spawn(async move {
+                    match crate::macos_file_provider::cleanup_stale_domains() {
+                        Ok(cleanup) => {
+                            if cleanup.removed_count() > 0 || !cleanup.skipped.is_empty() || !cleanup.ours_present {
+                                tracing::info!(
+                                    removed = cleanup.removed_count(),
+                                    skipped = cleanup.skipped.len(),
+                                    ours_present = cleanup.ours_present,
+                                    "stale File Provider domain sweep complete (task 1698)"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "stale File Provider domain sweep unavailable in this context (unsigned CLI gets -2001); \
+                                 the next signed app start retries"
+                            );
+                        }
+                    }
+                });
+            }
+
             // Spawn background update checker
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

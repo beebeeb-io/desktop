@@ -245,6 +245,150 @@ pub enum WorkingSetSignalOutcome {
     Failed,
 }
 
+/// Task 1698 part 3 (closes 1696, audit G8): the ONE domain we own. The
+/// zombie `io.beebeeb.desktop.FileProvider` domain from the pre-rename bundle
+/// id (task 1696 forensics) keeps its "Beebeeb-Drive" volume in
+/// `~/Library/CloudStorage` until a SIGNED context enumerates and removes it
+/// (`NSFileProviderManager.getDomains` needs app identity — an unsigned CLI
+/// gets error -2001). Must stay identical to `BeebeebDomainIdentifier` in
+/// `src-tauri/macos/FileProviderBridge.m`.
+pub const DOMAIN_IDENTIFIER: &str = "io.beebeeb.app.domain";
+
+/// Pure filter: which of the system's registered domains must be REMOVED?
+/// Every domain whose identifier is not EXACTLY ours is stale — a zombie
+/// from an older bundle id, a renamed registration, or another app's domain
+/// that must never have been created in our app group context. Our own
+/// identifier is never stale (the cleanup can never remove the live domain,
+/// even if the system reports it twice). The comparison is exact and
+/// case-sensitive: `io.beebeeb.app.domain` ≠ `IO.BEEBEEB.APP.DOMAIN`.
+pub fn stale_domain_identifiers<'a>(domains: &'a [String], ours: &str) -> Vec<&'a str> {
+    domains
+        .iter()
+        .map(String::as_str)
+        .filter(|identifier| *identifier != ours)
+        .collect()
+}
+
+/// What one app-start cleanup run did (logged honestly; also surfaced for
+/// tests and diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleDomainCleanup {
+    /// Identifiers that were present and stale, with their removal result:
+    /// Ok(()) = removed, Err(message) = the system refused (logged, NOT
+    /// retried here — the next app start retries the whole sweep).
+    pub removals: Vec<(String, Result<(), String>)>,
+    /// Domains found foreign but not attempted (enumeration/other errors).
+    pub skipped: Vec<String>,
+    /// Our own domain was present (or not) — informational only; it is never
+    /// touched.
+    pub ours_present: bool,
+}
+
+impl StaleDomainCleanup {
+    pub fn removed_count(&self) -> usize {
+        self.removals.iter().filter(|(_, result)| result.is_ok()).count()
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod cleanup_ffi {
+    use std::ffi::CStr;
+    use std::os::raw::c_char;
+
+    unsafe extern "C" {
+        fn beebeeb_fp_list_domains(
+            ids_buffer: *mut c_char,
+            ids_buffer_len: usize,
+            error_buffer: *mut c_char,
+            error_buffer_len: usize,
+        ) -> i32;
+        fn beebeeb_fp_remove_domain_by_id(
+            identifier: *const c_char,
+            error_buffer: *mut c_char,
+            error_buffer_len: usize,
+        ) -> i32;
+    }
+
+    /// Enumerate every registered domain identifier via the ObjC bridge.
+    /// Newline-separated in `buffer`; returns the count, or Err(message).
+    pub fn list_domains() -> Result<Vec<String>, String> {
+        let mut ids_buffer = [0i8; 8192];
+        let mut error_buffer = [0i8; 1024];
+        let count = unsafe {
+            beebeeb_fp_list_domains(
+                ids_buffer.as_mut_ptr(),
+                ids_buffer.len(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if count < 0 {
+            return Err(super::buffer_to_string(&error_buffer)
+                .unwrap_or_else(|| "enumerate File Provider domains failed".to_string()));
+        }
+        let raw = super::buffer_to_string(&ids_buffer).unwrap_or_default();
+        Ok(raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub fn remove_domain(identifier: &str) -> Result<(), String> {
+        let mut error_buffer = [0i8; 1024];
+        let code = unsafe {
+            let c_id = std::ffi::CString::new(identifier)
+                .map_err(|_| "domain identifier contained a NUL byte".to_string())?;
+            beebeeb_fp_remove_domain_by_id(
+                c_id.as_ptr(),
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if code < 0 {
+            return Err(super::buffer_to_string(&error_buffer)
+                .unwrap_or_else(|| "remove File Provider domain failed".to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// App-start stale-domain sweep (task 1698 part 3 / 1696 acceptance). Runs in
+/// the SIGNED app process only — the Tauri app holds the Developer ID
+/// identity the NSFileProviderManager calls require; an unsigned CLI context
+/// gets -2001, which surfaces here as Err and is logged by the caller
+/// WITHOUT failing anything (the engine does not depend on this).
+///
+/// Idempotent by construction: a second run finds no foreign domains and
+/// removes nothing. Our own domain is NEVER a removal candidate (the pure
+/// filter above guarantees it). Per-domain removal failures are recorded and
+/// skipped — one stubborn zombie never blocks the rest or the app.
+#[cfg(target_os = "macos")]
+pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, String> {
+    let domains = match cleanup_ffi::list_domains() {
+        Ok(domains) => domains,
+        Err(error) => return Err(error),
+    };
+    let ours_present = domains.iter().any(|identifier| identifier == DOMAIN_IDENTIFIER);
+    let stale = stale_domain_identifiers(&domains, DOMAIN_IDENTIFIER);
+    let mut cleanup = StaleDomainCleanup {
+        removals: Vec::new(),
+        skipped: Vec::new(),
+        ours_present,
+    };
+    for identifier in stale {
+        match cleanup_ffi::remove_domain(identifier) {
+            Ok(()) => cleanup.removals.push((identifier.to_string(), Ok(()))),
+            Err(error) => {
+                tracing::warn!(identifier = %identifier, error = %error, "stale-domain removal failed; the next app start retries");
+                cleanup.skipped.push(identifier.to_string());
+            }
+        }
+    }
+    Ok(cleanup)
+}
+
 /// Pure decision core for the runner's signal path: an operation batch that
 /// changed items always asks for a working-set signal (Replicated honors ONLY
 /// `.workingSet`); anything else never touches the bridge.
@@ -306,6 +450,47 @@ mod tests {
         assert_eq!(
             decide_install_step(&Ok(DomainUserEnabledState::Enabled)),
             InstallDecision::Proceed
+        );
+    }
+
+    // ── Task 1698 part 3: stale domain cleanup (closes 1696, audit G8) ─────
+
+    #[test]
+    fn test_1698_stale_domain_filter_removes_foreign_domains_keeps_ours() {
+        // The zombie from the 0.8.6 era (io.beebeeb.desktop.FileProvider) and
+        // anything else foreign must be removed; the CURRENT domain never.
+        let domains = vec![
+            "io.beebeeb.desktop.FileProvider".to_string(),
+            "io.beebeeb.app.domain".to_string(),
+            "com.other.zombie".to_string(),
+        ];
+        let stale = stale_domain_identifiers(&domains, "io.beebeeb.app.domain");
+        assert_eq!(
+            stale,
+            vec!["io.beebeeb.desktop.FileProvider", "com.other.zombie"],
+            "every non-Beebeeb domain is stale"
+        );
+    }
+
+    #[test]
+    fn test_1698_stale_domain_filter_is_idempotent_and_safe() {
+        // A clean registry removes nothing.
+        assert_eq!(
+            stale_domain_identifiers(&["io.beebeeb.app.domain".to_string()], "io.beebeeb.app.domain"),
+            Vec::<&str>::new()
+        );
+        // An empty registry removes nothing.
+        assert_eq!(stale_domain_identifiers(&[], "io.beebeeb.app.domain"), Vec::<&str>::new());
+        // NEVER a partial match: only exact foreign identifiers are stale.
+        assert_eq!(
+            stale_domain_identifiers(&["io.beebeeb.app.domain.stale".to_string()], "io.beebeeb.app.domain"),
+            vec!["io.beebeeb.app.domain.stale"]
+        );
+        // Case matters: the identifier is compared exactly.
+        assert_eq!(
+            stale_domain_identifiers(&["IO.BEEBEEB.APP.DOMAIN".to_string()], "io.beebeeb.app.domain"),
+            vec!["IO.BEEBEEB.APP.DOMAIN"],
+            "a case-mangled copy of our id is NOT ours and must be cleaned"
         );
     }
 

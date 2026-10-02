@@ -1196,6 +1196,151 @@ check("1697-T4: the page wait is bounded (5s budget) and a stale signal never re
     try expect(second == .timedOut, "a fresh semaphore per page isolates stale signals from later waits")
 }
 
+// MARK: - 1698 part 1: contentPolicy mapping
+
+check("1698-C1: the ROOT item reports .downloadLazily (lazy materialization of the tree)") {
+    let item = FileProviderItem(model: .root())
+    try expect(item.contentPolicy == .downloadLazily, "root contentPolicy must be .downloadLazily, got \(item.contentPolicy.rawValue)")
+}
+
+check("1698-C2: an effectively-PINNED file reports .downloadEagerlyAndKeepDownloaded") {
+    var model = item1697(capabilities: BeebeebProviderItem.read)
+    model = BeebeebProviderItem(
+        identifier: model.identifier,
+        parentIdentifier: model.parentIdentifier,
+        filename: model.filename,
+        kind: model.kind,
+        sizeBytes: model.sizeBytes,
+        contentType: model.contentType,
+        status: model.status,
+        capabilities: model.capabilities,
+        versionIdentifier: model.versionIdentifier,
+        pinned: true
+    )
+    let item = FileProviderItem(model: model)
+    try expect(item.contentPolicy == .downloadEagerlyAndKeepDownloaded, "pinned file contentPolicy got \(item.contentPolicy.rawValue)")
+}
+
+check("1698-C3: a PINNED FOLDER also reports .downloadEagerlyAndKeepDownloaded (children inherit)") {
+    var model = item1697(capabilities: BeebeebProviderItem.read)
+    model = BeebeebProviderItem(
+        identifier: model.identifier,
+        parentIdentifier: model.parentIdentifier,
+        filename: model.filename,
+        kind: .folder,
+        sizeBytes: model.sizeBytes,
+        contentType: model.contentType,
+        status: model.status,
+        capabilities: model.capabilities,
+        versionIdentifier: model.versionIdentifier,
+        pinned: true
+    )
+    let item = FileProviderItem(model: model)
+    try expect(item.contentPolicy == .downloadEagerlyAndKeepDownloaded, "pinned folder contentPolicy got \(item.contentPolicy.rawValue)")
+}
+
+check("1698-C4: an UNPINNED item reports .inherited (root default governs)") {
+    var model = item1697(capabilities: BeebeebProviderItem.read)
+    model = BeebeebProviderItem(
+        identifier: model.identifier,
+        parentIdentifier: model.parentIdentifier,
+        filename: model.filename,
+        kind: model.kind,
+        sizeBytes: model.sizeBytes,
+        contentType: model.contentType,
+        status: model.status,
+        capabilities: model.capabilities,
+        versionIdentifier: model.versionIdentifier,
+        pinned: false
+    )
+    let item = FileProviderItem(model: model)
+    try expect(item.contentPolicy == .inherited, "unpinned contentPolicy got \(item.contentPolicy.rawValue)")
+}
+
+check("1698-C5: decodeItem reads the daemon's `pinned` field (absent = false, older daemons)") {
+    let bridge = XPCBridge()
+    let decoder = { (dict: [String: Any]) -> BeebeebProviderItem? in
+        // XPCBridge.decodeItem is private; reach it through the same
+        // item-payload path the framing harness already uses: a one-item
+        // ListFileProviderItems reply.
+        try? bridge.test_decodeItemsPayload(["FileProviderItems": ["items": [dict]]]).first
+    }
+    let base: [String: Any] = [
+        "identifier": "f-1",
+        "parent_identifier": "NSFileProviderRootContainerItemIdentifier",
+        "filename": "a.txt",
+        "kind": "file",
+        "status": "cloud_only",
+    ]
+    let unpinned = decoder(base)
+    try expect(unpinned?.pinned == false, "absent pinned defaults to false")
+    let pinned = decoder(base.merging(["pinned": true]) { _, new in new })
+    try expect(pinned?.pinned == true, "pinned=true decodes")
+}
+
+// MARK: - 1698 part 2: trash semantics (ruling: full sync)
+
+check("1698-T1: item(for: trashContainer) is answered locally as a system folder (no IPC)") {
+    // The trash container is a SYSTEM container: always materialized,
+    // never a daemon lookup. This must not touch the IPC socket (which the
+    // test binary cannot reach) — a successful local answer proves it.
+    let item = try XPCBridge().item(identifier: .trashContainer)
+    try expect(item.identifier == NSFileProviderItemIdentifier.trashContainer.rawValue, "the trash container identifies itself")
+    try expect(item.kind == .folder, "the trash container is a folder")
+    try expect(item.capabilities == BeebeebProviderItem.read, "the system trash is read-only to us, got \(item.capabilities)")
+}
+
+check("1698-T2: deleteDisposition rejects a non-recursive NON-EMPTY folder with directoryNotEmpty") {
+    try expect(
+        FileProviderExtension.deleteDisposition(isFolder: true, childItemCount: 2, recursive: false) == .directoryNotEmpty,
+        "a non-recursive delete of a folder with children must be rejected"
+    )
+    try expect(
+        FileProviderExtension.deleteDisposition(isFolder: true, childItemCount: 0, recursive: false) == .queueServerTrash,
+        "an EMPTY folder deletes fine without the recursive option"
+    )
+    try expect(
+        FileProviderExtension.deleteDisposition(isFolder: true, childItemCount: 2, recursive: true) == .queueServerTrash,
+        "the recursive option accepts a non-empty folder"
+    )
+    try expect(
+        FileProviderExtension.deleteDisposition(isFolder: false, childItemCount: nil, recursive: false) == .queueServerTrash,
+        "a file deletes without the recursive option"
+    )
+    try expect(
+        FileProviderExtension.deleteDisposition(isFolder: true, childItemCount: nil, recursive: false) == .queueServerTrash,
+        "an unknown child count fails OPEN (the daemon always sends one for folders)"
+    )
+}
+
+check("1698-T3: the trash container is ALWAYS materialized for the working-set filter") {
+    let always = WorkingSetStore.alwaysMaterializedIdentifiers()
+    try expect(always.contains(NSFileProviderItemIdentifier.trashContainer.rawValue), "the trash container is a system container")
+    try expect(
+        WorkingSetStore.changeTouchesMaterialized(
+            oldParent: nil,
+            newParent: NSFileProviderItemIdentifier.trashContainer.rawValue,
+            materialized: ["some-unrelated-folder"]
+        ),
+        "a change parented at the trash container is reported even with an unrelated materialized set"
+    )
+}
+
+check("1698-T4: a modify whose NEW parent is the trash container routes to the server trash") {
+    try expect(
+        FileProviderExtension.modifyRoute(newParent: .trashContainer) == .serverTrash,
+        "the Finder-side trash is a reparent to the trash container → the server's existing trash op"
+    )
+    try expect(
+        FileProviderExtension.modifyRoute(newParent: .rootContainer) == .metadataUpdate,
+        "a reparent under the root is an ordinary move"
+    )
+    try expect(
+        FileProviderExtension.modifyRoute(newParent: NSFileProviderItemIdentifier("dir-9")) == .metadataUpdate,
+        "a reparent into a folder is an ordinary move"
+    )
+}
+
 // MARK: - Test hooks (task 1697)
 
 // Exposes XPCBridge's change-page decoder so the harness can pin the wire
@@ -1204,6 +1349,68 @@ extension XPCBridge {
     func test_decodeChangesPayload(_ dictionary: [String: Any]) -> ChangesPage {
         Self.decodeChanges(dictionary)
     }
+
+    func test_decodeItemsPayload(_ dictionary: [String: Any]) -> [BeebeebProviderItem] {
+        guard let payload = dictionary["FileProviderItems"] as? [String: Any],
+              let rawItems = payload["items"] as? [[String: Any]] else {
+            return []
+        }
+        return rawItems.compactMap(Self.decodeItem)
+    }
+}
+
+// MARK: - 1698 part 4: error truth (transient vs definitive)
+
+check("1698-E1: invalidResponse maps to TRANSIENT serverUnreachable, NOT cannotSynchronize") {
+    let err = BeebeebIPCError.invalidResponse("Beebeeb's sync engine closed the connection before answering.") as NSError
+    try expect(err.domain == NSFileProviderErrorDomain, "bridges into NSFileProviderErrorDomain, got \(err.domain)")
+    try expect(
+        err.code == NSFileProviderError.serverUnreachable.rawValue,
+        "invalidResponse must be transient (serverUnreachable = -1004), got code \(err.code)"
+    )
+}
+
+check("1698-E2: timedOut maps to serverUnreachable (transient)") {
+    let err = BeebeebIPCError.timedOut(seconds: 30) as NSError
+    try expect(err.code == NSFileProviderError.serverUnreachable.rawValue, "got code \(err.code)")
+}
+
+check("1698-E3: daemonUnavailable maps to serverUnreachable (transient)") {
+    let err = BeebeebIPCError.daemonUnavailable as NSError
+    try expect(err.code == NSFileProviderError.serverUnreachable.rawValue, "got code \(err.code)")
+}
+
+check("1698-E4: invalidIdentifier stays DEFINITIVE cannotSynchronize") {
+    // A malformed identifier is a request-shape failure, not a transport
+    // glitch: retrying can never fix it, so it must stay definitive.
+    let err = BeebeebIPCError.invalidIdentifier as NSError
+    try expect(err.code == NSFileProviderError.cannotSynchronize.rawValue, "got code \(err.code)")
+}
+
+check("1698-E5: the transient classification used by the resolved-signal bookkeeping") {
+    try expect(BeebeebIPCError.invalidResponse("x").isTransient, "invalidResponse is transient")
+    try expect(BeebeebIPCError.timedOut(seconds: 1).isTransient, "timedOut is transient")
+    try expect(BeebeebIPCError.daemonUnavailable.isTransient, "daemonUnavailable is transient")
+    try expect(!BeebeebIPCError.invalidIdentifier.isTransient, "invalidIdentifier is definitive")
+    try expect(!BeebeebIPCError.cancelled.isTransient, "cancelled is a user action, not an unreachable")
+}
+
+check("1698-E6: TransientErrorTracker arms on transient, ignores definitive, clears on success") {
+    let tracker = TransientErrorTracker()
+    try expect(!tracker.hasPending, "a fresh tracker has nothing pending")
+    tracker.record(BeebeebIPCError.invalidIdentifier as NSError)
+    try expect(!tracker.hasPending, "a definitive error must never arm the resolved-signal")
+    tracker.record(BeebeebIPCError.invalidResponse("sync engine unreachable") as NSError)
+    try expect(tracker.hasPending, "a transient error arms the resolved-signal")
+    let pending = tracker.takePending()
+    try expect(pending?.code == NSFileProviderError.serverUnreachable.rawValue, "the pending error is the reported one")
+    try expect(!tracker.hasPending, "take clears the pending state")
+}
+
+check("1698-E7: the daemon's real message still reaches the system (error truth)") {
+    let err = BeebeebIPCError.invalidResponse("hydrate destination is not within an allowed root") as NSError
+    let message = err.userInfo[NSLocalizedDescriptionKey] as? String
+    try expect(message?.contains("allowed root") == true, "the real message must survive the mapping, got \(message ?? "nil")")
 }
 
 print("ipc-framing: \(passed) passed, \(failed) failed")

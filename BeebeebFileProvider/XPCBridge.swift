@@ -51,13 +51,19 @@ extension BeebeebIPCError: CustomNSError {
             // "server") cannot be reached.
             return NSFileProviderError.serverUnreachable.rawValue
         case .invalidResponse:
-            // Covers the daemon's own rejections (e.g. a hydration
-            // destination outside an allowed root, task 1670's actual root
-            // cause) and any other explicit error message it returned.
-            return NSFileProviderError.cannotSynchronize.rawValue
+            // Task 1698 (error truth): a transport glitch or a daemon-side
+            // rejection is a TRANSIENT condition, not a definitive one.
+            // `cannotSynchronize` told the system "stop retrying until an
+            // OS/extension update" — a dropped connection or a busy daemon
+            // would then brick every subsequent operation. `serverUnreachable`
+            // keeps the system retrying (with backoff), which is the truth:
+            // the daemon comes back when Beebeeb is running/unlocked again.
+            return NSFileProviderError.serverUnreachable.rawValue
         case .invalidIdentifier:
-            // Task 1670 round 2: same category as `.invalidResponse` — the
-            // request is refused before it ever reaches the daemon.
+            // Task 1670 round 2: the request is refused before it ever reaches
+            // the daemon. Task 1698: deliberately stays DEFINITIVE — a
+            // malformed identifier can never succeed on retry, so transient
+            // classification would only churn the system.
             return NSFileProviderError.cannotSynchronize.rawValue
         case .timedOut:
             // The daemon is there but not answering: same category as it
@@ -65,6 +71,18 @@ extension BeebeebIPCError: CustomNSError {
             return NSFileProviderError.serverUnreachable.rawValue
         case .cancelled:
             return NSFileProviderError.cannotSynchronize.rawValue
+        }
+    }
+
+    /// Task 1698: is this failure TRANSIENT (the system should retry after
+    /// backoff) or definitive? Only the transport/unreachable family is
+    /// transient; request-shape failures and user cancellations are not.
+    var isTransient: Bool {
+        switch self {
+        case .daemonUnavailable, .invalidResponse, .timedOut:
+            return true
+        case .invalidIdentifier, .cancelled:
+            return false
         }
     }
 
@@ -286,6 +304,11 @@ final class XPCBridge {
             // Task 1701: the single "Beebeeb" root (no synthetic namespaces).
             return .root()
         }
+        if identifier == .trashContainer {
+            // Task 1698: the SYSTEM trash container — a local answer, never
+            // a daemon lookup (the daemon has no row for it).
+            return .trashContainer()
+        }
 
         let response = try sendRequest([
             "GetFileStatus": [
@@ -497,7 +520,10 @@ final class XPCBridge {
         _ = try? sendRequest(["ReportMaterialized": ["container_ids": containerIDs]])
     }
 
-    private static func decodeItem(_ dictionary: [String: Any]) -> BeebeebProviderItem? {
+    /// Decode one `FileProviderItemPayload` from the daemon's wire JSON.
+    /// `static` (not `private`) so the framing harness can pin the wire shape
+    /// without a socket (BeebeebFileProviderTests).
+    static func decodeItem(_ dictionary: [String: Any]) -> BeebeebProviderItem? {
         guard let identifier = dictionary["identifier"] as? String,
               let parentIdentifier = dictionary["parent_identifier"] as? String,
               let filename = dictionary["filename"] as? String,
@@ -530,7 +556,8 @@ final class XPCBridge {
             modifiedAt: date("modified_at"),
             childItemCount: (dictionary["child_item_count"] as? NSNumber)?.int64Value,
             contentVersion: dictionary["content_version"] as? String,
-            metadataVersion: dictionary["metadata_version"] as? String
+            metadataVersion: dictionary["metadata_version"] as? String,
+            pinned: (dictionary["pinned"] as? NSNumber)?.boolValue ?? false
         )
     }
 
@@ -626,4 +653,47 @@ struct WriteQueueResult {
     let item: BeebeebProviderItem?
     let ignored: Bool
     let message: String
+}
+
+/// Task 1698 (error truth): remembers the most recent TRANSIENT error this
+/// extension reported to the system, so a later successful operation can call
+/// `-[NSFileProviderManager signalErrorResolved:completionHandler:]` with the
+/// SAME error. Apple (Mgr.h): the call "causes the system to cancel throttling
+/// on every item which has been throttled due to the given error" — without
+/// it, one `serverUnreachable` blip leaves the replica throttled even after
+/// the daemon comes back, until an OS-driven retry window happens to open.
+///
+/// Thread-safe: the File Provider callbacks arrive on arbitrary queues.
+final class TransientErrorTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: NSError?
+
+    /// Record a failure. Only transient errors (per `BeebeebIPCError
+    /// .isTransient`) arm the resolved-signal; a definitive failure must never
+    /// tell the system "an earlier transient problem is resolved".
+    func record(_ error: NSError) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard error.domain == NSFileProviderErrorDomain,
+              error.code == NSFileProviderError.serverUnreachable.rawValue else {
+            return
+        }
+        pending = error
+    }
+
+    var hasPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending != nil
+    }
+
+    /// Take (and clear) the pending transient error for a
+    /// `signalErrorResolved` call after a successful operation.
+    func takePending() -> NSError? {
+        lock.lock()
+        defer { lock.unlock() }
+        let error = pending
+        pending = nil
+        return error
+    }
 }

@@ -279,6 +279,88 @@ parent captured before the delete), `set_status` / `set_size_bytes` /
 `finish_windows_signout`) are deliberately NOT wired — the change log is FPFS
 machinery and Windows refreshes placeholders natively.
 
+## Trash semantics (task 1698 — ruling: full trash sync)
+
+Ruling: `.claude/tasks/decisions/finder-trash-full-sync.md` (recorded BEFORE
+the code). Trash is a SYSTEM container outside the 1701 single-root ruling;
+`supportsSyncingTrash` stays ON (default YES, now also set explicitly when the
+domain is registered).
+
+### Containers
+
+`ListFileProviderItems` accepts three container families now:
+
+| container | listing |
+| --- | --- |
+| root (`NSFileProviderRootContainerItemIdentifier` / `__fp_root__` / empty / `rootContainer`) | the real top-level tree, EXCLUDING `Trashing` rows |
+| the trash container (`NSFileProviderTrashContainerItemIdentifier` / `trashContainer`) | the trash view: `Trashing` rows that are TOP of trash |
+| a real folder id | children by contract parent; `Trashing` children only when the folder ITSELF is trashed (trash-view content) |
+
+A `Trashing` row is TOP of trash when its parent row is not itself
+`Trashing`; such rows are parented at the trash container in EVERY payload
+(enumeration, `GetFileStatus`, and change-feed ride-alongs), so the working
+set moves them into macOS Trash without a content re-download (metadataVersion
+covers the status flip).
+
+### Finder-side trash (ruling step 2)
+
+The user moving a synced item to macOS Trash arrives as a `modifyItem` whose
+new parent is the trash container. The extension maps that reparent to
+`QueueFinderDelete` (the server's existing trash operation), and the daemon
+parks the row `Trashing` right after queueing the op — so the item leaves
+"Beebeeb" and appears in the trash view immediately, matching what the system
+just did in its own replica. Creating inside the trash container is refused.
+
+### Server-side trash (ruling step 3)
+
+A remote `file_trash` op (another device trashed the item) flips the mirror
+subtree to `Trashing` (`StateDb::mark_subtree_trashing`) instead of deleting
+the rows; on-disk placeholders are still removed (the item is hidden locally —
+that part of 0802 stands). The rows ARE the trash view now, so:
+
+- `prune_absent` no longer treats a snapshot-absent `Trashing` row as
+  convergence (the snapshot NEVER lists trashed files — absence is their
+  steady state). Rows whose parent row is `Trashing` (trash-view folder
+  content) are equally protected, and the descendant/orphan sweeps skip
+  `Trashing` rows.
+- `file_restore` flips a held `Trashing` row straight back to `CloudOnly`
+  (un-trashing = reparent back out of the trash container, mapped to the
+  server's existing restore path) and still schedules the re-snapshot.
+- Removal converges through the server's `file_delete` op — the PERMANENT
+  delete (password-confirmed in the app/web, or the retention janitor). A
+  `file_delete` for a `Trashing` row deletes it and records a `deleted`
+  change, which drops it from the macOS Trash view.
+- A successful hydrate of a `Trashing` row keeps the marker
+  (`hydrate_final_status`) — viewing a file from the Trash view must not
+  un-trash it in the replica.
+
+### `deleteItem` (ruling step 4)
+
+Fires only for items already in the Trash. The extension rejects a
+non-recursive delete of a non-empty folder with
+`NSFileProviderError.directoryNotEmpty` (child count provable from the
+payload; an absent count fails open). Unknown items report success
+(idempotent) — decided DAEMON-side: `QueueFinderDelete` for an unknown id
+returns `WriteQueued { ignored: true }` instead of queueing a doomed op.
+
+## Pin state on the payload (`pinned`, task 1698 — deviation 1)
+
+Every `FileProviderItemPayload` carries `pinned` (`#[serde(default)]`): the
+row's EFFECTIVE pin state (`pin_state`, else `inherited_pin_state`). Swift
+maps it to `contentPolicy`: the root reports `.downloadLazily`, an effectively
+pinned item reports `.downloadEagerlyAndKeepDownloaded` (a pinned folder's
+children inherit it), everything else `.inherited`. The pin SET is this
+device's own today (`files.pin_state`; the cross-device pin backend is task
+1683's slice — see the task's numbered deviation).
+
+## Retired RPC: `SetRecursivePin` (task 1698)
+
+Removed with no replacement RPC: it had no caller (audit G13). The pinning
+surface is the Tauri `set_recursive_pin` command (Onboarding / Mac Settings),
+which calls `EngineBridge::set_recursive_pin` directly; the File Provider side
+consumes pin state through the payload's `pinned` field. The `PinUpdated`
+response variant went with it.
+
 ## Version skew (app update in progress)
 
 | Extension | Daemon | Behaviour |
@@ -286,6 +368,7 @@ machinery and Windows refreshes placeholders natively.
 | new | old | The old daemon replies with no delimiter and keeps the connection open, and answers a hydrate with the bare string `"Ok"`. `IPCFrameReader` accepts a buffer that is already one complete JSON value without waiting for a newline, and `IPCFraming.decodeReply` maps a bare `"Ok"` to `{"Ok":{}}`. The old daemon ignores the unknown `progress` field, so no progress is shown. |
 | new | old (before 1684) | The old daemon's `serde` ignores the unknown `request_id` field, so the request works and is simply not deduplicated (the pre-1684 behaviour). |
 | new | old (before 1697) | The old daemon answers `ListChanges` with `unknown variant` — an `Error` reply the replica surfaces as `finishEnumeratingWithError`, and `currentSyncAnchor` falls back to the persisted App Group copy. The old daemon ignores the new payload fields (`created_at`, `modified_at`, `child_item_count`, `content_version`, `metadata_version`), so listings work with no dates/counts. |
+| new | old (before 1698) | The old daemon ignores the `pinned` field (`#[serde(default)]`). It has no trash-container arm: a `ListFileProviderItems` for the trash container falls through to the real-folder branch (empty), `Trashing` rows still enumerate at the root (pre-1698 shape), and `QueueFinderDelete` for an unknown id queues a doomed op. The extension treats an unknown trash container as an empty listing — honest degradation, no crash. |
 | old | new | The old extension writes its request with no delimiter and does not close: `FrameReader` accepts a buffer that is already one complete JSON value. It requests no progress, so it gets one reply, now `{"Ok":{}}\n` (which its parser accepts). It sends no `request_id`, so its write-queue requests take the pre-1684 path. |
 
 ## Tests
