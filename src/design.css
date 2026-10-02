@@ -41,6 +41,17 @@
    */
   --amber-ink: oklch(0.18 0.01 70);
 
+  /*
+   * Same contract as --amber-ink above, for the destructive confirm button (task 1683
+   * ruling, 2026-10-02): text painted directly on a solid --red fill (`ms-btn--danger`).
+   * --red never flips between themes except to get LIGHTER in dark mode, so paper text
+   * would measure 2.39:1 there in light and 1.99:1 in dark, and the theme-flipping --ink
+   * would flip to near-white. --red-ink is fixed, declared once, and never redefined in
+   * the dark blocks: 5.10:1 on the light --red, 6.13:1 on the dark --red (WCAG contrast,
+   * computed from the OKLab values below).
+   */
+  --red-ink: oklch(0.14 0.01 25);
+
   /* Status */
   --green:  oklch(0.72 0.16 155);
   --red:    oklch(0.62 0.21 25);

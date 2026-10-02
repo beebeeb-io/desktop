@@ -8,7 +8,7 @@
  * `min-width: 0`, text that can hold user data wraps with `overflow-wrap: anywhere`, grid
  * tracks are `minmax(0, 1fr)`. Colours are theme tokens only (tests/noHardcodedThemeColors).
  */
-import type { ReactNode } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 
 /** Line icons, 24 x 24 box, drawn with the current colour. Paths follow design/hifi (Ico and MpIco). */
 const ICON_PATHS: Record<string, ReactNode> = {
@@ -199,19 +199,26 @@ export function Btn({
   onClick,
   disabled,
   primary = false,
+  danger = false,
+  onKeyDown,
   ariaLabel,
 }: {
   children: ReactNode
   onClick?: () => void
   disabled?: boolean
   primary?: boolean
+  /** Destructive confirm: red fill, replacing the amber primary (task 1683 ruling, 2026-10-02). */
+  danger?: boolean
+  onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void
   ariaLabel?: string
 }) {
+  const variant = danger ? 'ms-btn--danger' : primary ? 'ms-btn--primary' : null
   return (
     <button
       type="button"
-      className={primary ? 'ms-btn ms-btn--primary' : 'ms-btn'}
+      className={variant ? `ms-btn ${variant}` : 'ms-btn'}
       onClick={onClick}
+      onKeyDown={onKeyDown}
       disabled={disabled}
       aria-label={ariaLabel}
     >
