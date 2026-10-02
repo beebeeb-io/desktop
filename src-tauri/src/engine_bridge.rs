@@ -331,6 +331,13 @@ pub struct TransferLoopOutcome {
     pub retried_op_ids: Vec<String>,
     pub paused_op_ids: Vec<String>,
     pub invalidated_item_ids: Vec<String>,
+    /// Task 1700: errors from best-effort post-complete upload work
+    /// (thumbnail generation/upload). These never fail the op — the upload
+    /// itself is committed — but they used to vanish into a
+    /// `tracing::warn!` that no test subscriber captures, so a red CI run
+    /// said only "medium thumbnail upload with blurhash query" with no
+    /// trail. Each entry is `"<op_id>: <error>"`.
+    pub post_complete_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,6 +465,7 @@ impl EngineBridge {
             retried_op_ids: Vec::new(),
             paused_op_ids: Vec::new(),
             invalidated_item_ids: Vec::new(),
+            post_complete_errors: Vec::new(),
         };
         #[cfg(target_os = "windows")]
         if !self.is_stopping() {
@@ -476,7 +484,9 @@ impl EngineBridge {
             if self.is_stopping() {
                 break;
             }
-            let result = self.execute_operation(&op, sync_root, now).await;
+            let result = self
+                .execute_operation(&op, sync_root, now, &mut outcome.post_complete_errors)
+                .await;
             match result {
                 Ok(()) => {
                     self.db.remove_operation(&op.op_id)?;
@@ -512,7 +522,13 @@ impl EngineBridge {
         Ok(outcome)
     }
 
-    async fn execute_operation(&self, op: &PendingOperation, sync_root: &Path, now: i64) -> anyhow::Result<()> {
+    async fn execute_operation(
+        &self,
+        op: &PendingOperation,
+        sync_root: &Path,
+        now: i64,
+        post_complete_errors: &mut Vec<String>,
+    ) -> anyhow::Result<()> {
         match op.kind {
             OperationKind::PinTree => Ok(()),
             OperationKind::HydrateFile => {
@@ -609,7 +625,9 @@ impl EngineBridge {
                 self.api.restore_version(file_id, version_id).await?;
                 Ok(())
             }
-            OperationKind::UploadVersion | OperationKind::UploadFile => self.upload_version(op, sync_root).await,
+            OperationKind::UploadVersion | OperationKind::UploadFile => {
+                self.upload_version(op, sync_root, post_complete_errors).await
+            }
         }
     }
 
@@ -617,6 +635,7 @@ impl EngineBridge {
         &self,
         op: &PendingOperation,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+        post_complete_errors: &mut Vec<String>,
     ) -> anyhow::Result<()> {
         let local_file_id = op
             .file_id
@@ -655,7 +674,7 @@ impl EngineBridge {
             id: local_file_id,
             previous: previous_status,
         };
-        self.do_upload_version(local_file_id, op, sync_root).await
+        self.do_upload_version(local_file_id, op, sync_root, post_complete_errors).await
     }
 
     async fn do_upload_version(
@@ -663,6 +682,7 @@ impl EngineBridge {
         local_file_id: &str,
         op: &PendingOperation,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+        post_complete_errors: &mut Vec<String>,
     ) -> anyhow::Result<()> {
         let payload_path = op
             .payload_path
@@ -793,15 +813,28 @@ impl EngineBridge {
                 self.defer_local_upload_finalization(op, &server_file_id, sync_root, payload_path)?;
                 self.db.track_staged_payload(&payload_path.to_string_lossy(), None, true)?;
                 self.db.clear_upload_resume(&op.op_id)?;
-                self.finish_completed_upload(
-                    op,
-                    &server_file_id,
-                    payload_path,
-                    thumbnail_content_type,
-                    &file_key,
-                    sync_root,
-                )
-                .await;
+                // Task 1700: post-complete thumbnail work must never fail the upload,
+                // but its failure used to vanish into a `tracing::warn!` that no
+                // test subscriber captures. Surface it on the outcome so a red
+                // run names the real error.
+                if let Err(e) = self
+                    .finish_completed_upload(
+                        op,
+                        &server_file_id,
+                        payload_path,
+                        thumbnail_content_type,
+                        &file_key,
+                        sync_root,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        file_id = %server_file_id,
+                        error = %e,
+                        "upload-time thumbnail generation/upload skipped"
+                    );
+                    post_complete_errors.push(format!("{}: {e}", op.op_id));
+                }
                 Ok(())
             }
             Err(error) => {
@@ -939,7 +972,11 @@ impl EngineBridge {
     }
 
     /// Post-`complete` best-effort work: thumbnails, staged-payload cleanup and
-    /// (Windows) placeholder conversion. Never fails the upload.
+    /// (Windows) placeholder conversion. Never fails the upload — but the
+    /// thumbnail outcome is RETURNED (task 1700) instead of being swallowed
+    /// into a `tracing::warn!` that no test subscriber captures, so callers
+    /// can surface it for diagnostics. Cleanup and Windows finalization stay
+    /// warn-only inside.
     async fn finish_completed_upload(
         &self,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] op: &PendingOperation,
@@ -948,37 +985,31 @@ impl EngineBridge {
         thumbnail_content_type: Option<String>,
         file_key: &beebeeb_core::kdf::FileKey,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
-    ) {
+    ) -> anyhow::Result<()> {
         let server_file_id = server_file_id.to_string();
-        if let Err(e) = self
+        let thumbnails = self
             .upload_thumbnails_for_plaintext_media(
                 &server_file_id,
                 payload_path,
                 thumbnail_content_type.as_deref(),
                 file_key,
             )
-            .await
-        {
-            tracing::warn!(
-                file_id = %server_file_id,
-                error = %e,
-                "upload-time thumbnail generation/upload skipped"
-            );
-        }
+            .await;
 
         #[cfg(target_os = "windows")]
         {
             crate::windows_cf::upload_finalization::retry(&self.db, sync_root);
             // A failed stamp or unlink retains its durable completed proof.
             match self.db.upload_finalizations() {
-                Ok(rows) if rows.iter().any(|row| row.op_id == op.op_id) => return,
-                Err(e) => { tracing::warn!(error = %e, "cannot inspect finalization journal"); return; }
+                Ok(rows) if rows.iter().any(|row| row.op_id == op.op_id) => return thumbnails,
+                Err(e) => { tracing::warn!(error = %e, "cannot inspect finalization journal"); return thumbnails; }
                 _ => {}
             }
         }
         if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
             tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
         }
+        thumbnails
     }
 
     /// Give up on a persisted upload session (payload changed, session gone,
@@ -3044,10 +3075,19 @@ impl EngineBridge {
             updated_at: now,
         };
 
-        if let Err(e) = self.upload_version(&op, sync_root).await {
+        let mut post_complete_errors = Vec::new();
+        if let Err(e) = self
+            .upload_version(&op, sync_root, &mut post_complete_errors)
+            .await
+        {
             // One-shot op (never queued): nothing will resume its session.
             self.abandon_upload_after_give_up(&op).await;
             return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+        }
+        // Task 1700: thumbnail failures never fail the resolution, but they
+        // must not vanish silently either.
+        for error in &post_complete_errors {
+            tracing::warn!(file_id = %file_id, error = %error, "conflict keep-mine upload: post-complete thumbnail work skipped");
         }
 
         tracing::info!(file_id = %file_id, "conflict resolved: keep mine uploaded local version");
@@ -6364,20 +6404,50 @@ mod tests {
         base_url: String,
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
         handle: thread::JoinHandle<()>,
+        shutdown: Arc<AtomicBool>,
     }
 
     impl UploadMockServer {
         fn start(fail_chunk: bool) -> Self {
+            Self::start_inner(fail_chunk, false)
+        }
+
+        /// Variant whose `PUT …/thumbnail` responses are 500s — drives the
+        /// task-1700 diagnosability test (failed post-complete work must be
+        /// visible on the outcome, never silent).
+        fn start_failing_thumbnail_uploads(fail_chunk: bool) -> Self {
+            Self::start_inner(fail_chunk, true)
+        }
+
+        fn start_inner(fail_chunk: bool, fail_thumbnails: bool) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
             let server_requests = Arc::clone(&requests);
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
             let handle = thread::spawn(move || {
-                let expected_min_requests = if fail_chunk { 3 } else { 4 };
                 let started = std::time::Instant::now();
-                let mut idle_after_min_since: Option<std::time::Instant> = None;
                 loop {
+                    // Task 1700: shutdown is owned by `finish()`, not by an
+                    // idle timer. The old heuristic — stop 300ms after the
+                    // request count reached a minimum — raced the client's
+                    // post-complete thumbnail work: every mock response says
+                    // `Connection: close`, so the thumbnail PUTs need a fresh
+                    // accept, and under enough runner load the decode + 2×
+                    // WebP-encode + blurhash + encrypt gap exceeds the window.
+                    // The listener then dies first, the upload fails with a
+                    // connection error, the product's warn swallows it (no
+                    // subscriber in tests), and the test panicked at the
+                    // thumbnail expect with no trail — exactly the Windows CI
+                    // flake of task 1700. Recording happens-before the
+                    // response is written, and the response happens-before
+                    // the client's next step, so by the time `finish()` runs
+                    // every recorded request is already in the list.
+                    if server_shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             // The listener above is non-blocking so this accept
@@ -6399,21 +6469,15 @@ mod tests {
                             // tests using this helper each panicked here under
                             // load and passed 3/3 when rerun in isolation).
                             stream.set_nonblocking(false).unwrap();
-                            idle_after_min_since = None;
                             let request = read_http_request(&mut stream);
-                            let response = upload_mock_response(&request, fail_chunk);
+                            let response = upload_mock_response(&request, fail_chunk, fail_thumbnails);
                             server_requests.lock().unwrap().push(request);
                             stream.write_all(response.as_bytes()).unwrap();
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            let count = server_requests.lock().unwrap().len();
-                            if count >= expected_min_requests {
-                                let idle_since = idle_after_min_since.get_or_insert_with(std::time::Instant::now);
-                                if idle_since.elapsed() >= Duration::from_millis(300) {
-                                    break;
-                                }
-                            }
-                            if started.elapsed() >= Duration::from_secs(5) {
+                            // Hang backstop only; the normal exit is the
+                            // shutdown flag above.
+                            if started.elapsed() >= Duration::from_secs(30) {
                                 break;
                             }
                             std::thread::sleep(Duration::from_millis(10));
@@ -6426,10 +6490,12 @@ mod tests {
                 base_url,
                 requests,
                 handle,
+                shutdown,
             }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
+            self.shutdown.store(true, Ordering::SeqCst);
             self.handle.join().unwrap();
             Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
         }
@@ -6512,7 +6578,7 @@ mod tests {
         )
     }
 
-    fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool) -> String {
+    fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool, fail_thumbnails: bool) -> String {
         match (request.method.as_str(), request.path.as_str()) {
             ("POST", "/api/v1/uploads/init") => http_json(
                 "200 OK",
@@ -6549,7 +6615,11 @@ mod tests {
                 }),
             ),
             ("PUT", path) if path.starts_with("/api/v1/files/server-file-1/thumbnail") => {
-                http_json("200 OK", serde_json::json!({ "message": "thumbnail uploaded" }))
+                if fail_thumbnails {
+                    http_json("500 Internal Server Error", serde_json::json!({ "error": "thumbnail boom" }))
+                } else {
+                    http_json("200 OK", serde_json::json!({ "message": "thumbnail uploaded" }))
+                }
             }
             _ => http_json(
                 "404 Not Found",
@@ -8824,16 +8894,33 @@ mod tests {
 
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
         assert_eq!(outcome.completed_op_ids, vec!["op-upload-photo".to_string()]);
+        // Task 1700: if post-complete thumbnail work failed, say WHY here
+        // instead of letting the expects below fire blind.
+        assert!(
+            outcome.post_complete_errors.is_empty(),
+            "post-complete thumbnail work failed: {:?}",
+            outcome.post_complete_errors
+        );
 
         let requests = server.finish();
+        let recorded: Vec<String> = requests
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.path))
+            .collect();
         let medium = requests
             .iter()
             .find(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash="))
-            .expect("medium thumbnail upload with blurhash query");
+            .unwrap_or_else(|| {
+                panic!(
+                    "medium thumbnail upload with blurhash query — recorded requests: {recorded:?}"
+                )
+            });
         let large = requests
             .iter()
             .find(|r| r.method == "PUT" && r.path == "/api/v1/files/server-file-1/thumbnail/large")
-            .expect("large thumbnail upload");
+            .unwrap_or_else(|| {
+                panic!("large thumbnail upload — recorded requests: {recorded:?}")
+            });
 
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
@@ -8853,6 +8940,101 @@ mod tests {
         let large_index = requests.iter().position(|r| std::ptr::eq(r, large)).unwrap();
         assert!(medium_index > complete_index);
         assert!(large_index > complete_index);
+    }
+
+    /// Task 1700 guard: when post-complete thumbnail upload work fails, the
+    /// failure must be VISIBLE on `TransferLoopOutcome::post_complete_errors`
+    /// — never only in a `tracing::warn!` that no test subscriber captures.
+    /// Product law is unchanged: the failed thumbnail still never fails the
+    /// upload itself. Red-if-broken: removing the outcome plumbing (swallow
+    /// silently again) fails the `post_complete_errors` assertions below.
+    #[tokio::test]
+    async fn test_process_due_operations_reports_failed_thumbnail_upload_in_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("photo.png");
+        write_test_png(&payload);
+
+        let server = UploadMockServer::start_failing_thumbnail_uploads(false);
+        let master_key = [31u8; 32];
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload-photo-thumb-fail".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("local-photo-1".into()),
+                parent_id: None,
+                target_path: Some("Photos/photo.png".into()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "operation": "create_file",
+                        "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                        "display_name": "photo.png",
+                        "content_type": "image/png"
+                    })
+                    .to_string(),
+                ),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        // The upload itself still completes — post-complete work is
+        // best-effort by contract.
+        assert_eq!(
+            outcome.completed_op_ids,
+            vec!["op-upload-photo-thumb-fail".to_string()],
+            "a failed thumbnail must never fail the upload"
+        );
+        // But the failure is no longer swallowed: the outcome names it.
+        assert_eq!(
+            outcome.post_complete_errors.len(),
+            1,
+            "the failed thumbnail upload must be reported exactly once: {outcome:?}"
+        );
+        assert!(
+            outcome.post_complete_errors[0].contains("op-upload-photo-thumb-fail"),
+            "the report carries the op id: {:?}",
+            outcome.post_complete_errors
+        );
+        assert!(
+            outcome.post_complete_errors[0].contains("upload medium thumbnail"),
+            "the report names the variant that failed: {:?}",
+            outcome.post_complete_errors
+        );
+        assert!(
+            outcome.post_complete_errors[0].contains("HTTP 500"),
+            "the report carries the server's status: {:?}",
+            outcome.post_complete_errors
+        );
+
+        // The mock recorded the medium PUT before answering 500 — the
+        // failure is server-side, not a lost request. Medium is attempted
+        // first and its failure short-circuits, so large is never sent.
+        let requests = server.finish();
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash=")),
+            "the medium thumbnail PUT must reach the server: {:?}",
+            requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.method == "PUT" && r.path == "/api/v1/files/server-file-1/thumbnail/large"),
+            "the medium failure short-circuits before the large variant"
+        );
     }
 
     #[tokio::test]
