@@ -7,16 +7,16 @@
   sidecars, the NSIS installer and its uninstaller, the MSI). Publisher is the
   validated organization behind the certificate profile: CN=Initlabs B.V.
 
-  Authentication is a scoped client secret (GitHub secret AZURE_CLIENT_SECRET,
-  app registration beebeeb-desktop-release whose ONLY Azure role is
-  "Artifact Signing Certificate Profile Signer" on the beebeebsigning
-  account): DefaultAzureCredential's EnvironmentCredential resolves it first,
-  deterministically. OIDC-only auth was tried first and failed twice with
-  measured evidence (task 1617): ambient credentials (IMDS probing) hung the
-  dlib ~33 min, and azure/login's OIDC assertion expires after ~5 minutes
-  while the build signs ~19 minutes later (AADSTS700024). Rotation: the
-  secret expires after 1 year (created 2026-10-01) — rotate via
-  `az ad app credential reset`.
+  Authentication is ambient Azure auth (Azure CLI login) - the Microsoft
+  Artifact Signing dlib acquires the token itself via DefaultAzureCredential.
+  azure/login runs LATE in the build (after the cargo pre-build step, see
+  release.yml) and the first sign happens within ~2 minutes of that login:
+  the GitHub OIDC client assertion azure/login relies on is only valid
+  ~5 minutes, so the login-to-first-sign window must stay inside it (runs
+  5-7 failed with AADSTS700024 when the 12-minute cargo compile sat between
+  login and the first sign; az caches the exchanged access token for ~1h,
+  so all later signs ride the cache). No signing credential exists in this
+  repo, in env vars, or in CI secrets.
 
   Identity validation id: 3177670b-59dd-4d4b-acc5-8f10e8916fec (decision 1499).
   Service coordinates are non-secret defaults, overridable by env:
@@ -122,6 +122,13 @@ function Install-ArtifactSigningDlib {
 if (-not (Test-Path -LiteralPath $FilePath)) {
   Stop-Signing "sign-artifact: file not found: $FilePath"
 }
+
+# Presence diagnostics only (booleans, never values): proves which credential
+# environment variables actually reached this process. Run 7 showed
+# "Environment variables are not fully configured" without saying which one
+# was missing.
+Write-Host ("sign-artifact: env-present AZURE_CLIENT_ID={0} AZURE_TENANT_ID={1} AZURE_CLIENT_SECRET={2}" -f `
+  [bool]$env:AZURE_CLIENT_ID, [bool]$env:AZURE_TENANT_ID, [bool]$env:AZURE_CLIENT_SECRET)
 
 $signtool = Find-SignTool
 if (-not $signtool) { Stop-Signing "sign-artifact: signtool.exe not found (install the Windows SDK)" }
