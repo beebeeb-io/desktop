@@ -60,7 +60,8 @@ import {
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
 import { Modal, useToast } from './windows/ui'
-import { desktopUpdateCheck } from './windows/manualUpdateCheck'
+import { listen } from '@tauri-apps/api/event'
+import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
 
 // ── Shared state: the desktop config ────────────────────────────────────────
 
@@ -857,6 +858,15 @@ function AboutTab() {
 export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }) {
   const settings = useSettingsConfig()
   const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? settingsTabFromLocation())
+
+  // Slice 6: this window is the surface the native "Check for updates…" menu item opens on
+  // macOS, so it drains the pending request itself and answers inline in the About tab's row
+  // (it mounts no ManualUpdateFeedback toast).
+  useEffect(() => connectNativeUpdateMenu(
+    (callback) => listen('menu:check-for-updates', callback),
+    () => command<boolean>('consume_menu_update_check'),
+    desktopUpdateCheck.check,
+  ), [])
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const next = tabAfterKey(tab, event.key)

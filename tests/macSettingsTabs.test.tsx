@@ -11,6 +11,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
+import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCheck } from '../src/windows/manualUpdateCheck'
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
 import * as finderInstallCard from '../src/finderInstallCard'
 import * as model from '../src/macSettingsModel'
@@ -825,7 +826,7 @@ describe('MacSettings window', () => {
   const tabStub = (id: string) => () => createElement('div', { 'data-tab': id })
   const settingsStub = () => ({ state: { status: 'loading' }, save: async () => {}, reload: async () => {} })
   const openWindow = (props: any = { initialTab: 'general' }, bindings: Record<string, unknown> = {}) =>
-    open('MacSettings', {}, { props, bindings: { GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'), useSettingsConfig: settingsStub, ...bindings } })
+    open('MacSettings', {}, { props, bindings: { GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'), useSettingsConfig: settingsStub, listen: () => Promise.resolve(() => {}), connectNativeUpdateMenu: () => () => {}, ...bindings } })
 
   const shown = (m: Mounted) => find(m, (el) => el.props['data-tab'] !== undefined).map((el) => el.props['data-tab'])
   const tabs = (m: Mounted) => find(m, (el) => el.props.role === 'tab')
@@ -836,6 +837,28 @@ describe('MacSettings window', () => {
     expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([true, false, false, false])
     expect(shown(m)).toEqual(['general'])
     expect(find(m, (el) => el.props.role === 'tablist')).toHaveLength(1)
+  })
+
+  test('the window drains the native update-check menu request on mount (slice 6)', async () => {
+    // Slice 6 flips the Preferences/Settings menu items and "Check for
+    // updates…" onto this window: a native menu event must make the WINDOW
+    // consume the pending request (the controller then runs the check the
+    // About row renders — that behavior is nativeUpdateSettings's). Wired
+    // through the real helper with a scripted transport.
+    let onMenu: () => void = () => {}
+    const consumes: number[] = []
+    const m = openWindow({ consume_menu_update_check: () => { consumes.push(1); return false } }, {
+      listen: (_event: string, callback: () => void) => { onMenu = callback; return Promise.resolve(() => {}) },
+      connectNativeUpdateMenu: realConnectNativeUpdateMenu,
+      desktopUpdateCheck,
+    })
+    await m.flush()
+    // The helper drains once as soon as it is listening (the cold-window case:
+    // the request may have been stored before this webview subscribed).
+    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(1)
+    onMenu()
+    await m.flush()
+    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(2)
   })
 
   test('clicking a tab swaps the panel and moves selection and the one tab stop', () => {

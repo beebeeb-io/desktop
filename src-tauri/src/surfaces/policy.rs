@@ -319,4 +319,30 @@ mod wiring_tests {
         assert!(body.len() > 200, "extracted {} bytes", body.len());
         assert!(body.contains("get_webview_window"));
     }
+
+    #[test]
+    fn the_settings_menu_action_opens_the_macos_settings_window_on_macos() {
+        // Slice 6: the OpenSettings menu arm must open the real macOS
+        // Settings window, not the legacy compact app window. Lives here
+        // (not next to the function) so the signature search cannot
+        // self-match this test file.
+        let src = lib_rs();
+        let body = item_from(&src, "fn handle_desktop_menu_action(");
+        assert!(
+            body.contains("show_macos_settings_window"),
+            "the OpenSettings arm must open the real macOS Settings window (slice 6 flip):\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_menu_update_check_opens_the_macos_settings_window_on_macos() {
+        // A menu-triggered update check opens the real Settings window so
+        // its update row drains the pending check and answers inline.
+        let src = lib_rs();
+        let body = item_from(&src, "fn request_menu_update_check(");
+        assert!(
+            body.contains("show_macos_settings_window"),
+            "a menu-triggered update check must open the real macOS Settings window so its update row can drain the pending check:\n{body}"
+        );
+    }
 }

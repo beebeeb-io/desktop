@@ -8263,6 +8263,185 @@ fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
     }
 }
 
+// ── slice 6: the real macOS Settings window ────────────────────────────────
+//
+// The redesigned Settings window (task 1683 slice 4, `?window=settings-v2`)
+// was dev-URL-only until this slice: no window config opened it, so the
+// Preferences/Settings menu items still opened the legacy compact app window.
+// This is the flip: a configured, on-demand-built window with an overlay
+// title bar (the `.ms-toolbar` is the drag region; the traffic lights sit at
+// its left), opened top-right under the menu bar on the tray icon's display.
+//
+// `create: false` in tauri.conf.json keeps it off every platform's startup
+// set — nothing builds it except the macOS open path below, so Windows and
+// Linux never see a webview for it.
+
+/// Logical width of the real macOS Settings window (the harness renders it
+/// at 560; see `tests/render-mac-settings.mjs`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MACOS_SETTINGS_V2_WIDTH: f64 = 560.0;
+
+/// Pure anchor math for the Settings window: right-aligns the window's edge
+/// with the status item's right edge (the design's "top-right under the menu
+/// bar") and puts its top edge `MACOS_TRAY_FLYOUT_GAP` points below the
+/// icon's bottom edge, clamped so it never runs off either edge of the
+/// containing monitor. Same units and scale handling as
+/// `macos_tray_flyout_position`; pass `f64::NEG_INFINITY`/`f64::INFINITY`
+/// for the screen bounds to skip clamping.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_settings_window_position(
+    icon_x: f64,
+    icon_y: f64,
+    icon_width: f64,
+    icon_height: f64,
+    window_width_logical: f64,
+    scale_factor: f64,
+    screen_min_x: f64,
+    screen_max_x: f64,
+) -> tauri::PhysicalPosition<i32> {
+    let scale_factor = valid_macos_tray_scale_factor(scale_factor);
+    let physical_window_width = window_width_logical * scale_factor;
+    let physical_gap = MACOS_TRAY_FLYOUT_GAP as f64 * scale_factor;
+
+    let ideal_x = icon_x + icon_width - physical_window_width;
+    let max_x = (screen_max_x - physical_window_width).max(screen_min_x);
+
+    tauri::PhysicalPosition {
+        x: ideal_x.clamp(screen_min_x, max_x).round() as i32,
+        y: (icon_y + icon_height + physical_gap).round() as i32,
+    }
+}
+
+/// Resolves the Settings window's anchor from the tray icon's current rect
+/// (queried on demand, not from a click event — Settings opens from the app
+/// menu, which has no icon rect). Same monitor/scale resolution as
+/// `macos_tray_flyout_anchor`; `None` means "no tray icon and no scale
+/// factor" and the caller degrades to centering.
+#[cfg(target_os = "macos")]
+fn macos_settings_anchor(app: &tauri::AppHandle) -> Option<tauri::PhysicalPosition<i32>> {
+    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
+    let provisional = rect.position.to_physical::<f64>(1.0);
+    let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
+
+    let scale_factor = match monitor.as_ref().map(|m| m.scale_factor()).filter(|s| s.is_finite() && *s > 0.0) {
+        Some(scale_factor) => scale_factor,
+        None => {
+            let primary_scale = app
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| m.scale_factor())
+                .filter(|s| s.is_finite() && *s > 0.0);
+            match primary_scale {
+                Some(scale_factor) => {
+                    tracing::warn!(
+                        icon_x = provisional.x,
+                        icon_y = provisional.y,
+                        scale_factor,
+                        "macos settings window: no monitor found under the tray icon; falling back to the primary monitor's scale factor"
+                    );
+                    scale_factor
+                }
+                None => {
+                    tracing::warn!(
+                        icon_x = provisional.x,
+                        icon_y = provisional.y,
+                        "macos settings window: no monitor and no primary-monitor scale factor available; falling back to 1.0 (window may mis-position)"
+                    );
+                    1.0
+                }
+            }
+        }
+    };
+
+    let icon_position = rect.position.to_physical::<f64>(scale_factor);
+    let icon_size = rect.size.to_physical::<f64>(scale_factor);
+    let (screen_min_x, screen_max_x) = match &monitor {
+        Some(m) => {
+            let position = m.position();
+            let size = m.size();
+            (position.x as f64, position.x as f64 + size.width as f64)
+        }
+        None => (f64::NEG_INFINITY, f64::INFINITY),
+    };
+
+    let result = macos_settings_window_position(
+        icon_position.x,
+        icon_position.y,
+        icon_size.width,
+        icon_size.height,
+        MACOS_SETTINGS_V2_WIDTH,
+        scale_factor,
+        screen_min_x,
+        screen_max_x,
+    );
+
+    tracing::info!(
+        icon_x = icon_position.x,
+        icon_y = icon_position.y,
+        scale_factor,
+        monitor_found = monitor.is_some(),
+        result_x = result.x,
+        result_y = result.y,
+        "macos settings window: computed anchor position"
+    );
+    Some(result)
+}
+
+/// Opens (or focuses) the real macOS Settings window. The window never
+/// remembers its position: every open re-anchors it under the tray icon
+/// (top-right, on the icon's display). Built on demand from its
+/// `tauri.conf.json` entry (`create: false`), so no idle webview exists
+/// before the first open.
+#[cfg(target_os = "macos")]
+fn show_macos_settings_window(app: &tauri::AppHandle) {
+    const LABEL: &str = "macos-settings";
+
+    let anchor = macos_settings_anchor(app);
+    if let Some(win) = app.get_webview_window(LABEL) {
+        match anchor {
+            Some(position) => {
+                let _ = win.set_position(tauri::Position::Physical(position));
+            }
+            None => {
+                tracing::warn!("macos settings window: no anchor available; leaving the existing window where it is");
+            }
+        }
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == LABEL) else {
+        tracing::warn!("macos settings window: no tauri.conf.json entry named {LABEL}; cannot open Settings");
+        return;
+    };
+
+    match tauri::WebviewWindowBuilder::from_config(app, config) {
+        Ok(builder) => match builder.build() {
+            Ok(win) => {
+                match anchor {
+                    Some(position) => {
+                        let _ = win.set_position(tauri::Position::Physical(position));
+                    }
+                    None => {
+                        tracing::warn!("macos settings window: no anchor available; centering on the primary display");
+                        let _ = win.center();
+                    }
+                }
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to create macos settings window");
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "failed to load the macos settings window config");
+        }
+    }
+}
+
 fn window_state_denylist_labels() -> &'static [&'static str] {
     &["tray", "windows-onboarding"]
 }
@@ -9044,6 +9223,10 @@ static MENU_UPDATE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
 fn update_check_window_label() -> &'static str {
     if cfg!(target_os = "windows") {
         "main-app"
+    } else if cfg!(target_os = "macos") {
+        // Slice 6: the real macOS Settings window drains the pending menu
+        // check in its About tab's update row.
+        "macos-settings"
     } else {
         "settings"
     }
@@ -9051,6 +9234,9 @@ fn update_check_window_label() -> &'static str {
 
 fn request_menu_update_check(app: &tauri::AppHandle) {
     MENU_UPDATE_CHECK_PENDING.store(true, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    show_macos_settings_window(app);
+    #[cfg(not(target_os = "macos"))]
     show_main_app_window_with_nav(app, Some("settings"));
     if let Some(window) = app.get_webview_window(update_check_window_label()) {
         log_menu_result(
@@ -9083,11 +9269,28 @@ mod menu_update_check_tests {
         pending.store(true, Ordering::SeqCst);
         assert!(take_menu_update_check(&pending, update_check_window_label()));
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_update_check_targets_the_macos_settings_window() {
+        // Slice 6: on macOS the native "Check for updates…" item opens the
+        // new real Settings window, so that window must be the one the
+        // pending request targets and the About tab's row answers inline.
+        assert_eq!(update_check_window_label(), "macos-settings");
+    }
 }
 
 fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenuSpec) {
     match spec.action {
-        DesktopMenuAction::OpenSettings => show_main_app_window_with_nav(app, Some("settings")),
+        DesktopMenuAction::OpenSettings => {
+            #[cfg(target_os = "macos")]
+            {
+                // Slice 6: the real macOS Settings window.
+                show_macos_settings_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            show_main_app_window_with_nav(app, Some("settings"));
+        }
         DesktopMenuAction::CheckForUpdates => {
             request_menu_update_check(app);
         }
@@ -10577,6 +10780,58 @@ mod tests {
         assert_eq!(super::valid_macos_tray_scale_factor(-1.0), 1.0);
         assert_eq!(super::valid_macos_tray_scale_factor(f64::NAN), 1.0);
         assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
+    }
+
+    // ── slice 6: the Settings window anchors top-right under the menu bar ──
+
+    #[test]
+    fn macos_settings_window_position_aligns_right_edges_under_the_icon() {
+        // The design ruling (spec Q6): Settings opens top-right under the
+        // menu bar on the icon's display. The status item already sits in
+        // the menu bar's top-right region, so the window's RIGHT edge
+        // aligns with the icon's right edge and its top sits
+        // MACOS_TRAY_FLYOUT_GAP below the icon's bottom (the menu bar's
+        // bottom edge).
+        let position = super::macos_settings_window_position(1_000.0, 0.0, 24.0, 22.0, 560.0, 1.0, 0.0, 2_560.0);
+
+        assert_eq!(position.x, 464); // icon right edge 1024 - 560
+        assert_eq!(position.y, 28); // 0 + 22 + 6 gap
+    }
+
+    #[test]
+    fn macos_settings_window_position_scales_with_dpi() {
+        let position = super::macos_settings_window_position(2_000.0, 0.0, 48.0, 44.0, 560.0, 2.0, 0.0, 5_120.0);
+
+        assert_eq!(position.x, 928); // right edge 2048 - (560*2)
+        assert_eq!(position.y, 56); // 0 + 44 + 6*2 gap
+    }
+
+    #[test]
+    fn macos_settings_window_position_clamps_to_right_screen_edge() {
+        // The icon's right edge itself sits at the monitor's right edge, so
+        // right-aligning would push the window off-screen: clamp to the
+        // monitor instead.
+        let position = super::macos_settings_window_position(2_540.0, 0.0, 24.0, 22.0, 560.0, 1.0, 0.0, 2_560.0);
+
+        assert_eq!(position.x, 2_000); // 2560 - 560
+        assert_eq!(position.y, 28);
+    }
+
+    #[test]
+    fn macos_settings_window_position_clamps_to_left_screen_edge() {
+        let position = super::macos_settings_window_position(-1_400.0, 0.0, 24.0, 22.0, 560.0, 1.0, -1_440.0, 0.0);
+
+        assert_eq!(position.x, -1_440);
+        assert_eq!(position.y, 28);
+    }
+
+    #[test]
+    fn macos_settings_window_position_unbounded_when_no_monitor_found() {
+        let position =
+            super::macos_settings_window_position(500.0, 0.0, 24.0, 22.0, 560.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
+
+        assert_eq!(position.x, -36); // icon right edge 524 - 560, unclamped
+        assert_eq!(position.y, 28);
     }
 
     #[test]
