@@ -112,6 +112,37 @@ to begin with.
   Provider ACLs, resisted direct removal. Likely harmless (a naming migration artifact from
   changing the domain display name from `Beebeeb` to `Drive` mid-development), but worth a clean
   Finder-side check before treating any future macOS QA machine as pristine.
+- **A stale local `target/debug/bundle/macos/Beebeeb.app` from an earlier `cargo tauri build`
+  wins PlugInKit precedence over the real installed app** (task `1524` issue 3, found 2026-09-25):
+  on the QA Mac, `pluginkit -m -i io.beebeeb.app.FileProvider` showed only the real
+  `/Applications/Beebeeb.app` copy, but `pluginkit -mvvv -D -i io.beebeeb.app.FileProvider`
+  (the `-D`/duplicates flag — the non-`-D` form silently collapses to one row) revealed a SECOND,
+  adhoc-signed (`TeamIdentifier=not set`) registration at
+  `repos/desktop/src-tauri/target/debug/bundle/macos/Beebeeb.app/…/BeebeebFileProvider.appex`, a
+  leftover from an earlier local debug build in the **primary** checkout (not a worktree — the
+  2026-09-08 worktree-only cleanup missed this one). `pkd`'s own discovery log
+  (`log show --predicate 'process == "pkd"'`) explicitly named it:
+  `[u io.beebeeb.app.FileProvider] … rejecting; another plugin has precedent: [u 1ACF7D70-…]`,
+  at the exact moment of an "Install Finder location" attempt. Because the precedent copy is
+  adhoc-signed, `fileproviderd`/ExtensionKit can never actually stand up an extension process for
+  it (no `ExtensionProcess … bundleID: io.beebeeb.app.FileProvider` launch ever appears in the
+  log, unlike a working extension such as OneDrive's in the same window) — so
+  `NSFileProviderManager waitForStabilizationWithCompletionHandler:`'s completion block never
+  fires and `BeebeebWaitForDomainReady` (`src-tauri/macos/FileProviderBridge.m`) burns its full
+  10 s and reports "Timed out waiting for the Beebeeb File Provider domain to become available".
+  **Ruled out on the same evidence:** the PlugInKit "no `+` election" tag on the real copy —
+  every third-party `com.apple.fileprovider-nonui` extension on the box (ProtonMail Drive,
+  OneDrive, Beebeeb) shows the same blank election state and OneDrive still launches fine, so an
+  unelected extension is normal for this extension point on this macOS version, not the cause.
+  **Before any macOS File Provider session:** run
+  `pluginkit -mvvv -D -i io.beebeeb.app.FileProvider` and confirm exactly one result, at
+  `/Applications/Beebeeb.app/…`. A second result → `pluginkit -r <stale path>` (or delete the
+  stale `.app` outright) before touching "Install Finder location" again, or every timeout in that
+  session is this false lead, not a real code regression. No code fix exists for this class of
+  failure: the completion handler genuinely never fires, so the app has no NSError to
+  distinguish "stale local dev build has precedence" from any other reason the extension didn't
+  come up, and there's nothing in production for it to detect (`target/debug/` build artifacts on
+  a QA Mac).
 
 ## What a macOS session should NOT do
 
