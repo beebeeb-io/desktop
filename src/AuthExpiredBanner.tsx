@@ -24,6 +24,8 @@ import { forceReauth } from './desktopApi'
 import { useToast } from './windows/ui'
 
 const AUTH_EXPIRED_TOAST_ID = 'auth-expired-banner'
+// Distinct id so the failure toast doesn't clobber the persistent banner.
+const AUTH_EXPIRED_REAUTH_ERROR_TOAST_ID = 'auth-expired-reauth-error'
 
 export default function AuthExpiredBanner({ authExpired }: { authExpired: boolean }) {
   const { showToast, dismissToast } = useToast()
@@ -40,7 +42,22 @@ export default function AuthExpiredBanner({ authExpired }: { authExpired: boolea
       message: 'Sync is paused until you sign in again.',
       action: {
         label: 'Sign in again',
-        onClick: () => void forceReauth(),
+        onClick: () => {
+          void forceReauth().then((result) => {
+            if (!result.ok) {
+              // Surface the failure — the old handler ignored the result, so
+              // a failed clearSession (e.g. "Could not stop the sync
+              // engine…") left the user stuck with no feedback. The
+              // persistent banner itself stays up either way.
+              showToast({
+                id: AUTH_EXPIRED_REAUTH_ERROR_TOAST_ID,
+                variant: 'error',
+                title: "Couldn't start sign-in again",
+                message: result.reason,
+              })
+            }
+          })
+        },
       },
       durationMs: null,
       dismissible: false,

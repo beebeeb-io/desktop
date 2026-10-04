@@ -113,6 +113,12 @@ impl AccountConfig {
 ///   - `auth_health` — the consecutive-401 streak fed by the engine's
 ///     heartbeat + sync-tick API calls, read by `sync_status` as
 ///     `auth_expired` (task 1546 finding 5).
+///   - `engine_stop_unconfirmed` — set when a sign-out could not CONFIRM
+///     the engine task terminated (Bug A2): the consumed handle leaves an
+///     empty `engine` slot, so without this flag a sign-out RETRY would
+///     sail past the stop gate (slot looks idle) into the cross-account
+///     purge while the old engine may still be running. In-memory only —
+///     a process restart is the documented remedy (and re-resets it).
 ///
 /// Accessed via `Arc<AccountRuntime>` from `AppState::active_account()`; callers
 /// lock the inner mutexes. The `Arc` shares the runtime; it never duplicates the
@@ -126,6 +132,7 @@ pub struct AccountRuntime {
     pub cached_profile: Mutex<Option<AccountProfile>>,
     pub auth_email: Mutex<Option<String>>,
     pub auth_health: Arc<AuthHealth>,
+    pub engine_stop_unconfirmed: AtomicBool,
 }
 
 impl AccountRuntime {
@@ -145,6 +152,7 @@ impl AccountRuntime {
             cached_profile: Mutex::new(None),
             auth_email: Mutex::new(None),
             auth_health: Arc::new(AuthHealth::new()),
+            engine_stop_unconfirmed: AtomicBool::new(false),
         }
     }
 }

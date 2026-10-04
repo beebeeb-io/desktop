@@ -582,7 +582,15 @@ export default function AccountView() {
   } else if (state.phase === 'unsupported') {
     body = <UnsupportedState />
   } else if (state.phase === 'error') {
-    body = <ErrorState reason={state.reason} onRetry={load} />
+    // Sign-out must stay reachable even when the profile API 401s: the old
+    // error branch rendered only ErrorState, so DisconnectSection — the only
+    // in-app sign-out control — vanished exactly when the session was dead.
+    body = (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <ErrorState reason={state.reason} onRetry={load} />
+        <DisconnectSection />
+      </div>
+    )
   } else {
     body = (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
