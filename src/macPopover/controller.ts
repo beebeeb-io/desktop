@@ -123,9 +123,9 @@ export class PopoverController {
     await this.hide()
   }
 
-  /** An `engine-status` event. Ignored while hidden. */
+  /** An `engine-status` event. While hidden `refresh()` returns before it asks for anything. */
   engineStatus(): void {
-    if (this.current.visible) void this.refresh()
+    void this.refresh()
   }
 
   private async hide(): Promise<void> {

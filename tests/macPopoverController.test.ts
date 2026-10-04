@@ -94,6 +94,17 @@ describe('silence while hidden', () => {
     expect([...h.log].sort()).toEqual(['snapshot', 'theme'])
   })
 
+  test('going hidden makes no call itself (blur is not a trigger)', async () => {
+    const h = harness()
+    h.controller.shown()
+    await h.flush()
+    const before = h.log.length
+    h.controller.hidden()
+    await h.flush()
+    expect(h.log.length).toBe(before)
+    expect(h.controller.getState().visible).toBe(false)
+  })
+
   test('refresh() called directly while hidden still does nothing', async () => {
     const h = harness()
     await h.controller.refresh()
@@ -390,6 +401,16 @@ describe('unlock (c1, c1b)', () => {
 })
 
 describe('reload (the load-failed state)', () => {
+  test('Try again clears an earlier notice before it re-reads', async () => {
+    const h = harness({ snapshot: 'paused', replies: { tray_resume_sync: err('engine busy') } })
+    h.controller.shown()
+    await h.flush()
+    await h.controller.perform({ id: 'resume' })
+    expect(h.controller.getState().notice).not.toBeNull()
+    await h.controller.perform({ id: 'reload' })
+    expect(h.controller.getState().notice).toBeNull()
+  })
+
   test('Try again there re-reads the snapshot and nothing else', async () => {
     const h = harness()
     h.setSnapshotReply(async () => err('boom'))
