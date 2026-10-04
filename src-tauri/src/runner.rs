@@ -682,23 +682,37 @@ impl EngineRunner {
         self.ipc_bind_error.clone()
     }
 
+    /// Test-only constructor: wraps an already-spawned task in a runner
+    /// handle so `lib.rs`'s sign-out tests can install a real (stoppable)
+    /// engine in an account's engine slot without a Tauri `AppHandle`. The
+    /// cancel channel's receiver is dropped immediately, so `abort()`'s
+    /// cancel send is a no-op — the wrapped task's own body decides when
+    /// (or whether) it stops.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_task(task: JoinHandle<()>) -> Self {
+        let (tx, _rx) = oneshot::channel::<()>();
+        Self {
+            cancel: Some(tx),
+            task: Some(task),
+            ipc_bind_error: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Signal the runner to stop and wait for CONFIRMED termination. Drops
     /// the lock file as part of teardown. Idempotent — calling twice is a
-    /// no-op (the second call has nothing left to wait on and returns
-    /// `true` immediately).
+    /// no-op (the second call has nothing left to wait on and reports
+    /// [`AbortOutcome::Stopped`] immediately).
     ///
-    /// Returns `true` only when the runner's task is actually gone — never
-    /// merely "we gave up waiting" (task 1538 Codex P1, PR #49 lib.rs:1087
-    /// thread). The old version just dropped the `JoinHandle` after a 3s
-    /// timeout, which DETACHES rather than cancels the task: the engine
-    /// (and everything nested inside its single tokio task — the IPC socket
-    /// server, the Windows upload watcher) could keep running after a
-    /// caller believed sign-out/lock had finished, still holding the
-    /// session master key and able to drain/enqueue operations behind a
-    /// purge's back. Callers that need that guarantee — `clear_session_impl`
-    /// gating its cross-account purge on it — must check the return value
-    /// and refuse to proceed when it's `false`.
-    pub async fn abort(mut self) -> bool {
+    /// Returns a per-stage [`AbortOutcome`], never a bare bool: the old
+    /// `bool` conflated "the engine task is gone" with "the Windows Cloud
+    /// Files callback revocation succeeded", which misattributed revocation
+    /// failures (Explorer-held handles, 3s drain timeout) to the sync
+    /// engine. Callers that need the task-terminated guarantee —
+    /// `clear_session_impl` gating its cross-account purge on it — must
+    /// check [`AbortOutcome::task_confirmed`]; callers that need the old
+    /// all-stages-success bool use [`AbortOutcome::is_stopped`].
+    pub async fn abort(mut self) -> AbortOutcome {
         // Flip the cooperative flag FIRST, before the cancel oneshot even
         // sends: `EngineBridge::is_stopping()` (checked by
         // `process_due_operations` before every operation and by
@@ -707,7 +721,7 @@ impl EngineRunner {
         // tick loop to next reach its `tokio::select!` boundary.
         self.stopping.store(true, Ordering::SeqCst);
         #[cfg(target_os = "windows")]
-        let callbacks_stopped = crate::windows_cf::revoke_callbacks().await.is_ok();
+        let revoke_before = crate::windows_cf::revoke_callbacks().await;
         let stopped = stop_task_and_confirm(
             self.cancel.take(),
             self.task.take(),
@@ -723,11 +737,87 @@ impl EngineRunner {
             if !stopped {
                 crate::windows_cf::refuse_unconfirmed_stop();
             }
-            return crate::windows_cf::revoke_callbacks().await.is_ok() && stopped && callbacks_stopped;
+            let revoke_after = crate::windows_cf::revoke_callbacks().await;
+            return classify_abort_result(
+                stopped,
+                revoke_before.as_ref().err().map(|e| e.to_string()),
+                revoke_after.as_ref().err().map(|e| e.to_string()),
+            );
         }
         #[cfg(not(target_os = "windows"))]
-        stopped
+        if stopped {
+            AbortOutcome::Stopped
+        } else {
+            AbortOutcome::TaskUnconfirmed
+        }
     }
+}
+
+/// What [`EngineRunner::abort`] actually achieved, per stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbortOutcome {
+    /// The engine task is CONFIRMED terminated AND (Windows) both Cloud
+    /// Files callback revocations succeeded. The exact `true` of the old
+    /// `abort() -> bool`.
+    Stopped,
+    /// The engine task itself IS confirmed terminated, but a Windows Cloud
+    /// Files callback revocation failed. `stage` names which revocation
+    /// attempt failed and `source` carries its error — the sync engine is
+    /// NOT the thing that failed here.
+    RevokeFailed { stage: &'static str, source: String },
+    /// Even a forced abort could not confirm the task terminated — it may
+    /// still be running and must be treated as alive.
+    TaskUnconfirmed,
+}
+
+impl AbortOutcome {
+    /// The exact boolean the pre-enum `abort() -> bool` returned, kept so
+    /// existing call sites preserve their gating semantics unchanged:
+    /// `true` only when the task is confirmed stopped AND (Windows) every
+    /// revocation succeeded.
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, AbortOutcome::Stopped)
+    }
+
+    /// `true` when the engine task itself was CONFIRMED terminated — the
+    /// guarantee a cross-account purge actually needs. A Cloud Files
+    /// revocation failure does not void it; an unconfirmed task does.
+    pub fn task_confirmed(&self) -> bool {
+        !matches!(self, AbortOutcome::TaskUnconfirmed)
+    }
+}
+
+/// Per-stage classification of [`EngineRunner::abort`]'s raw results,
+/// preserving the old `revoke_before.is_ok() && stopped && revoke_after.is_ok()`
+/// semantics while attributing the failure to the stage that actually
+/// failed. Pure so it is unit-testable off-Windows (the real revocation
+/// calls cannot run in CI).
+///
+/// Stage precedence: an unconfirmed task dominates everything (the caller
+/// must treat the engine as alive); otherwise the FIRST failing revocation
+/// stage is reported, matching the old all-must-succeed conjunction.
+#[cfg(any(target_os = "windows", test))]
+fn classify_abort_result(
+    task_stopped: bool,
+    revoke_before_error: Option<String>,
+    revoke_after_error: Option<String>,
+) -> AbortOutcome {
+    if !task_stopped {
+        return AbortOutcome::TaskUnconfirmed;
+    }
+    if let Some(source) = revoke_before_error {
+        return AbortOutcome::RevokeFailed {
+            stage: "initial Cloud Files callback revocation",
+            source,
+        };
+    }
+    if let Some(source) = revoke_after_error {
+        return AbortOutcome::RevokeFailed {
+            stage: "final Cloud Files callback revocation",
+            source,
+        };
+    }
+    AbortOutcome::Stopped
 }
 
 /// How long [`EngineRunner::abort`] waits for the tick loop to reach its
@@ -2554,5 +2644,117 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
         let paused_event = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "paused").await;
         assert!(paused_event.is_some(), "the pulse must say `paused` within two seconds of the flag");
         pulse.abort();
+    }
+
+    // ── AbortOutcome per-stage classification (Bug A) ───────────────────────
+    //
+    // The old `abort() -> bool` conflated "the engine task is gone" with "the
+    // Windows Cloud Files callback revocation succeeded", so a revocation
+    // failure (Explorer-held handles, 3s drain timeout) was reported as
+    // "could not stop the sync engine". The classification must attribute the
+    // failure to the stage that actually failed.
+
+    #[test]
+    fn classify_abort_maps_full_success_to_stopped() {
+        assert_eq!(
+            classify_abort_result(true, None, None),
+            AbortOutcome::Stopped,
+            "confirmed task + both revocations ok must be Stopped"
+        );
+    }
+
+    #[test]
+    fn classify_abort_maps_a_confirmed_task_with_a_failed_revocation_to_revoke_failed() {
+        // The Bug A core case: the engine task stopped fine; the revocation
+        // did NOT. Must be RevokeFailed — never TaskUnconfirmed (which would
+        // claim the engine itself is still running).
+        assert_eq!(
+            classify_abort_result(true, None, Some("drain timed out".to_string())),
+            AbortOutcome::RevokeFailed {
+                stage: "final Cloud Files callback revocation",
+                source: "drain timed out".to_string(),
+            },
+            "revoke failure with a confirmed-stopped task must be RevokeFailed, not TaskUnconfirmed"
+        );
+    }
+
+    #[test]
+    fn classify_abort_reports_the_initial_stage_when_the_first_revocation_failed() {
+        assert_eq!(
+            classify_abort_result(true, Some("first drain timed out".to_string()), None),
+            AbortOutcome::RevokeFailed {
+                stage: "initial Cloud Files callback revocation",
+                source: "first drain timed out".to_string(),
+            },
+            "the first failing revocation stage must be the one reported"
+        );
+    }
+
+    #[test]
+    fn classify_abort_maps_unconfirmed_task_to_task_unconfirmed_even_when_revocation_also_failed() {
+        // Stage precedence: an unconfirmed task dominates everything — the
+        // caller must treat the engine as alive regardless of revocation
+        // outcomes.
+        assert_eq!(
+            classify_abort_result(false, Some("revoke err".to_string()), Some("revoke err 2".to_string())),
+            AbortOutcome::TaskUnconfirmed,
+            "an unconfirmed task must never be masked by revocation failures"
+        );
+    }
+
+    /// A real (not classified) abort of a runner wrapping a task that
+    /// promptly observes its cancel signal must classify as `Stopped`.
+    #[tokio::test]
+    async fn abort_returns_stopped_for_a_cooperative_task() {
+        let (tx, rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = rx.await;
+        });
+        let runner = EngineRunner {
+            cancel: Some(tx),
+            task: Some(task),
+            ipc_bind_error: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+
+        let outcome = runner.abort().await;
+
+        assert_eq!(outcome, AbortOutcome::Stopped, "a cooperative task must classify as Stopped");
+    }
+
+    /// The pathological case (task 1538): a task with NO await point cannot
+    /// be force-aborted by tokio, so even the forced path times out — the
+    /// outcome must be `TaskUnconfirmed`, never `Stopped`. Uses
+    /// `spawn_blocking` (blocking pool, not a runtime worker) with a
+    /// wall-clock deadline so the busy loop cannot leak a spinning thread
+    /// into the rest of the test run. Runs on a multi-thread runtime so the
+    /// graceful/force timeouts can still fire while one blocking thread
+    /// spins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_returns_task_unconfirmed_when_the_task_cannot_be_aborted() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let task = tokio::task::spawn_blocking(move || {
+            while std::time::Instant::now() < deadline {
+                std::hint::black_box(());
+            }
+        });
+        let (tx, _rx) = oneshot::channel::<()>();
+        let runner = EngineRunner {
+            cancel: Some(tx),
+            task: Some(task),
+            ipc_bind_error: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+
+        // GRACEFUL_ABORT_TIMEOUT (3s) + FORCE_ABORT_TIMEOUT (2s) — the task
+        // outlives both (its own deadline is 10s), so the abort cannot be
+        // confirmed within either window.
+        let outcome = runner.abort().await;
+
+        assert_eq!(
+            outcome,
+            AbortOutcome::TaskUnconfirmed,
+            "a task that cannot be aborted must classify as TaskUnconfirmed"
+        );
     }
 }

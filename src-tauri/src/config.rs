@@ -63,6 +63,21 @@ pub struct DesktopConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
 
+    /// The last email that signed in on this install, kept ONLY so the
+    /// onboarding sign-in form can prefill it after a sign-out or a
+    /// startup-401 auto sign-out (the keychain account-email credential is
+    /// deliberately erased by `AuthVault::clear_session` — "logout leaves no
+    /// PII behind" for credential material — so without this field the
+    /// sign-in form would always start blank).
+    ///
+    /// Non-secret metadata, same class as `account_id`: it is deliberately
+    /// NOT in `DesktopSettings`/`apply_settings` so a settings save can never
+    /// read, clobber, or clear it. The file is written mode 0600 (Unix);
+    /// hand-editing the TOML removes the prefill. `skip_serializing_if`
+    /// keeps configs that never signed in byte-identical to the old layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_signed_in_email: Option<String>,
+
     /// Local folder mirrored against the vault. `None` until the user
     /// completes the first-launch picker.
     #[serde(default)]
@@ -252,31 +267,25 @@ fn default_local_cache_limit_bytes() -> i64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DesktopTheme {
     Light,
     Dark,
+    #[default]
     System,
 }
 
-impl Default for DesktopTheme {
-    fn default() -> Self {
-        Self::System
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ReleaseChannel {
+    #[default]
     Stable,
     Beta,
     Alpha,
 }
 
-impl Default for ReleaseChannel {
-    fn default() -> Self {
-        Self::Stable
-    }
-}
 
 impl ReleaseChannel {
     pub fn as_str(self) -> &'static str {
@@ -299,6 +308,7 @@ impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
             account_id: None,
+            last_signed_in_email: None,
             sync_root: None,
             upload_kbps_limit: 0,
             download_kbps_limit: 0,
@@ -627,6 +637,31 @@ mod tests {
         assert!(toml.contains("account_id"));
         let back: DesktopConfig = toml::from_str(&toml).expect("parse");
         assert_eq!(back.account_id.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+    }
+
+    #[test]
+    fn last_signed_in_email_round_trips_and_stays_absent_until_set() {
+        // Same byte-identical guarantee as account_id: a config that never
+        // signed in must not grow a `last_signed_in_email` key, and older
+        // configs missing the key must load as `None` (serde default).
+        let cfg = DesktopConfig::default();
+        let toml = toml::to_string_pretty(&cfg).expect("serialize default");
+        assert!(
+            !toml.contains("last_signed_in_email"),
+            "last_signed_in_email must be omitted until an email is remembered, got:\n{toml}"
+        );
+
+        // A pre-field config (no key) loads as None — backward compatible.
+        let legacy: DesktopConfig = toml::from_str("sync_root = \"/tmp/x\"\n").expect("parse legacy");
+        assert_eq!(legacy.last_signed_in_email, None);
+
+        // Once set, the key appears and round-trips losslessly.
+        let mut cfg = DesktopConfig::default();
+        cfg.last_signed_in_email = Some("user@example.com".to_string());
+        let toml = toml::to_string_pretty(&cfg).expect("serialize with email");
+        assert!(toml.contains("last_signed_in_email"));
+        let back: DesktopConfig = toml::from_str(&toml).expect("parse");
+        assert_eq!(back.last_signed_in_email.as_deref(), Some("user@example.com"));
     }
 
     #[test]

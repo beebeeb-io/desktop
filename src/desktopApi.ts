@@ -962,6 +962,16 @@ export interface DesktopLoginResult {
 }
 
 /**
+ * The last email that signed in on this install, for prefilling the
+ * onboarding sign-in form after a sign-out or a startup-401 auto sign-out.
+ * Non-secret metadata from desktop.toml (the keychain account-email
+ * credential is erased by sign-out); `null` when nothing was ever signed in.
+ */
+export function lastSignedInEmail(): Promise<CommandResult<string | null>> {
+  return command<string | null>('last_signed_in_email')
+}
+
+/**
  * Authenticate with email + password. Returns `{ requires_2fa: true }` when
  * the account has TOTP enabled — the caller must then invoke
  * `desktopLogin2fa` with the 6-digit code to complete the session.

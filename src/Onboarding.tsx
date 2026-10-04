@@ -5,6 +5,7 @@ import OnboardingErrorBoundary from './OnboardingErrorBoundary'
 import {
   command,
   commandUnavailableLabel,
+  lastSignedInEmail,
   loadSyncStatus,
   type CommandResult,
   type DesktopPlatform,
@@ -187,6 +188,23 @@ function SignInStep({ onDone }: { onDone: () => void }) {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
+
+  // Prefill the email from the last signed-in account on this install, so a
+  // sign-out / startup-401 auto sign-out lands on a password form that
+  // already knows the address (backend keeps it in desktop.toml — the
+  // keychain account-email credential is erased by sign-out). Prefill only:
+  // never overwrites what the user is typing, and stays silent on
+  // unavailability (fresh install / hand-edited config).
+  useEffect(() => {
+    let cancelled = false
+    void lastSignedInEmail().then((result) => {
+      if (cancelled || !result.ok || !result.value) return
+      setEmail((current) => (current ? current : result.value as string))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const [totpCode, setTotpCode] = useState('')
   const [backupCode, setBackupCode] = useState('')

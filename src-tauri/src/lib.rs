@@ -262,11 +262,10 @@ impl AppState {
             return Err("no active account".to_string());
         }
         let active_id = self.active_account_id.lock().ok().and_then(|g| g.clone());
-        if let Some(id) = active_id {
-            if let Some(found) = accounts.iter().find(|a| a.id == id) {
+        if let Some(id) = active_id
+            && let Some(found) = accounts.iter().find(|a| a.id == id) {
                 return Ok(found.clone());
             }
-        }
         // Fallback: first registered account (the only one in Phase 0).
         Ok(accounts[0].clone())
     }
@@ -474,6 +473,154 @@ fn clear_keychain_session(account_id: &str) -> Result<(), String> {
         .map_err(|e| keychain_error("clear legacy Keychain session", e))
 }
 
+/// Read the segmented keychain account-email credential WITHOUT unlocking
+/// (email is metadata, not key material — no lock-state gate). `None` on
+/// absence or on a store that cannot answer (the Linux fail-closed stub).
+fn keychain_account_email(account_id: &str) -> Option<String> {
+    AuthVault::new(platform_keychain_store_for(account_id))
+        .account_email()
+        .ok()
+        .flatten()
+}
+
+/// The email to remember for the sign-in prefill at sign-out time, in
+/// precedence order: the in-memory session's email, then the mirrored
+/// per-account `auth_email`, then the keychain account-email credential.
+/// MUST be called before `clear_keychain_session` erases the keychain copy.
+fn signout_email_to_preserve(acct: &crate::account::AccountRuntime) -> Option<String> {
+    acct.session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|s| s.email.clone()))
+        .or_else(|| acct.auth_email.lock().ok().and_then(|guard| guard.clone()))
+        .or_else(|| keychain_account_email(acct.id.as_str()))
+}
+
+/// Pure core of [`persist_last_signed_in_email`]: stage the prefill email
+/// onto a config. `None` (nothing signed in) and unchanged values are
+/// no-ops, so sign-out never rewrites `desktop.toml` just for the prefill.
+/// Returns whether the config changed and needs saving.
+fn stage_last_signed_in_email(cfg: &mut DesktopConfig, email: Option<&str>) -> bool {
+    match email {
+        None => false,
+        Some(email) if cfg.last_signed_in_email.as_deref() == Some(email) => false,
+        Some(email) => {
+            cfg.last_signed_in_email = Some(email.to_string());
+            true
+        }
+    }
+}
+
+/// Best-effort: remember the last signed-in email so the onboarding sign-in
+/// form can prefill it after a sign-out / startup-401 auto sign-out (the
+/// keychain account-email credential is erased by `clear_keychain_session`,
+/// so this desktop.toml field is the only surviving copy). A config failure
+/// must never fail sign-out — log and continue.
+fn persist_last_signed_in_email(email: Option<String>) {
+    let Some(email) = email else { return };
+    let result = DesktopConfig::load().and_then(|mut cfg| {
+        if stage_last_signed_in_email(&mut cfg, Some(&email)) {
+            cfg.save()?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        tracing::warn!(
+            %error,
+            "could not persist the last signed-in email for sign-in prefill (best-effort)"
+        );
+    }
+}
+
+/// Result of the one bounded startup session probe (`GET /api/v1/auth/me`).
+///
+/// The classification is deliberately three-valued: only a DEFINITIVE HTTP
+/// 401 proves the stored token is dead. Everything else — network error,
+/// timeout, 5xx, any other status — is [`StartupSessionCheck::Inconclusive`]
+/// and must fail OPEN (offline users must never be logged out by startup).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartupSessionCheck {
+    /// `GET /auth/me` answered 2xx — the stored token is valid.
+    Authorized,
+    /// `GET /auth/me` answered exactly 401 — the stored token is definitively
+    /// rejected; the session may be discarded (auto sign-out).
+    Unauthorized,
+    /// Anything else (network error, timeout, 5xx, other status). Never
+    /// authorizes discarding the session.
+    Inconclusive(String),
+}
+
+/// One bounded `GET /api/v1/auth/me` with the stored session token (the same
+/// endpoint+auth shape [`ApiClient::account_profile`] uses, via the ad-hoc
+/// reqwest pattern the logout revocation uses). `base_url` is a parameter so
+/// tests can point this at a loopback mock; production passes
+/// [`runner::api_base_url`]. Total cost is capped at 5 seconds — this runs
+/// during startup.
+///
+/// The bearer token is only sent over the wire, never logged.
+async fn probe_startup_session(base_url: &str, token: &str) -> StartupSessionCheck {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .default_headers(api_client::provenance_headers())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return StartupSessionCheck::Inconclusive(format!("client build: {error}")),
+    };
+    let request = client
+        .get(format!("{base_url}/api/v1/auth/me"))
+        .bearer_auth(token);
+    let response = match tokio::time::timeout(std::time::Duration::from_secs(5), request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return StartupSessionCheck::Inconclusive(format!("network error: {error}")),
+        Err(_) => return StartupSessionCheck::Inconclusive("probe timed out after 5s".to_string()),
+    };
+    match response.status() {
+        reqwest::StatusCode::UNAUTHORIZED => StartupSessionCheck::Unauthorized,
+        status if status.is_success() => StartupSessionCheck::Authorized,
+        status => StartupSessionCheck::Inconclusive(format!("HTTP {status}")),
+    }
+}
+
+/// Apply the auto sign-out for a startup session the server definitively
+/// rejected with 401: clear the keychain session trio (exactly like a real
+/// sign-out's credential step — wrapped-master-key semantics untouched,
+/// `clear_keychain_session` is the same call) and drop the auth flags so the
+/// app boots signed-out and the SignedOutGate routes to onboarding/sign-in.
+/// The in-memory session is never installed and the engine never started on
+/// this path (the caller checks before doing either).
+///
+/// `email` is the rejected session's email — persisted for the sign-in
+/// prefill BEFORE the keychain clear erases the keychain copy (best-effort).
+///
+/// Best-effort on the keychain clear: a store that cannot answer (the Linux
+/// fail-closed stub) must not panic startup — log and continue, the flags
+/// still route the app to signed-out.
+fn discard_unusable_startup_session(
+    state: &AppState,
+    acct: &crate::account::AccountRuntime,
+    email: Option<String>,
+) {
+    tracing::info!(
+        account_id = acct.id.as_str(),
+        "stored session token was rejected by the server (HTTP 401) at startup; \
+         clearing the stored session so the app boots signed out"
+    );
+    // The session was never installed in memory, so the caller passes the
+    // restored session's email directly; fall back to the per-account mirror
+    // / keychain credential while they still exist (short-circuits when the
+    // session email is known).
+    persist_last_signed_in_email(email.or_else(|| signout_email_to_preserve(acct)));
+    if let Err(error) = clear_keychain_session(acct.id.as_str()) {
+        tracing::warn!(
+            %error,
+            "could not clear the server-rejected keychain session trio at startup (best-effort)"
+        );
+    }
+    set_auth_present(state, false);
+    set_auth_email(state, None);
+}
+
 /// On launch, resume a fully signed-in **and unlocked** session when the
 /// platform credential store still holds BOTH the session token and the
 /// vault master key.
@@ -552,6 +699,29 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
             return;
         }
     };
+
+    // Definitive-401 auto sign-out (the dead-session trap fix): the restore
+    // used to reinstall a stored token with NO server validation, while every
+    // login path refuses while a session is installed — a revoked/expired
+    // token trapped the user. ONE bounded probe decides: HTTP 401 → the
+    // stored session is definitively dead → clear the keychain trio and boot
+    // signed-out. ANYTHING else (network error, timeout, 5xx, other status)
+    // fails OPEN — keep the session and current behavior; an offline user
+    // must never be logged out by startup. Still inside the spawned startup
+    // task: setup() is never blocked by this.
+    match probe_startup_session(&runner::api_base_url(), &session.token).await {
+        StartupSessionCheck::Unauthorized => {
+            discard_unusable_startup_session(&state, &acct, session.email.clone());
+            return;
+        }
+        StartupSessionCheck::Authorized => {}
+        StartupSessionCheck::Inconclusive(reason) => {
+            tracing::info!(
+                %reason,
+                "startup session probe inconclusive; failing open and keeping the stored session"
+            );
+        }
+    }
 
     let token = session.token.clone();
     let master_key = session.master_key;
@@ -647,7 +817,7 @@ async fn start_engine_if_possible(
     }
     #[cfg(target_os = "windows")]
     let generation = SESSION_COMMANDS.generation()?;
-    if let Some(cfg) = DesktopConfig::load().ok() {
+    if let Ok(cfg) = DesktopConfig::load() {
         let Some(root) = cfg.sync_root else { return Ok(()) };
         // The engine + pause flag are per-account (decision 0800). No active
         // account → nothing to start.
@@ -667,7 +837,7 @@ async fn start_engine_if_possible(
             // unconfirmed stop is still worth knowing about (a not-really-
             // gone previous task could still be touching the same state.db
             // the freshly spawned runner is about to open).
-            if !prev.abort().await {
+            if !prev.abort().await.is_stopped() {
                 #[cfg(target_os = "windows")]
                 return Err("Could not stop the previous sync engine; retry locking before restarting sync.".into());
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
@@ -1425,63 +1595,157 @@ pub(crate) async fn apply_session(
     Ok(())
 }
 
+/// What [`clear_session_impl`] actually did, so the native menu can tell
+/// "you were already signed out" apart from a completed teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignOutOutcome {
+    /// Full teardown ran (or completed idempotently).
+    Completed,
+    /// Nothing was signed in — engine stop and Cloud Files teardown were
+    /// skipped; only the idempotent cleanups (keychain clear, local purge)
+    /// ran.
+    NotSignedIn,
+}
+
+/// The unconfirmed-stop refusal (Bug A / task 1538 Codex P1). Shared by the
+/// fresh-abort path and the Bug-A2 retry gate so a retry cannot be
+/// distinguished from a first refusal by its message.
+const UNCONFIRMED_ENGINE_STOP_ERROR: &str =
+    "Could not stop the sync engine. Please try signing out again; if this keeps \
+     happening, restart Beebeeb before signing in with a different account.";
+
 /// Drop any cached session and abort the engine if running.
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState) -> Result<(), String> {
+async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
     let mut _auth_reopen = None;
     let acct = state.active_account()?;
-    #[cfg(target_os = "windows")]
-    close_session_commands().await?;
-    // Stop the engine before dropping memory so the IPC listener cannot accept
-    // new File Provider operations with a cloned master key.
-    //
-    // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): `abort()` now returns
-    // whether the engine's task is CONFIRMED terminated, not just "we asked
-    // and waited a bit". The purge below is a cross-account data-
-    // exfiltration control (findings 1+2) — it is only safe to run once the
-    // OLD engine (and everything nested in its single task: the IPC socket
-    // server, the Windows upload watcher) is genuinely gone and can no
-    // longer drain or enqueue operations behind its back. If we can't
-    // confirm that, refuse to complete sign-out rather than purge anyway
-    // and hand the next account's engine a false sense of a clean slate.
-    let mut engine_slot = acct.engine.lock().await;
-    if let Some(prev) = engine_slot.take() {
-        let stopped = prev.abort().await;
-        if !stopped {
-            tracing::error!(
-                "sign-out refused: could not confirm the sync engine stopped; \
-                 refusing to purge local state or clear credentials while it may still be running"
-            );
-            return Err(
-                "Could not stop the sync engine. Please try signing out again; if this keeps \
-                 happening, restart Beebeeb before signing in with a different account."
-                    .to_string(),
-            );
-        }
-        tracing::info!("engine aborted on logout");
-    }
 
-    #[cfg(not(target_os = "windows"))]
-    drop(engine_slot);
+    // Bug B guard: already signed out everywhere (no auth flag, no in-memory
+    // session, no keychain session) → skip the engine stop and the Cloud
+    // Files teardown entirely. The old flow ran the full teardown anyway and
+    // could FAIL (CFAPI/purge preflight) — trapping the user in a
+    // "can't sign out because not signed in" loop. What still runs below, on
+    // BOTH paths: the idempotent keychain clear, the local-state purge (the
+    // queue purge is a cross-account safety invariant — never skipped), and
+    // the auth-flag resets.
+    let already_signed_out = {
+        let auth_present = state.auth_present.lock().map(|present| *present).unwrap_or(false);
+        let session_installed = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
+        !auth_present && !session_installed && !keychain_session_present(acct.id.as_str())
+    };
+    if already_signed_out {
+        tracing::info!(
+            "sign-out requested while already signed out; skipping engine stop and Cloud Files teardown"
+        );
+    } else {
+        // Remember the signed-in email for the sign-in prefill BEFORE any
+        // credential erasure: `clear_keychain_session` deletes the keychain
+        // account-email credential, so this capture is the last chance to
+        // keep the address the sign-in form should open with. Best-effort —
+        // never gates sign-out. On the already-signed-out path the capture
+        // finds nothing and no write happens.
+        persist_last_signed_in_email(signout_email_to_preserve(&acct));
+        #[cfg(target_os = "windows")]
+        close_session_commands().await?;
+        // Stop the engine before dropping memory so the IPC listener cannot accept
+        // new File Provider operations with a cloned master key.
+        //
+        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): `abort()` reports
+        // whether the engine's task is CONFIRMED terminated, not just "we asked
+        // and waited a bit". The purge below is a cross-account data-
+        // exfiltration control (findings 1+2) — it is only safe to run once the
+        // OLD engine (and everything nested in its single task: the IPC socket
+        // server, the Windows upload watcher) is genuinely gone and can no
+        // longer drain or enqueue operations behind its back. If we can't
+        // confirm that, refuse to complete sign-out rather than purge anyway
+        // and hand the next account's engine a false sense of a clean slate.
+        //
+        // Bug A2: a refused attempt consumes the engine handle, leaving the
+        // slot empty — without the `engine_stop_unconfirmed` flag below, a
+        // RETRY would see an idle slot, skip this gate entirely, and purge
+        // while the old engine may still be running. The flag (per-account,
+        // in-memory) keeps the gate closed until the process restarts, which
+        // is exactly what the error message tells the user to do.
+        let mut engine_slot = acct.engine.lock().await;
+        if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
+            drop(engine_slot);
+            tracing::error!(
+                "sign-out refused: a previous attempt could not confirm the sync engine \
+                 stopped; restart Beebeeb before signing in with a different account"
+            );
+            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+        }
+        if let Some(prev) = engine_slot.take() {
+            match prev.abort().await {
+                runner::AbortOutcome::Stopped => {
+                    tracing::info!("engine aborted on logout");
+                }
+                runner::AbortOutcome::RevokeFailed { stage, source } => {
+                    // Bug A misattribution fix: the engine task itself IS
+                    // confirmed stopped here — what failed is the Windows
+                    // Cloud Files callback revocation. Say so, instead of
+                    // blaming the sync engine.
+                    tracing::error!(
+                        stage,
+                        %source,
+                        "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
+                    );
+                    return Err(format!(
+                        "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
+                         Please try signing out again; if this keeps happening, restart Beebeeb \
+                         before signing in with a different account. ({source})"
+                    ));
+                }
+                runner::AbortOutcome::TaskUnconfirmed => {
+                    acct.engine_stop_unconfirmed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        "sign-out refused: could not confirm the sync engine stopped; \
+                         refusing to purge local state or clear credentials while it may still be running"
+                    );
+                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        drop(engine_slot);
+
+        #[cfg(target_os = "windows")]
+        {
+            windows_cf::revoke_callbacks()
+                .await
+                .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+            windows_cf::wait_for_credential_release().await?;
+            // Native/credential shutdown is now confirmed. Cleanup may refuse dirty
+            // files; allow an explicit unlock so the user can sync and retry.
+            {
+                SESSION_COMMANDS.finish_close();
+                _auth_reopen = Some(auth_attempts::ReopenOnDrop(&AUTH_ATTEMPTS));
+            }
+        }
+    }
 
     #[cfg(target_os = "windows")]
     {
-        windows_cf::revoke_callbacks()
-            .await
-            .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
-        windows_cf::wait_for_credential_release().await?;
-        // Native/credential shutdown is now confirmed. Cleanup may refuse dirty
-        // files; allow an explicit unlock so the user can sync and retry.
-        {
-            SESSION_COMMANDS.finish_close();
-            _auth_reopen = Some(auth_attempts::ReopenOnDrop(&AUTH_ATTEMPTS));
-        }
-        let root = DesktopConfig::load()?.sync_root;
+        // Local teardown is authoritative even offline; server revocation is
+        // best effort and bounded. Never log the bearer token.
+        //
+        // The PURGE below runs on BOTH paths (already-signed-out included):
+        // it is the cross-account safety invariant and must never be skipped.
+        // Only the Cloud Files unregister + server revocation are gated on
+        // actually having been signed in — when already signed out there is
+        // no live registration of ours to remove and no session to revoke.
+        let root = if already_signed_out {
+            DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root)
+        } else {
+            DesktopConfig::load()?.sync_root
+        };
         let db = state_db_from_app_local_state_dir()?;
         if let Some(db) = db {
             windows_cf::signout::purge(&db, root.as_deref()).map_err(|e| format!("Sign-out paused: {e}"))?;
@@ -1494,35 +1758,35 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
                 return Err("Cannot verify sync-folder ownership without its database. Restore the local state before signing out.".into());
             }
         }
-        if let Some(root) = root {
-            // Cloud Files must release the root before WinRT removes its shell registration.
-            windows_cf::unregister_sync_root(&root).map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
-            windows_cf::unregister_shell_sync_root(&root)
-                .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
-        }
-        // Local teardown is authoritative even offline; server revocation is
-        // best effort and bounded. Never log the bearer token.
-        let token = acct
-            .session
-            .lock()
-            .ok()
-            .and_then(|s| s.as_ref().map(|s| zeroize::Zeroizing::new(s.token.clone())))
-            .or_else(|| {
-                load_session_token_from_keychain(acct.id.as_str())
-                    .ok()
-                    .flatten()
-                    .map(zeroize::Zeroizing::new)
-            });
-        if let Some(token) = token {
-            let client = reqwest::Client::builder()
-                .default_headers(api_client::provenance_headers())
-                .build()
-                .map_err(|e| format!("Could not initialize logout request: {e}"))?;
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                revoke_desktop_session(&client, &runner::api_base_url(), &token),
-            )
-            .await;
+        if !already_signed_out {
+            if let Some(root) = root {
+                // Cloud Files must release the root before WinRT removes its shell registration.
+                windows_cf::unregister_sync_root(&root).map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
+                windows_cf::unregister_shell_sync_root(&root)
+                    .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
+            }
+            let token = acct
+                .session
+                .lock()
+                .ok()
+                .and_then(|s| s.as_ref().map(|s| zeroize::Zeroizing::new(s.token.clone())))
+                .or_else(|| {
+                    load_session_token_from_keychain(acct.id.as_str())
+                        .ok()
+                        .flatten()
+                        .map(zeroize::Zeroizing::new)
+                });
+            if let Some(token) = token {
+                let client = reqwest::Client::builder()
+                    .default_headers(api_client::provenance_headers())
+                    .build()
+                    .map_err(|e| format!("Could not initialize logout request: {e}"))?;
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    revoke_desktop_session(&client, &runner::api_base_url(), &token),
+                )
+                .await;
+            }
         }
     }
 
@@ -1612,7 +1876,7 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     }
     // Drop the cached account profile so a subsequent `account_profile` IPC
     // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
-    clear_cached_profile(&state);
+    clear_cached_profile(state);
     // Sign out = clean slate: drop any in-flight 2FA challenge so an abandoned
     // partial token can't linger (and is zeroized) past a logout.
     if let Ok(mut guard) = state.pending_2fa.lock() {
@@ -1625,10 +1889,25 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
     // finding 5): the engine that was feeding it just stopped, and a fresh
     // sign-in must not inherit a stale `auth_expired: true` banner.
     acct.auth_health.note_result(None);
+    if already_signed_out {
+        // Already signed out: the trio should already be gone. The clear is
+        // idempotent, but on a store that cannot answer (e.g. the Linux
+        // fail-closed stub) an error must not turn an already-signed-out
+        // no-op into a failure — log it and return success.
+        if let Err(error) = clear_keychain_session(acct.id.as_str()) {
+            tracing::warn!(
+                %error,
+                "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing"
+            );
+        }
+        set_auth_present(state, false);
+        set_auth_email(state, None);
+        return Ok(SignOutOutcome::NotSignedIn);
+    }
     clear_keychain_session(acct.id.as_str())?;
     set_auth_present(state, false);
     set_auth_email(state, None);
-    Ok(())
+    Ok(SignOutOutcome::Completed)
 }
 
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
@@ -1636,7 +1915,7 @@ async fn clear_session_impl(state: &AppState) -> Result<(), String> {
 /// the UI must retain the account and display that error for recovery/retry.
 #[tauri::command]
 async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
-    clear_session_impl(&state).await
+    clear_session_impl(&state).await.map(|_| ())
 }
 
 /// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
@@ -1736,7 +2015,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         // stays fast — there's nothing cross-account to protect here), but
         // it's still worth a loud warning rather than a silent "we waited 3s
         // and moved on".
-        if !prev.abort().await {
+        if !prev.abort().await.is_stopped() {
             #[cfg(target_os = "windows")]
             return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
             #[cfg(not(target_os = "windows"))]
@@ -2269,7 +2548,7 @@ async fn persist_sync_root_and_start_engine(
             // unconfirmed stop is still worth knowing about (a not-really-
             // gone previous task could still be touching the same state.db
             // the freshly spawned runner is about to open).
-            if !prev.abort().await {
+            if !prev.abort().await.is_stopped() {
                 #[cfg(target_os = "windows")]
                 return Err("Could not stop the previous sync engine; retry locking before restarting sync.".into());
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
@@ -2359,7 +2638,7 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     if let Some(prev) = engine_slot.take() {
         // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
         // respawn guard.
-        if !prev.abort().await {
+        if !prev.abort().await.is_stopped() {
             tracing::warn!("pending-finder-install engine did not confirm termination on stop");
         }
     }
@@ -2392,18 +2671,15 @@ async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sy
             return Err(format!("Could not start the local Beebeeb sync socket: {bind_error}"));
         }
 
-        match timeout(Duration::from_millis(300), UnixStream::connect(&path)).await {
-            Ok(Ok(mut stream)) => {
-                let mut response = vec![0u8; 4096];
-                if stream.write_all(&request).await.is_ok()
-                    && let Ok(Ok(bytes_read)) = timeout(Duration::from_millis(300), stream.read(&mut response)).await
-                    && bytes_read > 0
-                    && serde_json::from_slice::<ipc_socket::IpcResponse>(&response[..bytes_read]).is_ok()
-                {
-                    return Ok(());
-                }
+        if let Ok(Ok(mut stream)) = timeout(Duration::from_millis(300), UnixStream::connect(&path)).await {
+            let mut response = vec![0u8; 4096];
+            if stream.write_all(&request).await.is_ok()
+                && let Ok(Ok(bytes_read)) = timeout(Duration::from_millis(300), stream.read(&mut response)).await
+                && bytes_read > 0
+                && serde_json::from_slice::<ipc_socket::IpcResponse>(&response[..bytes_read]).is_ok()
+            {
+                return Ok(());
             }
-            Ok(Err(_)) | Err(_) => {}
         }
 
         if Instant::now() >= deadline {
@@ -3008,7 +3284,7 @@ async fn reset_macos_integration(
     if let Some(prev) = engine_slot.take() {
         // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
         // respawn guard.
-        if !prev.abort().await {
+        if !prev.abort().await.is_stopped() {
             tracing::warn!("engine did not confirm termination before macOS integration reset");
         } else {
             tracing::info!("engine aborted for macOS integration reset");
@@ -4617,7 +4893,7 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
             if let Some(prev) = engine_slot.take() {
                 // Task 1538 Codex P1 — see `start_engine_if_possible`'s
                 // identical respawn guard.
-                if !prev.abort().await {
+                if !prev.abort().await.is_stopped() {
                     #[cfg(target_os = "windows")]
                     return Err(
                         "Could not stop the previous sync engine; retry locking before restarting sync.".into(),
@@ -5794,20 +6070,19 @@ fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collections::HashSet
         if row.is_folder {
             continue;
         }
-        if let Some(parent) = row.parent_id.as_ref() {
-            if let Some(folder) = folders.get_mut(parent) {
+        if let Some(parent) = row.parent_id.as_ref()
+            && let Some(folder) = folders.get_mut(parent) {
                 folder.direct_size = folder.direct_size.saturating_add(row.size_bytes.max(0));
                 folder.direct_count = folder.direct_count.saturating_add(1);
                 if row.on_disk {
                     folder.direct_on_disk = folder.direct_on_disk.saturating_add(row.size_bytes.max(0));
                 }
             }
-        }
     }
 
     // 3 + 4. Materialize recursively with a cycle guard.
     let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    roots.sort_by(|a, b| folder_sort_key(&folders, a).cmp(&folder_sort_key(&folders, b)));
+    roots.sort_by_key(|a| folder_sort_key(&folders, a));
     roots
         .iter()
         .filter_map(|id| materialize_folder(id, &folders, excluded, &mut visiting))
@@ -5837,7 +6112,7 @@ fn materialize_folder(
     }
 
     let mut child_ids = folder.children.clone();
-    child_ids.sort_by(|a, b| folder_sort_key(folders, a).cmp(&folder_sort_key(folders, b)));
+    child_ids.sort_by_key(|a| folder_sort_key(folders, a));
     let children: Vec<VaultItem> = child_ids
         .iter()
         .filter_map(|cid| materialize_folder(cid, folders, excluded, visiting))
@@ -5998,8 +6273,8 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
             .collect();
 
         // Primary path: build from the local, already-nested state DB.
-        if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg)) {
-            if let Ok(entries) = db.list_files() {
+        if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))
+            && let Ok(entries) = db.list_files() {
                 let rows: Vec<VaultEntryRow> = entries
                     .iter()
                     .map(|e| VaultEntryRow {
@@ -6017,7 +6292,6 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
                 }
                 // DB present but no folders yet — fall through to the API stopgap.
             }
-        }
 
         // Fallback: top-level API folders, FLAT, zeroed aggregates. Only used
         // until the first sync populates the local DB.
@@ -6126,6 +6400,17 @@ fn account_email(state: State<'_, AppState>) -> Result<Option<String>, String> {
     }
     drop(guard);
     Ok(acct.auth_email.lock().ok().and_then(|guard| guard.clone()))
+}
+
+/// The last email that signed in on this install, for prefilling the
+/// onboarding sign-in form after a sign-out or a startup-401 auto sign-out
+/// (the keychain account-email credential is erased by sign-out, so this
+/// reads the non-secret `desktop.toml` field `last_signed_in_email` — see
+/// its doc for the privacy posture). `Ok(None)` when nothing was ever
+/// signed in on this install, or the user hand-edited the value away.
+#[tauri::command]
+fn last_signed_in_email() -> Result<Option<String>, String> {
+    Ok(DesktopConfig::load().ok().and_then(|cfg| cfg.last_signed_in_email))
 }
 
 // ── IPC commands: data layer (account / billing / devices / activity) ─────────
@@ -8517,6 +8802,7 @@ pub fn run() {
             get_desktop_config,
             set_desktop_config,
             account_email,
+            last_signed_in_email,
             // PKG-DATA — account / billing / devices / activity data layer.
             // Wrappers over existing server endpoints (the "all pages empty"
             // fix) plus the locally-computed storage breakdown.
@@ -9304,11 +9590,21 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
                 let state = app.state::<AppState>();
                 let result = clear_session_impl(&state).await;
                 #[cfg(target_os = "windows")]
-                if let Err(error) = &result {
-                    app.dialog().message(error).title("Sign-out paused")
-                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+                match &result {
+                    // Nothing to tear down — tell the user instead of running
+                    // (and possibly failing) the full teardown (Bug B).
+                    Ok(SignOutOutcome::NotSignedIn) => {
+                        app.dialog().message("You are not signed in on this device.")
+                            .title("Sign out")
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Info).show(|_| {});
+                    }
+                    Ok(SignOutOutcome::Completed) => {}
+                    Err(error) => {
+                        app.dialog().message(error.clone()).title("Sign-out paused")
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
+                    }
                 }
-                result
+                result.map(|_| ())
             });
         }
         DesktopMenuAction::Quit => app.exit(0),
@@ -9542,11 +9838,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let _ = manager.enable();
             }
             let new_state = !currently;
-            if let Some(tray) = app.tray_by_id("tray") {
-                if let Ok(menu) = build_tray_menu(app, new_state) {
+            if let Some(tray) = app.tray_by_id("tray")
+                && let Ok(menu) = build_tray_menu(app, new_state) {
                     let _ = tray.set_menu(Some(menu));
                 }
-            }
             tracing::info!(enabled = new_state, "autostart toggled via tray");
         }
         _ => {}
@@ -9831,7 +10126,6 @@ fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
             Some(other) => Some(other),
         };
         show_compact_app_window_with_nav(app, compact_nav);
-        return;
     }
 
     #[cfg(target_os = "windows")]
@@ -12180,5 +12474,300 @@ mod popover_wiring_tests {
         let adding = install.find("finder_adding_guard()").expect("the install marks the attempt for the popover");
         let slow = install.find("install_file_provider_domain()").unwrap();
         assert!(clear < adding && adding < slow, "the marker is set before the slow File Provider work");
+    }
+}
+
+/// Sign-out teardown regression tests (engine-stop gate, already-signed-out
+/// no-op guard). These drive the REAL `clear_session_impl` against a
+/// synthesized in-memory account; the platform credential store is the
+/// non-macOS/Linux stub (every method → `Unsupported`), the Tauri app-local
+/// state dir is never initialized in tests (the purge logs and continues),
+/// and the Windows Cloud Files block is cfg'd out — so these tests exercise
+/// exactly the cross-platform control flow, not OS integration.
+#[cfg(test)]
+mod signout_teardown_tests {
+    use super::{AppState, clear_session_impl, set_auth_email, set_auth_present};
+    use crate::account::{AccountId, synthesize_single_account};
+    use crate::runner::EngineRunner;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn test_account(state: &AppState, id: &str) -> Arc<crate::account::AccountRuntime> {
+        synthesize_single_account(state, AccountId(id.to_string()));
+        state.active_account().expect("synthesized account resolves")
+    }
+
+    /// Bug B: sign-out while already signed out (no auth flag, no in-memory
+    /// session, no keychain session) must SUCCEED as a no-op — it must not
+    /// attempt the engine stop (a live engine in the slot must still be
+    /// running afterwards), must not consume the engine slot, and must not
+    /// fail on the (Linux-stub) keychain clear.
+    #[tokio::test]
+    async fn clear_session_when_already_signed_out_skips_the_engine_and_succeeds() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-noop-acct");
+        set_auth_present(&state, false);
+        assert!(acct.session.lock().unwrap().is_none());
+
+        // A live engine in the slot: if teardown tried to stop it, the tick
+        // counter freezes — the liveness assertion below catches that.
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticks_for_task = ticks.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                ticks_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+
+        let result = clear_session_impl(&state).await;
+
+        assert!(
+            result.is_ok(),
+            "signing out while already signed out must succeed, got {result:?}"
+        );
+        assert!(
+            acct.engine.lock().await.is_some(),
+            "the no-op path must not consume the engine slot"
+        );
+        let before = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            ticks.load(Ordering::SeqCst) > before,
+            "the engine task must still be running — the already-signed-out path \
+             must not attempt an engine abort"
+        );
+    }
+
+    /// User amendment: the email to prefill into the sign-in form must be
+    /// captured at sign-out time, BEFORE `clear_keychain_session` erases the
+    /// keychain account-email credential. Precedence: in-memory session
+    /// email → mirrored `auth_email` → keychain credential (None on the
+    /// Linux fail-closed stub, which is also what a genuinely-absent
+    /// credential yields).
+    #[tokio::test]
+    async fn signout_email_to_preserve_prefers_the_session_email() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-email-acct");
+        let session = super::Session {
+            token: "tok".into(),
+            master_key: [7u8; 32],
+            email: Some("session@example.com".into()),
+        };
+        *acct.session.lock().unwrap() = Some(session);
+        set_auth_email(&state, Some("mirror@example.com".into()));
+
+        assert_eq!(
+            super::signout_email_to_preserve(&acct).as_deref(),
+            Some("session@example.com"),
+            "the in-memory session email is the most authoritative source"
+        );
+    }
+
+    #[tokio::test]
+    async fn signout_email_to_preserve_falls_back_to_the_mirror_then_none() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-email-acct-2");
+        set_auth_email(&state, Some("mirror@example.com".into()));
+        assert_eq!(
+            super::signout_email_to_preserve(&acct).as_deref(),
+            Some("mirror@example.com"),
+            "without a session, the mirrored auth_email is captured"
+        );
+
+        // Both in-memory sources absent → the keychain credential decides.
+        // On the Linux stub store (and for a synthetic account id with no
+        // stored credential anywhere) that is None — nothing to prefill.
+        set_auth_email(&state, None);
+        assert_eq!(
+            super::signout_email_to_preserve(&acct),
+            None,
+            "no session, no mirror, no keychain credential → nothing to prefill"
+        );
+    }
+
+    #[test]
+    fn stage_last_signed_in_email_skips_none_and_unchanged_values() {
+        let mut cfg = crate::config::DesktopConfig::default();
+
+        // Nothing signed in → no change, no save.
+        assert!(!super::stage_last_signed_in_email(&mut cfg, None));
+        assert_eq!(cfg.last_signed_in_email, None);
+
+        // First email → change (caller saves).
+        assert!(super::stage_last_signed_in_email(&mut cfg, Some("user@example.com")));
+        assert_eq!(cfg.last_signed_in_email.as_deref(), Some("user@example.com"));
+
+        // Same email again → no change, so sign-out never rewrites the
+        // desktop.toml just for the prefill.
+        assert!(!super::stage_last_signed_in_email(&mut cfg, Some("user@example.com")));
+
+        // A different account's email → change.
+        assert!(super::stage_last_signed_in_email(&mut cfg, Some("other@example.com")));
+        assert_eq!(cfg.last_signed_in_email.as_deref(), Some("other@example.com"));
+    }
+
+    /// Bug A2: after an abort that cannot CONFIRM the engine stopped, the
+    /// consumed handle leaves an empty engine slot. A retry must NOT sail
+    /// past the stop gate (and into the purge) just because the slot is
+    /// empty — it must be refused with the same unconfirmed-stop error until
+    /// the process restarts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_session_retry_after_unconfirmed_engine_stop_cannot_skip_the_stop_gate() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-retry-acct");
+        // Keep the already-signed-out guard out of the way: a failed sign-out
+        // attempt leaves the auth flag up.
+        set_auth_present(&state, true);
+
+        // A task with NO await point: tokio cannot force-abort it, so the
+        // forced path times out unconfirmed — the Bug A precondition. It
+        // exits on its own after a wall-clock deadline so it cannot leak a
+        // spinning worker into the rest of the test run.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let task = tokio::task::spawn_blocking(move || {
+            while std::time::Instant::now() < deadline {
+                std::hint::black_box(());
+            }
+        });
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+
+        let first = clear_session_impl(&state)
+            .await
+            .expect_err("the first attempt must fail while the engine stop is unconfirmed");
+        assert!(
+            first.contains("Could not stop the sync engine"),
+            "first attempt must be the unconfirmed-stop refusal, got: {first}"
+        );
+
+        let second = clear_session_impl(&state)
+            .await
+            .expect_err("the retry must also be refused, not silently proceed past the stop gate");
+        assert!(
+            second.contains("Could not stop the sync engine"),
+            "the retry must be gated by the same unconfirmed-stop refusal \
+             (Bug A2: it must not skip the stop gate on an empty slot), got: {second}"
+        );
+    }
+}
+
+/// Startup session-probe regression tests (definitive-401 auto sign-out).
+/// The probe is pointed at a raw-TCP loopback mock (same technique as the
+/// `recovery_phrase_unlock_tests` server; desktop has no axum dev-dep), so
+/// the classification is exercised against real HTTP status lines.
+#[cfg(test)]
+mod startup_session_tests {
+    use super::{
+        AppState, StartupSessionCheck, discard_unusable_startup_session, probe_startup_session,
+        set_auth_email, set_auth_present,
+    };
+    use crate::account::{AccountId, synthesize_single_account};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Minimal loop-accepting HTTP/1.1 mock that answers EVERY request with
+    /// one fixed status line and an empty JSON object.
+    struct AuthMeMockServer {
+        base_url: String,
+    }
+
+    impl AuthMeMockServer {
+        fn start(status_line: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let body = "{}";
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { base_url }
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_startup_session_classifies_http_401_as_unauthorized() {
+        let server = AuthMeMockServer::start("401 Unauthorized");
+        assert_eq!(
+            probe_startup_session(&server.base_url, "stored-token").await,
+            StartupSessionCheck::Unauthorized,
+            "exactly HTTP 401 must classify as Unauthorized — the ONLY auto-sign-out trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_startup_session_classifies_2xx_as_authorized() {
+        let server = AuthMeMockServer::start("200 OK");
+        assert_eq!(
+            probe_startup_session(&server.base_url, "stored-token").await,
+            StartupSessionCheck::Authorized,
+            "a healthy token must classify as Authorized and restore normally"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_startup_session_fails_open_on_5xx_and_connection_refused() {
+        let server = AuthMeMockServer::start("500 Internal Server Error");
+        assert!(
+            matches!(
+                probe_startup_session(&server.base_url, "stored-token").await,
+                StartupSessionCheck::Inconclusive(_)
+            ),
+            "a 5xx must be inconclusive (fail open — keep the session), never a sign-out trigger"
+        );
+
+        // Unreachable server: bind then drop a listener so the port refuses.
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_url = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        assert!(
+            matches!(
+                probe_startup_session(&dead_url, "stored-token").await,
+                StartupSessionCheck::Inconclusive(_)
+            ),
+            "a network error must be inconclusive (fail open — offline users are never logged out)"
+        );
+    }
+
+    /// The 401 action: boot signed-out. auth_present false (SignedOutGate
+    /// routes to onboarding/sign-in), no in-memory session, mirrored email
+    /// cleared. The keychain trio clear itself is the same idempotent call a
+    /// real sign-out makes; on the Linux stub store it errors and must be
+    /// tolerated (best-effort), which this test also proves on Linux.
+    #[tokio::test]
+    async fn discard_unusable_startup_session_boots_signed_out() {
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId("startup-discard-acct".to_string()));
+        let acct = state.active_account().unwrap();
+        // setup() seeds auth_present from keychain presence — a stored
+        // session means true at this point.
+        set_auth_present(&state, true);
+        set_auth_email(&state, Some("user@example.com".into()));
+
+        // None: no session email to preserve — also proves the helper makes
+        // no config write when it has nothing to remember.
+        discard_unusable_startup_session(&state, &acct, None);
+
+        assert!(
+            !*state.auth_present.lock().unwrap(),
+            "auth_present must be false so the app boots signed out"
+        );
+        assert!(
+            acct.session.lock().unwrap().is_none(),
+            "the rejected session must never be installed in memory"
+        );
+        assert!(
+            acct.auth_email.lock().unwrap().is_none(),
+            "the mirrored signed-in email must be cleared"
+        );
     }
 }
