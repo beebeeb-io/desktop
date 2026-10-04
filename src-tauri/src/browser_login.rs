@@ -7,14 +7,17 @@
 //!
 //! Flow (see `cli_auth.rs` for the server side):
 //!   1. Desktop opens a WebSocket to `wss://api.beebeeb.io/api/v1/auth/cli` and
-//!      sends an ephemeral P-256 ECDH public key: `{"ecdh_public_key_b64": "..."}`.
+//!      sends an ephemeral P-256 ECDH public key plus what it can say about
+//!      itself (`init_frame`): `{"ecdh_public_key_b64": "...", "client": "desktop", ...}`.
 //!   2. Server replies `{"user_code","verification_uri","expires_in"}` (300s).
-//!   3. We open the system browser at `verification_uri` and emit a
-//!      `browser-login` event so the UI can show the code + "we opened your
-//!      browser" state.
-//!   4. The (already-signed-in) browser fetches our pubkey, ECDH-encrypts
-//!      `{session_token, master_key_b64, email}`, and POSTs it to the server,
-//!      which pushes the encrypted blob back over our WS.
+//!   3. We open the system browser at `verification_uri` (which carries NO
+//!      code, task 1734) and emit a `browser-login` event so the UI can show
+//!      the code + "we opened your browser" state. The person TYPES that code
+//!      on the page; a link someone else sends them has nothing to approve.
+//!   4. The (already-signed-in) browser looks the code up, shows who is
+//!      asking, re-proves the user's password, then ECDH-encrypts
+//!      `{session_token, master_key_b64, email}` to our pubkey and POSTs it to
+//!      the server, which pushes the encrypted blob back over our WS.
 //!   5. We derive the shared secret, run HKDF-SHA256 with info
 //!      `"beebeeb-cli-auth-v1"`, AES-256-GCM-decrypt, and hand the credentials
 //!      to `crate::apply_session` (persist to the platform credential store +
@@ -102,6 +105,37 @@ fn ws_url() -> String {
     let base = runner::api_base_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
     format!("{ws}/api/v1/auth/cli")
+}
+
+/// This machine's name, if it has one.
+fn device_hostname() -> Option<String> {
+    hostname::get().ok().and_then(|h| h.into_string().ok())
+}
+
+/// The version this build reports: `BEEBEEB_RELEASE_VERSION` (set by
+/// release.yml) falling back to the Cargo version for local builds — the same
+/// string `api_client`'s `X-Beebeeb-Client-Version` header carries.
+const CLIENT_VERSION: &str = match option_env!("BEEBEEB_RELEASE_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// The first WebSocket frame: our public key (so the browser can do its half of
+/// the ECDH) plus what this app can honestly say about itself, which the
+/// approval page shows the person labelled "reported by the device" — a fake
+/// client can say anything, so the page treats it as a hint, never as proof.
+/// The server ignores anything it does not recognise.
+fn init_frame(pub_key_b64: &str, hostname: Option<String>) -> serde_json::Value {
+    let mut frame = serde_json::json!({
+        "ecdh_public_key_b64": pub_key_b64,
+        "client": "desktop",
+        "client_version": CLIENT_VERSION,
+        "os": std::env::consts::OS,
+    });
+    if let Some(name) = hostname.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
+        frame["device_name"] = serde_json::Value::String(name);
+    }
+    frame
 }
 
 /// Build the WebSocket upgrade request for `ws_url()`, carrying the same
@@ -290,7 +324,7 @@ async fn run_handoff(
     //    the server's device-code reply. Both are bounded by DEVICE_CODE_TIMEOUT:
     //    a connected-but-silent server (cold/stalled first handoff) must not hang
     //    the UI on "Connecting" forever — fail fast with an actionable error.
-    let init = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
+    let init = init_frame(&pub_key_b64, device_hostname());
     let handoff = async {
         ws.send(Message::Text(init.to_string())).await.map_err(|e| {
             tracing::error!(error = %e, "browser-login: failed to send public key");
@@ -520,6 +554,31 @@ mod tests {
             Some(expected_version),
             "X-Beebeeb-Client-Version missing or stale on the /api/v1/auth/cli WS upgrade request"
         );
+    }
+
+    // Task 1734: what the desktop app tells the server about itself when it
+    // asks to be signed in. The approval page shows it to the person labelled
+    // "reported by the device" - it is a hint, never proof - and the server
+    // ignores anything it does not recognise.
+    #[test]
+    fn init_frame_carries_the_key_and_what_this_device_can_say_about_itself() {
+        let frame = init_frame("cHVia2V5", Some("Guus-PC".to_string()));
+        assert_eq!(frame["ecdh_public_key_b64"], "cHVia2V5");
+        assert_eq!(frame["client"], "desktop");
+        assert_eq!(
+            frame["client_version"],
+            option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(frame["device_name"], "Guus-PC");
+        assert_eq!(frame["os"], std::env::consts::OS);
+    }
+
+    #[test]
+    fn init_frame_omits_a_device_name_when_the_machine_has_none() {
+        let frame = init_frame("cHVia2V5", None);
+        assert!(frame.get("device_name").is_none(), "{frame}");
+        let blank = init_frame("cHVia2V5", Some("  \t ".to_string()));
+        assert!(blank.get("device_name").is_none(), "{blank}");
     }
 
     type WsItem = Result<Message, tokio_tungstenite::tungstenite::Error>;

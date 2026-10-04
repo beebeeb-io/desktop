@@ -180,6 +180,10 @@ The Tauri warning that `io.beebeeb.app` ends in `.app` is known. Keep this
 identifier unless Guus creates a new macOS App Store Connect record and chooses
 to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
 
+## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
+
+The first-run "Sign in with browser" handoff opens `<APP_URL>/cli-auth` and shows the device code in the app. The link carries NO code: the person TYPES the code on the page and confirms with their password, so a link someone else sends them has nothing to approve (security review 2026-10-04, finding 9). The WS init frame (`init_frame`) adds `client: "desktop"`, the release version, `os` and the hostname for the page to show as "reported by the device"; the screen copy lives in `src/browserLoginCopy.ts` (tested by `tests/browserLoginCopy.test.ts`). The decrypt path is unchanged.
+
 ## Adding commands (Rust → JS bridge)
 
 1. Add a `#[tauri::command]` function in `src-tauri/src/lib.rs`.
