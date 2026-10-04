@@ -48,6 +48,11 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { useToast } from './windows/ui'
+import {
+  BROWSER_DID_NOT_OPEN_HINT,
+  BROWSER_SIGN_IN_INTRO,
+  browserWaitingInstruction,
+} from './browserLoginCopy'
 
 // Progress event emitted by the Rust `start_browser_login` handoff.
 // `phase` keys the UI state machine; the other fields are populated on
@@ -649,9 +654,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
         Sign in to Beebeeb
       </h1>
       <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
-        Sign in through your browser. Beebeeb opens a Beebeeb tab, you confirm
-        the code below, and your access &amp; refresh credentials are handed back
-        encrypted — end-to-end, never touching this app in the clear.
+        {BROWSER_SIGN_IN_INTRO}
       </p>
       {browserError && <Notice kind="error">{browserError}</Notice>}
 
@@ -667,9 +670,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
             {browserPhase === 'authorized' ? 'Authorized — finishing…' : 'We opened your browser'}
           </div>
           <p style={{ margin: '0 0 12px', fontSize: 12, color: T.ink2, lineHeight: 1.6 }}>
-            {browserPhase === 'authorized'
-              ? 'Decrypting your credentials and starting sync…'
-              : 'Confirm the sign-in in the browser tab we just opened. Check that the code there matches:'}
+            {browserWaitingInstruction(browserPhase)}
           </p>
           {userCode && (
             <div style={{
@@ -687,7 +688,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
             <p style={{ margin: 0, fontSize: 11, color: T.ink3, lineHeight: 1.5, wordBreak: 'break-all' as const }}>
               Browser didn&apos;t open? Visit{' '}
               <span style={{ fontFamily: T.fontMono, color: T.amberDeep }}>{verificationUri}</span>
-              {' '}in any signed-in browser.
+              {' '}{BROWSER_DID_NOT_OPEN_HINT}
             </p>
           )}
         </div>
