@@ -5,12 +5,13 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, finderOpenFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
+import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, finderOpenFailedToast, finderRepairFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
 import {
   FINDER_ACTION_FAILED,
   FINDER_ACTION_LABEL,
   FINDER_ADDING_LINE,
   FINDER_OPEN_FAILED,
+  FINDER_REPAIR_FAILED,
   FINDER_READY_LINE,
   FINDER_REASON_COPY,
   FINDER_SETUP_TITLE,
@@ -103,6 +104,7 @@ describe('finderSetupCopy (spec §6.2)', () => {
       FINDER_SETUP_TITLE,
       FINDER_UNAVAILABLE_LINE,
       FINDER_OPEN_FAILED,
+      FINDER_REPAIR_FAILED,
       ...Object.values(FINDER_ACTION_LABEL),
       ...Object.values(FINDER_ACTION_FAILED),
       ...Object.values(FINDER_REASON_COPY).map((c) => c.sentence),
@@ -183,6 +185,17 @@ describe('a failed Open in Finder on a Mac (task 17b)', () => {
  * Task 17b, lead ruling on its concern 2: the four actions of `useFinderSetup().run` fail to one
  * fixed sentence each, never to `result.reason` (a redacted bridge code on a Mac).
  */
+describe('a failed Finder repair on a Mac says one sentence (task 17b)', () => {
+  test('is one sentence, with the typographic apostrophe', () => {
+    expect(FINDER_REPAIR_FAILED).toBe('Beebeeb couldn’t repair its Finder location.')
+    expect(FINDER_REPAIR_FAILED.match(/[.!?]/g)).toHaveLength(1)
+  })
+
+  test('is one error toast that carries the sentence and nothing else', () => {
+    expect(finderRepairFailedToast()).toEqual({ variant: 'error', message: FINDER_REPAIR_FAILED })
+  })
+})
+
 describe('a failed Finder action on a Mac says one sentence (task 17b)', () => {
   const TABLE: Record<FinderSetupAction, string> = {
     try_again: 'Beebeeb couldn’t retry adding itself to Finder.',

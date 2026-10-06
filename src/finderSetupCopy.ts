@@ -34,6 +34,12 @@ export const FINDER_UNAVAILABLE_LINE = 'Couldn’t check Finder.'
  */
 export const FINDER_OPEN_FAILED = 'Beebeeb couldn’t open its Finder location.'
 
+/**
+ * A failed repair of the Finder location on a Mac (task 17b, lead ruling): the SyncFolder pane's Reset.
+ * Same reason as `FINDER_OPEN_FAILED`: the bridge's error is a bare domain and code, never shown.
+ */
+export const FINDER_REPAIR_FAILED = 'Beebeeb couldn’t repair its Finder location.'
+
 export const FINDER_REASON_COPY: Readonly<Record<FinderFailureReason, { sentence: string; action: FinderSetupAction }>> = {
   extension_loading: { sentence: 'macOS hasn’t finished loading Beebeeb’s Finder extension.', action: 'try_again' },
   user_disabled: { sentence: 'Beebeeb is turned off in System Settings.', action: 'open_system_settings' },

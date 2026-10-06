@@ -10,7 +10,7 @@ import {
 } from '../desktopApi'
 import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
-import { finderOpenFailedToast, useFinderSetup } from '../finderSetup'
+import { finderOpenFailedToast, finderRepairFailedToast, useFinderSetup } from '../finderSetup'
 import { finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
 import { preservedFilesLine, repairRemovedNotice } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
@@ -180,11 +180,17 @@ export default function SyncFolder() {
         showToast({ variant: 'error', title: removed.title, message: removed.body })
         return
       }
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t reset Finder integration',
-        message: result.unsupported ? commandUnavailableLabel('reset_macos_integration') : result.reason,
-      })
+      // A Mac's error is a redacted bridge code, never shown: the toast is the one sentence
+      // (task 17b). Windows/Linux keep the error text.
+      showToast(
+        platform === 'macos'
+          ? finderRepairFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t reset Finder integration',
+              message: result.unsupported ? commandUnavailableLabel('reset_macos_integration') : result.reason,
+            },
+      )
       return
     }
 

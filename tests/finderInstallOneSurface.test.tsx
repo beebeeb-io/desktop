@@ -193,6 +193,23 @@ describe('SyncFolder on Windows/Linux (unchanged): Finder location pane', () => 
     }
   })
 
+  test('a failed Finder reset keeps its title and shows the error text, and never reaches the macOS sentence (task 17b)', async () => {
+    for (const platform of ['windows', 'linux']) {
+      const reason = 'reset failed: the socket is busy'
+      const { m } = mountSyncFolder(
+        { ...finderBackend('success', null), desktop_platform: () => platform, reset_macos_integration: () => { throw new Error(reason) } },
+        { caps: platform, extra: { finderRepairFailedToast: () => { throw new Error('the macOS helper was reached off a Mac') } } },
+      )
+      await m.flush(); await m.flush()
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(1)
+      expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([
+        { variant: 'error', title: 'Couldn’t reset Finder integration', message: reason },
+      ])
+    }
+  })
+
   test('it still installs through the install-era commands, and never reads or listens to the reconciler', async () => {
     const { m, bus } = mountSyncFolder(finderBackend('success', null), { caps: 'linux' })
     await m.flush(); await m.flush()
@@ -338,6 +355,25 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
         expect(rendered).not.toContain('io.beebeeb')
         expect(rendered).not.toContain('No such file')
       }
+    }
+  })
+
+  // Task 17b (lead ruling): the Reset button's failure is a redacted bridge code on a Mac too. It is
+  // one toast with the one sentence, never `result.reason`, and the state is not re-read after it.
+  test('a failed Reset is one toast with the one sentence; the bridge code is rendered nowhere (task 17b)', async () => {
+    const toastText = (t: any) => [t.title, t.message].filter((part) => part != null).map((part) => textOf(part)).join(' ')
+    for (const reason of ['io.beebeeb.bridge 3', 'invoke failed: io.beebeeb.bridge 3']) {
+      const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), reset_macos_integration: () => { throw new Error(reason) } }
+      const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairFailedToast: finderSetup.finderRepairFailedToast } })
+      await settle(m)
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      expect(count(m, 'reset_macos_integration')).toBe(1)
+      expect(m.toasts.map(toastText)).toEqual([finderSetupCopy.FINDER_REPAIR_FAILED])
+      expect(m.toasts.map((t) => t.variant)).toEqual(['error'])
+      expect(count(m, 'finder_setup_state')).toBe(1)
+      expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toEqual([])
+      for (const rendered of [JSON.stringify(m.toasts), textOf(m.tree())]) expect(rendered).not.toContain('io.beebeeb')
     }
   })
 

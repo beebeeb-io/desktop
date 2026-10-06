@@ -13,6 +13,7 @@ import { command, type CommandResult } from './desktopApi'
 import {
   FINDER_ACTION_FAILED,
   FINDER_OPEN_FAILED,
+  FINDER_REPAIR_FAILED,
   finderSetupLoadPresentation,
   type FinderSetupAction,
   type FinderSetupPresentation,
@@ -168,6 +169,11 @@ export function subscribeFinderSetup(onView: (view: FinderSetupView) => void, op
  */
 export function finderOpenFailedToast(): ToastInput {
   return { variant: 'error', message: FINDER_OPEN_FAILED }
+}
+
+/** The toast for a failed repair (Reset) of the Finder location on a Mac: the one sentence, never the reason. */
+export function finderRepairFailedToast(): ToastInput {
+  return { variant: 'error', message: FINDER_REPAIR_FAILED }
 }
 
 export interface FinderActionDeps {

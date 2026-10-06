@@ -163,3 +163,47 @@ describe('a failed Open in Finder on a Mac is mapped once (task 17b)', () => {
     expect(named).toEqual(['finderSetup.ts', 'finderSetupCopy.ts'])
   })
 })
+
+/**
+ * Task 17b, the sweep (lead ruling): every source file that invokes a Finder command whose error a Mac
+ * would show as a redacted bridge code. A file that is not on this list has not been looked at, so a new
+ * one fails here until someone has checked what it renders. Dispositions as of the sweep:
+ *   open_finder_location:    pages/SyncFolder.tsx and WindowsApp.tsx map a Mac failure to FINDER_OPEN_FAILED;
+ *                            WindowsTray.tsx is Windows-only (its status root is null on a Mac).
+ *   reset_macos_integration: pages/SyncFolder.tsx maps a Mac failure to FINDER_REPAIR_FAILED;
+ *                            MacSettings.tsx renders no reason (a boolean and a fixed Note).
+ *   finder_setup_*:          finderSetup.ts only: `run` toasts the action's sentence, a failed read is the
+ *                            `unavailable` state, never the reason.
+ */
+describe('the sweep: every file naming a Finder command whose Mac error is a redacted code (task 17b)', () => {
+  const sources = [...allSources()]
+  const files = (command: string) => sources.filter(([file, text]) => namesCommand(file, text, command)).map(([file]) => file).sort()
+
+  test('open_finder_location', () => {
+    expect(files('open_finder_location')).toEqual(['WindowsApp.tsx', 'WindowsTray.tsx', 'pages/SyncFolder.tsx'])
+  })
+
+  test('reset_macos_integration', () => {
+    expect(files('reset_macos_integration')).toEqual(['MacSettings.tsx', 'pages/SyncFolder.tsx'])
+  })
+
+  test('finder_setup_*', () => {
+    expect(files('finder_setup_')).toEqual(['finderSetup.ts'])
+  })
+
+  test('the failed Reset on SyncFolder takes its Mac toast from finderRepairFailedToast, and the sentence is named by the copy module and the helper only', () => {
+    const body = functionText('pages/SyncFolder.tsx', 'SyncFolder')
+    expect(body).toContain('finderRepairFailedToast()')
+    expect(body).not.toContain('FINDER_REPAIR_FAILED')
+    const named = sources.filter(([, text]) => text.includes('FINDER_REPAIR_FAILED')).map(([file]) => file).sort()
+    expect(named).toEqual(['finderSetup.ts', 'finderSetupCopy.ts'])
+  })
+
+  test('MacSettings reports a failed repair without rendering a reason', () => {
+    const body = readFileSync(join(SRC, 'MacSettings.tsx'), 'utf8')
+    const repair = body.slice(body.indexOf('const runRepair'), body.indexOf('const toggleFolder'))
+    expect(repair).toContain('reset_macos_integration')
+    expect(repair).toContain('setRepairFailed(true)')
+    expect(repair).not.toMatch(/\.reason|showToast/)
+  })
+})
