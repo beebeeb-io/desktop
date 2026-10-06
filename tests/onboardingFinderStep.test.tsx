@@ -307,7 +307,10 @@ function stubs() {
   }
 }
 
-async function openOnboarding(backend: Record<string, (a: any) => unknown>, rail: unknown[] = []) {
+async function openOnboarding(
+  backend: Record<string, (a: any) => unknown>,
+  opts: { rail?: unknown[]; hostOs?: desktopApi.DesktopPlatform } = {},
+) {
   const steps = stubs()
   const m = mount('Onboarding.tsx', 'OnboardingView', {
     backend,
@@ -316,7 +319,9 @@ async function openOnboarding(backend: Record<string, (a: any) => unknown>, rail
       ...finderSetup,
       ...steps,
       Wordmark,
-      STEPS: rail,
+      STEPS: opts.rail ?? [],
+      // The capability snapshot (main.tsx's CapabilityProvider); null = no snapshot.
+      useCapabilities: () => (opts.hostOs === undefined ? null : { host_os: opts.hostOs }),
       FINDER_RAIL_TITLE: copy.FINDER_RAIL_TITLE,
       FINDER_RAIL_DETAIL: copy.FINDER_RAIL_DETAIL,
       useRegionLabel: () => 'the EU',
@@ -329,9 +334,9 @@ async function openOnboarding(backend: Record<string, (a: any) => unknown>, rail
   return { m, shown, props }
 }
 
-describe('Onboarding routes to the Finder step by the reconciler on macOS', () => {
-  const signedIn = (over: Partial<desktopApi.SyncStatus> = {}) => ({ logged_in: true, engine: 'idle', sync_root: null, vault_unlocked: true, syncing: 0, cloud_only: 0, conflicts: 0, ...over })
+const signedIn = (over: Partial<desktopApi.SyncStatus> = {}) => ({ logged_in: true, engine: 'idle', sync_root: null, vault_unlocked: true, syncing: 0, cloud_only: 0, conflicts: 0, ...over })
 
+describe('Onboarding routes to the Finder step by the reconciler on macOS', () => {
   test('macOS, keys present, Finder Ready: straight to the last step, without asking the install-era state', async () => {
     const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => 'macos', finder_setup_state: () => view({ setup: 'ready' }) })
     expect(o.shown()).toEqual(['ReadyStep'])
@@ -376,7 +381,7 @@ describe('Onboarding routes to the Finder step by the reconciler on macOS', () =
     }
   })
 
-  test('a platform that cannot be read is the Windows/Linux step, not a blank page', async () => {
+  test('a platform that cannot be read, with no capability snapshot to ask, is the Windows/Linux step, not a blank page', async () => {
     const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => { throw new Error('no bridge') } })
     expect(o.shown()).toEqual(['FinderInstallStep'])
   })
@@ -395,6 +400,67 @@ describe('Onboarding routes to the Finder step by the reconciler on macOS', () =
     resolve('macos')
     await o.m.flush(); await tick(); await o.m.flush()
     expect(o.shown()).toEqual(['MacFinderStep'])
+  })
+})
+
+describe('Onboarding platform fallback: a Mac whose desktop_platform fails is still a Mac (Global Constraint: on macOS no code path calls install_finder_location)', () => {
+  const failing = () => { throw new Error('no bridge') }
+  const forbiddenCalls = (o: { m: Mounted }) => o.m.calls.map((c) => c.name).filter((name) => FORBIDDEN.includes(name))
+
+  test('desktop_platform fails, the capability snapshot says macos: the macOS step and no install-era command', async () => {
+    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: failing, finder_setup_state: () => view() }, { hostOs: 'macos' })
+    expect(o.shown()).toEqual(['MacFinderStep'])
+    expect(forbiddenCalls(o)).toEqual([])
+  })
+
+  test('the routing read follows the fallback too: Ready goes straight to the last step, without the install-era state', async () => {
+    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: failing, finder_setup_state: () => view({ setup: 'ready' }) }, { hostOs: 'macos' })
+    expect(o.shown()).toEqual(['ReadyStep'])
+    expect(forbiddenCalls(o)).toEqual([])
+  })
+
+  test('desktop_platform answering "unknown" falls back the same way', async () => {
+    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => 'unknown', finder_setup_state: () => view() }, { hostOs: 'macos' })
+    expect(o.shown()).toEqual(['MacFinderStep'])
+    expect(forbiddenCalls(o)).toEqual([])
+  })
+
+  test('desktop_platform fails, the snapshot says windows or linux: today\'s step', async () => {
+    for (const hostOs of ['windows', 'linux'] as const) {
+      const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: failing }, { hostOs })
+      expect(o.shown()).toEqual(['FinderInstallStep'])
+      expect(o.m.calls.map((c) => c.name)).not.toContain('finder_setup_state')
+    }
+  })
+
+  test('both unknown (failed or "unknown" answer; an "unknown" snapshot or none): only then the Windows/Linux step', async () => {
+    const answers: Array<() => unknown> = [failing, () => 'unknown']
+    for (const answer of answers) {
+      for (const hostOs of ['unknown', undefined] as const) {
+        const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: answer }, { hostOs })
+        expect(o.shown()).toEqual(['FinderInstallStep'])
+      }
+    }
+  })
+
+  test('the fallback is only a fallback: an answered platform wins over the snapshot', async () => {
+    for (const answered of ['windows', 'linux']) {
+      const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => answered }, { hostOs: 'macos' })
+      expect(o.shown()).toEqual(['FinderInstallStep'])
+    }
+    const mac = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => 'macos', finder_setup_state: () => view() }, { hostOs: 'windows' })
+    expect(mac.shown()).toEqual(['MacFinderStep'])
+  })
+
+  test('signing in and unlocking on a Mac whose desktop_platform fails also lands on the macOS step', async () => {
+    const o = await openOnboarding(
+      { sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }), desktop_platform: failing },
+      { hostOs: 'macos' },
+    )
+    o.props('SignInStep').onDone(); o.m.render()
+    o.props('UnlockStep').onDone(); o.m.render()
+    expect(o.shown()).toEqual(['MacFinderStep'])
+    expect(forbiddenCalls(o)).toEqual([])
   })
 })
 
@@ -441,24 +507,32 @@ describe('Onboarding step rail: macOS promises no manual install (lead ruling, p
   })
 
   test('on macOS the Finder row says Finder and that it adds itself; every other row is unchanged', async () => {
-    const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => 'macos' }, realSteps())
+    const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => 'macos' }, { rail: realSteps() })
     expect(rail(o.m)).toEqual(onMac)
   })
 
   test('on Windows, Linux, an unknown platform and an unreadable one the rail is exactly today\'s', async () => {
     for (const platform of ['windows', 'linux', 'unknown']) {
-      const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => platform }, realSteps())
+      const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => platform }, { rail: realSteps() })
       expect(rail(o.m)).toEqual(unchanged)
     }
-    const unreadable = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => { throw new Error('no bridge') } }, realSteps())
+    const unreadable = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => { throw new Error('no bridge') } }, { rail: realSteps() })
     expect(rail(unreadable.m)).toEqual(unchanged)
+  })
+
+  test('the rail follows the fallback: desktop_platform fails and the snapshot says macos', async () => {
+    const o = await openOnboarding(
+      { sync_status: () => loggedOut, desktop_platform: () => { throw new Error('no bridge') } },
+      { rail: realSteps(), hostOs: 'macos' },
+    )
+    expect(rail(o.m)).toEqual(onMac)
   })
 
   test('until the platform has answered the rail stays today\'s, then becomes the macOS one', async () => {
     let resolve!: (platform: string) => void
     const o = await openOnboarding(
       { sync_status: () => loggedOut, desktop_platform: () => new Promise((r) => { resolve = r as (platform: string) => void }) },
-      realSteps(),
+      { rail: realSteps() },
     )
     expect(rail(o.m)).toEqual(unchanged)
     resolve('macos')

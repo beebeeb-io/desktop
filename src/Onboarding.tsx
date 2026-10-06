@@ -13,6 +13,7 @@ import {
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
+import { useCapabilities } from './capabilities'
 import { submitPassword, submitTotpCode } from './onboardingSignIn'
 import { classifyFinderInstallResult } from './finderInstallCard'
 import { loadFinderSetup, useFinderSetup } from './finderSetup'
@@ -38,9 +39,14 @@ export default function Onboarding() {
 function OnboardingView() {
   const [step, setStep] = useState<Step>('signin')
   // `null` until `desktop_platform` has answered, so the Finder step never flashes the wrong
-  // variant. A platform that cannot be read becomes 'unknown', which takes the Windows/Linux
+  // variant. A platform that cannot be read stays resolvable through the capability snapshot
+  // (below); only when both are unknown does it become 'unknown', which takes the Windows/Linux
   // step exactly as it did before the macOS step existed (never a blank page).
   const [platform, setPlatform] = useState<DesktopPlatform | null>(null)
+  // The snapshot's host OS (what main.tsx's HostOnboarding already routes on). A Mac whose
+  // `desktop_platform` call fails must still be a Mac here: the Windows/Linux step runs the
+  // install-era command, which no macOS code path may reach.
+  const hostOs: DesktopPlatform = useCapabilities()?.host_os ?? 'unknown'
   const regionLabel = useRegionLabel(step)
   // On macOS the Finder row must not promise a manual install (nothing is installed by hand
   // there). Until the platform has answered, and everywhere else, the rail is `STEPS` as written.
@@ -53,7 +59,10 @@ function OnboardingView() {
 
     Promise.all([loadSyncStatus(), command<DesktopPlatform>('desktop_platform')]).then(async ([status, platformResult]) => {
       if (cancelled) return
-      setPlatform(platformResult.ok ? platformResult.value : 'unknown')
+      // `desktop_platform` answers first; if it failed or said 'unknown', the snapshot decides.
+      const answered: DesktopPlatform = platformResult.ok ? platformResult.value : 'unknown'
+      const resolved: DesktopPlatform = answered === 'unknown' ? hostOs : answered
+      setPlatform(resolved)
       if (!status?.logged_in) return
 
       if (!status.vault_unlocked) {
@@ -61,7 +70,7 @@ function OnboardingView() {
         return
       }
 
-      if (platformResult.ok && platformResult.value === 'macos') {
+      if (resolved === 'macos') {
         // Spec 2026-10-06 §10: the reconciler's state, not the install-era command. Anything
         // but Ready (adding, failed, turned off, unreadable) goes to the step that says which.
         const finder = await loadFinderSetup()
@@ -75,7 +84,7 @@ function OnboardingView() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [hostOs])
 
   return (
     <div className="onboarding-shell">
