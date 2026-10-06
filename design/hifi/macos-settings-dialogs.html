@@ -207,13 +207,13 @@ figcaption b{font-weight:600}
 
 <section aria-labelledby="s-repair">
   <div><h2 id="s-repair">2 · Repair Beebeeb in Finder — confirmation</h2>
-  <p class="sub">Opened from the Sync tab when the Finder row reports <em>added</em>, via the <strong>Repair…</strong> button. The confirm button stays amber: repair removes the Finder location but is reversible (“You can add it back afterwards”), so it is a caution, not a destruction. While it runs, the trigger button reads <strong>Repairing…</strong> and the dialog is already dismissed.</p></div>
+  <p class="sub">Opened from the Sync tab when the Finder row reports <em>added</em>, via the <strong>Repair…</strong> button. The confirm button stays amber: repair removes the Finder location but is reversible (“You can add it back afterwards”), so it is a caution, not a destruction. While it runs, the trigger button reads <strong>Repairing…</strong> and the dialog is already dismissed. <strong>Amended 6 Oct 2026 (ruling R5):</strong> Repair now adds Beebeeb back to Finder by itself, so it is still a caution, not a destruction.</p></div>
   <div class="grid2">
     <figure class="shot">
       <div class="stage">
         <div class="modal" role="dialog" aria-label="Repair Beebeeb in Finder?">
           <div class="modal-head"><div class="modal-title">Repair Beebeeb in Finder?</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div>
-          <div class="modal-body"><p class="sheet-copy">Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. You can add it back afterwards.</p></div>
+          <div class="modal-body"><p class="sheet-copy">Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.</p></div>
           <div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--primary">Repair</button></div>
         </div>
       </div>
@@ -289,6 +289,15 @@ figcaption b{font-weight:600}
   </div>
 </section>
 
+<section aria-labelledby="s-switch">
+  <div><h2 id="s-switch">4 · Switch to a different account — confirmation</h2>
+  <p class="sub"><strong>Added 6 Oct 2026</strong> (ruling R8, <code>docs/specs/2026-10-06-macos-finder-setup-reconciler.md</code>). Shown when a sign-in is a different account from the one on this Mac. The same account never sees it: only its session token is replaced, and Finder, keys, cache and pending edits stay. Cancel changes nothing. The confirm button is destructive: it signs the other account out of this Mac and removes changes that have not uploaded.</p></div>
+  <div class="grid2">
+    <figure class="shot"><div class="stage"><div class="modal" role="dialog" aria-label="Switch to a different account?"><div class="modal-head"><div class="modal-title">Switch to a different account?</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div><div class="modal-body"><p class="sheet-copy">This Mac is signed in to another Beebeeb account, and 3 changes on this Mac haven’t uploaded yet. Switching signs that account out of this Mac and removes them.</p></div><div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--danger">Sign out and switch</button></div></div></div><figcaption><b>Changes waiting</b><span>The number is the upload queue on this Mac. One change reads “1 change … hasn’t uploaded yet … removes it.”</span></figcaption></figure>
+    <figure class="shot"><div class="stage"><div class="modal" role="dialog" aria-label="Switch to a different account?"><div class="modal-head"><div class="modal-title">Switch to a different account?</div><button type="button" class="modal-x" aria-label="Close">&times;</button></div><div class="modal-body"><p class="sheet-copy">This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.</p></div><div class="modal-foot"><button type="button" class="ms-btn">Cancel</button><button type="button" class="ms-btn ms-btn--danger">Sign out and switch</button></div></div></div><figcaption><b>Nothing waiting</b><span>No count, and no loss to name.</span></figcaption></figure>
+  </div>
+</section>
+
 <section aria-labelledby="s-kbd">
   <div><h2 id="s-kbd">Keyboard</h2><p class="sub">What the built <code>Modal</code> already does, and the one rule to add when app work is scheduled.</p></div>
   <div class="tbl"><table>
@@ -324,7 +333,7 @@ figcaption b{font-weight:600}
       <tr><th scope="row">Sign out · dialog</th><td>Title “Sign out of this Mac?” · body “Sync stops until you sign in again.” · buttons “Cancel” / “Sign out”</td></tr>
       <tr><th scope="row">Sign out · failure toast</th><td>“Couldn’t sign out”</td></tr>
       <tr><th scope="row">Repair · trigger</th><td>Button “Repair…” (busy: “Repairing…”)</td></tr>
-      <tr><th scope="row">Repair · dialog</th><td>Title “Repair Beebeeb in Finder?” · body “Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. You can add it back afterwards.” · buttons “Cancel” / “Repair”</td></tr>
+      <tr><th scope="row">Repair · dialog</th><td>Title “Repair Beebeeb in Finder?” · body “Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.” (amended 6 Oct 2026, ruling R5) · buttons “Cancel” / “Repair”</td></tr>
       <tr><th scope="row">Repair · failure note</th><td>“Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”</td></tr>
       <tr><th scope="row">Choose folders · trigger row</th><td>“Keep on this Mac” / count “3 of 12” (example) / button “Choose folders…”</td></tr>
       <tr><th scope="row">Choose folders · dialog</th><td>Title “Keep on this Mac” · body “Folders you choose stay on this Mac. Everything else downloads when you open it.” · footer “Close”</td></tr>
