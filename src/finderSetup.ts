@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { command, commandUnavailableLabel, type CommandResult } from './desktopApi'
+import { command, type CommandResult } from './desktopApi'
 import {
   FINDER_ACTION_FAILED,
   FINDER_OPEN_FAILED,
@@ -50,7 +50,7 @@ export interface FinderSetupView {
 
 export const FINDER_SETUP_CHANGED_EVENT = 'finder-setup-changed'
 
-/** The command each action sends, for an honest "not wired" label. */
+/** The command each action sends. Documentation of the wiring; no surface shows it to a person. */
 export const FINDER_ACTION_COMMAND: Readonly<Record<FinderSetupAction, string>> = {
   try_again: 'finder_setup_retry',
   open_system_settings: 'open_login_items_and_extensions_settings',
@@ -222,8 +222,9 @@ export interface FinderSetupController {
   /** Read the state again. It is the one action of the `unavailable` presentation. */
   retry: () => Promise<void>
   /**
-   * Run one action. A failed action raises an error toast (it gates nothing) and is also
-   * returned, so a surface may react to success, e.g. to confirm that details were copied.
+   * Run one action. A failed action raises one error toast with the action's one sentence (it
+   * gates nothing; the reason is never shown) and is also returned, so a surface may react to
+   * success, e.g. to confirm that details were copied.
    */
   run: (action: FinderSetupAction) => Promise<CommandResult<void>>
 }
@@ -236,7 +237,7 @@ export interface FinderSetupController {
  *   flight wins over that read, because the read may be the older of the two.
  * - A state that cannot be read (a rejected command, an unparsable shape) is `unavailable`, never
  *   "Adding" (ruling 7a); `retry` reads again.
- * - A failed action is one error toast, titled for the action.
+ * - A failed action is one error toast: the action's one sentence, no title, never the reason.
  * - It unsubscribes on unmount and ignores anything that finishes afterwards.
  * - `enabled: false` (a surface on a host that is not a Mac) does none of the above.
  */
@@ -283,11 +284,10 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
     async (action: FinderSetupAction): Promise<CommandResult<void>> => {
       const result = await runFinderSetupAction(action, { writeClipboard })
       if (!result.ok) {
-        showToast({
-          variant: 'error',
-          title: FINDER_ACTION_FAILED[action],
-          message: result.unsupported ? commandUnavailableLabel(FINDER_ACTION_COMMAND[action]) : result.reason,
-        })
+        // One fixed sentence per action, never `result.reason` (task 17b): on a Mac that is a
+        // redacted bridge code. An `unsupported` failure says the same sentence, because that flag
+        // is a substring guess on the reason and must not put a command name in front of a person.
+        showToast({ variant: 'error', message: FINDER_ACTION_FAILED[action] })
       }
       return result
     },

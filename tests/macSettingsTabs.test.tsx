@@ -718,11 +718,11 @@ describe('Sync tab', () => {
     expect(calls(m, 'finder_setup_state')).toBe(reads)
   })
 
-  test('a failed Finder action is ONE toast titled for the action, and does not add a second surface', async () => {
+  test('a failed Finder action is ONE toast with the action\'s one sentence, and does not add a second surface', async () => {
     const { m } = await openSync({ finder: finder.failed, retry: () => { throw new Error('bridge down') } })
     await pressFinder(m, 'Try again')
-    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t try again'])
-    expect(m.toasts[0]).toMatchObject({ variant: 'error', message: 'bridge down' })
+    expect(m.toasts).toEqual([{ variant: 'error', message: 'Beebeeb couldn’t retry adding itself to Finder.' }])
+    expect(JSON.stringify(m.toasts)).not.toContain('bridge down')
     expect(alerts(m)).toHaveLength(1)
     expect(find(m, (el) => el.props['data-error-surface'] === 'finder-setup')).toHaveLength(1)
   })

@@ -270,42 +270,52 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
     expect(h.m.toasts).toEqual([])
   })
 
-  test('a failed action is one error toast titled for that action, carrying the reason', async () => {
-    const h = mountHook(backendWith({ finder_setup_retry: () => { throw new Error('no reconciler') } }))
+  // Task 17b (lead ruling): with every macOS FpError redacted to a domain and a code, a failed action
+  // never renders `result.reason`. It is one error toast with one fixed sentence, and no title.
+  const SENTENCES = {
+    try_again: 'Beebeeb couldn’t retry adding itself to Finder.',
+    open_system_settings: 'Beebeeb couldn’t open System Settings.',
+    show_in_finder: 'Beebeeb couldn’t show itself in Finder.',
+    copy_details: 'Beebeeb couldn’t copy the details.',
+  } as const
+
+  test('a failed action is one error toast with the action\'s one sentence, and the reason is not shown', async () => {
+    const h = mountHook(backendWith({ finder_setup_retry: () => { throw new Error('io.beebeeb.bridge 3') } }))
     await h.settle()
     const result = await h.hook().run('try_again')
     expect(result.ok).toBe(false)
-    expect(h.m.toasts).toEqual([{ variant: 'error', title: 'Couldn’t try again', message: 'no reconciler' }])
+    expect(h.m.toasts).toEqual([{ variant: 'error', message: SENTENCES.try_again }])
+    expect(JSON.stringify(h.m.toasts)).not.toContain('io.beebeeb')
   })
 
-  test('every action has its own toast title', async () => {
-    const throwing = (name: string) => () => { throw new Error(`${name} failed`) }
+  test('every action has its own sentence, and the bridge code appears in none of them', async () => {
+    const throwing = () => { throw new Error('io.beebeeb.bridge 3') }
     const h = mountHook(backendWith({
-      finder_setup_retry: throwing('retry'),
-      open_login_items_and_extensions_settings: throwing('settings'),
-      finder_setup_show_app: throwing('show'),
-      finder_setup_copy_details: throwing('copy'),
+      finder_setup_retry: throwing,
+      open_login_items_and_extensions_settings: throwing,
+      finder_setup_show_app: throwing,
+      finder_setup_copy_details: throwing,
     }))
     await h.settle()
     for (const action of ['try_again', 'open_system_settings', 'show_in_finder', 'copy_details'] as const) {
       await h.hook().run(action)
     }
-    expect(h.m.toasts.map((t) => t.title)).toEqual([
-      'Couldn’t try again',
-      'Couldn’t open System Settings',
-      'Couldn’t show Beebeeb in Finder',
-      'Couldn’t copy the details',
+    expect(h.m.toasts.map((t) => t.message)).toEqual([
+      SENTENCES.try_again,
+      SENTENCES.open_system_settings,
+      SENTENCES.show_in_finder,
+      SENTENCES.copy_details,
     ])
     expect(h.m.toasts.map((t) => t.variant)).toEqual(['error', 'error', 'error', 'error'])
+    expect(h.m.toasts.some((t) => 'title' in t && t.title !== undefined)).toBe(false)
+    expect(JSON.stringify(h.m.toasts)).not.toContain('io.beebeeb')
   })
 
-  test('a command this build does not have says so by name instead of the raw error', async () => {
+  test('a command this build does not have gets the same one sentence: no command name, no raw error', async () => {
     const h = mountHook(backendWith({ finder_setup_show_app: () => { throw new Error('finder_setup_show_app is not a registered command') } }))
     await h.settle()
     await h.hook().run('show_in_finder')
-    expect(h.m.toasts).toEqual([
-      { variant: 'error', title: 'Couldn’t show Beebeeb in Finder', message: commandUnavailableLabel('finder_setup_show_app') },
-    ])
+    expect(h.m.toasts).toEqual([{ variant: 'error', message: SENTENCES.show_in_finder }])
   })
 
   test('copy_details: the pasteboard refusing is a toast, and the details were still asked for', async () => {
@@ -313,9 +323,8 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
     await h.settle()
     const result = await h.hook().run('copy_details')
     expect(result.ok).toBe(false)
-    expect(h.m.toasts).toEqual([
-      { variant: 'error', title: 'Couldn’t copy the details', message: 'The details could not be put on the pasteboard.' },
-    ])
+    expect(h.m.calls.map((c) => c.name)).toContain('finder_setup_copy_details')
+    expect(h.m.toasts).toEqual([{ variant: 'error', message: SENTENCES.copy_details }])
   })
 
   test('copy_details: the text the command returned reaches the pasteboard, with no toast', async () => {

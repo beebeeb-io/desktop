@@ -281,7 +281,9 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill } })
     await settle(m)
     await m.click('Try again')
-    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t try again'])
+    expect(m.toasts.map((t) => t.message)).toEqual(['Beebeeb couldn’t retry adding itself to Finder.'])
+    expect(m.toasts.map((t) => t.title)).toEqual([undefined])
+    expect(JSON.stringify(m.toasts)).not.toContain('no reconciler')
     expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
   })
 
@@ -456,7 +458,9 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
     test('a failed action is one toast, and adds no second inline surface', async () => {
       const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'timeout' }), { finder_setup_retry: () => { throw new Error('no reconciler') } })
       await m.click('Try again')
-      expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t try again'])
+      expect(m.toasts.map((t) => t.message)).toEqual(['Beebeeb couldn’t retry adding itself to Finder.'])
+      expect(m.toasts.map((t) => t.title)).toEqual([undefined])
+      expect(JSON.stringify(m.toasts)).not.toContain('no reconciler')
       expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
     })
 

@@ -54,12 +54,17 @@ export const FINDER_ACTION_LABEL: Readonly<Record<FinderSetupAction, string>> = 
   copy_details: 'Copy details',
 }
 
-/** Toast titles for an action that failed (a failed action gates nothing, so it is a toast). */
+/**
+ * The one sentence a failed action says (a failed action gates nothing, so it is a toast, and the
+ * toast is this sentence alone: no title, never the reason). Task 17b, lead ruling: every macOS error
+ * from the File Provider bridge that reaches the frontend is a bare domain and code, and a person
+ * must not read it. Not for the reconciler's own failures: those are `FINDER_REASON_COPY`.
+ */
 export const FINDER_ACTION_FAILED: Readonly<Record<FinderSetupAction, string>> = {
-  try_again: 'Couldn’t try again',
-  open_system_settings: 'Couldn’t open System Settings',
-  show_in_finder: 'Couldn’t show Beebeeb in Finder',
-  copy_details: 'Couldn’t copy the details',
+  try_again: 'Beebeeb couldn’t retry adding itself to Finder.',
+  open_system_settings: 'Beebeeb couldn’t open System Settings.',
+  show_in_finder: 'Beebeeb couldn’t show itself in Finder.',
+  copy_details: 'Beebeeb couldn’t copy the details.',
 }
 
 /** The short pill on the compact Status page (spec B deletes that page). */

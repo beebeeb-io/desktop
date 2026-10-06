@@ -21,6 +21,7 @@ import {
   finderSetupLoadPresentation,
   finderSetupPresentation,
   finderStatusPill,
+  type FinderSetupAction,
 } from '../src/finderSetupCopy'
 import { finderHint } from '../src/macSettingsModel'
 
@@ -175,6 +176,27 @@ describe('a failed Open in Finder on a Mac (task 17b)', () => {
 
   test('is one error toast that carries the sentence and nothing else', () => {
     expect(finderOpenFailedToast()).toEqual({ variant: 'error', message: FINDER_OPEN_FAILED })
+  })
+})
+
+/**
+ * Task 17b, lead ruling on its concern 2: the four actions of `useFinderSetup().run` fail to one
+ * fixed sentence each, never to `result.reason` (a redacted bridge code on a Mac).
+ */
+describe('a failed Finder action on a Mac says one sentence (task 17b)', () => {
+  const TABLE: Record<FinderSetupAction, string> = {
+    try_again: 'Beebeeb couldn’t retry adding itself to Finder.',
+    copy_details: 'Beebeeb couldn’t copy the details.',
+    show_in_finder: 'Beebeeb couldn’t show itself in Finder.',
+    open_system_settings: 'Beebeeb couldn’t open System Settings.',
+  }
+
+  test('each action has exactly its sentence, one sentence long', () => {
+    expect(Object.keys(FINDER_ACTION_FAILED).sort()).toEqual(Object.keys(TABLE).sort())
+    for (const [action, sentence] of Object.entries(TABLE)) {
+      expect(FINDER_ACTION_FAILED[action as FinderSetupAction]).toBe(sentence)
+      expect(sentence.match(/[.!?]/g)).toHaveLength(1)
+    }
   })
 })
 
