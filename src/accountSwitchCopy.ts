@@ -1,12 +1,20 @@
 /**
- * R8 (spec 2026-10-06): the one warning an account switch shows. Drawn first in
- * design/hifi/macos-settings-dialogs.html (Task 13); tests/reauthInPlace.test.tsx holds both to the
- * same strings. Honest about the loss: the changes that have not uploaded are removed.
+ * R8 copy (spec 2026-10-06): everything the re-sign-in flow says that is new. The account-switch
+ * warning is drawn first in design/hifi/macos-settings-dialogs.html §4 (Task 13, amended for the
+ * onboarding-window Card variant); tests/reauthInPlace.test.tsx holds both to the same strings. Honest
+ * about the loss: the changes that have not uploaded are removed.
  */
 export const ACCOUNT_SWITCH_TITLE = 'Switch to a different account?'
 export const ACCOUNT_SWITCH_CONFIRM = 'Sign out and switch'
 export const ACCOUNT_SWITCH_CANCEL = 'Cancel'
 export const ACCOUNT_SWITCH_FAILED = 'Couldn’t sign out'
+
+/**
+ * Shown on the sign-in form when a sign-in finished but its result could not be read (an unknown
+ * shape from the backend; see `settledFrom` in onboardingSignIn.ts). Not drawn: one honest sentence
+ * that claims nothing about what did or did not change.
+ */
+export const SIGN_IN_OUTCOME_UNREADABLE = 'Beebeeb couldn’t read the result of that sign-in. Try signing in again.'
 
 export function accountSwitchBody(pendingChanges: number): string {
   if (pendingChanges <= 0) {

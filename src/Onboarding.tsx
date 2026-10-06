@@ -399,10 +399,18 @@ function SignInStep({ onDone }: { onDone: (settled: SignInSettled) => void }) {
  * R8: another account is signing in on this Mac. Nothing has changed yet. "Sign out and switch"
  * is the full sign-out (Finder entry removed, queue and cache purged), then a fresh sign-in.
  * A failed sign-out is a toast (an action that gates nothing more than itself).
+ *
+ * Drawn in design/hifi/macos-settings-dialogs.html §4 (onboarding-window variant): no close, the
+ * confirm is the filled destructive button, and focus is on Cancel when the step opens, so a stray
+ * Enter cancels and can never confirm.
  */
 function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingChanges: number; onSwitched: () => void; onCancel: () => void }) {
   const { showToast } = useToast()
   const [busy, setBusy] = useState(false)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    cancelRef.current?.focus()
+  }, [])
   const switchAccount = async () => {
     setBusy(true)
     const result = await command<void>('clear_session')
@@ -416,10 +424,10 @@ function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingCh
   return (
     <Card title={ACCOUNT_SWITCH_TITLE} copy={accountSwitchBody(pendingChanges)}>
       <div className="button-row" style={{ marginTop: 16 }}>
-        <button className="button" onClick={onCancel} disabled={busy}>
+        <button ref={cancelRef} className="button" onClick={onCancel} disabled={busy}>
           {ACCOUNT_SWITCH_CANCEL}
         </button>
-        <button className="button danger" onClick={() => void switchAccount()} disabled={busy}>
+        <button className="button danger filled" onClick={() => void switchAccount()} disabled={busy}>
           {ACCOUNT_SWITCH_CONFIRM}
         </button>
       </div>

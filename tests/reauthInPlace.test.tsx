@@ -245,12 +245,32 @@ describe('SignInStep reports what the sign-in became', () => {
     await m.flush()
     await submitPassword(m)
     expect(done).toEqual([])
-    expect(textOf(m.tree())).toContain(signIn.SIGN_IN_OUTCOME_UNREADABLE)
+    expect(textOf(m.tree())).toContain(switchCopy.SIGN_IN_OUTCOME_UNREADABLE)
     expect(clearCalls(m)).toHaveLength(0)
   })
 })
 
 describe('AccountSwitchStep', () => {
+  /**
+   * A stand-in for the browser's focus. React attaches refs at commit, before effects run, so each
+   * button that carries a ref gets a fake element that records `focus()` BEFORE the first flush.
+   * `pressEnter` is what Enter does in a browser: it activates the focused button.
+   */
+  function withFocusModel(m: Mounted) {
+    const focused: string[] = []
+    for (const el of m.elements().filter((e) => e.type === 'button')) {
+      const label = textOf(el.props.children).trim()
+      if (el.props.ref && typeof el.props.ref === 'object') el.props.ref.current = { focus: () => focused.push(label) }
+    }
+    const pressEnter = async () => {
+      const label = focused.at(-1)
+      if (label === undefined) return
+      await m.elements().find((e) => e.type === 'button' && textOf(e.props.children).trim() === label)!.props.onClick()
+      await m.flush()
+    }
+    return { focused, pressEnter }
+  }
+
   function openSwitch(pendingChanges: number, clear: () => unknown = () => undefined) {
     const events: string[] = []
     const m = mount('Onboarding.tsx', 'AccountSwitchStep', {
@@ -284,6 +304,23 @@ describe('AccountSwitchStep', () => {
     await m.flush(); await m.flush()
     expect(m.calls).toEqual([])
     expect(events).toEqual([])
+  })
+
+  // Design §4 (lead ruling 2026-10-06): on open, focus is on Cancel, so Enter cancels and can never confirm.
+  test('opens with focus on Cancel, and on nothing else', async () => {
+    const { m } = openSwitch(3)
+    const { focused } = withFocusModel(m)
+    await m.flush()
+    expect(focused).toEqual(['Cancel'])
+  })
+
+  test('Enter right after the step opens cancels; it never signs out', async () => {
+    const { m, events } = openSwitch(3)
+    const { pressEnter } = withFocusModel(m)
+    await m.flush()
+    await pressEnter()
+    expect(events).toEqual(['cancelled'])
+    expect(clearCalls(m)).toHaveLength(0)
   })
 
   test('Cancel changes nothing', async () => {
@@ -325,12 +362,14 @@ describe('AccountSwitchStep', () => {
     expect(events).toEqual([])
   })
 
-  test('the destructive action is the danger button, never the amber one', async () => {
+  test('the confirm is the filled destructive button, never the amber one; Cancel is the plain button', async () => {
     const { m } = openSwitch(3)
     await m.flush()
-    const confirm = m.elements().find((el) => el.type === 'button' && textOf(el.props.children).trim() === 'Sign out and switch')!
-    expect(String(confirm.props.className).split(' ')).toContain('danger')
-    expect(String(confirm.props.className).split(' ')).not.toContain('amber')
+    const classesOf = (label: string) =>
+      String(m.elements().find((el) => el.type === 'button' && textOf(el.props.children).trim() === label)!.props.className).split(' ')
+    expect(classesOf('Sign out and switch')).toEqual(expect.arrayContaining(['button', 'danger', 'filled']))
+    expect(classesOf('Sign out and switch')).not.toContain('amber')
+    expect(classesOf('Cancel')).toEqual(['button'])
   })
 })
 
@@ -350,11 +389,40 @@ describe('accountSwitchCopy', () => {
 
   // The artefact draws the 3-change and 0-change variants and describes the single change in prose
   // (“1 change … hasn’t uploaded yet … removes it.”); hold the singular to those three phrases.
+  test('the fail-closed sign-in sentence lives here too, and says nothing about what changed', () => {
+    expect(switchCopy.SIGN_IN_OUTCOME_UNREADABLE).toBe('Beebeeb couldn’t read the result of that sign-in. Try signing in again.')
+  })
+
   test('the singular body keeps the phrases the artefact’s caption names', () => {
     const html = readFileSync(new URL('../design/hifi/macos-settings-dialogs.html', import.meta.url), 'utf8')
     expect(html).toContain('“1 change … hasn’t uploaded yet … removes it.”')
     const body = switchCopy.accountSwitchBody(1)
     for (const phrase of ['1 change', 'hasn’t uploaded yet', 'removes it.']) expect(body).toContain(phrase)
+  })
+})
+
+describe('the filled destructive class has CSS behind it, from the 1683 tokens only', () => {
+  const css = (file: string) => readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')
+  /** The declarations of the rule whose selector is exactly `selector`, as a sorted list. */
+  const declarations = (text: string, selector: string) => {
+    const open = text.indexOf(`\n${selector} {`)
+    if (open < 0) return null
+    const body = text.slice(text.indexOf('{', open) + 1, text.indexOf('}', open))
+    return body.split(';').map((d) => d.trim().replace(/\s+/g, ' ')).filter(Boolean).sort()
+  }
+
+  test('`.button.danger.filled` paints exactly what `.ms-btn--danger` paints: --red fill, --red-ink label', () => {
+    const mine = declarations(css('design.css'), '.button.danger.filled')
+    const settings = declarations(css('macSettings.css'), '.ms-btn--danger')
+    expect(mine).not.toBeNull()
+    expect(mine).toEqual(['background: var(--red)', 'border-color: var(--red)', 'color: var(--red-ink)'])
+    expect(settings).toEqual(mine)
+  })
+
+  test('hovering it keeps the red fill (the plain .button hover would turn it paper)', () => {
+    const hover = declarations(css('design.css'), '.button.danger.filled:hover:not(:disabled)')
+    expect(hover).not.toBeNull()
+    expect(hover).toEqual(expect.arrayContaining(['background: var(--red)', 'color: var(--red-ink)']))
   })
 })
 

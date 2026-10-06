@@ -26,6 +26,7 @@
  * (`account_mismatch`, nothing changed here). The caller routes on it. A result that cannot be
  * classified is an error, never "the same account": see `settledFrom`.
  */
+import { SIGN_IN_OUTCOME_UNREADABLE } from './accountSwitchCopy'
 import { desktopLogin, desktopLogin2fa, commandUnavailableLabel, type DesktopLoginResult } from './desktopApi'
 
 export interface SignInApi {
@@ -43,12 +44,6 @@ export type SignInSettled =
 
 /** `settledFrom`'s answer: a `SignInSettled`, or `unreadable` for a shape it cannot classify. */
 export type SignInOutcome = SignInSettled | { kind: 'unreadable' }
-
-/**
- * Shown when a sign-in finished but its result could not be read (an unknown shape from the
- * backend). The honest sentence: it does not claim anything about what did or did not change.
- */
-export const SIGN_IN_OUTCOME_UNREADABLE = 'Beebeeb couldn’t read the result of that sign-in. Try signing in again.'
 
 export type PasswordStepResult =
   | { ok: true; requiresTotp: boolean; settled: SignInSettled }

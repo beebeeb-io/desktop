@@ -14,7 +14,8 @@
  * mocked `desktopLogin`/`desktopLogin2fa` pair — no Tauri runtime needed.
  */
 import { describe, expect, test } from 'bun:test'
-import { SIGN_IN_OUTCOME_UNREADABLE, settledFrom, submitPassword, submitTotpCode, type SignInApi } from '../src/onboardingSignIn'
+import { SIGN_IN_OUTCOME_UNREADABLE } from '../src/accountSwitchCopy'
+import { settledFrom, submitPassword, submitTotpCode, type SignInApi } from '../src/onboardingSignIn'
 
 function fakeApi(overrides: Partial<SignInApi> = {}): SignInApi {
   return {
