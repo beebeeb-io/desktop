@@ -12,11 +12,12 @@ import { listen } from '@tauri-apps/api/event'
 import { command, commandUnavailableLabel, type CommandResult } from './desktopApi'
 import {
   FINDER_ACTION_FAILED,
+  FINDER_OPEN_FAILED,
   finderSetupLoadPresentation,
   type FinderSetupAction,
   type FinderSetupPresentation,
 } from './finderSetupCopy'
-import { useToast } from './windows/ui'
+import { useToast, type ToastInput } from './windows/ui'
 
 export const FINDER_FAILURE_REASONS = [
   'extension_loading',
@@ -156,6 +157,17 @@ export function subscribeFinderSetup(onView: (view: FinderSetupView) => void, op
     if (stop) release(stop)
     stop = null
   }
+}
+
+/**
+ * The toast for a failed "Open in Finder" on a Mac (task 17b, lead ruling T4-⚠2). A failed action
+ * that gates nothing is a toast, and on a Mac its text is the one sentence and nothing else:
+ * `open_finder_location`'s own error is a bare code such as `io.beebeeb.bridge 3` (ruling T1-⚠4), so
+ * the reason is deliberately not an input here and cannot be rendered by a surface. Windows and Linux
+ * do not call this; their error text names a folder a person can act on and keeps its own title.
+ */
+export function finderOpenFailedToast(): ToastInput {
+  return { variant: 'error', message: FINDER_OPEN_FAILED }
 }
 
 export interface FinderActionDeps {

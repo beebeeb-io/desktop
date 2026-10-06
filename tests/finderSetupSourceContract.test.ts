@@ -137,3 +137,29 @@ describe('the mixed pages take the reconciler from useFinderSetup and never run 
     expect([...own, 'showToast'].filter((name) => body.includes(name))).toEqual([])
   })
 })
+
+/**
+ * Task 17b (lead ruling T4-⚠2): a failed "Open in Finder" on a Mac is mapped to one sentence ONCE.
+ * The two surfaces that invoke `open_finder_location` on a Mac take the toast from the helper; the
+ * sentence itself is named by the copy module and that helper only. (`WindowsTray` also names the
+ * command, but it opens only a sync root from the status, and a Mac's status never carries one
+ * (`sync_status` returns `None` there, src-tauri/src/lib.rs). tests/syncRoot.test.ts pins that a
+ * null root disables "Open folder" and sends no command, so the tray cannot reach it on a Mac.)
+ */
+describe('a failed Open in Finder on a Mac is mapped once (task 17b)', () => {
+  test('both macOS call sites take the toast from finderOpenFailedToast and never write the sentence themselves', () => {
+    for (const [file, fn] of [
+      ['pages/SyncFolder.tsx', 'SyncFolder'],
+      ['WindowsApp.tsx', 'SyncFolderCard'],
+    ] as const) {
+      const body = functionText(file, fn)
+      expect(body).toContain('finderOpenFailedToast()')
+      expect(body).not.toContain('FINDER_OPEN_FAILED')
+    }
+  })
+
+  test('the sentence is named by the copy module and the helper only', () => {
+    const named = [...allSources()].filter(([, text]) => text.includes('FINDER_OPEN_FAILED')).map(([file]) => file).sort()
+    expect(named).toEqual(['finderSetup.ts', 'finderSetupCopy.ts'])
+  })
+})

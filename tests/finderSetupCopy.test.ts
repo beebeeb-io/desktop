@@ -5,11 +5,12 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
+import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, finderOpenFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
 import {
   FINDER_ACTION_FAILED,
   FINDER_ACTION_LABEL,
   FINDER_ADDING_LINE,
+  FINDER_OPEN_FAILED,
   FINDER_READY_LINE,
   FINDER_REASON_COPY,
   FINDER_SETUP_TITLE,
@@ -100,6 +101,7 @@ describe('finderSetupCopy (spec §6.2)', () => {
       FINDER_READY_LINE,
       FINDER_SETUP_TITLE,
       FINDER_UNAVAILABLE_LINE,
+      FINDER_OPEN_FAILED,
       ...Object.values(FINDER_ACTION_LABEL),
       ...Object.values(FINDER_ACTION_FAILED),
       ...Object.values(FINDER_REASON_COPY).map((c) => c.sentence),
@@ -157,6 +159,22 @@ describe('the Finder state could not be read (lead ruling 7a)', () => {
     for (const v of [view({ setup: 'adding' }), view({ setup: 'ready' }), view({ setup: 'failed', reason: 'timeout' })]) {
       expect(finderSetupLoadPresentation({ status: 'loaded', view: v })).toEqual(finderSetupPresentation(v))
     }
+  })
+})
+
+/**
+ * Task 17b (lead ruling T4-⚠2). On a Mac every error from the File Provider bridge that reaches
+ * the frontend is redacted to a domain and a code (ruling T1-⚠4), so a failed "Open in Finder"
+ * must say one sentence of its own. A failed action that gates nothing is a toast.
+ */
+describe('a failed Open in Finder on a Mac (task 17b)', () => {
+  test('is one sentence, with the typographic apostrophe', () => {
+    expect(FINDER_OPEN_FAILED).toBe('Beebeeb couldn’t open its Finder location.')
+    expect(FINDER_OPEN_FAILED.match(/[.!?]/g)).toHaveLength(1)
+  })
+
+  test('is one error toast that carries the sentence and nothing else', () => {
+    expect(finderOpenFailedToast()).toEqual({ variant: 'error', message: FINDER_OPEN_FAILED })
   })
 })
 

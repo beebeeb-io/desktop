@@ -24,6 +24,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import * as desktopApi from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
+import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
 import { T } from '../src/windows/ui'
 import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
@@ -173,6 +174,25 @@ describe('SyncFolder on Windows/Linux (unchanged): Finder location pane', () => 
     expect(visibleErrorSurfaces(w)).toEqual([`toast: Couldn’t open the folder picker — picker crashed`])
   })
 
+  // Task 17b: the one-sentence mapping is macOS only. Off a Mac the error text names a folder the
+  // person can act on, and it keeps its own title. The macOS helper is bound to a throwing stub, so
+  // a ReferenceError-free pass also proves the Windows/Linux branch never evaluates it.
+  test('a failed Open in Explorer keeps its title and shows the error text, and never reaches the macOS sentence (task 17b)', async () => {
+    for (const platform of ['windows', 'linux']) {
+      const reason = 'open Explorer: access is denied'
+      const { m } = mountSyncFolder(
+        { ...finderBackend('success', null), desktop_platform: () => platform, open_finder_location: () => { throw new Error(reason) } },
+        { caps: platform, extra: { finderOpenFailedToast: () => { throw new Error('the macOS helper was reached off a Mac') } } },
+      )
+      await m.flush(); await m.flush()
+      await m.click('Open in Finder')
+      expect(m.calls.filter((c) => c.name === 'open_finder_location').map((c) => c.args)).toEqual([{ path: '/Users/fixture/Library/CloudStorage/Beebeeb' }])
+      expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([
+        { variant: 'error', title: 'Couldn’t open the sync folder', message: reason },
+      ])
+    }
+  })
+
   test('it still installs through the install-era commands, and never reads or listens to the reconciler', async () => {
     const { m, bus } = mountSyncFolder(finderBackend('success', null), { caps: 'linux' })
     await m.flush(); await m.flush()
@@ -294,6 +314,29 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     await m.click('Open in Finder')
     expect(m.calls.filter((c) => c.name === 'open_finder_location').map((c) => c.args)).toEqual([{ path: null }])
     expect(textOf(m.tree())).toContain('Beebeeb in Finder')
+  })
+
+  // Task 17b (lead ruling T4-⚠2): every macOS FpError that reaches the frontend is redacted to a
+  // domain and a code, so "Open in Finder" must not render `result.reason`. A failed action that
+  // gates nothing is a toast, and the toast is the one sentence.
+  test('a failed Open in Finder is one toast with the one sentence; the bridge code is rendered nowhere (task 17b)', async () => {
+    const toastText = (t: any) => [t.title, t.message].filter((part) => part != null).map((part) => textOf(part)).join(' ')
+    // A bare code, the same code arriving in a message the unsupported-command heuristic matches,
+    // and a plain OS message: none of them reaches a person.
+    for (const reason of ['io.beebeeb.bridge 3', 'invoke failed: io.beebeeb.bridge 3', 'open Finder: No such file or directory']) {
+      const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), open_finder_location: () => { throw new Error(reason) } }
+      const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderOpenFailedToast: finderSetup.finderOpenFailedToast } })
+      await settle(m)
+      await m.click('Open in Finder')
+      expect(count(m, 'open_finder_location')).toBe(1)
+      expect(m.toasts.map(toastText)).toEqual([finderSetupCopy.FINDER_OPEN_FAILED])
+      expect(m.toasts.map((t) => t.variant)).toEqual(['error'])
+      expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toEqual([])
+      for (const rendered of [JSON.stringify(m.toasts), textOf(m.tree())]) {
+        expect(rendered).not.toContain('io.beebeeb')
+        expect(rendered).not.toContain('No such file')
+      }
+    }
   })
 
   test('Reset reads the reconciler again, never finder_location_state', async () => {

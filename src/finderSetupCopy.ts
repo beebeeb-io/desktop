@@ -27,6 +27,13 @@ export const FINDER_RAIL_DETAIL = 'Beebeeb adds itself to Finder after sign-in.'
  */
 export const FINDER_UNAVAILABLE_LINE = 'Couldn’t check Finder.'
 
+/**
+ * A failed "Open in Finder" on a Mac (task 17b, lead ruling T4-⚠2). Every macOS error from the File
+ * Provider bridge that reaches the frontend is redacted to a domain and a code (ruling T1-⚠4: the OS
+ * message can carry a path), so the code is never shown; a person reads this one sentence instead.
+ */
+export const FINDER_OPEN_FAILED = 'Beebeeb couldn’t open its Finder location.'
+
 export const FINDER_REASON_COPY: Readonly<Record<FinderFailureReason, { sentence: string; action: FinderSetupAction }>> = {
   extension_loading: { sentence: 'macOS hasn’t finished loading Beebeeb’s Finder extension.', action: 'try_again' },
   user_disabled: { sentence: 'Beebeeb is turned off in System Settings.', action: 'open_system_settings' },

@@ -10,7 +10,7 @@ import {
 } from '../desktopApi'
 import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
-import { useFinderSetup } from '../finderSetup'
+import { finderOpenFailedToast, useFinderSetup } from '../finderSetup'
 import { finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
 import { preservedFilesLine, repairRemovedNotice } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
@@ -146,11 +146,17 @@ export default function SyncFolder() {
     const result = await command<void>('open_finder_location', { path: platform === 'macos' ? null : current!.sync_root })
     setBusy(false)
     if (!result.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open the sync folder',
-        message: result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason,
-      })
+      // A Mac's error is a redacted bridge code, never shown: the toast is the one sentence
+      // (task 17b). Windows/Linux keep the error text, which names a folder.
+      showToast(
+        platform === 'macos'
+          ? finderOpenFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t open the sync folder',
+              message: result.unsupported ? commandUnavailableLabel('open_finder_location') : result.reason,
+            },
+      )
     }
   }
 

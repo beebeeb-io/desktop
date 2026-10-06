@@ -65,6 +65,7 @@ import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
 import { usePlatformName, thisDeviceNoun } from './platform'
+import { finderOpenFailedToast } from './finderSetup'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
 
@@ -640,11 +641,17 @@ function SyncFolderCard({ status: polledStatus }: { status: SyncStatus | null })
     const r = await command<void>('open_finder_location', isMacos ? undefined : { path: current!.sync_root })
     setOpening(false)
     if (!r.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open folder',
-        message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
-      })
+      // A Mac's error is a redacted bridge code, never shown: the toast is the one sentence
+      // (task 17b). Windows/Linux keep the error text, which names a folder.
+      showToast(
+        isMacos
+          ? finderOpenFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t open folder',
+              message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
+            },
+      )
     }
   }
 

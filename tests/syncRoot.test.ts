@@ -4,6 +4,8 @@ import { createElement, Fragment } from 'react'
 import ts from 'typescript'
 import { command, loadSyncStatus, type SyncStatus } from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
+import { finderOpenFailedToast } from '../src/finderSetup'
+import { FINDER_OPEN_FAILED } from '../src/finderSetupCopy'
 
 // Execute the production component declarations/handlers with controlled hooks.
 // This does not claim browser layout, React scheduling, or native Explorer proof.
@@ -38,6 +40,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
   const intervals: Array<() => Promise<void>> = []
   const calls: Array<{ name: string; args: any }> = []
   const toasts: any[] = []
+  const failures = new Map<string, string>()
   let cursor = 0
   let backend: SyncStatus | null = { ...initialStatus }
   let props: any = { status: backend }
@@ -47,6 +50,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     setInterval(fn: any) { intervals.push(fn); return intervals.length }, clearInterval() {},
     __TAURI_INTERNALS__: { invoke: async (name: string, args: any) => {
       calls.push({ name, args })
+      if (failures.has(name)) throw new Error(failures.get(name))
       if (name === 'sync_status') {
         if (!backend) throw new Error('status unavailable')
         return backend
@@ -84,6 +88,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     // SyncFolder calls the macOS Finder hook and the capability snapshot unconditionally (a hook
     // cannot be conditional). Here, on Windows, neither has anything to say: the real hook's
     // behaviour off a Mac is pinned in tests/finderInstallOneSurface.test.tsx and useFinderSetup.test.ts.
+    finderOpenFailedToast,
     useFinderSetup: () => ({ load: { status: 'loading' }, presentation: { kind: 'quiet', line: '' }, retry: async () => {}, run: async () => ({ ok: true, value: undefined }) }),
     useCapabilities: () => null,
     usePlatform: () => ({ name: 'windows', resolved: true }), useRegionLabel: () => 'End-to-end encrypted',
@@ -102,7 +107,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
   }
   render()
   return {
-    calls, toasts, setBackend(next: SyncStatus | null) { backend = next }, elements: () => elements(tree), content: () => content(tree),
+    calls, toasts, failCommand(name: string, reason: string) { failures.set(name, reason) }, setBackend(next: SyncStatus | null) { backend = next }, elements: () => elements(tree), content: () => content(tree),
     async refresh(next = backend) { backend = next; props = { status: await loadSyncStatus() }; for (const fn of intervals) await fn(); render(); await flush() },
     setProps(next: any) { props = next; render() }, flush,
     close() { globalThis.window = previousWindow },
@@ -138,6 +143,43 @@ describe('runtime sync root (1646)', () => {
       expect(h.calls.filter(c => c.name === 'open_finder_location')).toEqual([{ name: 'open_finder_location', args: {} }])
     } finally { h.close() }
   })
+
+  // Task 17b (lead ruling T4-⚠2): on a Mac every FpError reaching the frontend is redacted to a
+  // domain and a code, so a failed "Open in Finder" says one sentence and never `result.reason`.
+  // Off a Mac the card keeps its own title and the error text, and never evaluates the macOS helper.
+  test('Mac Files: a failed Open in Finder is one toast with the one sentence, and the bridge code is rendered nowhere', async () => {
+    const h = harness('WindowsApp.tsx', 'SyncFolderCard', { usePlatformName: () => 'macos' })
+    try {
+      h.failCommand('open_finder_location', 'io.beebeeb.bridge 3')
+      await h.refresh({ ...initialStatus, sync_root: null })
+      const button = h.elements().find(e => e.type === 'button')
+      await button.props.onClick(); await h.flush()
+      expect(h.calls.filter(c => c.name === 'open_finder_location')).toHaveLength(1)
+      expect(h.toasts).toEqual([{ variant: 'error', message: FINDER_OPEN_FAILED }])
+      expect(JSON.stringify(h.toasts)).not.toContain('io.beebeeb')
+      expect(h.content()).not.toContain('io.beebeeb')
+    } finally { h.close() }
+  })
+
+  for (const [file, name, label] of [
+    ['WindowsApp.tsx', 'SyncFolderCard', 'Open in Explorer'],
+    ['WindowsTray.tsx', 'WindowsTray', 'Open folder'],
+    ['pages/SyncFolder.tsx', 'SyncFolder', 'Open in Finder'],
+  ] as const) {
+    test(`${name} on Windows: a failed open keeps its title and shows the error text (unchanged, task 17b)`, async () => {
+      const reason = 'open Explorer: access is denied'
+      const title = name === 'SyncFolder' ? 'Couldn’t open the sync folder' : 'Couldn’t open folder'
+      const h = harness(file, name, { finderOpenFailedToast: () => { throw new Error('the macOS helper was reached on Windows') } })
+      try {
+        h.failCommand('open_finder_location', reason)
+        await h.refresh()
+        const action = h.elements().find(e => e.props.label === label || (e.type === 'button' && content(e).trim() === label))
+        await action.props.onClick(); await h.flush()
+        expect(h.calls.filter(c => c.name === 'open_finder_location')).toEqual([{ name: 'open_finder_location', args: { path: customRoot } }])
+        expect(h.toasts).toEqual([{ variant: 'error', title, message: reason }])
+      } finally { h.close() }
+    })
+  }
 
   test('Files passes the current backend root when opening', async () => {
     const h = harness('WindowsApp.tsx', 'SyncFolderCard')
