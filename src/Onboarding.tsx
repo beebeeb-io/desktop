@@ -16,7 +16,7 @@ import {
 import { submitPassword, submitTotpCode } from './onboardingSignIn'
 import { classifyFinderInstallResult } from './finderInstallCard'
 import { loadFinderSetup, useFinderSetup } from './finderSetup'
-import { FINDER_SETUP_TITLE } from './finderSetupCopy'
+import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE, FINDER_SETUP_TITLE } from './finderSetupCopy'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
 
@@ -42,6 +42,11 @@ function OnboardingView() {
   // step exactly as it did before the macOS step existed (never a blank page).
   const [platform, setPlatform] = useState<DesktopPlatform | null>(null)
   const regionLabel = useRegionLabel(step)
+  // On macOS the Finder row must not promise a manual install (nothing is installed by hand
+  // there). Until the platform has answered, and everywhere else, the rail is `STEPS` as written.
+  const rail = STEPS.map((item) =>
+    item.id === 'finder' && platform === 'macos' ? { ...item, title: FINDER_RAIL_TITLE, detail: FINDER_RAIL_DETAIL } : item,
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -81,7 +86,7 @@ function OnboardingView() {
             <div className="brand-subtitle">Private macOS file access</div>
           </div>
           <div className="steps">
-            {STEPS.map((item, index) => (
+            {rail.map((item, index) => (
               <div key={item.id} className={`step-row ${step === item.id ? 'active' : ''}`}>
                 <div className="step-number">{index + 1}</div>
                 <div>

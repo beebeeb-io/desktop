@@ -13,6 +13,14 @@ export const FINDER_ADDING_LINE = 'Adding Beebeeb to Finder…'
 export const FINDER_READY_LINE = 'Your vault appears under Locations in Finder.'
 
 /**
+ * The onboarding step rail's entry for the Finder step, on macOS only (lead ruling on Task 15):
+ * the rail must not promise a manual install, because on macOS nothing is installed by hand
+ * (R5). Windows and Linux keep the rail's own words ("Install Finder location").
+ */
+export const FINDER_RAIL_TITLE = 'Finder'
+export const FINDER_RAIL_DETAIL = 'Beebeeb adds itself to Finder after sign-in.'
+
+/**
  * The state could not be read at all (lead ruling 7a). These are the words the Sync tab's
  * unavailable row already uses (`finderHint`, macSettingsModel.ts), kept here so that a surface
  * never composes its own; tests/finderSetupCopy.test.ts holds the two equal.

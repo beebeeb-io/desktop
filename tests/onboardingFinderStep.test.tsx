@@ -24,7 +24,7 @@ import * as finderSetup from '../src/finderSetup'
 import * as copy from '../src/finderSetupCopy'
 import { FINDER_FAILURE_REASONS, type FinderSetupView } from '../src/finderSetup'
 import { ToastProvider } from '../src/windows/ui'
-import { loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
+import { elementsOf, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
 
 const React = { createElement, Fragment }
 const Wordmark = () => null
@@ -295,32 +295,41 @@ describe('Onboarding Finder step source contract', () => {
   })
 })
 
+function stubs() {
+  const make = (name: string) => Object.defineProperty(function () { return null }, 'name', { value: name }) as (props: any) => null
+  return {
+    SignInStep: make('SignInStep'),
+    UnlockStep: make('UnlockStep'),
+    MacFinderStep: make('MacFinderStep'),
+    FinderInstallStep: make('FinderInstallStep'),
+    PinningStep: make('PinningStep'),
+    ReadyStep: make('ReadyStep'),
+  }
+}
+
+async function openOnboarding(backend: Record<string, (a: any) => unknown>, rail: unknown[] = []) {
+  const steps = stubs()
+  const m = mount('Onboarding.tsx', 'OnboardingView', {
+    backend,
+    bindings: {
+      ...desktopApi,
+      ...finderSetup,
+      ...steps,
+      Wordmark,
+      STEPS: rail,
+      FINDER_RAIL_TITLE: copy.FINDER_RAIL_TITLE,
+      FINDER_RAIL_DETAIL: copy.FINDER_RAIL_DETAIL,
+      useRegionLabel: () => 'the EU',
+    },
+  })
+  mounted.push(m)
+  await m.flush(); await tick(); await m.flush()
+  const shown = () => Object.entries(steps).filter(([, type]) => m.elements().some((el) => el.type === type)).map(([name]) => name)
+  const props = (name: keyof typeof steps) => m.elements().find((el) => el.type === steps[name])!.props
+  return { m, shown, props }
+}
+
 describe('Onboarding routes to the Finder step by the reconciler on macOS', () => {
-  function stubs() {
-    const make = (name: string) => Object.defineProperty(function () { return null }, 'name', { value: name }) as (props: any) => null
-    return {
-      SignInStep: make('SignInStep'),
-      UnlockStep: make('UnlockStep'),
-      MacFinderStep: make('MacFinderStep'),
-      FinderInstallStep: make('FinderInstallStep'),
-      PinningStep: make('PinningStep'),
-      ReadyStep: make('ReadyStep'),
-    }
-  }
-
-  async function openOnboarding(backend: Record<string, (a: any) => unknown>) {
-    const steps = stubs()
-    const m = mount('Onboarding.tsx', 'OnboardingView', {
-      backend,
-      bindings: { ...desktopApi, ...finderSetup, ...steps, Wordmark, STEPS: [], useRegionLabel: () => 'the EU' },
-    })
-    mounted.push(m)
-    await m.flush(); await tick(); await m.flush()
-    const shown = () => Object.entries(steps).filter(([, type]) => m.elements().some((el) => el.type === type)).map(([name]) => name)
-    const props = (name: keyof typeof steps) => m.elements().find((el) => el.type === steps[name])!.props
-    return { m, shown, props }
-  }
-
   const signedIn = (over: Partial<desktopApi.SyncStatus> = {}) => ({ logged_in: true, engine: 'idle', sync_root: null, vault_unlocked: true, syncing: 0, cloud_only: 0, conflicts: 0, ...over })
 
   test('macOS, keys present, Finder Ready: straight to the last step, without asking the install-era state', async () => {
@@ -386,6 +395,75 @@ describe('Onboarding routes to the Finder step by the reconciler on macOS', () =
     resolve('macos')
     await o.m.flush(); await tick(); await o.m.flush()
     expect(o.shown()).toEqual(['MacFinderStep'])
+  })
+})
+
+describe('Onboarding step rail: macOS promises no manual install (lead ruling, pre-review of Task 15)', () => {
+  /** The module-level `STEPS` constant of Onboarding.tsx, evaluated as written (it is not exported). */
+  function realSteps(): unknown[] {
+    const source = readFileSync(new URL('../src/Onboarding.tsx', import.meta.url), 'utf8')
+    const ast = ts.createSourceFile('Onboarding.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+    const statement = ast.statements.find((n) => ts.isVariableStatement(n) && n.declarationList.declarations.some((d) => d.name.getText(ast) === 'STEPS'))
+    if (!statement) throw new Error('Missing const STEPS in Onboarding.tsx')
+    const compiled = ts.transpileModule(statement.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    return new Function(`${compiled}; return STEPS`)()
+  }
+
+  /** The rail as drawn: one [title, detail] pair per row, in order. */
+  const rail = (m: Mounted) =>
+    m.elements()
+      .filter((el) => String(el.props.className ?? '').startsWith('step-row'))
+      .map((row) => {
+        const inner = elementsOf(row.props.children)
+        const text = (cls: string) => textOf(inner.find((el) => el.props.className === cls)?.props.children).trim()
+        return [text('row-title'), text('row-detail')]
+      })
+
+  // Written out here, not read from the source, so a change to either side shows up.
+  const unchanged = [
+    ['Sign in', 'Authenticate your account.'],
+    ['Set up this Mac', 'Restore the vault key on this device.'],
+    ['Install Finder location', 'Register Beebeeb in the Finder sidebar.'],
+    ['Choose offline folders', 'Default is online-only; pin only what you need.'],
+    ['Review status', 'Open the control center.'],
+  ]
+  const onMac = unchanged.map((row, at) => (at === 2 ? ['Finder', 'Beebeeb adds itself to Finder after sign-in.'] : row))
+  const loggedOut = { logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }
+
+  test('the two macOS strings are named exports of the copy module, and promise no install', () => {
+    expect(copy.FINDER_RAIL_TITLE).toBe('Finder')
+    expect(copy.FINDER_RAIL_DETAIL).toBe('Beebeeb adds itself to Finder after sign-in.')
+    expect(`${copy.FINDER_RAIL_TITLE} ${copy.FINDER_RAIL_DETAIL}`).not.toMatch(/Install|Register|Add to Finder/)
+  })
+
+  test('the rail the source declares is the one the Windows/Linux strings below are held to', () => {
+    expect(realSteps().map((row: any) => [row.title, row.detail])).toEqual(unchanged)
+  })
+
+  test('on macOS the Finder row says Finder and that it adds itself; every other row is unchanged', async () => {
+    const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => 'macos' }, realSteps())
+    expect(rail(o.m)).toEqual(onMac)
+  })
+
+  test('on Windows, Linux, an unknown platform and an unreadable one the rail is exactly today\'s', async () => {
+    for (const platform of ['windows', 'linux', 'unknown']) {
+      const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => platform }, realSteps())
+      expect(rail(o.m)).toEqual(unchanged)
+    }
+    const unreadable = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => { throw new Error('no bridge') } }, realSteps())
+    expect(rail(unreadable.m)).toEqual(unchanged)
+  })
+
+  test('until the platform has answered the rail stays today\'s, then becomes the macOS one', async () => {
+    let resolve!: (platform: string) => void
+    const o = await openOnboarding(
+      { sync_status: () => loggedOut, desktop_platform: () => new Promise((r) => { resolve = r as (platform: string) => void }) },
+      realSteps(),
+    )
+    expect(rail(o.m)).toEqual(unchanged)
+    resolve('macos')
+    await o.m.flush(); await tick(); await o.m.flush()
+    expect(rail(o.m)).toEqual(onMac)
   })
 })
 
