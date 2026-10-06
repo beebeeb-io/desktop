@@ -958,9 +958,20 @@ export function showMainAppWindow(): Promise<CommandResult<void>> {
 
 // ── 2FA / TOTP login (desktop credential path) ─────────────────────────────
 
-/** Shape returned by the `desktop_login` Tauri command. */
+/**
+ * Shape returned by `desktop_login` and `desktop_login_2fa`. R8 adds the last three fields (the Rust
+ * `LoginOutcome` always sends all four: `false`, `false`, `null` for a plain sign-in). They are
+ * optional here because a build from before R8 sends only `requires_2fa` from `desktop_login` and
+ * nothing at all from `desktop_login_2fa`; `settledFrom` (onboardingSignIn.ts) reads them strictly.
+ */
 export interface DesktopLoginResult {
   requires_2fa: boolean
+  /** The account on this Mac signed in again in place; nothing was cleared. */
+  reauthenticated?: boolean
+  /** With `reauthenticated`: the keys are here, so no recovery phrase is needed. */
+  vault_unlocked?: boolean
+  /** Another account signed in; nothing changed on this Mac. */
+  account_mismatch?: { pending_changes: number } | null
 }
 
 /**
@@ -990,8 +1001,8 @@ export function desktopLogin(
  * `{ requires_2fa: true }`. The partial token is held server-side for ~5 min.
  * Rejects with "Invalid authentication code" on a wrong code (retryable).
  */
-export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
-  return command<void>('desktop_login_2fa', { code })
+export function desktopLogin2fa(code: string): Promise<CommandResult<DesktopLoginResult>> {
+  return command<DesktopLoginResult>('desktop_login_2fa', { code })
 }
 
 /**
@@ -1006,30 +1017,36 @@ export function clearSession(): Promise<CommandResult<void>> {
 }
 
 export interface ForceReauthApi {
+  platform: () => Promise<CommandResult<DesktopPlatform>>
   clearSession: typeof clearSession
   openOnboardingWindow: () => Promise<CommandResult<void>>
+  openReauthWindow: () => Promise<CommandResult<void>>
 }
 
 const defaultForceReauthApi: ForceReauthApi = {
+  platform: () => command<DesktopPlatform>('desktop_platform'),
   clearSession,
   openOnboardingWindow: () => command<void>('open_onboarding_window'),
+  openReauthWindow: () => command<void>('open_reauth_window'),
 }
 
 /**
- * Force a fresh sign-in (task 1546 Codex round 2, finding 2). Clears the
- * (expired/invalid) session on the Rust side FIRST — via `clearSession`, so
- * `sync_status` reports `logged_in: false` and `auth_expired: false` — THEN
- * opens the onboarding window. Routing straight to `open_onboarding_window`
- * while the stale session/token was still installed let onboarding
- * fast-forward an "unlocked, configured" user straight past the sign-in
- * form. Shared by VersionCenter's "Sign in again" review action and the
- * persistent auth-expired banner, so both use the exact same forced flow.
+ * "Sign in again". On macOS (ruling R8, spec 2026-10-06) it opens sign-in IN PLACE: nothing is
+ * cleared, so a same-account sign-in keeps Finder, keys, cache and pending edits, and another
+ * account gets the switch warning. On Windows and Linux it is unchanged (task 1546 Codex round 2,
+ * finding 2): clear the session first, then open onboarding, which otherwise fast-forwards an
+ * "unlocked, configured" user past the sign-in form. If the platform cannot be read, nothing is
+ * cleared: clearing on a Mac by mistake is the data loss R8 fixes.
  *
- * Takes an injectable `api` (default: the real Tauri commands) so the
- * ordering + short-circuit-on-failure decision is unit-testable without a
- * Tauri runtime — mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
+ * Shared by VersionCenter's "Sign in again" review action and the persistent auth-expired banner,
+ * so both use the exact same flow. Takes an injectable `api` (default: the real Tauri commands) so
+ * the platform branch, the ordering and the short-circuit-on-failure decision are unit-testable
+ * without a Tauri runtime; mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
  */
 export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<void>> {
+  const platform = await api.platform()
+  if (!platform.ok) return platform
+  if (platform.value === 'macos') return api.openReauthWindow()
   const cleared = await api.clearSession()
   if (!cleared.ok) return cleared
   return api.openOnboardingWindow()

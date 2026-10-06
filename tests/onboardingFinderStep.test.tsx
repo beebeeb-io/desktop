@@ -363,7 +363,7 @@ describe('Onboarding routes to the Finder step by the reconciler on macOS', () =
   test('signing in and unlocking lead to the macOS Finder step, which leads on to the offline folders', async () => {
     const o = await openOnboarding({ sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }), desktop_platform: () => 'macos' })
     expect(o.shown()).toEqual(['SignInStep'])
-    o.props('SignInStep').onDone(); o.m.render()
+    o.props('SignInStep').onDone({ kind: 'fresh' }); o.m.render()
     expect(o.shown()).toEqual(['UnlockStep'])
     o.props('UnlockStep').onDone(); o.m.render()
     expect(o.shown()).toEqual(['MacFinderStep'])
@@ -394,7 +394,7 @@ describe('Onboarding routes to the Finder step by the reconciler on macOS', () =
       sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }),
       desktop_platform: () => new Promise((r) => { resolve = r as (platform: string) => void }),
     })
-    o.props('SignInStep').onDone(); o.m.render()
+    o.props('SignInStep').onDone({ kind: 'fresh' }); o.m.render()
     o.props('UnlockStep').onDone(); o.m.render()
     expect(o.shown()).toEqual([])
     resolve('macos')
@@ -457,7 +457,7 @@ describe('Onboarding platform fallback: a Mac whose desktop_platform fails is st
       { sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }), desktop_platform: failing },
       { hostOs: 'macos' },
     )
-    o.props('SignInStep').onDone(); o.m.render()
+    o.props('SignInStep').onDone({ kind: 'fresh' }); o.m.render()
     o.props('UnlockStep').onDone(); o.m.render()
     expect(o.shown()).toEqual(['MacFinderStep'])
     expect(forbiddenCalls(o)).toEqual([])

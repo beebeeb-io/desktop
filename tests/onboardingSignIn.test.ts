@@ -14,7 +14,7 @@
  * mocked `desktopLogin`/`desktopLogin2fa` pair — no Tauri runtime needed.
  */
 import { describe, expect, test } from 'bun:test'
-import { submitPassword, submitTotpCode, type SignInApi } from '../src/onboardingSignIn'
+import { SIGN_IN_OUTCOME_UNREADABLE, settledFrom, submitPassword, submitTotpCode, type SignInApi } from '../src/onboardingSignIn'
 
 function fakeApi(overrides: Partial<SignInApi> = {}): SignInApi {
   return {
@@ -42,7 +42,7 @@ describe('onboardingSignIn.submitPassword', () => {
       desktopLogin: async () => ({ ok: true, value: { requires_2fa: false } }),
     })
     const result = await submitPassword('user@beebeeb.io', 'correct horse', api)
-    expect(result).toEqual({ ok: true, requiresTotp: false })
+    expect(result).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'fresh' } })
   })
 
   test('a wrong password surfaces the server message and never reaches requiresTotp', async () => {
@@ -69,12 +69,12 @@ describe('onboardingSignIn.submitTotpCode', () => {
     }
 
     const passwordResult = await submitPassword('user@beebeeb.io', 'correct horse', api)
-    expect(passwordResult).toEqual({ ok: true, requiresTotp: true })
+    expect(passwordResult).toEqual({ ok: true, requiresTotp: true, settled: { kind: 'fresh' } })
     // Session must NOT be considered installed yet — the caller's UI is
     // expected to show a code prompt now, not proceed to the vault step.
 
     const totpResult = await submitTotpCode('123456', api)
-    expect(totpResult).toEqual({ ok: true })
+    expect(totpResult).toEqual({ ok: true, settled: { kind: 'fresh' } })
 
     // Both legs of the handoff actually ran, in order — proves the code
     // prompt's `desktop_login_2fa` call really happens before sign-in is
@@ -91,7 +91,7 @@ describe('onboardingSignIn.submitTotpCode', () => {
       },
     })
     const result = await submitTotpCode('12345678', api)
-    expect(result).toEqual({ ok: true })
+    expect(result).toEqual({ ok: true, settled: { kind: 'fresh' } })
     expect(received).toBe('12345678')
   })
 
@@ -111,5 +111,87 @@ describe('onboardingSignIn.submitTotpCode', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.message).toContain('desktop_login_2fa')
+  })
+})
+
+describe('settledFrom (R8)', () => {
+  test('maps the three outcomes', () => {
+    expect(settledFrom({ requires_2fa: false })).toEqual({ kind: 'fresh' })
+    expect(settledFrom(null)).toEqual({ kind: 'fresh' })
+    expect(settledFrom({ requires_2fa: false, reauthenticated: true, vault_unlocked: true })).toEqual({ kind: 'reauthenticated', vaultUnlocked: true })
+    expect(settledFrom({ requires_2fa: false, reauthenticated: true, vault_unlocked: false })).toEqual({ kind: 'reauthenticated', vaultUnlocked: false })
+    expect(settledFrom({ requires_2fa: false, account_mismatch: { pending_changes: 3 } })).toEqual({ kind: 'account_mismatch', pendingChanges: 3 })
+  })
+
+  // The Rust side serializes every field every time (LoginOutcome, Task 11): `false`, `false`, `null`.
+  test('reads the JSON the Rust LoginOutcome actually sends', () => {
+    expect(settledFrom(JSON.parse('{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"account_mismatch":null}'))).toEqual({ kind: 'fresh' })
+    expect(settledFrom(JSON.parse('{"requires_2fa":false,"reauthenticated":true,"vault_unlocked":true,"account_mismatch":null}'))).toEqual({ kind: 'reauthenticated', vaultUnlocked: true })
+    expect(settledFrom(JSON.parse('{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"account_mismatch":{"pending_changes":3}}'))).toEqual({ kind: 'account_mismatch', pendingChanges: 3 })
+    expect(settledFrom(JSON.parse('{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"account_mismatch":{"pending_changes":0}}'))).toEqual({ kind: 'account_mismatch', pendingChanges: 0 })
+  })
+
+  test('the same account is never assumed: without `vault_unlocked` the keys are not claimed to be here', () => {
+    expect(settledFrom({ requires_2fa: false, reauthenticated: true })).toEqual({ kind: 'reauthenticated', vaultUnlocked: false })
+  })
+
+  // Fail closed (lead, Task 18): a result that cannot be classified is never the same account, and
+  // never an account switch with an invented count. It is `unreadable`, and the sign-in shows an error.
+  test('a shape it cannot classify is `unreadable`, never the same account', () => {
+    const base = { requires_2fa: false }
+    const unreadable = [
+      { ...base, account_mismatch: {} },
+      { ...base, account_mismatch: { pending_changes: '3' } },
+      { ...base, account_mismatch: { pending_changes: -1 } },
+      { ...base, account_mismatch: { pending_changes: 1.5 } },
+      { ...base, account_mismatch: { pending_changes: null } },
+      { ...base, account_mismatch: true },
+      { ...base, account_mismatch: false },
+      { ...base, reauthenticated: true, vault_unlocked: true, account_mismatch: { pending_changes: 2 } },
+      { ...base, reauthenticated: 'yes' },
+      { ...base, reauthenticated: 1 },
+      { ...base, reauthenticated: true, vault_unlocked: 'yes' },
+      'signed in',
+      42,
+      [],
+    ]
+    for (const value of unreadable) {
+      expect({ value, settled: settledFrom(value as never) }).toEqual({ value, settled: { kind: 'unreadable' } })
+    }
+  })
+})
+
+describe('onboardingSignIn carries what the sign-in became (R8)', () => {
+  const mismatch = { requires_2fa: false, reauthenticated: false, vault_unlocked: false, account_mismatch: { pending_changes: 3 } }
+  const reauthenticated = { requires_2fa: false, reauthenticated: true, vault_unlocked: true, account_mismatch: null }
+
+  test('the password step reports a same-account sign-in and an account mismatch', async () => {
+    const same = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: reauthenticated }) }))
+    expect(same).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'reauthenticated', vaultUnlocked: true } })
+    const other = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: mismatch }) }))
+    expect(other).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'account_mismatch', pendingChanges: 3 } })
+  })
+
+  test('the 2FA step reports them too (that is where a 2FA account learns it)', async () => {
+    const same = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: reauthenticated }) }))
+    expect(same).toEqual({ ok: true, settled: { kind: 'reauthenticated', vaultUnlocked: true } })
+    const other = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: mismatch }) }))
+    expect(other).toEqual({ ok: true, settled: { kind: 'account_mismatch', pendingChanges: 3 } })
+  })
+
+  test('an unreadable result is an error in both steps, not a completed sign-in', async () => {
+    const odd = { requires_2fa: false, account_mismatch: { pending_changes: 'three' } }
+    const password = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: odd as never }) }))
+    expect(password).toEqual({ ok: false, message: SIGN_IN_OUTCOME_UNREADABLE })
+    const totp = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: odd as never }) }))
+    expect(totp).toEqual({ ok: false, message: SIGN_IN_OUTCOME_UNREADABLE })
+  })
+
+  // Task 1521's bug class: a missing `requires_2fa` used to read as "no second factor needed".
+  test('a password result without a boolean `requires_2fa` is unreadable, not "no 2FA needed"', async () => {
+    for (const value of [{}, { requires_2fa: 'false' }, { requires_2fa: 0 }, null]) {
+      const result = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: value as never }) }))
+      expect({ value, result }).toEqual({ value, result: { ok: false, message: SIGN_IN_OUTCOME_UNREADABLE } })
+    }
   })
 })

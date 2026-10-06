@@ -133,10 +133,11 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   }
 
   const signInAgain = async () => {
-    // Task 1546 Codex round 2, finding 2: must clear the expired session
-    // BEFORE opening onboarding, or onboarding fast-forwards an "unlocked,
-    // configured" user straight past the sign-in form — `forceReauth` does
-    // both steps in the right order.
+    // `forceReauth` decides the flow per platform. macOS (R8, spec 2026-10-06)
+    // opens sign-in in place and clears nothing. Windows and Linux clear the
+    // expired session BEFORE opening onboarding (task 1546 Codex round 2,
+    // finding 2), or onboarding fast-forwards an "unlocked, configured" user
+    // straight past the sign-in form.
     const result = await forceReauth()
     if (!result.ok) {
       showToast({

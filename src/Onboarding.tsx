@@ -14,14 +14,15 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { useCapabilities } from './capabilities'
-import { submitPassword, submitTotpCode } from './onboardingSignIn'
+import { submitPassword, submitTotpCode, type SignInSettled } from './onboardingSignIn'
+import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, accountSwitchBody } from './accountSwitchCopy'
 import { classifyFinderInstallResult } from './finderInstallCard'
 import { loadFinderSetup, useFinderSetup } from './finderSetup'
 import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE, FINDER_SETUP_TITLE } from './finderSetupCopy'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
 
-type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
+type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready' | 'switch'
 const RECOVERY_WORD_COUNT = 12
 
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
@@ -32,12 +33,14 @@ const STEPS: Array<{ id: Step; title: string; detail: string }> = [
   { id: 'ready', title: 'Review status', detail: 'Open the control center.' },
 ]
 
-export default function Onboarding() {
-  return <OnboardingErrorBoundary><OnboardingView /></OnboardingErrorBoundary>
+export default function Onboarding({ mode = 'setup' }: { mode?: 'setup' | 'reauth' }) {
+  return <OnboardingErrorBoundary><OnboardingView mode={mode} /></OnboardingErrorBoundary>
 }
 
-function OnboardingView() {
+function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   const [step, setStep] = useState<Step>('signin')
+  // How many unsent changes the switch warning names; set when a sign-in turns out to be another account.
+  const [pendingSwitch, setPendingSwitch] = useState(0)
   // `null` until `desktop_platform` has answered, so the Finder step never flashes the wrong
   // variant. A platform that cannot be read stays resolvable through the capability snapshot
   // (below); only when both are unknown does it become 'unknown', which takes the Windows/Linux
@@ -63,6 +66,9 @@ function OnboardingView() {
       const answered: DesktopPlatform = platformResult.ok ? platformResult.value : 'unknown'
       const resolved: DesktopPlatform = answered === 'unknown' ? hostOs : answered
       setPlatform(resolved)
+      // R8: "Sign in again" opens this window in reauth mode. It starts at sign-in whatever
+      // sync_status says; nothing was cleared, so the status still reads signed in and unlocked.
+      if (mode === 'reauth') return
       if (!status?.logged_in) return
 
       if (!status.vault_unlocked) {
@@ -84,7 +90,21 @@ function OnboardingView() {
     return () => {
       cancelled = true
     }
-  }, [hostOs])
+  }, [hostOs, mode])
+
+  const afterSignIn = (settled: SignInSettled) => {
+    if (settled.kind === 'account_mismatch') {
+      setPendingSwitch(settled.pendingChanges)
+      setStep('switch')
+      return
+    }
+    if (settled.kind === 'reauthenticated' && settled.vaultUnlocked) {
+      // The same account, its keys here: sync resumes; nothing else to set up.
+      void getCurrentWindow().close()
+      return
+    }
+    setStep('unlock')
+  }
 
   return (
     <div className="onboarding-shell">
@@ -112,7 +132,14 @@ function OnboardingView() {
       </aside>
 
       <main className="onboarding-main">
-        {step === 'signin' && <SignInStep onDone={() => setStep('unlock')} />}
+        {step === 'signin' && <SignInStep onDone={afterSignIn} />}
+        {step === 'switch' && (
+          <AccountSwitchStep
+            pendingChanges={pendingSwitch}
+            onSwitched={() => setStep('signin')}
+            onCancel={() => (mode === 'reauth' ? void getCurrentWindow().close() : setStep('signin'))}
+          />
+        )}
         {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} />}
         {step === 'finder' &&
           platform !== null &&
@@ -201,7 +228,7 @@ function Field({
  * issued at 2FA setup — the server's `/auth/2fa/verify` accepts either in the
  * same field (`verify_totp_or_backup`).
  */
-function SignInStep({ onDone }: { onDone: () => void }) {
+function SignInStep({ onDone }: { onDone: (settled: SignInSettled) => void }) {
   type Mode = 'password' | 'totp' | 'backup'
   const [mode, setMode] = useState<Mode>('password')
 
@@ -254,7 +281,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       startTotpStep('totp')
       return
     }
-    onDone()
+    onDone(result.settled)
   }
 
   const submitTotpForm = async (event: FormEvent) => {
@@ -274,7 +301,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       requestAnimationFrame(() => totpInputRef.current?.focus())
       return
     }
-    onDone()
+    onDone(result.settled)
   }
 
   if (mode === 'totp' || mode === 'backup') {
@@ -364,6 +391,38 @@ function SignInStep({ onDone }: { onDone: () => void }) {
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
+    </Card>
+  )
+}
+
+/**
+ * R8: another account is signing in on this Mac. Nothing has changed yet. "Sign out and switch"
+ * is the full sign-out (Finder entry removed, queue and cache purged), then a fresh sign-in.
+ * A failed sign-out is a toast (an action that gates nothing more than itself).
+ */
+function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingChanges: number; onSwitched: () => void; onCancel: () => void }) {
+  const { showToast } = useToast()
+  const [busy, setBusy] = useState(false)
+  const switchAccount = async () => {
+    setBusy(true)
+    const result = await command<void>('clear_session')
+    setBusy(false)
+    if (!result.ok) {
+      showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason })
+      return
+    }
+    onSwitched()
+  }
+  return (
+    <Card title={ACCOUNT_SWITCH_TITLE} copy={accountSwitchBody(pendingChanges)}>
+      <div className="button-row" style={{ marginTop: 16 }}>
+        <button className="button" onClick={onCancel} disabled={busy}>
+          {ACCOUNT_SWITCH_CANCEL}
+        </button>
+        <button className="button danger" onClick={() => void switchAccount()} disabled={busy}>
+          {ACCOUNT_SWITCH_CONFIRM}
+        </button>
+      </div>
     </Card>
   )
 }

@@ -12,11 +12,13 @@
  * Mirrors `UpdateBanner`'s pattern: no bar of its own, just a persistent
  * (non-dismissible, `durationMs: null`) toast via the shared toast system —
  * driven by the parent's already-polled `sync_status`, not its own poll.
- * The action button uses `forceReauth`, the EXACT SAME forced sign-in flow
- * as VersionCenter's "Sign in again" review action: clear the expired
- * session first, then open onboarding — never open onboarding on its own,
- * which would fast-forward an "unlocked, configured" user past the sign-in
- * form.
+ * The action button uses `forceReauth`, the EXACT SAME sign-in flow as
+ * VersionCenter's "Sign in again" review action. On macOS (R8, spec
+ * 2026-10-06) it opens sign-in in place and clears nothing: the same account
+ * keeps Finder, keys, cache and pending edits, and another account gets the
+ * switch warning. On Windows and Linux it clears the expired session first,
+ * then opens onboarding — never onboarding on its own, which would
+ * fast-forward an "unlocked, configured" user past the sign-in form.
  */
 
 import { useEffect } from 'react'
