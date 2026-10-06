@@ -5,22 +5,25 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, finderOpenFailedToast, finderRepairFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
+import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, finderOpenFailedToast, finderRepairFailedToast, finderShowFileFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
 import {
   FINDER_ACTION_FAILED,
   FINDER_ACTION_LABEL,
   FINDER_ADDING_LINE,
   FINDER_OPEN_FAILED,
   FINDER_REPAIR_FAILED,
+  FINDER_REPAIR_PARTIAL,
   FINDER_READY_LINE,
   FINDER_REASON_COPY,
   FINDER_SETUP_TITLE,
+  FINDER_SHOW_FILE_FAILED,
   FINDER_STATUS_PILL,
   FINDER_STATUS_PILL_LOADING,
   FINDER_STATUS_PILL_UNAVAILABLE,
   FINDER_UNAVAILABLE_LINE,
   finderSetupLoadPresentation,
   finderSetupPresentation,
+  finderRepairWarningNote,
   finderStatusPill,
   type FinderSetupAction,
 } from '../src/finderSetupCopy'
@@ -105,6 +108,8 @@ describe('finderSetupCopy (spec §6.2)', () => {
       FINDER_UNAVAILABLE_LINE,
       FINDER_OPEN_FAILED,
       FINDER_REPAIR_FAILED,
+      FINDER_REPAIR_PARTIAL,
+      FINDER_SHOW_FILE_FAILED,
       ...Object.values(FINDER_ACTION_LABEL),
       ...Object.values(FINDER_ACTION_FAILED),
       ...Object.values(FINDER_REASON_COPY).map((c) => c.sentence),
@@ -193,6 +198,35 @@ describe('a failed Finder repair on a Mac says one sentence (task 17b)', () => {
 
   test('is one error toast that carries the sentence and nothing else', () => {
     expect(finderRepairFailedToast()).toEqual({ variant: 'error', message: FINDER_REPAIR_FAILED })
+  })
+})
+
+describe('a repair that succeeds with warnings says one sentence (task 17b, fix round 1)', () => {
+  // Rust puts a bridge code (lib.rs:3326) and a cache-file path (lib.rs:3265) in `warnings`.
+  const LEAKS = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+
+  test('is one sentence, with the typographic apostrophe', () => {
+    expect(FINDER_REPAIR_PARTIAL).toBe('Beebeeb repaired its Finder location, but couldn’t remove everything it left behind.')
+    expect(FINDER_REPAIR_PARTIAL.match(/[.!?]/g)).toHaveLength(1)
+  })
+
+  test('any non-blank warning gives the sentence and none of the warning text; blank or no warnings give nothing', () => {
+    expect(finderRepairWarningNote({ warnings: LEAKS })).toBe(FINDER_REPAIR_PARTIAL)
+    expect(finderRepairWarningNote({ warnings: ['  ', LEAKS[0]] })).toBe(FINDER_REPAIR_PARTIAL)
+    expect(finderRepairWarningNote({ warnings: [] })).toBeNull()
+    expect(finderRepairWarningNote({ warnings: ['', '   '] })).toBeNull()
+    for (const leak of LEAKS) expect(finderRepairWarningNote({ warnings: LEAKS })).not.toContain(leak)
+  })
+})
+
+describe('a failed "show that file in Finder" on a Mac says one sentence (task 17b, fix round 1)', () => {
+  test('is one sentence, with the typographic apostrophe', () => {
+    expect(FINDER_SHOW_FILE_FAILED).toBe('Beebeeb couldn’t show that file in Finder.')
+    expect(FINDER_SHOW_FILE_FAILED.match(/[.!?]/g)).toHaveLength(1)
+  })
+
+  test('is one error toast that carries the sentence and nothing else', () => {
+    expect(finderShowFileFailedToast()).toEqual({ variant: 'error', message: FINDER_SHOW_FILE_FAILED })
   })
 })
 

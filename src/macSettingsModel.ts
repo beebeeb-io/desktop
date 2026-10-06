@@ -15,6 +15,7 @@ import {
   FINDER_ADDING_LINE,
   FINDER_READY_LINE,
   FINDER_UNAVAILABLE_LINE,
+  finderRepairWarningNote,
   finderSetupPresentation,
   type FinderSetupAction,
 } from './finderSetupCopy'
@@ -130,16 +131,16 @@ export const REPAIR_TITLE = 'Repair Beebeeb in Finder?'
 export const REPAIR_BODY =
   'Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.'
 
-/** After a successful repair: one neutral line, or nothing when there is nothing to add. */
+/**
+ * After a successful repair: one neutral line, or nothing when there is nothing to add. A repair's
+ * `warnings` hold a bridge error code and a cache-file path (task 17b, fix round 1), so they are never
+ * shown: any warning makes this one fixed sentence instead of the count.
+ */
 export function repairNote(result: { pending_operations_preserved: number; warnings: string[] }): string | null {
-  const parts: string[] = []
+  const warned = finderRepairWarningNote(result)
+  if (warned) return warned
   const kept = result.pending_operations_preserved
-  if (kept > 0) parts.push(`${kept} ${kept === 1 ? 'change' : 'changes'} waiting to upload ${kept === 1 ? 'was' : 'were'} kept.`)
-  for (const warning of result.warnings) {
-    const text = warning.trim()
-    if (text) parts.push(text)
-  }
-  return parts.length > 0 ? parts.join(' ') : null
+  return kept > 0 ? `${kept} ${kept === 1 ? 'change' : 'changes'} waiting to upload ${kept === 1 ? 'was' : 'were'} kept.` : null
 }
 
 /**

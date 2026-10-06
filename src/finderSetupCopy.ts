@@ -40,6 +40,28 @@ export const FINDER_OPEN_FAILED = 'Beebeeb couldn’t open its Finder location.'
  */
 export const FINDER_REPAIR_FAILED = 'Beebeeb couldn’t repair its Finder location.'
 
+/**
+ * A repair (Reset) that succeeded but could not clean up everything (task 17b, fix round 1). Rust
+ * puts a bridge error code and a cache-file path in the result's `warnings`; neither is ever shown on
+ * a Mac, so any warning turns the notice into this one sentence.
+ */
+export const FINDER_REPAIR_PARTIAL = 'Beebeeb repaired its Finder location, but couldn’t remove everything it left behind.'
+
+/**
+ * A failed "show this file in Finder" (`open_in_finder`: the Shared roots page, quick search) on a
+ * Mac. Same reason as `FINDER_OPEN_FAILED`: the error is never shown, this sentence is.
+ */
+export const FINDER_SHOW_FILE_FAILED = 'Beebeeb couldn’t show that file in Finder.'
+
+/**
+ * The one sentence a repair result's warnings turn into on a Mac, or `null` when there is nothing to
+ * say. It takes the whole result so that no caller reads `.warnings` itself, and it never returns any
+ * of the warning text.
+ */
+export function finderRepairWarningNote(result: { warnings: readonly string[] }): string | null {
+  return result.warnings.some((warning) => warning.trim().length > 0) ? FINDER_REPAIR_PARTIAL : null
+}
+
 export const FINDER_REASON_COPY: Readonly<Record<FinderFailureReason, { sentence: string; action: FinderSetupAction }>> = {
   extension_loading: { sentence: 'macOS hasn’t finished loading Beebeeb’s Finder extension.', action: 'try_again' },
   user_disabled: { sentence: 'Beebeeb is turned off in System Settings.', action: 'open_system_settings' },

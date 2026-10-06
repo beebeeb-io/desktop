@@ -11,7 +11,7 @@ import {
 import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
 import { finderOpenFailedToast, finderRepairFailedToast, useFinderSetup } from '../finderSetup'
-import { finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
+import { finderRepairWarningNote, finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
 import { preservedFilesLine, repairRemovedNotice } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
@@ -200,12 +200,19 @@ export default function SyncFolder() {
       const finderState = await command<FinderInstallState>('finder_location_state')
       if (finderState.ok) setInstallState(finderState.value)
     }
+    // A repair's warnings hold a bridge error code and a cache-file path (task 17b, fix round 1): a
+    // Mac never shows them, so any warning makes the whole notice one fixed sentence.
+    const warned = platform === 'macos' ? finderRepairWarningNote(result.value) : null
+    if (warned) {
+      setNotice(warned)
+      return
+    }
     const preserved = result.value.pending_operations_preserved
     const details = [
       'Finder integration was reset.',
       preserved > 0 ? `${preserved} queued operation${preserved === 1 ? '' : 's'} preserved.` : null,
       result.value.removed_cache_files > 0 ? `${result.value.removed_cache_files} disposable cache file${result.value.removed_cache_files === 1 ? '' : 's'} removed.` : null,
-      result.value.warnings.length > 0 ? result.value.warnings.join(' ') : null,
+      platform === 'macos' ? null : result.value.warnings.length > 0 ? result.value.warnings.join(' ') : null,
       // Task 1882: where macOS kept the files that had not reached the server.
       preservedFilesLine(result.value),
     ]

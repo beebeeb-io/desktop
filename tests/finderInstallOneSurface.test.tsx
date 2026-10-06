@@ -210,6 +210,20 @@ describe('SyncFolder on Windows/Linux (unchanged): Finder location pane', () => 
     }
   })
 
+  test('a Finder reset that succeeds with warnings keeps its notice and shows the warnings, and never reaches the macOS sentence (task 17b)', async () => {
+    for (const platform of ['windows', 'linux']) {
+      const warning = 'Could not remove cache file /var/x.db: permission denied'
+      const { m } = mountSyncFolder(
+        { ...finderBackend('success', null), desktop_platform: () => platform, reset_macos_integration: () => ({ pending_operations_preserved: 2, removed_cache_files: 3, warnings: [warning] }) },
+        { caps: platform, extra: { finderRepairWarningNote: () => { throw new Error('the macOS helper was reached off a Mac') } } },
+      )
+      await m.flush(); await m.flush()
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      expect(textOf(m.tree())).toContain(`Finder integration was reset. 2 queued operations preserved. 3 disposable cache files removed. ${warning}`)
+    }
+  })
+
   test('it still installs through the install-era commands, and never reads or listens to the reconciler', async () => {
     const { m, bus } = mountSyncFolder(finderBackend('success', null), { caps: 'linux' })
     await m.flush(); await m.flush()
@@ -243,7 +257,7 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     }
   }
   async function openMac(over: { view?: unknown; platform?: string } = {}, caps: string | null = 'macos') {
-    const { m, bus } = mountSyncFolder(macBackend(over), { caps, extra: { finderStatusPill: finderSetupCopy.finderStatusPill } })
+    const { m, bus } = mountSyncFolder(macBackend(over), { caps, extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
     await settle(m)
     return { m, bus }
   }
@@ -375,6 +389,30 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
       expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toEqual([])
       for (const rendered of [JSON.stringify(m.toasts), textOf(m.tree())]) expect(rendered).not.toContain('io.beebeeb')
     }
+  })
+
+  // Task 17b, fix round 1: a SUCCESSFUL Reset can still carry `warnings` that hold a bridge code and a
+  // cache-file path (lib.rs:3326, 3265). A Mac shows one fixed sentence and none of that text.
+  test('a Reset that succeeds with warnings shows ONE fixed sentence; neither the code nor the path is rendered', async () => {
+    const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+    const reset = (warnings: string[]) => ({ pending_operations_preserved: 2, removed_cache_files: 3, skipped_cache_files: 0, warnings })
+    const open = async (warnings: string[]) => {
+      const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), reset_macos_integration: () => reset(warnings) }
+      const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
+      await settle(m)
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      return m
+    }
+    const warned = await open(leaks)
+    const warnedText = textOf(warned.tree())
+    expect(warnedText).toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
+    for (const leak of leaks) expect(warnedText).not.toContain(leak)
+    expect(warned.toasts).toEqual([])
+    // Without warnings the notice is what it always was.
+    const clean = await open([])
+    expect(textOf(clean.tree())).toContain('Finder integration was reset. 2 queued operations preserved. 3 disposable cache files removed.')
+    expect(textOf(clean.tree())).not.toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
   })
 
   test('Reset reads the reconciler again, never finder_location_state', async () => {

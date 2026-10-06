@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'bun:test'
 import type { VaultItem } from '../src/desktopApi'
 import type { FinderSetupView } from '../src/finderSetup'
-import { FINDER_REASON_COPY } from '../src/finderSetupCopy'
+import { FINDER_REASON_COPY, FINDER_REPAIR_PARTIAL } from '../src/finderSetupCopy'
 import { DESKTOP_NOTIFICATION_PREF_META } from '../src/windows/notificationPreferenceMeta'
 import {
   accountInitial,
@@ -146,14 +146,20 @@ describe('Beebeeb in Finder (spec 2026-10-06)', () => {
     expect(REPAIR_BODY).not.toContain('You can add it back afterwards')
   })
 
-  test('after a repair: one neutral line, singular and plural, warnings appended, nothing when empty', () => {
+  test('after a repair: one neutral line, singular and plural, nothing when empty', () => {
     expect(repairNote({ pending_operations_preserved: 0, warnings: [] })).toBeNull()
     expect(repairNote({ pending_operations_preserved: 1, warnings: [] })).toBe('1 change waiting to upload was kept.')
     expect(repairNote({ pending_operations_preserved: 3, warnings: [] })).toBe('3 changes waiting to upload were kept.')
-    expect(repairNote({ pending_operations_preserved: 0, warnings: ['  ', 'Could not remove a file.'] })).toBe('Could not remove a file.')
-    expect(repairNote({ pending_operations_preserved: 2, warnings: ['Could not remove a file.'] })).toBe(
-      '2 changes waiting to upload were kept. Could not remove a file.',
-    )
+    expect(repairNote({ pending_operations_preserved: 0, warnings: ['  ', ''] })).toBeNull()
+  })
+
+  // Task 17b, fix round 1: Rust puts a bridge code and a cache path in `warnings` (lib.rs:3326, 3265).
+  // A Mac never shows them: any warning turns the line into one fixed sentence.
+  test('after a repair with warnings: the one fixed sentence, and none of the warning text', () => {
+    const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+    expect(repairNote({ pending_operations_preserved: 0, warnings: leaks })).toBe(FINDER_REPAIR_PARTIAL)
+    expect(repairNote({ pending_operations_preserved: 2, warnings: ['  ', leaks[0]] })).toBe(FINDER_REPAIR_PARTIAL)
+    for (const leak of leaks) expect(repairNote({ pending_operations_preserved: 2, warnings: leaks })).not.toContain(leak)
   })
 })
 

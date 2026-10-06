@@ -14,6 +14,7 @@ import {
   FINDER_ACTION_FAILED,
   FINDER_OPEN_FAILED,
   FINDER_REPAIR_FAILED,
+  FINDER_SHOW_FILE_FAILED,
   finderSetupLoadPresentation,
   type FinderSetupAction,
   type FinderSetupPresentation,
@@ -174,6 +175,11 @@ export function finderOpenFailedToast(): ToastInput {
 /** The toast for a failed repair (Reset) of the Finder location on a Mac: the one sentence, never the reason. */
 export function finderRepairFailedToast(): ToastInput {
   return { variant: 'error', message: FINDER_REPAIR_FAILED }
+}
+
+/** The toast for a failed "show this file in Finder" on a Mac: the one sentence, never the reason. */
+export function finderShowFileFailedToast(): ToastInput {
+  return { variant: 'error', message: FINDER_SHOW_FILE_FAILED }
 }
 
 export interface FinderActionDeps {

@@ -960,6 +960,21 @@ describe('Sync tab', () => {
     }
   })
 
+  // Task 17b, fix round 1: Rust puts a bridge code and a cache path in `warnings` (lib.rs:3326, 3265).
+  test('a repair that succeeds with warnings shows ONE fixed sentence and none of the warning text', async () => {
+    const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 2, warnings: leaks }) })
+    await press(m, 'Repair…')
+    await pressFinder(m, 'Repair')
+    expect(calls(m, 'reset_macos_integration')).toBe(1)
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
+    for (const leak of leaks) {
+      expect(visibleText(m)).not.toContain(leak)
+      expect(JSON.stringify(m.toasts)).not.toContain(leak)
+    }
+    expect(m.toasts).toEqual([])
+  })
+
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
     const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
     await press(m, 'Repair…')

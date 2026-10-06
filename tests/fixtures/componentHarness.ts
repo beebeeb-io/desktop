@@ -109,6 +109,11 @@ export function mount(
   ;(globalThis as any).window = {
     setInterval: () => 0,
     clearInterval() {},
+    // A timer fires on the next microtask (no real delay), so a debounced effect settles inside `flush`.
+    setTimeout: (fn: () => void) => { queueMicrotask(fn); return 0 },
+    clearTimeout() {},
+    addEventListener() {},
+    removeEventListener() {},
     __TAURI_INTERNALS__: {
       invoke: async (command: string, args: any) => {
         calls.push({ name: command, args })

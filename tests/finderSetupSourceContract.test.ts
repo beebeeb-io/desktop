@@ -14,6 +14,7 @@ import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
+import { censusOfSource, familyLiterals, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
 
 const SRC = new URL('../src/', import.meta.url).pathname
 const FORBIDDEN_ON_MACOS = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
@@ -165,45 +166,158 @@ describe('a failed Open in Finder on a Mac is mapped once (task 17b)', () => {
 })
 
 /**
- * Task 17b, the sweep (lead ruling): every source file that invokes a Finder command whose error a Mac
- * would show as a redacted bridge code. A file that is not on this list has not been looked at, so a new
- * one fails here until someone has checked what it renders. Dispositions as of the sweep:
- *   open_finder_location:    pages/SyncFolder.tsx and WindowsApp.tsx map a Mac failure to FINDER_OPEN_FAILED;
- *                            WindowsTray.tsx is Windows-only (its status root is null on a Mac).
- *   reset_macos_integration: pages/SyncFolder.tsx maps a Mac failure to FINDER_REPAIR_FAILED;
- *                            MacSettings.tsx renders no reason (a boolean and a fixed Note).
- *   finder_setup_*:          finderSetup.ts only: `run` toasts the action's sentence, a failed read is the
- *                            `unavailable` state, never the reason.
+ * Task 17b, the sweep, fix round 1: a census of CALL SITES, not files. The first sweep listed the files
+ * that name a Finder command; that proved a file named a command and nothing about what it rendered,
+ * and it missed two paths (a successful repair's `warnings`, and `open_in_finder`). This one reads every
+ * invocation of a Finder command (and of the wrappers and `finder.run` that hand its result on), finds
+ * the variable that holds the result, and reports every use that can run on a Mac and renders the reason
+ * or the warnings. The engine is tests/fixtures/finderResultCensus.ts, proved on snippets in
+ * tests/finderResultCensus.test.ts; it fails closed on a guard it does not recognise.
+ *
+ * The tables below are the pinned truth as of this fix. A new call site, a new use, or a changed guard
+ * fails here until somebody has looked at what it renders on a Mac.
  */
-describe('the sweep: every file naming a Finder command whose Mac error is a redacted code (task 17b)', () => {
-  const sources = [...allSources()]
-  const files = (command: string) => sources.filter(([file, text]) => namesCommand(file, text, command)).map(([file]) => file).sort()
+describe('the sweep: every call site of a Finder command, and what it does with the result on a Mac (task 17b)', () => {
+  type Tally = Partial<Record<ViolationKind, number>>
+  const tally = (violations: Violation[]): Tally => {
+    const out: Tally = {}
+    for (const v of violations) out[v.kind] = (out[v.kind] ?? 0) + 1
+    return out
+  }
+  const sources = [...allSources()].filter(([file]) => file !== 'desktopApi.ts')
+  const sites = sources.flatMap(([file, text]) => censusOfSource(file, text))
+  const bySite = new Map<string, Site[]>()
+  for (const site of sites) bySite.set(`${site.file} | ${site.family}`, [...(bySite.get(`${site.file} | ${site.family}`) ?? []), site])
+  const column = <T,>(pick: (group: Site[]) => T): Record<string, T> =>
+    Object.fromEntries([...bySite].sort(([a], [b]) => a.localeCompare(b)).map(([key, group]) => [key, pick(group)]))
+  const only = (violations: Violation[], reachable: boolean) => tally(violations.filter((v) => v.macReachable === reachable))
 
-  test('open_finder_location', () => {
-    expect(files('open_finder_location')).toEqual(['WindowsApp.tsx', 'WindowsTray.tsx', 'pages/SyncFolder.tsx'])
+  const TRAY = 'WindowsTray.tsx | open_finder_location'
+  const OPEN_SETTINGS = 'pages/SyncFolder.tsx | open_login_items_and_extensions_settings'
+
+  test('the census reads the whole of src and finds the call sites, so an empty read cannot pass for a clean one', () => {
+    expect(sources.length).toBeGreaterThan(30)
+    expect(sites.length).toBeGreaterThan(15)
+    expect(familyLiterals('desktopApi.ts', readFileSync(join(SRC, 'desktopApi.ts'), 'utf8'))).toEqual({})
   })
 
-  test('reset_macos_integration', () => {
-    expect(files('reset_macos_integration')).toEqual(['MacSettings.tsx', 'pages/SyncFolder.tsx'])
+  test('call sites: the pinned count of invocations per file and command', () => {
+    expect(column((group) => group.length)).toEqual({
+      'DesktopQuickSearch.tsx | open_in_finder': 1,
+      'MacSettings.tsx | finder.run': 1,
+      'MacSettings.tsx | reset_macos_integration': 1,
+      'Onboarding.tsx | finder.run': 1,
+      'Onboarding.tsx | wrapper:loadFinderSetup': 1,
+      'WindowsApp.tsx | open_finder_location': 1,
+      [TRAY]: 1,
+      'finderSetup.ts | finder_setup_*': 4,
+      'finderSetup.ts | open_login_items_and_extensions_settings': 1,
+      'finderSetup.ts | wrapper:copyFinderSetupDetails': 1,
+      'finderSetup.ts | wrapper:loadFinderSetup': 1,
+      'finderSetup.ts | wrapper:runFinderSetupAction': 1,
+      'pages/Shared.tsx | open_in_finder': 1,
+      'pages/SyncFolder.tsx | finder.run': 1,
+      'pages/SyncFolder.tsx | open_finder_location': 1,
+      [OPEN_SETTINGS]: 1,
+      'pages/SyncFolder.tsx | reset_macos_integration': 1,
+      'windows/views/SettingsView.tsx | finder.run': 1,
+    })
   })
 
-  test('finder_setup_*', () => {
-    expect(files('finder_setup_')).toEqual(['finderSetup.ts'])
+  test('every string literal that names a Finder command, calls or not: a command reached through a variable shows here', () => {
+    const literals = Object.fromEntries(
+      sources.map(([file, text]) => [file, familyLiterals(file, text)]).filter(([, counts]) => Object.keys(counts as object).length > 0),
+    )
+    expect(literals).toEqual({
+      'DesktopQuickSearch.tsx': { open_in_finder: 2 },
+      'MacSettings.tsx': { reset_macos_integration: 1 },
+      'WindowsApp.tsx': { open_finder_location: 2 },
+      'WindowsTray.tsx': { open_finder_location: 1 },
+      'finderSetup.ts': { 'finder_setup_*': 7, open_login_items_and_extensions_settings: 2 },
+      'pages/Shared.tsx': { open_in_finder: 2 },
+      'pages/SyncFolder.tsx': { open_finder_location: 2, open_login_items_and_extensions_settings: 2, reset_macos_integration: 2 },
+    })
   })
 
-  test('the failed Reset on SyncFolder takes its Mac toast from finderRepairFailedToast, and the sentence is named by the copy module and the helper only', () => {
-    const body = functionText('pages/SyncFolder.tsx', 'SyncFolder')
-    expect(body).toContain('finderRepairFailedToast()')
-    expect(body).not.toContain('FINDER_REPAIR_FAILED')
-    const named = sources.filter(([, text]) => text.includes('FINDER_REPAIR_FAILED')).map(([file]) => file).sort()
-    expect(named).toEqual(['finderSetup.ts', 'finderSetupCopy.ts'])
+  test('no use that can run on a Mac renders a reason or the warnings, except the two pinned exemptions', () => {
+    const leaks = Object.fromEntries(
+      Object.entries(column((group) => only(group.flatMap((site) => site.violations), true))).filter(([, found]) => Object.keys(found).length > 0),
+    )
+    expect(leaks).toEqual({ [TRAY]: { reason: 1 }, [OPEN_SETTINGS]: { reason: 1 } })
   })
 
-  test('MacSettings reports a failed repair without rendering a reason', () => {
+  test('the uses that sit only on a non-macOS side are seen, so the analysis did read them (pinned)', () => {
+    const seen = Object.fromEntries(
+      Object.entries(column((group) => only(group.flatMap((site) => site.violations), false))).filter(([, found]) => Object.keys(found).length > 0),
+    )
+    expect(seen).toEqual({
+      'DesktopQuickSearch.tsx | open_in_finder': { reason: 1 },
+      'WindowsApp.tsx | open_finder_location': { reason: 1 },
+      'pages/Shared.tsx | open_in_finder': { reason: 1 },
+      'pages/SyncFolder.tsx | open_finder_location': { reason: 1 },
+      'pages/SyncFolder.tsx | reset_macos_integration': { reason: 1, warnings: 2 },
+    })
+  })
+
+  test('nothing reads the result of finder.run: it is discarded or handed to an event handler that discards it', () => {
+    const runs = sites.filter((site) => site.family === 'finder.run')
+    expect(runs).toHaveLength(4)
+    for (const run of runs) expect(['returned', 'discarded']).toContain(run.consumption)
+  })
+
+  test('exemption 1, WindowsTray: it opens only the status root, and a Mac\'s status never has one', () => {
+    const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+    expect(rust).toMatch(/#\[cfg\(target_os = "macos"\)\]\s*let sync_root = None::<String>;/)
+    const tray = functionText('WindowsTray.tsx', 'WindowsTray')
+    const open = tray.indexOf("command<void>('open_finder_location'")
+    const guard = tray.indexOf('if (!current?.sync_root)')
+    expect(guard).toBeGreaterThan(-1)
+    expect(open).toBeGreaterThan(guard)
+    expect(tray).toContain('disabled={opening || !status?.sync_root}')
+  })
+
+  test('exemption 2, SyncFolder.openSystemSettings: reachable only from the non-macOS user_disabled notice', () => {
+    const text = readFileSync(join(SRC, 'pages/SyncFolder.tsx'), 'utf8')
+    expect(text).toContain('const finderNotice = isMacos ? null :')
+    expect(text.match(/openSystemSettings/g)).toHaveLength(2) // the definition and one use
+    const notice = text.indexOf("finderNotice?.kind === 'user_disabled'")
+    const use = text.indexOf('onClick={() => void openSystemSettings()}')
+    expect(notice).toBeGreaterThan(-1)
+    expect(use).toBeGreaterThan(notice)
+  })
+
+  test('the failed Reset, the failed open, and the failed show-file each take their Mac toast from one helper, and the sentences are named by the copy module and the helpers only', () => {
+    const syncFolder = functionText('pages/SyncFolder.tsx', 'SyncFolder')
+    expect(syncFolder).toContain('finderRepairFailedToast()')
+    expect(syncFolder).toContain('finderRepairWarningNote(result.value)')
+    for (const [file, fn] of [
+      ['pages/Shared.tsx', 'Shared'],
+      ['DesktopQuickSearch.tsx', 'DesktopQuickSearch'],
+    ] as const) {
+      const body = functionText(file, fn)
+      expect(body).toContain('finderShowFileFailedToast()')
+      expect(body).not.toMatch(/FINDER_[A-Z_]+/)
+    }
+    for (const [constant, files] of [
+      ['FINDER_REPAIR_FAILED', ['finderSetup.ts', 'finderSetupCopy.ts']],
+      ['FINDER_REPAIR_PARTIAL', ['finderSetupCopy.ts']],
+      ['FINDER_SHOW_FILE_FAILED', ['finderSetup.ts', 'finderSetupCopy.ts']],
+    ] as const) {
+      const named = sources.filter(([, text]) => text.includes(constant)).map(([file]) => file).sort()
+      expect({ constant, named }).toEqual({ constant, named: [...files] })
+    }
+  })
+
+  test('MacSettings reports a failed repair without rendering a reason, and a repair\'s note never carries the warnings', () => {
     const body = readFileSync(join(SRC, 'MacSettings.tsx'), 'utf8')
     const repair = body.slice(body.indexOf('const runRepair'), body.indexOf('const toggleFolder'))
     expect(repair).toContain('reset_macos_integration')
     expect(repair).toContain('setRepairFailed(true)')
-    expect(repair).not.toMatch(/\.reason|showToast/)
+    expect(repair).toContain('repairNote(result.value)')
+    expect(repair).not.toMatch(/\.reason|\.warnings|showToast/)
+    // repairNote (the sanitiser it hands the value to) asks the copy module and never reads `.warnings`.
+    const note = functionText('macSettingsModel.ts', 'repairNote')
+    expect(note).toContain('finderRepairWarningNote(result)')
+    expect(note).not.toContain('.warnings')
   })
 })
