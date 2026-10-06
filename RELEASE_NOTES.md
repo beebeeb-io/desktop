@@ -1,10 +1,10 @@
 # Beebeeb Desktop 0.8.11 — the Mac app catches up
 
-0.8.10 went out for Windows and Linux without the Mac app. This release is that
-same code with the macOS build added and the test results written down. Nothing
-in the app changed between 0.8.10 and 0.8.11; the only change in the repository
-is these notes. If you use the Mac app, you last received 0.8.9, so the changes
-below are new to you.
+0.8.10 went out for Windows and Linux without the Mac app. This release adds the
+macOS build and puts the test results on record. The app itself behaves the same
+as 0.8.10: the only code change is in unit-test code (below), and the rest of the
+repository change is these notes. If you use the Mac app, you last received
+0.8.9, so the changes below are new to you.
 
 ### What's New
 
@@ -26,6 +26,15 @@ below are new to you.
 
 ### Bug Fixes / Hardening
 
+- **A failing Windows test is fixed (PR #111, test only):** the Windows CI check
+  had been red since the 0.8.10 sign-out fix merged, so 0.8.10's Windows build
+  shipped while its own Windows test run read `782 passed; 1 failed`. The failing
+  test was `signout_teardown_tests::clear_session_when_already_signed_out_skips_the_engine_and_succeeds`.
+  On Windows, sign-out runs the local-state purge even when you are already signed
+  out, and the test never set up the state directory the real app sets at
+  startup. The app was not affected; the test was incomplete. After the fix the
+  same Windows check reads `783 passed; 0 failed`.
+
 - **Dead sessions (Windows):** a password change on any device revokes every
   session, and the Windows app used to leave you behind a wall of 401s with no
   way to sign out. Covered by the Windows session tests in the cargo run below.
@@ -35,14 +44,22 @@ below are new to you.
 
 ### Verification
 
-- Test suite, frontend: `bun test` completed with 558 pass / 0 fail.
-- Test suite, Rust: `cargo test --locked` from `src-tauri` on macOS (Apple
-  Silicon) completed with `test result: ok. 899 passed; 0 failed; 4 ignored`
-  for the library, plus `test result: ok. 20 passed` (keychain),
-  `test result: ok. 8 passed` (Windows session wiring) and
-  `test result: ok. 3 passed` (Windows sign-out cleanup), 0 failed in every
-  binary. The Linux release gate counts platform-specific tests differently and
-  reported a lower library count (870) for 0.8.10.
+- Test suite, frontend: `bun test` on this release's tree completed with
+  558 pass / 0 fail.
+- Test suite, Rust (macOS, Apple Silicon): `cargo test --locked` from `src-tauri`
+  on this release's tree completed with
+  `test result: ok. 899 passed; 0 failed; 4 ignored` for the library, plus
+  `test result: ok. 20 passed` (keychain), `test result: ok. 8 passed` (Windows
+  session wiring) and `test result: ok. 3 passed` (Windows sign-out cleanup),
+  0 failed in every binary.
+- Windows CI on the code of this release (PR #111, same tree as `main` at the
+  fix): `Rust check (Windows)` ran `783 passed; 0 failed; 2 ignored`. On 0.8.10
+  the same check ran `782 passed; 1 failed`.
+- Linux CI on the same code: `870 passed; 0 failed; 4 ignored`, after one rerun.
+  The first run failed `link_health::tests::a_refused_connection_is_offline`
+  (a local network test: it saw "server did not answer" instead of "refused")
+  and passed on the rerun with no code change. That test is not touched by this
+  release and may be flaky; it has not been investigated.
 - Release workflow check: the release workflow re-runs both suites as its own
   gate before any installer is built.
 - Not verified: no person has exercised this release's installers on real
