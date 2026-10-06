@@ -14,15 +14,11 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { submitPassword, submitTotpCode } from './onboardingSignIn'
-import { classifyFinderInstallResult, shouldRetryAfterUserEnabledPoll } from './finderInstallCard'
+import { classifyFinderInstallResult } from './finderInstallCard'
+import { loadFinderSetup, useFinderSetup } from './finderSetup'
+import { FINDER_SETUP_TITLE } from './finderSetupCopy'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
-
-// Task 1524 Issue 4: how often the "turned off in System Settings" card polls
-// `finder_domain_user_enabled` to notice the user has re-enabled Beebeeb and
-// continue installation automatically. Stopped on unmount and the moment the
-// card is no longer shown (see the effect in `FinderInstallStep`).
-const USER_ENABLED_POLL_INTERVAL_MS = 2000
 
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
 const RECOVERY_WORD_COUNT = 12
@@ -41,29 +37,34 @@ export default function Onboarding() {
 
 function OnboardingView() {
   const [step, setStep] = useState<Step>('signin')
+  // `null` until `desktop_platform` has answered, so the Finder step never flashes the wrong
+  // variant. A platform that cannot be read becomes 'unknown', which takes the Windows/Linux
+  // step exactly as it did before the macOS step existed (never a blank page).
+  const [platform, setPlatform] = useState<DesktopPlatform | null>(null)
   const regionLabel = useRegionLabel(step)
 
   useEffect(() => {
     let cancelled = false
 
-    Promise.all([
-      loadSyncStatus(),
-      command<DesktopPlatform>('desktop_platform'),
-      command<FinderInstallState>('finder_location_state'),
-    ]).then(([status, platform, finder]) => {
-      if (cancelled || !status?.logged_in) return
+    Promise.all([loadSyncStatus(), command<DesktopPlatform>('desktop_platform')]).then(async ([status, platformResult]) => {
+      if (cancelled) return
+      setPlatform(platformResult.ok ? platformResult.value : 'unknown')
+      if (!status?.logged_in) return
 
       if (!status.vault_unlocked) {
         setStep('unlock')
         return
       }
 
-      const isMacos = platform.ok && platform.value === 'macos'
-      if ((isMacos && (!finder.ok || !finder.value.installed)) || (!isMacos && !status.sync_root)) {
-        setStep('finder')
+      if (platformResult.ok && platformResult.value === 'macos') {
+        // Spec 2026-10-06 §10: the reconciler's state, not the install-era command. Anything
+        // but Ready (adding, failed, turned off, unreadable) goes to the step that says which.
+        const finder = await loadFinderSetup()
+        if (cancelled) return
+        setStep(finder.ok && finder.value.setup === 'ready' ? 'ready' : 'finder')
         return
       }
-      setStep('ready')
+      setStep(status.sync_root ? 'ready' : 'finder')
     })
 
     return () => {
@@ -99,7 +100,13 @@ function OnboardingView() {
       <main className="onboarding-main">
         {step === 'signin' && <SignInStep onDone={() => setStep('unlock')} />}
         {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} />}
-        {step === 'finder' && <FinderInstallStep onDone={() => setStep('pinning')} />}
+        {step === 'finder' &&
+          platform !== null &&
+          (platform === 'macos' ? (
+            <MacFinderStep onDone={() => setStep('pinning')} />
+          ) : (
+            <FinderInstallStep onDone={() => setStep('pinning')} />
+          ))}
         {step === 'pinning' && <PinningStep onDone={() => setStep('ready')} />}
         {step === 'ready' && <ReadyStep />}
       </main>
@@ -473,9 +480,85 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   )
 }
 
+/**
+ * macOS (spec 2026-10-06 §10, ruling R5): no install button. Beebeeb adds itself once the keys
+ * arrive; this step shows Adding, advances by itself on Ready, and on a failure or a turned-off
+ * extension shows the one notice and the one action of finderSetupCopy.ts. The notice gates the
+ * step, so it is inline; a failed ACTION gates nothing, so `useFinderSetup` raises it as a toast.
+ *
+ * The load, the `finder-setup-changed` subscription and that toast live in `useFinderSetup`
+ * (lead ruling 7b); this component only draws what the hook presents.
+ */
+function MacFinderStep({ onDone }: { onDone: () => void }) {
+  const finder = useFinderSetup()
+  const [busy, setBusy] = useState(false)
+  const presentation = finder.presentation
+  const ready = presentation.kind === 'ready'
+
+  useEffect(() => {
+    if (ready) onDone()
+  }, [ready, onDone])
+
+  const act = async (send: () => Promise<unknown>) => {
+    setBusy(true)
+    try {
+      await send()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Two different "Try again"s, never crossed (lead rulings 7a / c5). A failure notice asks the
+  // reconciler to check again (`run`); the unreadable state has nothing to ask yet, so its one
+  // action only reads the state again (`retry`).
+  const notice =
+    presentation.kind === 'notice'
+      ? {
+          tone: presentation.tone,
+          sentence: presentation.sentence,
+          actionLabel: presentation.actionLabel,
+          send: () => finder.run(presentation.action),
+        }
+      : presentation.kind === 'unavailable'
+        ? { tone: 'alert' as const, sentence: presentation.line, actionLabel: presentation.actionLabel, send: () => finder.retry() }
+        : null
+
+  return (
+    <Card title={FINDER_SETUP_TITLE} copy="Beebeeb appears as a system-managed Finder location. Offline folders are controlled separately.">
+      {notice ? (
+        <div
+          className={notice.tone === 'alert' ? 'notice error' : 'notice'}
+          role={notice.tone === 'alert' ? 'alert' : 'status'}
+          data-error-surface={notice.tone === 'alert' ? 'finder-setup' : undefined}
+          style={{ marginTop: 16 }}
+        >
+          <div>{notice.sentence}</div>
+          <div className="button-row" style={{ marginTop: 10 }}>
+            <button className="button" onClick={() => void act(notice.send)} disabled={busy}>
+              {notice.actionLabel}
+            </button>
+          </div>
+        </div>
+      ) : presentation.kind === 'adding' || presentation.kind === 'ready' ? (
+        // Only what the reconciler said. Before its first answer, and while it says Missing, there
+        // is nothing true to show yet, so nothing is shown (never "Adding" on a guess).
+        <div className="panel" style={{ marginTop: 16, background: 'var(--paper-2)' }}>
+          <div className="mono" style={{ fontSize: 13 }}>
+            {presentation.line}
+          </div>
+        </div>
+      ) : null}
+    </Card>
+  )
+}
+
+/**
+ * Windows/Linux only since spec 2026-10-06 (macOS renders MacFinderStep). The macOS-only
+ * branches (the turned-off card, its poll, the System Settings link, the macOS copy) are gone;
+ * on these platforms they never rendered.
+ */
 function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
-  const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
   const [finderPath, setFinderPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   // KEPT INLINE BY DESIGN — task 1255, lead ruling 2026-08-31 ("option (a)").
@@ -494,30 +577,13 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   // unlock" escape hatch. See the 1255 task file for the full ruling and the
   // `escapeHatchVisible: true` evidence.
   const [message, setMessage] = useState<string | null>(null)
-  // Task 1524 Issue 4 — true while the Beebeeb File Provider domain exists but is
-  // disabled by the user in System Settings. Drives the "open System Settings" button
-  // and the poll effect below; independent of `message` (which is macOS-safe to keep
-  // set here since the "Continue without install" escape hatch is already `!isMacos`
-  // gated, see the comment above it).
-  const [userDisabled, setUserDisabled] = useState(false)
 
   useEffect(() => {
-    command<DesktopPlatform>('desktop_platform').then((result) => {
-      if (result.ok) setPlatform(result.value)
-    })
     command<string>('default_sync_root').then((result) => {
       if (result.ok) setSyncRoot(result.value)
     })
     command<FinderInstallState>('finder_location_state').then((result) => {
-      if (!result.ok) return
-      setFinderPath(result.value.path ?? null)
-      // Reflect a previously-observed "turned off in System Settings" state on load
-      // (e.g. the user left onboarding, then came back) rather than only detecting it
-      // after a fresh `install_finder_location` attempt.
-      if (!result.value.installed && result.value.reason_category === 'user_disabled') {
-        setMessage(result.value.last_error ?? null)
-        setUserDisabled(true)
-      }
+      if (result.ok) setFinderPath(result.value.path ?? null)
     })
   }, [])
 
@@ -536,54 +602,16 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const install = useCallback(async () => {
     setBusy(true)
     setMessage(null)
-    setUserDisabled(false)
-    const result = await command<FinderInstallState>('install_finder_location', {
-      path: platform === 'macos' ? null : syncRoot,
-    })
+    const result = await command<FinderInstallState>('install_finder_location', { path: syncRoot })
     setBusy(false)
-    // Task 1524 Issue 4: `result.ok` alone is NOT "installed" — a user-disabled
-    // domain also comes back as `Ok`, with `reason_category: "user_disabled"`, so the
-    // real question is `outcome.kind`, not `result.ok`. See finderInstallCard.ts.
     const outcome = classifyFinderInstallResult(result)
     if (outcome.kind === 'installed') {
       setFinderPath(outcome.path)
       onDone()
       return
     }
-    if (outcome.kind === 'user_disabled') {
-      setMessage(outcome.message)
-      setUserDisabled(true)
-      return
-    }
     setMessage(!result.ok && result.unsupported ? commandUnavailableLabel('install_finder_location') : outcome.message)
-  }, [onDone, platform, syncRoot])
-
-  // Task 1524 Issue 4: while the domain is disabled, poll whether the user has
-  // re-enabled it in System Settings and, the moment they have, retry the install
-  // automatically — the user only has to flip the switch, not come back and click
-  // "Install Finder location" again. Stops on unmount or once `userDisabled` clears
-  // (install succeeded, or a fresh attempt started).
-  useEffect(() => {
-    if (!userDisabled) return
-    let cancelled = false
-    const interval = setInterval(() => {
-      command<boolean | null>('finder_domain_user_enabled').then((poll) => {
-        if (cancelled) return
-        if (shouldRetryAfterUserEnabledPoll(poll)) {
-          setUserDisabled(false)
-          void install()
-        }
-      })
-    }, USER_ENABLED_POLL_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [userDisabled, install])
-
-  const openSystemSettings = useCallback(async () => {
-    await command<void>('open_login_items_and_extensions_settings')
-  }, [])
+  }, [onDone, syncRoot])
 
   const continueWithoutInstall = useCallback(async () => {
     setBusy(true)
@@ -597,46 +625,29 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
     setMessage(result.unsupported ? commandUnavailableLabel('continue_without_finder_location') : result.reason)
   }, [onDone, syncRoot])
 
-  const isMacos = platform === 'macos'
-
   return (
     <Card
       title="Install the Finder location"
-      copy={
-        isMacos
-          ? 'Beebeeb appears as a system-managed Finder location. Offline folders are controlled separately.'
-          : 'Beebeeb should appear as a file-manager location. This is separate from choosing optional offline folders.'
-      }
+      copy="Beebeeb should appear as a file-manager location. This is separate from choosing optional offline folders."
     >
       {message && <div className="notice">{message}</div>}
       <div className="panel" style={{ marginTop: 16, background: 'var(--paper-2)' }}>
-        <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
+        <div className="section-label">Folder path</div>
         <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
-          {finderPath ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? '~/Beebeeb')}
+          {finderPath ?? syncRoot ?? '~/Beebeeb'}
         </div>
       </div>
       <div className="button-row" style={{ marginTop: 16 }}>
-        {!isMacos && (
-          <button className="button" onClick={chooseFolder} disabled={busy}>
-            Choose location
-          </button>
-        )}
+        <button className="button" onClick={chooseFolder} disabled={busy}>
+          Choose location
+        </button>
         <button className="button amber" onClick={install} disabled={busy}>
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
-        {/* Task 1524 Issue 4 — only reachable on macOS, once install_finder_location
-            reports the domain is disabled in System Settings. The poll effect above
-            clears `userDisabled` and retries automatically once the user flips it back
-            on, so this button is a shortcut to the right pane, not a required step. */}
-        {userDisabled && (
-          <button className="button" onClick={openSystemSettings} disabled={busy}>
-            Open Login Items &amp; Extensions
-          </button>
-        )}
         {/* This escape hatch EXISTS ONLY while `message` is set — it is the gate described
             on the `message` state above. Removing the inline error removes this button.
             Read that comment before refactoring either one. */}
-        {message && !isMacos && (
+        {message && (
           <button className="button" onClick={continueWithoutInstall} disabled={busy}>
             Continue without install
           </button>

@@ -74,10 +74,28 @@ export interface Mounted {
   close: () => void
 }
 
+/**
+ * A custom hook (or any function that calls hooks) from another module, executed with THIS mount's
+ * controlled hooks so it and the component under test share one state/effect/ref store, as they do
+ * in React. It is bound into the component's scope under `name`; `bindings` are what the hook
+ * itself references (the component's own `bindings` are not visible to it).
+ */
+export interface HookModule {
+  file: string
+  name: string
+  bindings?: Record<string, unknown>
+}
+
 export function mount(
   file: string,
   name: string,
-  opts: { backend: Record<string, Handler>; bindings?: Record<string, unknown>; props?: any; expand?: boolean },
+  opts: {
+    backend: Record<string, Handler>
+    bindings?: Record<string, unknown>
+    props?: any
+    expand?: boolean
+    hookModules?: HookModule[]
+  },
 ): Mounted {
   const states: any[] = []
   const deps: any[][] = []
@@ -100,7 +118,7 @@ export function mount(
       },
     },
   }
-  const View = loadComponent(file, name, {
+  const controlledHooks: Record<string, unknown> = {
     React: { createElement, Fragment },
     useState(initial: any) {
       const index = cursor++
@@ -130,8 +148,12 @@ export function mount(
     },
     useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
     useToast: () => ({ showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }),
-    ...opts.bindings,
-  })
+  }
+  const hookFunctions: Record<string, unknown> = {}
+  for (const hook of opts.hookModules ?? []) {
+    hookFunctions[hook.name] = loadComponent(hook.file, hook.name, { ...controlledHooks, ...hook.bindings })
+  }
+  const View = loadComponent(file, name, { ...controlledHooks, ...hookFunctions, ...opts.bindings })
   const render = () => { cursor = 0; tree = View(opts.props ?? {}) }
   const flush = async () => {
     for (let i = 0; i < 12; i++) {
