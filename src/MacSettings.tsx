@@ -30,13 +30,12 @@ import {
   openUrl,
   popoverSnapshot,
   type DesktopConfig,
-  type FinderInstallState,
   type MacosIntegrationResetResult,
   type Subscription,
   type VaultItem,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
-import { finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from './finderInstallCard'
+import { useFinderSetup } from './finderSetup'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
   accountInitial,
@@ -47,6 +46,7 @@ import {
   keepOnMac,
   KEPT_FOLDER_ROW_SENTENCE,
   keptFolderAfterDismiss,
+  monoReason,
   NOTIFICATION_ROWS,
   planLine,
   preservedFilesNote,
@@ -493,11 +493,11 @@ type RepairPhase = 'idle' | 'confirming' | 'busy'
 
 function SyncTab({ settings }: { settings: SettingsConfig }) {
   const { showToast } = useToast()
-  // The failure of the last Add to Finder lives in this state and is shown once, under its row.
-  // It gates the row's action (decision D1, slice 5), so it is inline and never also a toast.
-  const [finder, setFinder] = useState<FinderInstallState | null>(null)
-  const [finderLoadFailed, setFinderLoadFailed] = useState(false)
-  const [attempting, setAttempting] = useState(false)
+  // The Finder row is the reconciler's state, read and followed by the one shared hook (lead
+  // ruling 7b): it loads, follows `finder-setup-changed` (no polling), and toasts a failed ACTION.
+  // A failed SETUP is part of the state: it gates Finder, so it is the inline notice under the
+  // row and never also a toast. Nothing here adds Beebeeb to Finder by hand (R5): the reconciler does.
+  const finder = useFinderSetup()
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
   // 1882 r4: a Repair that failed AFTER it removed the Finder location reads differently.
@@ -512,19 +512,6 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
   const [chooser, setChooser] = useState(false)
   const [savingFolder, setSavingFolder] = useState<string | null>(null)
-
-  const loadFinder = useCallback(async () => {
-    setFinderLoadFailed(false)
-    const result = await command<FinderInstallState>('finder_location_state')
-    if (result.ok) setFinder(result.value)
-    else {
-      // The state could not be read: whatever it said before may no longer be true (a repair
-      // that just succeeded removed the integration), so drop it and show the failed refresh
-      // with its Try again instead of the stale row.
-      setFinder(null)
-      setFinderLoadFailed(true)
-    }
-  }, [])
 
   const loadTree = useCallback(async () => {
     setTreeLoadFailed(false)
@@ -541,10 +528,9 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   }, [])
 
   useEffect(() => {
-    void loadFinder()
     void loadTree()
     void loadKept()
-  }, [loadFinder, loadTree, loadKept])
+  }, [loadTree, loadKept])
 
   // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
   const dismissKept = async () => {
@@ -563,33 +549,6 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setKept(keptFolderAfterDismiss(result.value))
   }
 
-  const addToFinder = async () => {
-    setAttempting(true)
-    setRepairFailed(false)
-    setRepairRemoved(false)
-    setRepairResult(null)
-    setFinder(finderInstallStateWhileAttempting)
-    const result = await command<FinderInstallState>('install_finder_location', { path: null })
-    setAttempting(false)
-    setFinder((previous) => finderInstallStateAfterAttempt(result, previous, commandUnavailableLabel('install_finder_location')))
-    // 1882 r5: the attempt's own cleanup, or the rollback of a failed one, may have kept files and
-    // saved their folder while it ran, whether it then succeeded or failed. The row read the saved
-    // folder once on open, so read it again here instead of waiting for a tab switch.
-    await loadKept()
-  }
-
-  // A one-off action that gates nothing: a failure is a toast (house rule).
-  const openSystemSettings = async () => {
-    const result = await command<void>('open_login_items_and_extensions_settings')
-    if (!result.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open System Settings',
-        message: result.unsupported ? commandUnavailableLabel('open_login_items_and_extensions_settings') : result.reason,
-      })
-    }
-  }
-
   const runRepair = async () => {
     setRepair('busy')
     setRepairFailed(false)
@@ -601,7 +560,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
       setRepairFailed(true)
       const removed = repairRemovedNotice(result.reason, 'Add to Finder') !== null
       setRepairRemoved(removed)
-      await loadFinder()
+      await finder.retry()
       return
     }
     setRepairResult(repairNote(result.value))
@@ -613,7 +572,9 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     await loadKept()
     const reported = preservedFilesNote(result.value)
     if (reported) setKept((current) => current ?? reported.path)
-    await loadFinder()
+    // The reconciler adds Beebeeb back by itself and says so through finder-setup-changed; this
+    // read is the safety net that keeps the row from claiming the pre-repair "Added".
+    await finder.retry()
   }
 
   const toggleFolder = async (id: string, pinned: boolean) => {
@@ -631,7 +592,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setTree((current) => (current === null ? current : withPinned(current, id, pinned)))
   }
 
-  const row = finderRow(finder, attempting, finderLoadFailed)
+  const row = finderRow(finder.load.status === 'loaded' ? finder.load.view : null, finder.load.status === 'unavailable')
   const keep = keepOnMac(tree, treeLoadFailed)
   const config = settings.state.status === 'ready' ? settings.state.config : null
 
@@ -650,18 +611,12 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
         </Btn>
       </>
     )
-  } else if (row.kind === 'missing') {
-    finderControl = (
-      <Btn primary onClick={() => void addToFinder()}>
-        Add to Finder
-      </Btn>
-    )
-  } else if (row.kind === 'failed' || row.kind === 'user_disabled') {
-    finderControl = <Btn onClick={() => void addToFinder()}>Try again</Btn>
   } else if (row.kind === 'adding') {
     finderControl = <Btn disabled>Adding…</Btn>
   } else if (row.kind === 'unavailable') {
-    finderControl = <Btn onClick={() => void loadFinder()}>Try again</Btn>
+    // The state could not be read: this Try again reads it again. It is NOT the reconciler's
+    // retry, which only exists inside a failure notice below (two different "Try again"s).
+    finderControl = <Btn onClick={() => void finder.retry()}>Try again</Btn>
   }
 
   let keepControl = null
@@ -697,17 +652,14 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           hint={finderHint(row)}
           control={finderControl}
         />
-        {row.kind === 'failed' ? (
-          <Note kind="alert" surface="finder-install" title={row.title} reason={row.reason}>
-            {row.sentence}
-          </Note>
-        ) : null}
-        {row.kind === 'user_disabled' ? (
+        {row.kind === 'notice' ? (
           <Note
-            kind="status"
-            actions={<Btn onClick={() => void openSystemSettings()}>Open Login Items &amp; Extensions</Btn>}
+            kind={row.tone}
+            surface="finder-setup"
+            reason={row.tone === 'alert' ? monoReason(row.reason) : null}
+            actions={<Btn onClick={() => void finder.run(row.action)}>{row.actionLabel}</Btn>}
           >
-            {row.message}
+            {row.sentence}
           </Note>
         ) : null}
         {repairFailed && repairRemoved ? (

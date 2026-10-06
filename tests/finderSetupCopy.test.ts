@@ -131,10 +131,11 @@ describe('finderSetupCopy (spec §6.2)', () => {
 
 describe('the Finder state could not be read (lead ruling 7a)', () => {
   test('it reuses the existing Sync-tab words: no new user-facing string', () => {
-    // 'Couldn’t check Finder.' is what MacSettings' unavailable row already says
-    // (macSettingsModel.finderHint), and 'Try again' is the button it already shows.
-    expect(FINDER_UNAVAILABLE_LINE).toBe(finderHint({ kind: 'unavailable' }))
+    // 'Couldn’t check Finder.' is what MacSettings' unavailable row has always said. Task 16 made
+    // `finderHint` read this constant (one copy, in this module), so the literal below is the pin
+    // and `finderHint` is held to it, instead of the two being compared with each other.
     expect(FINDER_UNAVAILABLE_LINE).toBe('Couldn’t check Finder.')
+    expect(finderHint({ kind: 'unavailable' })).toBe('Couldn’t check Finder.')
     expect(FINDER_ACTION_LABEL.try_again).toBe('Try again')
   })
 

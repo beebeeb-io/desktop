@@ -13,7 +13,8 @@ import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCheck } from '../src/windows/manualUpdateCheck'
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
-import * as finderInstallCard from '../src/finderInstallCard'
+import * as finderSetup from '../src/finderSetup'
+import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import { expand, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted, type TreeNode } from './fixtures/componentHarness'
@@ -34,7 +35,6 @@ const withPinned = loadComponent('MacSettings.tsx', 'withPinned', {})
 const baseBindings = {
   ...desktopApi,
   ...diagnosticsCopy,
-  ...finderInstallCard,
   ...model,
   ...parts,
   Modal,
@@ -48,12 +48,53 @@ const baseBindings = {
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 
-function open(name: string, backend: Record<string, (args: any) => unknown>, extra: { props?: any; bindings?: Record<string, unknown> } = {}) {
+/**
+ * A scripted stand-in for `subscribeFinderSetup` (the real one needs a Tauri event bus): the
+ * registration lands on the next microtask, as the real one does, and `emit` is a reconciler
+ * transition arriving as a `finder-setup-changed` event.
+ */
+function finderBus() {
+  const listeners: Array<(view: unknown) => void> = []
+  return {
+    get live() { return listeners.length },
+    subscribeFinderSetup(onView: (view: unknown) => void, options: { onSubscribed?: () => void } = {}) {
+      listeners.push(onView)
+      void Promise.resolve().then(() => options.onSubscribed?.())
+      return () => { const at = listeners.indexOf(onView); if (at >= 0) listeners.splice(at, 1) }
+    },
+    emit(view: unknown) { for (const listener of [...listeners]) listener(view) },
+  }
+}
+
+interface FinderHarness {
+  bus: ReturnType<typeof finderBus>
+  /** What "Copy details" put on the (stand-in) pasteboard. */
+  copied: string[]
+}
+
+/** The REAL `useFinderSetup` declaration, run inside the mounted Sync tab (lead ruling 7b). */
+const useFinderSetupModule = ({ bus, copied }: FinderHarness) => ({
+  file: 'finderSetup.ts',
+  name: 'useFinderSetup',
+  bindings: {
+    loadFinderSetup: finderSetup.loadFinderSetup,
+    runFinderSetupAction: (action: finderSetupCopy.FinderSetupAction) =>
+      finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(text) } }),
+    finderSetupLoadPresentation: finderSetupCopy.finderSetupLoadPresentation,
+    FINDER_ACTION_FAILED: finderSetupCopy.FINDER_ACTION_FAILED,
+    FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
+    commandUnavailableLabel: desktopApi.commandUnavailableLabel,
+    subscribeFinderSetup: bus.subscribeFinderSetup,
+  },
+})
+
+function open(name: string, backend: Record<string, (args: any) => unknown>, extra: { props?: any; bindings?: Record<string, unknown>; finder?: FinderHarness } = {}) {
   const m = mount('MacSettings.tsx', name, {
     backend: backend as any,
     expand: true,
     props: extra.props,
     bindings: { ...baseBindings, ...extra.bindings },
+    hookModules: name === 'SyncTab' ? [useFinderSetupModule(extra.finder ?? { bus: finderBus(), copied: [] })] : undefined,
   })
   mounted.push(m)
   return m
@@ -93,12 +134,15 @@ const statuses = (m: Mounted) => find(m, (el) => el.props.role === 'status')
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
-const TIMEOUT_TEXT = 'Timed out waiting for the Beebeeb File Provider domain to become available'
+const finderView = (over: Record<string, unknown> = {}) => ({
+  setup: 'missing', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null, ...over,
+})
 const finder = {
-  installed: { installed: true, path: 'Beebeeb in Finder', status: 'installed', last_error: null, last_attempt_at: 3, reason_category: null },
-  missing: { installed: false, path: null, status: 'missing', last_error: null, last_attempt_at: null, reason_category: null },
-  failed: { installed: false, path: null, status: 'error', last_error: TIMEOUT_TEXT, last_attempt_at: 2, reason_category: 'timeout' },
-  userDisabled: { installed: false, path: null, status: 'error', last_error: 'Beebeeb is turned off in System Settings. Open Login Items & Extensions, then try again.', last_attempt_at: 4, reason_category: 'user_disabled' },
+  installed: finderView({ setup: 'ready' }),
+  adding: finderView({ setup: 'adding' }),
+  failed: finderView({ setup: 'failed', reason: 'timeout', attempt: 4, max_attempts: 4 }),
+  folderTaken: finderView({ setup: 'failed', reason: 'folder_taken' }),
+  userDisabled: finderView({ setup: 'user_disabled', reason: 'user_disabled' }),
 }
 const config = { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'dark', local_cache_limit_bytes: 123 }
 const snapshot = (over: { account?: object; storage?: object | null; phase?: string } = {}) => ({
@@ -482,23 +526,29 @@ describe('Account tab', () => {
 
 describe('Sync tab', () => {
   const ready = (over: object = {}) => ({ state: { status: 'ready', config: { ...config, ...over } }, save: async () => {}, reload: async () => {} })
+  /** These four stay registered for Windows and Linux (spec §4, §9); no macOS code path may call them (R5). */
+  const FORBIDDEN_COMMANDS = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+  /** The hook reads once its subscription has landed, so a render needs microtasks AND a macrotask. */
+  const settleFinder = async (m: Mounted) => { await m.flush(); await tick(); await m.flush() }
+  const pressFinder = async (m: Mounted, label: string) => { await button(m, label).props.onClick(); await settleFinder(m) }
+  const calls = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
 
-  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
+  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
     // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
-    const st: { finder: any; kept: string | null } = { finder: opts.finder ?? finder.installed, kept: opts.kept ?? null }
+    const st: { finder: any; unreadable: boolean; kept: string | null } = { finder: opts.finder ?? finder.installed, unreadable: opts.unreadable ?? false, kept: opts.kept ?? null }
     return {
       st,
       backend: {
-        finder_location_state: () => st.finder,
-        install_finder_location: async (a: any) => {
-          if (opts.gate) await opts.gate
-          return opts.install ? opts.install(a) : st.finder
-        },
+        finder_setup_state: () => { if (st.unreadable) throw new Error('no reconciler'); return st.finder },
+        finder_setup_retry: opts.retry ?? (() => undefined),
+        finder_setup_copy_details: () => 'details',
+        finder_setup_show_app: () => undefined,
         reset_macos_integration: (a: any) => {
           // A Repair that fails AFTER it removed the Finder location: the domain is already gone.
-          if (opts.removesBeforeFailing) st.finder = finder.missing
+          if (opts.removesBeforeFailing) st.finder = finder.adding
           const result: any = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
-          st.finder = finder.missing
+          st.finder = finder.adding // the reconciler adds Beebeeb back by itself
           // Like Rust: a repair that kept files saves the folder for the row.
           if (typeof result?.preserved_location === 'string') st.kept = result.preserved_location
           return result
@@ -523,109 +573,183 @@ describe('Sync tab', () => {
   }
   const openSync = async (opts: Parameters<typeof syncBackend>[0] = {}, settings: any = ready()) => {
     const { backend, st } = syncBackend(opts)
-    const m = open('SyncTab', backend, { props: { settings } })
-    await m.flush()
-    return { m, st }
+    const harness: FinderHarness = { bus: finderBus(), copied: [] }
+    const m = open('SyncTab', backend, { props: { settings }, finder: harness })
+    await settleFinder(m)
+    return { m, st, bus: harness.bus, copied: harness.copied }
   }
 
-  test('an added Finder location reads Added with Repair…, no error, and the spec\'s hint', async () => {
+  test('an added Finder location reads Added with Repair…, no error, and the ready hint', async () => {
     const { m } = await openSync()
     const text = visibleText(m)
     expect(text).toContain('Beebeeb in Finder')
     expect(text).toContain('Your vault appears under Locations in Finder.')
     expect(text).toContain('Added')
     expect(buttons(m)).toContain('Repair…')
-    expect(buttons(m)).not.toContain('Add to Finder')
     expect(visibleErrorSurfaces(m)).toEqual([])
     expect(visibleText(m)).not.toContain('Users')
   })
 
-  test('a Finder location that is not added offers exactly one primary action, Add to Finder', async () => {
-    const { m } = await openSync({ finder: finder.missing })
-    expect(buttons(m)).toContain('Add to Finder')
-    expect(buttons(m)).not.toContain('Repair…')
-    expect(button(m, 'Add to Finder').props.className).toContain('ms-btn--primary')
-    expect(visibleText(m)).toContain('Add it to see your files in Finder like any other folder.')
-    expect(visibleText(m)).not.toContain('Your vault appears under Locations')
+  test('no state ever offers Add to Finder or Install, and no macOS code path calls the Windows/Linux commands (R5)', async () => {
+    const states = [
+      ...Object.values(finder),
+      ...finderSetup.FINDER_FAILURE_REASONS.map((reason) => finderView({ setup: reason === 'user_disabled' ? 'user_disabled' : 'failed', reason })),
+    ]
+    for (const state of states) {
+      const { m } = await openSync({ finder: state })
+      expect(buttons(m).join('|')).not.toMatch(/Add to Finder|Install/)
+      expect(visibleText(m)).not.toMatch(/Add to Finder|Add it to see/)
+      for (const forbidden of FORBIDDEN_COMMANDS) expect(m.calls.map((c) => c.name)).not.toContain(forbidden)
+    }
+    const unreadable = await openSync({ unreadable: true })
+    expect(buttons(unreadable.m).join('|')).not.toMatch(/Add to Finder|Install/)
+    for (const forbidden of FORBIDDEN_COMMANDS) expect(unreadable.m.calls.map((c) => c.name)).not.toContain(forbidden)
   })
 
-  test('screenshot 1: a failed install is ONE inline alert (title, sentence, mono reason), never also a toast, and never the raw error', async () => {
-    const { m } = await openSync({ finder: finder.missing, install: () => finder.failed })
-    await press(m, 'Add to Finder')
-    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-install')).toHaveLength(1)
+  test('adding is a disabled Adding… with the adding line, no error and no other button for it', async () => {
+    const { m } = await openSync({ finder: finder.adding })
+    expect(button(m, 'Adding…').props.disabled).toBe(true)
+    expect(visibleText(m)).toContain('Adding Beebeeb to Finder…')
+    expect(buttons(m)).not.toContain('Try again')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('the instant before the first answer says nothing and offers nothing (it is not "Adding" either)', async () => {
+    const { backend } = syncBackend()
+    const m = open('SyncTab', { ...backend, finder_setup_state: () => new Promise(() => {}) }, { props: { settings: ready() } })
+    await settleFinder(m)
+    expect(visibleText(m)).not.toContain('Adding Beebeeb to Finder…')
+    expect(visibleText(m)).not.toContain('Your vault appears under Locations')
+    expect(buttons(m)).not.toContain('Adding…')
+    expect(buttons(m)).not.toContain('Try again')
+    expect(buttons(m)).not.toContain('Repair…')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a failure is ONE inline alert with one sentence and one action, never a toast, never raw error text', async () => {
+    const { m } = await openSync({ finder: finder.failed })
+    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-setup')).toHaveLength(1)
     expect(alerts(m)).toHaveLength(1)
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
-    const text = visibleText(m)
-    expect(text).toContain('Couldn’t add Beebeeb to Finder')
-    expect(text).toContain('macOS didn’t respond in time.')
-    expect(text).toContain('reason: timeout')
-    expect(text).not.toContain('File Provider')
-    expect(text).not.toContain(TIMEOUT_TEXT)
-    expect(buttons(m)).toContain('Try again')
+    expect(visibleText(m)).toContain('macOS didn’t finish adding Beebeeb to Finder.')
+    expect(visibleText(m)).toContain('reason: timeout')
+    expect(visibleText(m)).not.toContain('Couldn’t add Beebeeb to Finder') // the old title is gone: one sentence, not two
+    expect(buttons(m).filter((b) => b === 'Try again')).toHaveLength(1)
+    expect(visibleText(m)).not.toContain('File Provider')
+    expect(buttons(m)).not.toContain('Repair…') // nothing is Added, so nothing to repair
   })
 
-  test('the same failure that arrives as a rejected command is still one inline alert and no toast', async () => {
-    const { m } = await openSync({ finder: finder.missing, install: () => { throw new Error('Finder location must be absolute: relative/path') } })
-    await press(m, 'Add to Finder')
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
+  test('each of the seven reasons is one notice with its one sentence and its one action (spec §6.2)', async () => {
+    const actionLabels = Object.values(finderSetupCopy.FINDER_ACTION_LABEL)
+    for (const reason of finderSetup.FINDER_FAILURE_REASONS) {
+      const setup = reason === 'user_disabled' ? 'user_disabled' : 'failed'
+      const { m } = await openSync({ finder: finderView({ setup, reason }) })
+      const copy = finderSetupCopy.FINDER_REASON_COPY[reason]
+      const notice = [...alerts(m), ...statuses(m)]
+      expect(notice).toHaveLength(1)
+      expect(notice[0].props.role).toBe(reason === 'user_disabled' ? 'status' : 'alert')
+      expect(textOf(notice[0].props.children)).toContain(copy.sentence)
+      expect(buttons(m).filter((b) => actionLabels.includes(b))).toEqual([finderSetupCopy.FINDER_ACTION_LABEL[copy.action]])
+      expect(visibleText(m).includes(`reason: ${reason}`)).toBe(reason !== 'user_disabled') // the mono line is for alerts only
+      expect(m.toasts).toEqual([])
+    }
+  })
+
+  test('a failure notice\'s Try again asks the reconciler (finder_setup_retry); it does not re-read the state', async () => {
+    const { m } = await openSync({ finder: finder.failed })
+    const reads = calls(m, 'finder_setup_state')
+    await pressFinder(m, 'Try again')
+    expect(calls(m, 'finder_setup_retry')).toBe(1)
+    expect(calls(m, 'finder_setup_state')).toBe(reads)
     expect(m.toasts).toEqual([])
-    expect(visibleText(m)).not.toContain('relative/path')
   })
 
-  test('Add to Finder sends no path on macOS (the app picks its own location)', async () => {
-    const { m } = await openSync({ finder: finder.missing, install: () => finder.installed })
-    await press(m, 'Add to Finder')
-    expect(m.calls.find((c) => c.name === 'install_finder_location')?.args).toEqual({ path: null })
+  test('folder_taken offers Copy details and no Try again; Copy details uses the shared action and the pasteboard once', async () => {
+    const { m, copied } = await openSync({ finder: finder.folderTaken })
+    expect(buttons(m)).toContain('Copy details')
+    expect(buttons(m)).not.toContain('Try again')
+    await pressFinder(m, 'Copy details')
+    expect(calls(m, 'finder_setup_copy_details')).toBe(1)
+    expect(copied).toEqual(['details'])
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a Finder state that cannot be read is "Couldn’t check Finder." with one Try again that reads again, and never "Adding"', async () => {
+    const { m, st } = await openSync({ unreadable: true })
+    expect(visibleText(m)).toContain('Couldn’t check Finder.')
+    expect(visibleText(m)).not.toContain('Adding')
+    expect(buttons(m).filter((b) => b === 'Try again')).toHaveLength(1)
+    expect(buttons(m)).not.toContain('Adding…')
+    expect(m.toasts).toEqual([])
+    const reads = calls(m, 'finder_setup_state')
+    st.unreadable = false
+    await pressFinder(m, 'Try again')
+    // The unavailable state's Try again is a re-read, NOT the reconciler's retry.
+    expect(calls(m, 'finder_setup_state')).toBe(reads + 1)
+    expect(calls(m, 'finder_setup_retry')).toBe(0)
+    expect(visibleText(m)).toContain('Your vault appears under Locations in Finder.')
     expect(buttons(m)).toContain('Repair…')
-    expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
-  test('a new attempt clears the old failure while it runs ("Adding…", disabled), then shows the new result once', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const { m } = await openSync({ finder: finder.failed, install: () => finder.failed, gate })
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
-    void button(m, 'Try again').props.onClick()
-    m.render()
-    expect(visibleErrorSurfaces(m)).toEqual([])
-    expect(button(m, 'Adding…').props.disabled).toBe(true)
-    release()
-    await m.flush()
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
-    expect(m.toasts).toEqual([])
-  })
-
-  test('a user-disabled extension is a neutral notice with the System Settings action, not an error', async () => {
+  test('a turned-off extension is a neutral notice with Open System Settings, not an error', async () => {
     const { m } = await openSync({ finder: finder.userDisabled })
     expect(visibleErrorSurfaces(m)).toEqual([])
     expect(alerts(m)).toHaveLength(0)
     expect(statuses(m)).toHaveLength(1)
-    await press(m, 'Open Login Items & Extensions')
-    expect(m.calls.filter((c) => c.name === 'open_login_items_and_extensions_settings')).toHaveLength(1)
+    expect(visibleText(m)).toContain('Beebeeb is turned off in System Settings.')
+    await pressFinder(m, 'Open System Settings')
+    expect(calls(m, 'open_login_items_and_extensions_settings')).toBe(1)
     expect(m.toasts).toEqual([])
   })
 
-  test('Repair… asks first, says it turns off Open Beebeeb at login, and sends nothing until the second click', async () => {
+  test('the row follows finder-setup-changed without asking again (no polling)', async () => {
+    const { m, bus } = await openSync({ finder: finder.adding })
+    const reads = calls(m, 'finder_setup_state')
+    expect(buttons(m)).not.toContain('Repair…')
+    bus.emit(finder.installed)
+    await m.flush()
+    expect(buttons(m)).toContain('Repair…')
+    expect(visibleText(m)).toContain('Your vault appears under Locations in Finder.')
+    bus.emit(finder.failed)
+    await m.flush()
+    expect(alerts(m)).toHaveLength(1)
+    expect(buttons(m)).not.toContain('Repair…')
+    expect(calls(m, 'finder_setup_state')).toBe(reads)
+  })
+
+  test('a failed Finder action is ONE toast titled for the action, and does not add a second surface', async () => {
+    const { m } = await openSync({ finder: finder.failed, retry: () => { throw new Error('bridge down') } })
+    await pressFinder(m, 'Try again')
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t try again'])
+    expect(m.toasts[0]).toMatchObject({ variant: 'error', message: 'bridge down' })
+    expect(alerts(m)).toHaveLength(1)
+    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-setup')).toHaveLength(1)
+  })
+
+  test('Repair… asks first, says it turns off Open Beebeeb at login and adds itself back, and sends nothing until the second click', async () => {
     const { m } = await openSync()
     await press(m, 'Repair…')
     expect(dialogs(m)).toHaveLength(1)
     expect(visibleText(m)).toContain('Repair Beebeeb in Finder?')
     expect(visibleText(m)).toContain('turns off Open Beebeeb at login')
-    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(0)
+    expect(visibleText(m)).toContain('then adds itself back to Finder')
+    expect(visibleText(m)).not.toContain('You can add it back afterwards')
+    expect(calls(m, 'reset_macos_integration')).toBe(0)
     await press(m, 'Cancel')
     expect(dialogs(m)).toHaveLength(0)
-    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(0)
+    expect(calls(m, 'reset_macos_integration')).toBe(0)
   })
 
-  test('confirming a repair resets once, reads the Finder state again and says what was kept, in one neutral line', async () => {
+  test('confirming a repair resets once, reads the Finder state again, says what was kept in one neutral line, and shows Adding… while the reconciler puts Beebeeb back', async () => {
     const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 3, warnings: [] }) })
     await press(m, 'Repair…')
-    await press(m, 'Repair')
-    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(1)
-    expect(m.calls.filter((c) => c.name === 'finder_location_state')).toHaveLength(2)
+    await pressFinder(m, 'Repair')
+    expect(calls(m, 'reset_macos_integration')).toBe(1)
+    expect(calls(m, 'finder_setup_state')).toBe(2)
     expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('3 changes waiting to upload were kept.')
-    expect(buttons(m)).toContain('Add to Finder') // the repair removed it, so it can be added again
+    expect(button(m, 'Adding…').props.disabled).toBe(true) // the reconciler adds it back by itself
+    expect(buttons(m).join('|')).not.toMatch(/Add to Finder|Install/)
     expect(visibleErrorSurfaces(m)).toEqual([])
     expect(dialogs(m)).toHaveLength(0)
   })
@@ -839,7 +963,7 @@ describe('Sync tab', () => {
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
     const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
     await press(m, 'Repair…')
-    await press(m, 'Repair')
+    await pressFinder(m, 'Repair')
     expect(find(m, (el) => el.props['data-error-surface'] === 'finder-repair')).toHaveLength(1)
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
@@ -880,34 +1004,22 @@ describe('Sync tab', () => {
   })
 
   test('a successful repair whose refreshed Finder state cannot be read stops claiming Added and offers Try again', async () => {
-    let failRead = false
-    const st = { finder: finder.installed }
-    const m = open('SyncTab', {
-      finder_location_state: () => {
-        if (failRead) throw new Error('offline')
-        return st.finder
-      },
-      reset_macos_integration: () => {
-        st.finder = finder.missing // the repair really removed the integration
-        return { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
-      },
-      list_remote_tree: () => [folder('a', 'Photos', true)],
-      open_login_items_and_extensions_settings: () => undefined,
-    }, { props: { settings: ready() } })
-    await m.flush()
+    const { backend, st } = syncBackend()
+    const m = open('SyncTab', backend, { props: { settings: ready() } })
+    await settleFinder(m)
     expect(visibleText(m)).toContain('Added')
     await press(m, 'Repair…')
-    failRead = true
-    await press(m, 'Repair')
+    st.unreadable = true
+    await pressFinder(m, 'Repair')
     // The reset succeeded but the refresh failed: the row must not keep the pre-repair "Added"
     // (the integration is gone), and the failed refresh needs its own way back in.
     expect(visibleText(m)).not.toContain('Added')
     expect(visibleText(m)).toContain('Couldn’t check Finder.')
     expect(buttons(m)).toContain('Try again')
-    failRead = false
-    await press(m, 'Try again')
-    expect(visibleText(m)).toContain('Add it to see your files in Finder like any other folder.')
-    expect(buttons(m)).toContain('Add to Finder')
+    st.unreadable = false
+    await pressFinder(m, 'Try again')
+    expect(button(m, 'Adding…').props.disabled).toBe(true)
+    expect(buttons(m).join('|')).not.toMatch(/Add to Finder|Install/)
   })
 
   test('Keep on this Mac: the count of kept folders and a way to choose', async () => {
@@ -1223,8 +1335,7 @@ describe('Confirmation dialogs: danger and Enter', () => {
     clear_session: () => undefined,
   })
   const repairBackend = (over: Record<string, (a: any) => unknown> = {}) => ({
-    finder_location_state: () => finder.installed,
-    install_finder_location: () => finder.installed,
+    finder_setup_state: () => finder.installed,
     reset_macos_integration: () => ({ removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }),
     list_remote_tree: () => [],
     open_login_items_and_extensions_settings: () => undefined,
@@ -1232,6 +1343,8 @@ describe('Confirmation dialogs: danger and Enter', () => {
   })
   const openSyncRepair = async (over: Record<string, (a: any) => unknown> = {}) => {
     const m = open('SyncTab', repairBackend(over), { props: { settings: readySettings } })
+    await m.flush()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0)) // the Finder state is read once the subscription has landed
     await m.flush()
     return m
   }
