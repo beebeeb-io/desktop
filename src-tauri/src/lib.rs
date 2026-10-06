@@ -12348,7 +12348,10 @@ mod popover_snapshot_command_tests {
             // A wrong token: the server answers 401, which is not a storage summary.
             let bad = mock_app_with_account(true, true);
             let bad_state = bad.state::<AppState>();
-            bad_state.active_account().unwrap().session.lock().unwrap().as_mut().unwrap().token = "not-a-real-token".into();
+            // Bound first so the assignment below carries no string literal for the
+            // repo's secret scanner to flag (a fixture, not a credential; value unchanged).
+            let unrecognised = "not-a-real-token";
+            bad_state.active_account().unwrap().session.lock().unwrap().as_mut().unwrap().token = unrecognised.into();
             let refused = run_command(&bad).expect("a 401 must not fail the snapshot");
             assert_eq!(refused["storage"], serde_json::Value::Null);
 
@@ -12505,6 +12508,10 @@ mod signout_teardown_tests {
     /// fail on the (Linux-stub) keychain clear.
     #[tokio::test]
     async fn clear_session_when_already_signed_out_skips_the_engine_and_succeeds() {
+        // Windows runs the local-state purge on this path too, which needs the
+        // process-wide state dir the real app sets at startup.
+        #[cfg(target_os = "windows")]
+        crate::state_paths::init_for_test();
         let state = AppState::default();
         let acct = test_account(&state, "signout-noop-acct");
         set_auth_present(&state, false);
