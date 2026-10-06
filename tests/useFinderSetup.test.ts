@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { commandUnavailableLabel } from '../src/desktopApi'
 import * as finderSetup from '../src/finderSetup'
-import type { FinderActionDeps, FinderSetupController, FinderSetupView } from '../src/finderSetup'
+import type { FinderSetupController, FinderSetupOptions, FinderSetupView } from '../src/finderSetup'
 import {
   FINDER_ACTION_FAILED,
   FINDER_ADDING_LINE,
@@ -64,7 +64,7 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 
-function mountHook(backend: Record<string, Handler>, opts: { auto?: boolean; deps?: FinderActionDeps } = {}) {
+function mountHook(backend: Record<string, Handler>, opts: { auto?: boolean; deps?: FinderSetupOptions } = {}) {
   const bus = fakeBus(opts.auto ?? true)
   const m = mount('finderSetup.ts', 'useFinderSetup', {
     backend,
@@ -335,5 +335,56 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
     h.m.render()
     expect(h.hook().load).toEqual({ status: 'loaded', view: failedTimeout })
     expect(h.hook().presentation).toMatchObject({ kind: 'notice', reason: 'timeout' })
+  })
+})
+
+/**
+ * Task 17. SyncFolder and Status also run on Windows and Linux, and a hook cannot be called
+ * conditionally, so they call it always and say whether this host is a Mac. While it is not
+ * enabled the hook reads nothing, listens to nothing and presents nothing: on those hosts the
+ * reconciler's commands and event are never touched.
+ */
+describe('enabled: a surface that also exists off macOS', () => {
+  const backend = (): Record<string, Handler> => ({ finder_setup_state: () => ready, finder_setup_retry: () => undefined })
+
+  test('disabled: no read, no subscription, nothing to present', async () => {
+    const h = mountHook(backend(), { deps: { enabled: false } })
+    await h.settle()
+    await h.settle()
+    expect(h.stateCalls()).toBe(0)
+    expect(h.bus.subscriptions).toHaveLength(0)
+    expect(h.hook().load).toEqual({ status: 'loading' })
+    expect(h.hook().presentation).toEqual({ kind: 'quiet', line: '' })
+  })
+
+  test('disabled: retry reads nothing either', async () => {
+    const h = mountHook(backend(), { deps: { enabled: false } })
+    await h.settle()
+    await h.hook().retry()
+    await h.settle()
+    expect(h.stateCalls()).toBe(0)
+    expect(h.hook().load).toEqual({ status: 'loading' })
+  })
+
+  test('enabled later (the platform resolves after the first render): it subscribes and reads once', async () => {
+    const deps: FinderSetupOptions = { enabled: false }
+    const h = mountHook(backend(), { deps })
+    await h.settle()
+    expect(h.bus.subscriptions).toHaveLength(0)
+    deps.enabled = true
+    h.m.render()
+    await h.settle()
+    expect(h.bus.subscriptions).toHaveLength(1)
+    expect(h.stateCalls()).toBe(1)
+    expect(h.hook().load).toEqual({ status: 'loaded', view: ready })
+    for (let i = 0; i < 4; i++) await h.m.flush()
+    expect(h.stateCalls()).toBe(1)
+  })
+
+  test('not passing it is enabled, as every existing caller expects', async () => {
+    const h = mountHook(backend())
+    await h.settle()
+    expect(h.bus.subscriptions).toHaveLength(1)
+    expect(h.stateCalls()).toBe(1)
   })
 })

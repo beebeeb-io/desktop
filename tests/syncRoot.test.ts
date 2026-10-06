@@ -81,6 +81,11 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     desktopFileOverview: async () => ({ ok: true, value: { total_files: 0, total_bytes: 0, recent: [] } }),
     commandUnavailableLabel: () => 'Unavailable',
     usePlatformName: () => 'windows',
+    // SyncFolder calls the macOS Finder hook and the capability snapshot unconditionally (a hook
+    // cannot be conditional). Here, on Windows, neither has anything to say: the real hook's
+    // behaviour off a Mac is pinned in tests/finderInstallOneSurface.test.tsx and useFinderSetup.test.ts.
+    useFinderSetup: () => ({ load: { status: 'loading' }, presentation: { kind: 'quiet', line: '' }, retry: async () => {}, run: async () => ({ ok: true, value: undefined }) }),
+    useCapabilities: () => null,
     usePlatform: () => ({ name: 'windows', resolved: true }), useRegionLabel: () => 'End-to-end encrypted',
     shellIntegrationLabel: () => 'Explorer integration', thisDeviceNoun: () => 'this PC',
     shellIntegrationCommandsFor: () => ({ state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }),
@@ -253,7 +258,7 @@ describe('runtime sync root (1646)', () => {
 
   for (const [file, name, route, child] of [
     ['WindowsApp.tsx', 'renderContent', 'files', 'FilesView'],
-    ['windows/views/SettingsView.tsx', 'renderPanel', 'explorer-integration', 'ExplorerIntegrationPanel'],
+    ['windows/views/SettingsView.tsx', 'renderPanel', 'explorer-integration', 'ShellOrFinderPanel'],
   ]) {
     test(`${name} passes its live status into ${child}`, () => {
       const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')

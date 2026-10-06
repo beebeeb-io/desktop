@@ -64,6 +64,10 @@ export const FINDER_STATUS_PILL: Readonly<Record<FinderSetupState, string>> = {
   missing: 'Checking',
 }
 
+/** The pill when there is no view yet, and when the state cannot be read (never "Adding", ruling 7a). */
+export const FINDER_STATUS_PILL_LOADING = 'Loading'
+export const FINDER_STATUS_PILL_UNAVAILABLE = 'Unknown'
+
 export type FinderSetupPresentation =
   | { kind: 'quiet'; line: '' }
   | { kind: 'adding'; line: string }
@@ -107,4 +111,16 @@ export function finderSetupLoadPresentation(load: FinderSetupLoad): FinderSetupP
     return { kind: 'unavailable', line: FINDER_UNAVAILABLE_LINE, actionLabel: FINDER_ACTION_LABEL.try_again }
   }
   return finderSetupPresentation(load.status === 'loaded' ? load.view : null)
+}
+
+/**
+ * The compact pages' pill (SyncFolder, Status) for whatever the hook has: its label and the tone
+ * the page paints its dot with. One place, so the two pages cannot drift.
+ */
+export function finderStatusPill(load: FinderSetupLoad): { label: string; tone: 'ok' | 'warn' | 'error' | 'idle' } {
+  if (load.status === 'unavailable') return { label: FINDER_STATUS_PILL_UNAVAILABLE, tone: 'warn' }
+  if (load.status === 'loading') return { label: FINDER_STATUS_PILL_LOADING, tone: 'idle' }
+  const presentation = finderSetupPresentation(load.view)
+  const tone = presentation.kind === 'ready' ? 'ok' : presentation.kind === 'notice' && presentation.tone === 'alert' ? 'error' : 'warn'
+  return { label: FINDER_STATUS_PILL[load.view.setup], tone }
 }

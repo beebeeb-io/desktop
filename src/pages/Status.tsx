@@ -4,10 +4,14 @@ import {
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
+  type DesktopPlatform,
   type FinderInstallState,
   type StorageSummary,
   type SyncStatus,
 } from '../desktopApi'
+import { useCapabilities } from '../capabilities'
+import { useFinderSetup, type FinderSetupLoad } from '../finderSetup'
+import { finderSetupLoadPresentation, finderStatusPill } from '../finderSetupCopy'
 import { useToast } from '../windows/ui'
 
 type PageLink = 'versions' | 'selective-sync' | 'finder' | 'account'
@@ -48,9 +52,33 @@ function finderSetupState(installState: FinderInstallState | null) {
   }
 }
 
+/**
+ * macOS (spec 2026-10-06): the reconciler's state, in this page's label/className/detail shape. A
+ * state that could not be read is its own pill and line, never "Adding" (lead ruling 7a).
+ */
+function macFinderSetupState(load: FinderSetupLoad) {
+  const pill = finderStatusPill(load)
+  const className = pill.tone === 'idle' ? '' : pill.tone
+  const presentation = finderSetupLoadPresentation(load)
+  if (presentation.kind === 'notice') return { label: pill.label, className, detail: presentation.sentence }
+  if (presentation.kind === 'ready' || presentation.kind === 'adding' || presentation.kind === 'unavailable') {
+    return { label: pill.label, className, detail: presentation.line }
+  }
+  return { label: pill.label, className, detail: 'Checking Finder setup.' }
+}
+
 export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) => void }) {
   const { showToast } = useToast()
   const [status, setStatus] = useState<SyncStatus | null>(null)
+  // `desktop_platform` answers first; when it fails or says 'unknown' the capability snapshot's host
+  // OS decides (as Onboarding does, Task 15): a Mac whose platform read fails is still a Mac and
+  // never reaches the install-era command. `null` until known, so nothing is read for the wrong host.
+  const hostOs: DesktopPlatform = useCapabilities()?.host_os ?? 'unknown'
+  const [platform, setPlatform] = useState<DesktopPlatform | null>(hostOs === 'unknown' ? null : hostOs)
+  // The reconciler's state on a Mac (load, `finder-setup-changed`, the failed-action toast: the one
+  // shared hook, lead ruling 7b), switched off elsewhere because a hook cannot be conditional.
+  const finder = useFinderSetup({ enabled: platform === 'macos' })
+  // Windows/Linux only: macOS reads no install state (spec 2026-10-06 §10).
   const [finderInstallState, setFinderInstallState] = useState<FinderInstallState | null>(null)
   const [finderNotice, setFinderNotice] = useState<string | null>(null)
   const [storage, setStorage] = useState<StorageSummary | null>(null)
@@ -60,13 +88,29 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
 
   useEffect(() => {
     let cancelled = false
+    command<DesktopPlatform>('desktop_platform').then((result) => {
+      if (cancelled) return
+      const answered: DesktopPlatform = result.ok ? result.value : 'unknown'
+      setPlatform(answered === 'unknown' ? hostOs : answered)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [hostOs])
+
+  useEffect(() => {
+    if (platform === null) return
+    const mac = platform === 'macos'
+    let cancelled = false
     const refresh = async () => {
+      // On a Mac the Finder state is not polled: `finder-setup-changed` replaces it (spec §10).
       const [next, finderState] = await Promise.all([
         loadSyncStatus(),
-        command<FinderInstallState>('finder_location_state'),
+        mac ? Promise.resolve(null) : command<FinderInstallState>('finder_location_state'),
       ])
       if (cancelled) return
       setStatus(next)
+      if (finderState === null) return
       if (finderState.ok) {
         setFinderInstallState(finderState.value)
         setFinderNotice(null)
@@ -83,7 +127,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
       cancelled = true
       window.clearInterval(id)
     }
-  }, [])
+  }, [platform])
 
   const statusLoggedIn = status?.logged_in
   const statusEngine = status?.engine
@@ -135,7 +179,8 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     storage && storage.quota_bytes > 0
       ? Math.min(100, Math.round((storage.used_bytes / storage.quota_bytes) * 100))
       : 0
-  const finderSetup = finderSetupState(finderInstallState)
+  const isMacos = platform === 'macos'
+  const finderSetup = isMacos ? macFinderSetupState(finder.load) : finderSetupState(finderInstallState)
 
   const openSetup = async () => {
     if (!status?.logged_in) {
@@ -213,7 +258,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
                   <span className={`dot ${finderSetup.className}`} />
                   {finderSetup.label}
                 </span>
-                <span className={finderSetup.label === 'Setup blocked' ? undefined : 'mono'}>
+                <span className={isMacos || finderSetup.label === 'Setup blocked' ? undefined : 'mono'}>
                   {finderNotice ?? finderSetup.detail}
                 </span>
               </div>

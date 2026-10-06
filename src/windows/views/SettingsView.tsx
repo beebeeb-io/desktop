@@ -54,7 +54,8 @@ import {
   buildDataResidencyViewState,
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
-import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../../finderInstallCard'
+import { useFinderSetup } from '../../finderSetup'
+import { FINDER_SETUP_TITLE, FINDER_STATUS_PILL } from '../../finderSetupCopy'
 import { setDesktopThemePreference } from '../theme'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
 
@@ -861,16 +862,14 @@ function LaunchPanel() {
 }
 
 /**
- * The Rust command pair backing this panel, per platform. macOS registers the
- * sync root as a File Provider domain (`finder_*`); Windows registers it as a
- * Cloud Files sync root (`windows_*`). Both return `FinderInstallState`
- * (aliased here as `ShellIntegrationState`), so the panel's result mapping is
- * shared — only the command names differ. Linux has no backing command yet:
- * `null` tells the panel to say so honestly instead of invoking a
- * platform-specific command that can only ever error.
+ * The Rust command pair backing the Explorer panel, per platform. Windows registers the sync root
+ * as a Cloud Files sync root (`windows_*`) and returns `FinderInstallState` (aliased here as
+ * `ShellIntegrationState`). macOS never reaches this panel (`ShellOrFinderPanel` sends it to
+ * `MacFinderIntegrationPanel`, which reads the reconciler). Linux has no backing command yet:
+ * `null` tells the panel to say so honestly instead of invoking a platform-specific command that
+ * can only ever error.
  */
 function shellIntegrationCommandsFor(platform: PlatformName): { state: string; install: string } | null {
-  if (platform === 'macos') return { state: 'finder_location_state', install: 'install_finder_location' }
   if (platform === 'windows') return { state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }
   return null
 }
@@ -895,8 +894,8 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
   const fileSurfaceName =
     platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : platform === 'windows' ? 'File Explorer' : 'your files'
   const commands = useMemo(() => (platform ? shellIntegrationCommandsFor(platform) : null), [platform])
-  const actionVerb = platform === 'macos' ? 'Install' : 'Enable'
-  const actionVerbBusy = platform === 'macos' ? 'Installing...' : 'Enabling...'
+  const actionVerb = 'Enable'
+  const actionVerbBusy = 'Enabling...'
   const [state, setState] = useState<ShellIntegrationState | null>(null)
   const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -937,29 +936,14 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     return () => { cancelled = true }
   }, [showToast, midSentenceLabel, commands])
 
-  // D1 (task 1683 slice 5), macOS only (spec section 11: "no toast for gating failures" is macOS
-  // only; Windows is unchanged). On macOS a failed install GATES the row's action, so it is ONE
-  // inline banner (`finderInstallNotice`), never also a toast: the backend saves the failure and
-  // returns it as a state, a rejected command (never saved) is folded into the same state by
-  // finderInstallStateAfterAttempt, and a new attempt clears the old failure.
-  // Windows/Linux keep the pre-slice-5 behaviour exactly: a failed enable is a toast and nothing
-  // is painted from the saved `finder_install_last_error` (the Windows first-run flow saves one
-  // that Settings has never shown).
+  // Windows/Linux: a failed enable is a toast and nothing is painted from the saved
+  // `finder_install_last_error` (the Windows first-run flow saves one that Settings has never shown).
+  // macOS has no install action at all since spec 2026-10-06: it renders MacFinderIntegrationPanel.
   const enable = async () => {
     if (!commands) return
     setBusy(true)
-    const inline = platform === 'macos'
-    if (inline) setState(finderInstallStateWhileAttempting)
-    // macOS ignores `path` and always installs at the default sync root
-    // (src-tauri/src/lib.rs `install_finder_location`), same as Onboarding.tsx.
-    const args = inline ? { path: null } : undefined
-    const r = await command<ShellIntegrationState>(commands.install, args)
+    const r = await command<ShellIntegrationState>(commands.install)
     setBusy(false)
-    if (inline) {
-      setState((previous) => finderInstallStateAfterAttempt(r, previous, commandUnavailableLabel(commands.install)))
-      if (r.ok && r.value.installed) void refresh()
-      return
-    }
     if (r.ok) {
       setState(r.value)
       void refresh()
@@ -972,20 +956,7 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
     })
   }
 
-  // Transient action failure that gates nothing: toast.
-  const openSystemSettings = async () => {
-    const r = await command<void>('open_login_items_and_extensions_settings')
-    if (!r.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open System Settings',
-        message: r.unsupported ? commandUnavailableLabel('open_login_items_and_extensions_settings') : r.reason,
-      })
-    }
-  }
-
   const active = state?.installed === true
-  const notice = platform === 'macos' && !active ? finderInstallNotice(state) : null
   const deviceNoun = platform ? thisDeviceNoun(platform) : 'this device'
   const statusText = !resolved
     ? 'Checking...'
@@ -994,12 +965,8 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
       : checking
         ? 'Checking...'
         : active
-          ? platform === 'macos'
-            ? `Finder location installed on ${deviceNoun}.`
-            : `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
-          : platform === 'macos'
-            ? `Finder location not installed on ${deviceNoun}.`
-            : `Not set up yet on ${deviceNoun}.`
+          ? `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
+          : `Not set up yet on ${deviceNoun}.`
 
   return (
     <SettingsSectionShell>
@@ -1023,38 +990,54 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
         )}
         {commands && !checking && active && <Chip tone="green">Active</Chip>}
       </Card>
+    </SettingsSectionShell>
+  )
+}
 
-      {commands && !checking && notice?.kind === 'error' && (
-        <div
-          role="alert"
-          data-error-surface="finder-install"
-          style={{
-            marginTop: 10,
-            padding: '10px 12px',
-            background: 'var(--err-bg)',
-            border: '1px solid var(--err-line)',
-            borderRadius: 8,
-            color: T.ink,
-            fontSize: 12,
-            lineHeight: 1.5,
-            overflowWrap: 'anywhere',
-          }}
-        >
-          {notice.message}
+/** Dispatches the main window's integration panel: macOS reads the reconciler (spec 2026-10-06). */
+function ShellOrFinderPanel({ status }: { status: SyncStatus | null }) {
+  const { name, resolved } = usePlatform()
+  return resolved && name === 'macos' ? <MacFinderIntegrationPanel /> : <ExplorerIntegrationPanel status={status} />
+}
+
+/**
+ * macOS: the reconciler's state, read-only. The load, the `finder-setup-changed` subscription and
+ * the failed-action toast come from the one shared hook (lead ruling 7b). No install action exists
+ * here (R5): Beebeeb adds itself to Finder, and this panel says where that stands. A failed SETUP
+ * gates Finder, so it is the one inline notice below the card (never also a toast); a failed
+ * ACTION gates nothing, so the hook raises it as a toast.
+ */
+function MacFinderIntegrationPanel() {
+  const regionLabel = useRegionLabel()
+  const finder = useFinderSetup()
+  const presentation = finder.presentation
+  const alert = presentation.kind === 'notice' && presentation.tone === 'alert'
+  const detail =
+    presentation.kind === 'notice'
+      ? FINDER_STATUS_PILL[finder.load.status === 'loaded' ? finder.load.view.setup : 'missing']
+      : presentation.line || 'Checking...'
+  return (
+    <SettingsSectionShell>
+      <PageHeader title="Finder integration" subtitle={`Beebeeb appears in Finder as a sync folder. Files are encrypted on this Mac before they leave. ${regionLabel}.`} />
+      <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{FINDER_SETUP_TITLE}</div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{detail}</div>
         </div>
-      )}
-
-      {/* The fixable state, not a failure: the user turned Beebeeb off in System Settings. Neutral
-          surface, role="status", with the same action Onboarding offers. */}
-      {commands && !checking && notice?.kind === 'user_disabled' && (
+        {presentation.kind === 'ready' && <Chip tone="green">Active</Chip>}
+        {/* The state could not be read: this reads it again (`retry`). It is not the reconciler's
+            `try_again`, which only exists inside a failure notice. */}
+        {presentation.kind === 'unavailable' && <PrimaryBtn onClick={() => void finder.retry()}>{presentation.actionLabel}</PrimaryBtn>}
+      </Card>
+      {presentation.kind === 'notice' && (
         <div
-          role="status"
-          data-finder-state="user_disabled"
+          role={alert ? 'alert' : 'status'}
+          data-error-surface={alert ? 'finder-setup' : undefined}
           style={{
             marginTop: 10,
             padding: '10px 12px',
-            background: T.paper2,
-            border: `1px solid ${T.line2}`,
+            background: alert ? 'var(--err-bg)' : T.paper2,
+            border: alert ? '1px solid var(--err-line)' : `1px solid ${T.line2}`,
             borderRadius: 8,
             color: T.ink,
             fontSize: 12,
@@ -1065,27 +1048,8 @@ function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
             gap: 12,
           }}
         >
-          <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{notice.message}</span>
-          <button
-            type="button"
-            onClick={() => void openSystemSettings()}
-            disabled={busy}
-            style={{
-              height: 30,
-              padding: '0 11px',
-              fontSize: 11.5,
-              fontFamily: T.fontSans,
-              fontWeight: 600,
-              borderRadius: 6,
-              border: `1px solid ${T.line2}`,
-              background: T.paper,
-              color: T.ink2,
-              cursor: busy ? 'not-allowed' : 'pointer',
-              whiteSpace: 'nowrap' as const,
-            }}
-          >
-            Open Login Items &amp; Extensions
-          </button>
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{presentation.sentence}</span>
+          <PrimaryBtn onClick={() => void finder.run(presentation.action)}>{presentation.actionLabel}</PrimaryBtn>
         </div>
       )}
     </SettingsSectionShell>
@@ -2012,7 +1976,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       case 'launch':
         return <LaunchPanel />
       case 'explorer-integration':
-        return <ExplorerIntegrationPanel status={status} />
+        return <ShellOrFinderPanel status={status} />
       case 'updates':
         return <UpdatesPanel config={config} onConfigChange={(patch) => void handleConfigChange(patch)} />
       case 'advanced':

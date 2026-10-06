@@ -14,9 +14,12 @@ import {
   FINDER_REASON_COPY,
   FINDER_SETUP_TITLE,
   FINDER_STATUS_PILL,
+  FINDER_STATUS_PILL_LOADING,
+  FINDER_STATUS_PILL_UNAVAILABLE,
   FINDER_UNAVAILABLE_LINE,
   finderSetupLoadPresentation,
   finderSetupPresentation,
+  finderStatusPill,
 } from '../src/finderSetupCopy'
 import { finderHint } from '../src/macSettingsModel'
 
@@ -101,6 +104,8 @@ describe('finderSetupCopy (spec §6.2)', () => {
       ...Object.values(FINDER_ACTION_FAILED),
       ...Object.values(FINDER_REASON_COPY).map((c) => c.sentence),
       ...Object.values(FINDER_STATUS_PILL),
+      FINDER_STATUS_PILL_LOADING,
+      FINDER_STATUS_PILL_UNAVAILABLE,
     ]
     for (const text of all) expect(text).not.toMatch(/Add to Finder|\bInstall\b/)
   })
@@ -174,5 +179,28 @@ describe('copyFinderSetupDetails', () => {
     backend(() => 'x')
     const result = await copyFinderSetupDetails({ writeClipboard: async () => { throw new Error('denied') } })
     expect(result).toEqual({ ok: false, reason: 'The details could not be put on the pasteboard.', unsupported: false })
+  })
+})
+
+/**
+ * Task 17. The compact SyncFolder and Status pages show one short pill. Both read it from here so
+ * the two cannot drift, and an unreadable state has a pill of its own (lead ruling 7a: it is never
+ * "Adding").
+ */
+describe('the status pill of the compact pages', () => {
+  test('one label and one tone per state', () => {
+    const pill = (v: FinderSetupView) => finderStatusPill({ status: 'loaded', view: v })
+    expect(finderStatusPill({ status: 'loading' })).toEqual({ label: 'Loading', tone: 'idle' })
+    expect(finderStatusPill({ status: 'unavailable' })).toEqual({ label: 'Unknown', tone: 'warn' })
+    expect(pill(view({ setup: 'ready' }))).toEqual({ label: 'Installed', tone: 'ok' })
+    expect(pill(view({ setup: 'adding' }))).toEqual({ label: 'Adding', tone: 'warn' })
+    expect(pill(view({ setup: 'failed', reason: 'timeout' }))).toEqual({ label: 'Setup blocked', tone: 'error' })
+    expect(pill(view({ setup: 'user_disabled', reason: 'user_disabled' }))).toEqual({ label: 'Turned off', tone: 'warn' })
+    expect(pill(view({ setup: 'missing' }))).toEqual({ label: 'Checking', tone: 'warn' })
+  })
+
+  test('an unreadable state is not "Adding"', () => {
+    expect(finderStatusPill({ status: 'unavailable' }).label).not.toMatch(/Add/)
+    expect(FINDER_STATUS_PILL_UNAVAILABLE).not.toBe(FINDER_STATUS_PILL.adding)
   })
 })

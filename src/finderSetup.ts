@@ -162,6 +162,16 @@ export interface FinderActionDeps {
   writeClipboard?: (text: string) => Promise<void>
 }
 
+export interface FinderSetupOptions extends FinderActionDeps {
+  /**
+   * Default true. A surface that also exists on Windows and Linux (SyncFolder, Status) cannot call
+   * a hook conditionally, so it calls this always and passes whether the host is a Mac. While it is
+   * false the hook reads nothing, listens to nothing and presents nothing (`quiet`), so off macOS the
+   * reconciler's command and event are never touched.
+   */
+  enabled?: boolean
+}
+
 export async function copyFinderSetupDetails(deps: FinderActionDeps = {}): Promise<CommandResult<void>> {
   const details = await command<string>('finder_setup_copy_details')
   if (!details.ok) return details
@@ -216,11 +226,12 @@ export interface FinderSetupController {
  *   "Adding" (ruling 7a); `retry` reads again.
  * - A failed action is one error toast, titled for the action.
  * - It unsubscribes on unmount and ignores anything that finishes afterwards.
+ * - `enabled: false` (a surface on a host that is not a Mac) does none of the above.
  */
-export function useFinderSetup(deps: FinderActionDeps = {}): FinderSetupController {
+export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupController {
   const { showToast } = useToast()
-  const writeClipboard = deps.writeClipboard
-  const [load, setLoad] = useState<FinderSetupLoad>({ status: 'loading' })
+  const { enabled = true, writeClipboard } = options
+  const [stored, setLoad] = useState<FinderSetupLoad>({ status: 'loading' })
   const eventsSeen = useRef(0)
   const alive = useRef(false)
 
@@ -232,11 +243,13 @@ export function useFinderSetup(deps: FinderActionDeps = {}): FinderSetupControll
   }, [])
 
   const retry = useCallback(async () => {
+    if (!enabled) return
     setLoad({ status: 'loading' })
     await read()
-  }, [read])
+  }, [read, enabled])
 
   useEffect(() => {
+    if (!enabled) return
     alive.current = true
     const stop = subscribeFinderSetup(
       (view) => {
@@ -252,7 +265,7 @@ export function useFinderSetup(deps: FinderActionDeps = {}): FinderSetupControll
       alive.current = false
       stop()
     }
-  }, [read])
+  }, [read, enabled])
 
   const run = useCallback(
     async (action: FinderSetupAction): Promise<CommandResult<void>> => {
@@ -269,5 +282,7 @@ export function useFinderSetup(deps: FinderActionDeps = {}): FinderSetupControll
     [writeClipboard, showToast],
   )
 
+  // A disabled hook shows nothing, even if it was enabled a moment ago and holds a stale view.
+  const load: FinderSetupLoad = enabled ? stored : { status: 'loading' }
   return { load, presentation: finderSetupLoadPresentation(load), retry, run }
 }
