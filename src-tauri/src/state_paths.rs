@@ -55,6 +55,30 @@ pub(crate) fn beebeeb_state_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Beebeeb state dir has not been initialized".to_string())
 }
 
+/// Test-only, Windows-only: resolve the process-wide state dir to a throwaway
+/// directory, the way `init_from_app` does at real startup.
+///
+/// Why Windows only: `clear_session_impl` runs the local-state purge on BOTH
+/// sign-out paths, already-signed-out included (it is a cross-account safety
+/// invariant), and on Windows that block resolves the state dir through the
+/// global above. A unit test that drives `clear_session_impl` without an
+/// `AppHandle` therefore got `Err("Beebeeb state dir has not been
+/// initialized")` there (CI run 37322574694, 782 passed / 1 failed), while on
+/// macOS/Linux the block is cfg'd out and nothing reads the global. Kept off
+/// the other platforms on purpose so their test processes stay exactly as they
+/// were. `set` is first-writer-wins, so whichever test gets here first fixes
+/// the directory; the returned path is whatever the global really holds.
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) fn init_for_test() -> PathBuf {
+    static SCRATCH: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let scratch = SCRATCH.get_or_init(|| tempfile::tempdir().expect("create scratch state dir"));
+    let _ = BEEBEEB_STATE_DIR.set(scratch.path().to_path_buf());
+    BEEBEEB_STATE_DIR
+        .get()
+        .cloned()
+        .expect("state dir set just above")
+}
+
 pub(crate) fn beebeeb_state_dir_from_app_local_data(app_local_data_dir: &Path) -> PathBuf {
     app_local_data_dir.to_path_buf()
 }
