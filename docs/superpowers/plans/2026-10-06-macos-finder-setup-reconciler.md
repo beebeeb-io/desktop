@@ -20,6 +20,8 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 
 **Round 3 (2026-10-06, rulings R9 and R10).** R9 answers item 18. R10 folds the binding of local data to its account into this plan as Task 10, the old items 17 and 19 are rewritten, and items 22–23 are new. The tasks are renumbered (20 → 21). The spec records R9, R10 and §5.6.
 
+**Round 4 (2026-10-06, Codex review of PR #113 and ruling R11).** Spec issue 24 is a P1 that Codex found. It is fixed in Tasks 11 and 12, with tests that reproduce it first. R11 rules the Windows gap of issue 17.
+
 ~~**Item 1 needs a ruling from Guus before device check D5 can pass.** Items 6, 11 and 16 are smaller questions, queued in Task 21 step 1. Every other item is resolved in this plan as stated, and the reviewer can reject any one of them on its own.~~ (Superseded by round 2, above.)
 
 1. **R2 and D5 contradict the existing re-sign-in path ~~(needs Guus)~~ (answered by R8).** After a session is revoked, the only way back in is `AuthExpiredBanner` → `forceReauth` (`src/desktopApi.ts:1030-1034`), which calls `clear_session` and then opens onboarding. `clear_session` *is* the "sign-out by choice" of spec §5.3(5), so it removes the domain. It also purges the operation queue and the decrypted cache (`src-tauri/src/lib.rs:1802-1844`, the task 1538 cross-account control). Spec R2 says "files stay listed … edits made meanwhile are kept and upload after sign-in". D5 says "Finder stays; … an edit made meanwhile reaches the server after sign-in". Neither holds while re-auth goes through `clear_session`. ~~**This plan does not change `forceReauth` or the purge.** That is security-sensitive and belongs to spec C (sign-in flow). The plan implements R2 everywhere the reconciler decides (see item 2), and D5 runs and reports the true result. The decision goes to `.claude/tasks/decisions/` (Task 21, step 1). Candidate answer for Guus: a `reauth` path that keeps the domain and, only for the *same* account id, keeps the queue.~~ **Resolved 2026-10-06 by ruling R8** (re-sign-in in place, spec §3). Tasks 11, 12 and 18 implement it, and device checks D5/D5b check it.
@@ -38,7 +40,7 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 14. **A macOS surface the spec does not list.** `src/windows/views/SettingsView.tsx:873` makes the macOS main window's Finder panel call `install_finder_location`. Task 17 moves it onto `finder_setup_state`.
 15. **Apostrophes.** Spec §6.2 writes straight quotes ("hasn't"). Product copy in this repo uses the typographic `’` (for example `src/macSettingsModel.ts:91`). `finderSetupCopy.ts` and the artefact use `’`, and the copy test pins those exact strings.
 16. **D6's "exactly 1 add attempt after the flip" vs §5.5 step 3.** Turning the extension back on leaves the domain registered. §5.5 step 3 then only confirms stability, so the app itself calls `addDomain` **0** times after the flip (core test `user_disabled_poll_reads_only_while_visible_and_a_flip_runs_one_check`). fileproviderd may still log its own re-registration. D6 is therefore gated as "≤ 1" (Task 21), and the wording goes to Guus.
-17. **Local data is bound to the account that created it (ruling R10, hardening).** `state.db` and the files it points at carried no record of their account. Background: private workspace task 1835, which stays out of this public repo. Task 10 adds the binding: an owner record inside `state.db`, checked before every engine start; a different or unrecorded owner's data is reset first; a failed reset or sign-out purge stops. **Windows is covered, but it refuses where macOS and Linux reset.** A Windows PC that holds another account's unsent changes cannot start sync for the new account. The Windows sign-out, which refuses while unsent changes exist (`windows_cf/signout.rs:24`), cannot clear it either, and Windows sign-in refuses while a session is present. That leaves no in-app way forward, which is a decision for Guus (Task 21 step 1).
+17. **Local data is bound to the account that created it (ruling R10, hardening).** `state.db` and the files it points at carried no record of their account. Background: private workspace task 1835, which stays out of this public repo. Task 10 adds the binding: an owner record inside `state.db`, checked before every engine start; a different or unrecorded owner's data is reset first; a failed reset or sign-out purge stops. **Windows is covered, but it refuses where macOS and Linux reset.** A Windows PC that holds another account's unsent changes cannot start sync for the new account. The Windows sign-out, which refuses while unsent changes exist (`windows_cf/signout.rs:24`), cannot clear it either, and Windows sign-in refuses while a session is present. That leaves no in-app way forward, ~~which is a decision for Guus (Task 21 step 1)~~. **Ruled R11 (Guus, 2026-10-06):** "Refuse now, escape hatch as its own task". Windows stays fail-closed in this plan, and Task 10's Windows tests prove the refusal. The explicit "Discard and switch" escape hatch is private workspace task 1837.
 18. **R8 keeps the keys after a remote revocation.** Today a startup 401 deletes the vault key (`lib.rs:599-622`), so revoking a lost device from the web wipes its keys at its next launch. Task 12 keeps the key so the same account signs in again without its recovery phrase (R8: "keys … all stay"). That is a security trade-off. It is question 5 of the mandatory review (Task 11 step 9), and Task 12 merges only with that review's OK. Its fallback is described in Task 12. **Answered 2026-10-06 by ruling R9:** "Keep the key, review decides". The key stays. Task 12 merges only if the security review agrees, and if it disagrees the decision returns to Guus.
 19. ~~**Identity for installs from before R8.** No server user id is stored today. Task 6 adds `signed_in_user_id`: written at sign-in, backfilled by the startup probe (Task 12) while the session still works, and cleared by a sign-out by choice. Without it, the account check falls back to the account email recorded on this Mac (case-insensitive), and an unknown identity counts as a different account (fail closed). This is review question 1.~~
    Round 3: the identity is the owner record of the local data, inside `state.db` (Task 10), not a `desktop.toml` key. Local data from before R10 is adopted at startup by the email this computer's Keychain still holds. R8 falls back to the owner's email, then the Keychain email, then `last_signed_in_email` (case-insensitive). An identity that cannot be compared is never the same account. This is review question 1.
@@ -46,6 +48,19 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 21. **The switch warning is new UI copy.** Task 13 draws it in `design/hifi/macos-settings-dialogs.html` before any code (design first). Guus reviews the wording in that PR.
 22. **The 1835 fix boundary names one function, but engines start in five places.** They are `start_engine_if_possible` (`lib.rs:851`), `persist_sync_root_and_start_engine` (`lib.rs:2562`), `start_engine_for_pending_finder_install` (`lib.rs:2612`), `pick_sync_root` (`lib.rs:4909`) and Task 8's `ensure_sync_root_and_engine`. Onboarding's folder pick and the Finder reconciler bypass the first. So Task 10 binds at the spawn (`spawn_bound_engine`, the only remaining `EngineRunner::spawn(`), and a source test pins it. It also puts the owner inside `state.db` rather than a separate file next to it, with the evidence given in Task 10.
 23. **A failed sign-out now stops on macOS and Linux (R10).** The engine has already stopped and Beebeeb has already left Finder (Task 9 removes it first). So a person whose sign-out fails is still signed in, with no sync and no Finder entry, until they try again or relaunch. The error says to try again. Windows already behaves this way (`lib.rs:1751`).
+24. **The account check missed traces that a startup 401 keeps (Codex P1 on PR #113, confirmed).** Round 2's `traces` (Task 11 `settle_sign_in`) was:
+    - the session in memory
+    - `auth_present`
+    - `keychain_session_present`, which reads only the token (`lib.rs:443-458`)
+    - pending changes
+
+    Task 12 drops only the token and keeps the vault key and email. Task 10 can adopt an email-only owner. So on an install from before R10, with a revoked token and nothing queued, `traces` was false. `sign_in_kind` then returned `Fresh` before it compared the email (`if !local.traces`, Task 11 step 2). A different account would then have signed in next to the previous account's vault key, and a later Keychain restore would have loaded that key with the new account's token.
+
+    **Fixed:**
+    - `reauth::LocalTraces` counts every retained trace: session, `auth_present`, token, Keychain email, vault key, recorded owner, cached profile, queued or staged data. `Fresh` needs none of them.
+    - A different or unknown account takes the switch, and a mismatch still changes nothing locally (Task 11).
+    - The switch's sign-out stops unless the Keychain holds no vault key and no email afterwards (Task 12).
+    - Windows is unaffected: its startup 401 still clears everything, and `settle_sign_in` does not run there.
 
 ## Global Constraints
 
@@ -4912,7 +4927,7 @@ The session's own identity is not stored anywhere new. It is the profile its sig
 | some | cannot be compared (no field in common) | any | refuse: start nothing, delete nothing |
 
 - **Reset** = the sign-out purge (`purge_local_state_files`: the queue, staged payloads and cache files) plus every remaining row of the previous account, then the new owner. A reset that fails returns an error, and no engine starts. On macOS a reset then asks the reconciler for a Repair, without waiting for it, so Finder drops the old listing and adds Beebeeb back for the new account. The gate never waits on the reconciler: the reconciler itself starts engines through this gate.
-- **Windows refuses where macOS and Linux reset** (`OTHER_ACCOUNT_ON_WINDOWS`). Windows sign-out never discards unsent changes silently (`state_db.rs:2766`, `windows_cf/signout.rs:24`). The tested way to clear a Windows PC is that sign-out, which also unregisters the Cloud Files root. The resulting Windows gap is Spec issue 17.
+- **Windows refuses where macOS and Linux reset** (`OTHER_ACCOUNT_ON_WINDOWS`). Windows sign-out never discards unsent changes silently (`state_db.rs:2766`, `windows_cf/signout.rs:24`). The tested way to clear a Windows PC is that sign-out, which also unregisters the Cloud Files root. The resulting Windows gap is Spec issue 17, ruled R11: refuse here, and the escape hatch is private task 1837.
 - **Upgrade path.** Installs from before this task have local data but no owner. `restore_session_on_startup` first adopts the account this computer's Keychain still names (its email) as the owner, before the probe and before anything starts. R8's same-account re-sign-in (Task 11) records the owner too. Any other unrecorded data is reset.
 - **Sign-out by choice.** `purge_all_local_state` also deletes the staged-payload rows (and returns their files for deletion) and forgets the owner. On macOS and Linux a failed purge now stops the sign-out (`SIGN_OUT_PURGE_FAILED`), as Windows already does (`lib.rs:1751`). Today it logs a warning and returns `Completed` (`lib.rs:1829-1843`). The engine is already stopped at that point, so trying again is safe.
 
@@ -5847,13 +5862,15 @@ git show --stat HEAD
 - Create: `src-tauri/src/reauth.rs` (pure)
 - Modify: `src-tauri/src/lib.rs`: `mod reauth;`, `LoginOutcome`, `desktop_login`, `desktop_login_2fa`, new helpers and the `open_reauth_window` command, tests, and the census in `finder_setup_wiring_tests` (Task 9)
 - Modify: `src-tauri/src/browser_login.rs` (`run_handoff`: the same check before `apply_session`)
+- Modify: `src-tauri/src/keychain.rs` (`holds_vault_key`, a test) and `src-tauri/src/state_db.rs` (`queued_or_staged_count`, a test): the two probes behind `LocalTraces` (Spec issue 24)
 
 **Interfaces:**
 - Consumes: `StateDb::owner`/`set_owner` and `account_binding::Identity` (Task 10); `keys_arrived`, `notify_finder` (Tasks 8, 9); `account_dto::AccountProfile { user_id, email, .. }`; the existing `fetch_session_profile`, `revoke_desktop_session`, `persist_session_token_to_keychain`, `load_session_from_keychain`, `install_unlocked_session`, `start_engine_if_possible`, `keychain_session_present`, `keychain_account_email`, `state_db_from_app_local_state_dir`.
 - Produces:
-  - `reauth::{LocalAccount<'a> { user_id: Option<&'a str>, email: Option<&'a str>, traces: bool }, SignInKind { Fresh, SameAccount, DifferentAccount }, sign_in_kind(&LocalAccount, user_id: &str, email: &str) -> SignInKind}`
+  - `reauth::{LocalTraces { session_in_memory, auth_present, keychain_token, keychain_email, vault_key, recorded_owner, cached_profile, queued_or_staged } (all `bool`; `any() -> bool`), LocalAccount<'a> { user_id: Option<&'a str>, email: Option<&'a str>, traces: bool }, SignInKind { Fresh, SameAccount, DifferentAccount }, sign_in_kind(&LocalAccount, user_id: &str, email: &str) -> SignInKind}`
   - `LoginOutcome { requires_2fa: bool, reauthenticated: bool, vault_unlocked: bool, account_mismatch: Option<AccountMismatchDto { pending_changes: u64 }> }`. JSON example: `{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"account_mismatch":{"pending_changes":3}}`. `desktop_login_2fa` now returns it too (it returned `()`). Windows' frontend reads only `requires_2fa`, so the extra fields change nothing there.
-  - Non-Windows: `fn local_data_owner() -> Option<account_binding::Identity>` and `fn record_local_data_owner(&account_binding::Identity) -> Result<(), String>`. Also `fn pending_changes_count() -> u64`, `fn replace_session_token_in_memory(&AccountRuntime, &str) -> Result<bool, String>`, `fn reauth_settle_flags(&AppState, &AccountRuntime, &str)`.
+  - `keychain::holds_vault_key<S: AuthSecretStore>(&S) -> bool` and `StateDb::queued_or_staged_count() -> Result<u64>`.
+  - Non-Windows: `fn local_data_owner() -> Result<Option<account_binding::Identity>, String>`, `fn keychain_vault_key_present(&str) -> bool`, `fn queued_or_staged_present() -> bool` and `fn record_local_data_owner(&account_binding::Identity) -> Result<(), String>`. Also `fn pending_changes_count() -> u64`, `fn replace_session_token_in_memory(&AccountRuntime, &str) -> Result<bool, String>`, `fn reauth_settle_flags(&AppState, &AccountRuntime, &str)`.
   - Non-Windows only: `enum SignInSettlement { Fresh, Reauthenticated { vault_unlocked: bool }, AccountMismatch { pending_changes: u64 } }`, `async fn settle_sign_in(app, state: &State<'_, AppState>, token: &str, profile: &AccountProfile) -> Result<SignInSettlement, String>`, and `async fn reauth_in_place(app, state, acct: &AccountRuntime, token, email, user_id) -> Result<bool, String>`.
   - Command `open_reauth_window` (non-Windows): opens or reloads the `onboarding` window at `index.html?window=onboarding&mode=reauth`.
 
@@ -5876,9 +5893,29 @@ pub struct LocalAccount<'a> {
     /// Consulted only when `user_id` is unknown: an owner recorded by email only (the upgrade
     /// path), or no owner yet (plan "Spec issues" 19).
     pub email: Option<&'a str>,
-    /// Anything else of an account is still here: keys or a token, a session flag, or changes
-    /// waiting in `state.db`.
+    /// `LocalTraces::any()`: anything of a previous account is still on this computer.
     pub traces: bool,
+}
+
+/// Everything of a previous account that can outlive its session on this computer (Codex P1 on
+/// PR #113, plan "Spec issues" 24). A startup 401 keeps the Keychain email and the vault key (R9);
+/// an install from before R10 can have an email-only owner. `Fresh` needs none of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LocalTraces {
+    pub session_in_memory: bool,
+    pub auth_present: bool,
+    pub keychain_token: bool,
+    pub keychain_email: bool,
+    pub vault_key: bool,
+    pub recorded_owner: bool,
+    pub cached_profile: bool,
+    pub queued_or_staged: bool,
+}
+
+impl LocalTraces {
+    pub fn any(&self) -> bool {
+        todo!("Task 11 step 2")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5926,6 +5963,52 @@ mod tests {
     fn an_empty_signing_in_email_never_matches_either() {
         assert_eq!(sign_in_kind(&local(None, Some(""), true), "u-9", ""), DifferentAccount);
     }
+
+    // ── Codex P1 on PR #113 (plan "Spec issues" 24): every retained trace counts ──
+
+    #[test]
+    fn every_retained_trace_counts() {
+        assert!(!LocalTraces::default().any(), "a computer with nothing left is fresh");
+        let each: [(&str, fn(&mut LocalTraces)); 8] = [
+            ("a session in memory", |t| t.session_in_memory = true),
+            ("auth present", |t| t.auth_present = true),
+            ("a Keychain token", |t| t.keychain_token = true),
+            ("a Keychain email", |t| t.keychain_email = true),
+            ("a vault key", |t| t.vault_key = true),
+            ("a recorded owner", |t| t.recorded_owner = true),
+            ("a cached profile", |t| t.cached_profile = true),
+            ("queued or staged data", |t| t.queued_or_staged = true),
+        ];
+        for (name, set) in each {
+            let mut traces = LocalTraces::default();
+            set(&mut traces);
+            assert!(traces.any(), "{name} alone is a trace");
+        }
+    }
+
+    /// An install from before R10 whose token was revoked at startup, with nothing queued: Task 10
+    /// adopted an email-only owner, and Task 12 kept the Keychain email and the vault key (R9).
+    fn after_a_revoked_token_with_nothing_queued() -> LocalAccount<'static> {
+        let traces = LocalTraces { recorded_owner: true, keychain_email: true, vault_key: true, ..LocalTraces::default() };
+        LocalAccount { user_id: None, email: Some("sam@beebeeb.io"), traces: traces.any() }
+    }
+
+    #[test]
+    fn another_account_after_a_revoked_token_with_nothing_queued_is_a_switch_never_fresh() {
+        assert_eq!(sign_in_kind(&after_a_revoked_token_with_nothing_queued(), "u-2", "kim@beebeeb.io"), DifferentAccount);
+    }
+
+    #[test]
+    fn the_same_account_after_a_revoked_token_signs_in_again_in_place() {
+        assert_eq!(sign_in_kind(&after_a_revoked_token_with_nothing_queued(), "u-1", "Sam@beebeeb.io"), SameAccount);
+    }
+
+    #[test]
+    fn a_retained_vault_key_alone_with_no_email_anywhere_is_never_fresh() {
+        let traces = LocalTraces { vault_key: true, ..LocalTraces::default() };
+        let local = LocalAccount { user_id: None, email: None, traces: traces.any() };
+        assert_eq!(sign_in_kind(&local, "u-2", "kim@beebeeb.io"), DifferentAccount);
+    }
 }
 ```
 
@@ -5935,7 +6018,7 @@ Add `mod reauth;` to `lib.rs` next to `mod finder_setup;`.
 cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib reauth::tests > $EVID/t11-red-pure.log 2>&1; echo "rc=$?"; grep "test result:" $EVID/t11-red-pure.log
 ```
 
-Expected: `test result: FAILED. 0 passed; 2 failed`.
+Expected: `test result: FAILED. 0 passed; 6 failed` (every test reaches a `todo!`).
 
 - [ ] **Step 2: Implement `sign_in_kind`**
 
@@ -5954,7 +6037,30 @@ pub fn sign_in_kind(local: &LocalAccount<'_>, user_id: &str, email: &str) -> Sig
 }
 ```
 
-Run the step 1 command into `$EVID/t11-green-pure.log`. Expected: `ok. 2 passed`. **Mutation:** change the fallback arm `_ => SignInKind::DifferentAccount` to `SameAccount`. Expected: `the_r8_table` fails on "another email" and "no identity at all". Restore it. Paste the failure into Notes.
+`LocalTraces::any`. **First reproduce Codex's P1 (PR #113).** Write it with only round 2's four terms:
+
+```rust
+    pub fn any(&self) -> bool {
+        self.session_in_memory || self.auth_present || self.keychain_token || self.queued_or_staged
+    }
+```
+
+Run the step 1 command into `$EVID/t11-p1-red.log`. Expected: `FAILED. 2 passed; 4 failed`: `every_retained_trace_counts` (`a Keychain email alone is a trace`) and the three revoked-token tests (`left: Fresh`). That is the P1 reproduced. Paste it into Notes. Then write the real one:
+
+```rust
+    pub fn any(&self) -> bool {
+        self.session_in_memory
+            || self.auth_present
+            || self.keychain_token
+            || self.keychain_email
+            || self.vault_key
+            || self.recorded_owner
+            || self.cached_profile
+            || self.queued_or_staged
+    }
+```
+
+Run the step 1 command into `$EVID/t11-green-pure.log`. Expected: `ok. 6 passed`. **Mutation (the new `traces` terms, required):** remove `|| self.vault_key`. Expected: `every_retained_trace_counts` fails (`a vault key alone is a trace`), and so does `a_retained_vault_key_alone_with_no_email_anywhere_is_never_fresh` (`left: Fresh`). Restore it. Then remove `|| self.keychain_email`, `|| self.recorded_owner` and `|| self.cached_profile` one at a time. Each makes `every_retained_trace_counts` name it. Paste all four failures. **Mutation:** change the fallback arm `_ => SignInKind::DifferentAccount` to `SameAccount`. Expected: `the_r8_table` fails on "another email" and "no identity at all". Restore it. Paste the failure into Notes.
 
 - [ ] **Step 3: The `lib.rs` tests (RED)**
 
@@ -6115,6 +6221,26 @@ mod reauth_tests {
         let record = body.find("record_local_data_owner(").expect("the owner is recorded");
         assert!(record < body.find("persist_session_token_to_keychain(").expect("then the token"));
     }
+
+    /// Codex P1 on PR #113: the account check looks at every retained trace, not only the token.
+    #[test]
+    fn settle_sign_in_counts_every_retained_trace() {
+        let source = source();
+        let settle = body_of(production(&source), "async fn settle_sign_in(");
+        for probe in [
+            "acct.session.lock()",
+            "state.auth_present.lock()",
+            "keychain_session_present(",
+            "keychain_account_email(",
+            "keychain_vault_key_present(",
+            "local_data_owner()",
+            "acct.cached_profile.lock()",
+            "queued_or_staged_present()",
+            "traces: traces.any()",
+        ] {
+            assert!(settle.contains(probe), "settle_sign_in must use {probe}");
+        }
+    }
 }
 ```
 
@@ -6142,8 +6268,30 @@ In `lib.rs`, next to `keys_arrived`:
 ```rust
 /// R8 + R10: the recorded owner of this computer's local data: the account R8 compares.
 #[cfg(not(target_os = "windows"))]
-fn local_data_owner() -> Option<account_binding::Identity> {
-    state_db_from_app_local_state_dir().ok().flatten().and_then(|db| db.owner().ok().flatten())
+fn local_data_owner() -> Result<Option<account_binding::Identity>, String> {
+    match state_db_from_app_local_state_dir()? {
+        Some(db) => db.owner().map_err(|e| format!("read the local data owner: {e}")),
+        None => Ok(None),
+    }
+}
+
+/// Codex P1 on PR #113: does the Keychain still hold a vault key for this account slot, in the
+/// id-keyed or the legacy store? It never unlocks, and the bytes are dropped unread. Fails closed.
+#[cfg(not(target_os = "windows"))]
+fn keychain_vault_key_present(account_id: &str) -> bool {
+    keychain::holds_vault_key(&platform_keychain_store_for(account_id))
+        || keychain::holds_vault_key(&keychain::legacy_platform_keychain_store())
+}
+
+/// Codex P1 on PR #113: changes waiting to upload, or staged copies of them, in the local data.
+/// An unreadable `state.db` counts as present (fail closed).
+#[cfg(not(target_os = "windows"))]
+fn queued_or_staged_present() -> bool {
+    match state_db_from_app_local_state_dir() {
+        Ok(Some(db)) => db.queued_or_staged_count().map(|n| n > 0).unwrap_or(true),
+        Ok(None) => false,
+        Err(_) => true,
+    }
 }
 
 /// R8 + R10: the same account signed in again (decided by `reauth::sign_in_kind`), so it owns the
@@ -6199,7 +6347,9 @@ enum SignInSettlement {
 /// R8: before anything is stored, decide whether this sign-in is fresh, the same account again, or
 /// a different account. The same account gets only a new token (`reauth_in_place`). A different
 /// account changes nothing here: the caller revokes the new session and returns the warning. Never
-/// reads key material to decide. Not on Windows, where sign-in refuses while a session exists.
+/// reads key material to decide: it asks only whether a vault key exists. `Fresh` requires that
+/// nothing of a previous account remains (`LocalTraces`, Codex P1 on PR #113). Not on Windows,
+/// where sign-in refuses while a session exists.
 #[cfg(not(target_os = "windows"))]
 async fn settle_sign_in(
     app: tauri::AppHandle,
@@ -6210,17 +6360,30 @@ async fn settle_sign_in(
     let acct = state.active_account()?;
     let cfg = DesktopConfig::load().ok();
     let pending_changes = pending_changes_count();
-    let in_memory = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
-    let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
-    let traces = in_memory || auth_present || keychain_session_present(acct.id.as_str()) || pending_changes > 0;
-    // R10: the recorded owner of the local data is the account on this computer.
+    // R10: the recorded owner of the local data is the account on this computer. An unreadable
+    // `state.db` counts as a trace (fail closed).
     let owner = local_data_owner();
+    let recorded_owner = !matches!(owner, Ok(None));
+    let owner = owner.ok().flatten();
+    let keychain_email = keychain_account_email(acct.id.as_str());
+    // Codex P1 on PR #113: every retained trace counts, including what a startup 401 keeps on
+    // purpose (R9: the Keychain email and the vault key). A poisoned lock counts as a trace.
+    let traces = reauth::LocalTraces {
+        session_in_memory: acct.session.lock().map(|guard| guard.is_some()).unwrap_or(true),
+        auth_present: state.auth_present.lock().map(|guard| *guard).unwrap_or(true),
+        keychain_token: keychain_session_present(acct.id.as_str()),
+        keychain_email: keychain_email.is_some(),
+        vault_key: keychain_vault_key_present(acct.id.as_str()),
+        recorded_owner,
+        cached_profile: acct.cached_profile.lock().map(|guard| guard.is_some()).unwrap_or(true),
+        queued_or_staged: pending_changes > 0 || queued_or_staged_present(),
+    };
     let user_id = owner.as_ref().and_then(|o| o.user_id.clone());
     let email = owner
         .and_then(|o| o.email)
-        .or_else(|| keychain_account_email(acct.id.as_str()))
+        .or(keychain_email)
         .or_else(|| cfg.as_ref().and_then(|c| c.last_signed_in_email.clone()));
-    let local = reauth::LocalAccount { user_id: user_id.as_deref(), email: email.as_deref(), traces };
+    let local = reauth::LocalAccount { user_id: user_id.as_deref(), email: email.as_deref(), traces: traces.any() };
     match reauth::sign_in_kind(&local, &profile.user_id, &profile.email) {
         reauth::SignInKind::Fresh => Ok(SignInSettlement::Fresh),
         reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),
@@ -6321,6 +6484,87 @@ impl LoginOutcome {
 ```
 
 Replace `Ok(LoginOutcome { requires_2fa: true })` with `Ok(LoginOutcome::needs_2fa())` and `Ok(LoginOutcome { requires_2fa: false })` with `Ok(LoginOutcome::signed_in())`.
+
+- [ ] **Step 4b: The two probes behind `LocalTraces` (Spec issue 24), tests first**
+
+`keychain.rs` test module:
+
+```rust
+    /// Codex P1 on PR #113: a retained vault key is seen without unlocking; a store that cannot
+    /// hold secrets holds none; any other read error counts as present.
+    #[test]
+    fn holds_vault_key_sees_a_retained_key_and_fails_closed() {
+        let vault = AuthVault::new(MemoryStore::default());
+        assert!(!holds_vault_key(&vault.store));
+        vault.store_wrapped_master_key(SecretBytes::new_master_key([7u8; 32])).unwrap();
+        assert!(holds_vault_key(&vault.store));
+
+        struct Answers(fn() -> AuthStoreError);
+        impl AuthSecretStore for Answers {
+            fn save_session_token(&self, _: &SessionToken) -> AuthResult<()> { Err((self.0)()) }
+            fn load_session_token(&self) -> AuthResult<Option<SessionToken>> { Err((self.0)()) }
+            fn delete_session_token(&self) -> AuthResult<()> { Err((self.0)()) }
+            fn save_wrapped_master_key(&self, _: SecretBytes) -> AuthResult<()> { Err((self.0)()) }
+            fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> { Err((self.0)()) }
+            fn delete_wrapped_master_key(&self) -> AuthResult<()> { Err((self.0)()) }
+            fn save_account_email(&self, _: &str) -> AuthResult<()> { Err((self.0)()) }
+            fn load_account_email(&self) -> AuthResult<Option<String>> { Err((self.0)()) }
+            fn delete_account_email(&self) -> AuthResult<()> { Err((self.0)()) }
+        }
+        assert!(!holds_vault_key(&Answers(|| AuthStoreError::Unsupported("no keychain here"))));
+        assert!(!holds_vault_key(&Answers(|| AuthStoreError::NotFound)));
+        assert!(holds_vault_key(&Answers(|| AuthStoreError::Backend("keychain locked".into()))), "fail closed");
+    }
+```
+
+(If `AuthSecretStore` has more methods than the nine above, give each the same `Err((self.0)())` body.)
+
+`state_db.rs` test module:
+
+```rust
+    #[test]
+    fn queued_or_staged_counts_the_queue_and_the_staged_payloads() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(db.queued_or_staged_count().unwrap(), 0);
+        db.track_staged_payload("/tmp/bb-p1-staged.bin", None, false).unwrap();
+        assert_eq!(db.queued_or_staged_count().unwrap(), 1);
+    }
+```
+
+RED: `cargo test --locked -p beebeeb-desktop --lib holds_vault_key` and `--lib queued_or_staged` into `$EVID/t11-red-probes.log`. Expected: compile errors (`cannot find function holds_vault_key`, `no method named queued_or_staged_count`). Then implement.
+
+`keychain.rs`, module level next to `AuthVault`:
+
+```rust
+/// Codex P1 on PR #113: does this store still hold a vault key? It never unlocks, and the bytes
+/// are dropped unread. A store that cannot hold secrets (`Unsupported`) or has none (`NotFound`)
+/// holds none. Any other read error counts as present, so callers fail closed.
+pub fn holds_vault_key<S: AuthSecretStore>(store: &S) -> bool {
+    match store.load_wrapped_master_key() {
+        Ok(key) => key.is_some(),
+        Err(AuthStoreError::Unsupported(_) | AuthStoreError::NotFound) => false,
+        Err(_) => true,
+    }
+}
+```
+
+`state_db.rs`, in `impl StateDb`:
+
+```rust
+    /// Codex P1 on PR #113: changes waiting to upload, or staged copies of them. A trace of an account.
+    pub fn queued_or_staged_count(&self) -> Result<u64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let rows: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM operation_queue) + (SELECT COUNT(*) FROM staged_payloads)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(rows).unwrap_or(0))
+    }
+```
+
+GREEN: the same commands into `$EVID/t11-green-probes.log`. Expected: `ok. 1 passed` each.
 
 - [ ] **Step 5: Wire the three sign-in methods**
 
@@ -6443,15 +6687,16 @@ $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib finder_setup_w
 $LOCK cargo-build -- cargo check --locked --all-targets > $EVID/t11-check.log 2>&1; echo "rc=$?"
 ```
 
-Expected: `reauth` filter → `ok. 9 passed` (2 pure + 7 in `reauth_tests`; round 2 wrote 8, which miscounted its own module), the census module still passes, and `cargo check` gives `rc=0`. Windows compiles in CI's Windows job on the PR: the `#[cfg(target_os = "windows")]` arms cannot be checked from the Mac. Say so in the PR.
+Expected: `reauth` filter → `ok. 14 passed` (6 in `reauth::tests` + 8 in `reauth_tests`; round 2 wrote 8, which miscounted its own module), the census module still passes, and `cargo check` gives `rc=0`. Windows compiles in CI's Windows job on the PR: the `#[cfg(target_os = "windows")]` arms cannot be checked from the Mac. Say so in the PR.
 
 - [ ] **Step 7: Mutation checks (required for R8)**
 
 1. Add `clear_keychain_session(acct.id.as_str())?;` as the first line of `reauth_in_place`. Expected: `a_re_sign_in_never_purges_removes_or_touches_keys` fails, naming `clear_keychain_session`. Remove it.
 2. Add `persist_last_signed_in_email(None);` inside `desktop_login`'s `AccountMismatch` arm. Expected: `a_mismatch_changes_nothing_on_this_mac` fails (`persist_`). Remove it. Then add `record_local_data_owner(&account_binding::Identity::default())?;` there. Expected: the same test fails (`record_local_data_owner`). Remove it.
-5. In `reauth_in_place`, move the `record_local_data_owner(…)?;` line below `persist_session_token_to_keychain(…)?;`. Expected: `a_same_account_re_sign_in_records_the_owner_first` fails. Restore it.
 3. Delete the `#[cfg(not(target_os = "windows"))]` line above `desktop_login`'s `match settle_sign_in(`. Expected: `every_sign_in_method_is_checked_and_windows_is_unchanged` fails. Restore it.
 4. In `replace_session_token_in_memory`, also write `session.master_key = [0u8; 32];`. Expected: `a_new_token_replaces_only_the_token_in_memory` fails (and the source test, on `master_key =`). Remove it.
+5. In `reauth_in_place`, move the `record_local_data_owner(…)?;` line below `persist_session_token_to_keychain(…)?;`. Expected: `a_same_account_re_sign_in_records_the_owner_first` fails. Restore it.
+6. In `settle_sign_in`, replace `vault_key: keychain_vault_key_present(acct.id.as_str()),` with `vault_key: false,`. Expected: `settle_sign_in_counts_every_retained_trace` fails (`keychain_vault_key_present(`). Restore it.
 
 Paste each failure into Notes.
 
@@ -6476,7 +6721,8 @@ After Task 12 lands, the lead runs the `crypto-security-reviewer` agent on the c
 5. Spec issue 18, ruled R9 ("Keep the key, review decides"): keys are kept on the Mac after a remote revocation. Is that acceptable, and what would the reviewer require? A "no" goes back to Guus.
 6. The mismatch path revokes the new session. Can it leave a dangling server session?
 7. R10: is a failed reset or a failed sign-out purge always fatal before any engine starts? Is `clear_account_data` complete (`every_table_is_classified_for_the_account_binding`)?
-8. R10 on Windows refuses instead of resetting (Spec issue 17). Is the resulting state safe, and what would the reviewer require before the Windows decision?
+8. R10 on Windows refuses instead of resetting (Spec issue 17, ruled R11: refuse here; the escape hatch is private task 1837). Is the resulting state safe?
+9. Codex P1 on PR #113 (Spec issue 24): can any retained trace be missed, so that another account gets `Fresh`? The traces are the recorded owner, the Keychain email, the vault key, the cached profile, and queued or staged data. Can the previous account's vault key ever sit next to another account's token, or be loaded for it?
 
 The findings go verbatim into the task Notes under "Security review (R8, R9, R10)", and the R10 findings also into private task 1835's Notes. A HIGH finding blocks the merge until it is fixed (back to the owning task) or Guus rules on it. Without this step, Lane R's PR does not merge.
 
@@ -6484,13 +6730,13 @@ The findings go verbatim into the task Notes under "Security review (R8, R9, R10
 
 ## Task 12: A startup 401 keeps the keys and Finder; the startup probe caches the account profile (R8, R9, backend)
 
-**Lane R.** Today a startup 401 (`discard_unusable_startup_session`) deletes the session token **and the vault key and email**. Under R8 the same account must be able to sign in again with "keys … all stay", so on macOS and Linux only the revoked token is deleted. The Finder domain already stays: `finder_signed_out_by_choice` is not set by this path (Task 6, core `wanted`). The startup probe also caches the account profile while the session still works, so the account binding (Task 10) compares by user id instead of email. The token-only discard is not for Windows: Windows keeps today's discard.
+**Lane R.** Today a startup 401 (`discard_unusable_startup_session`) deletes the session token **and the vault key and email**. Under R8 the same account must be able to sign in again with "keys … all stay", so on macOS and Linux only the revoked token is deleted. The Finder domain already stays: `finder_signed_out_by_choice` is not set by this path (Task 6, core `wanted`). The startup probe also caches the account profile while the session still works, so the account binding (Task 10) compares by user id instead of email. The token-only discard is not for Windows: Windows keeps today's discard. Because the key and the email now survive a startup 401, "already signed out" no longer means "nothing left". The sign-out that an account switch runs must therefore verify that no vault key and no email remain, or stop (Codex P1 on PR #113, Spec issue 24).
 
 **This task changes key retention after a remote revocation (Spec issue 18, ruled R9: "Keep the key, review decides").** It merges only with the security review's explicit OK on that point (Task 11 step 9, question 5). If the review disagrees, the lead takes the question back to Guus. The lane neither drops nor merges the change on its own. Without the change, a same-account re-sign-in still keeps Finder and the queue, but asks for the recovery phrase after a relaunch.
 
 **Files:**
 - Modify: `src-tauri/src/keychain.rs` (`AuthVault::clear_session_token` + a test using the existing in-module `MemoryStore`, line ~918)
-- Modify: `src-tauri/src/lib.rs`: `clear_keychain_session_token` (non-Windows), `discard_unusable_startup_session` (cfg split), `StartupSessionCheck::Authorized { profile }`, `probe_startup_session` (parses the profile), `restore_session_on_startup` (caches it), the `AuthMeMockServer` test helper (a body), and tests
+- Modify: `src-tauri/src/lib.rs`: `clear_keychain_session_token` (non-Windows), `discard_unusable_startup_session` (cfg split), `StartupSessionCheck::Authorized { profile }`, `probe_startup_session` (parses the profile), `restore_session_on_startup` (caches it), `ensure_keychain_holds_no_account` and its two calls in `clear_session_impl` (a switch leaves no vault key behind), the `AuthMeMockServer` test helper (a body), and tests
 - Modify: `src-tauri/src/account_dto.rs` (`AccountProfile` derives `PartialEq, Eq`, so `StartupSessionCheck` keeps its `Eq`)
 
 **Interfaces:**
@@ -6512,6 +6758,21 @@ The findings go verbatim into the task Notes under "Security review (R8, R9, R10
         assert!(vault.session_token().unwrap().is_none(), "the revoked token is gone");
         assert_eq!(vault.account_email().unwrap().as_deref(), Some("sam@beebeeb.io"));
         assert!(vault.store.load_wrapped_master_key().unwrap().is_some(), "R8: the vault key stays");
+    }
+
+    /// Codex P1 on PR #113: after the token-only clear of a startup 401, the full clear of
+    /// "Sign out and switch" leaves no vault key and no email for the next account.
+    #[test]
+    fn a_full_clear_after_a_token_only_clear_leaves_no_vault_key() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("tok-a").unwrap()).unwrap();
+        vault.store_wrapped_master_key(SecretBytes::new_master_key([7u8; 32])).unwrap();
+        vault.store_account_email("sam@beebeeb.io").unwrap();
+        vault.clear_session_token().unwrap();
+        assert!(holds_vault_key(&vault.store), "R9: the revoked token goes, the key stays");
+        vault.clear_session().unwrap();
+        assert!(!holds_vault_key(&vault.store), "after the switch the old key is gone");
+        assert_eq!(vault.account_email().unwrap(), None);
     }
 ```
 
@@ -6562,6 +6823,21 @@ If `MemoryStore` does not implement `Default` or `save_account_email`, build it 
         let arm = &restore[restore.find("StartupSessionCheck::Authorized { profile }").expect("the authorized arm")..];
         assert!(arm[..arm.find("StartupSessionCheck::Inconclusive").unwrap()].contains("cached_profile"));
     }
+
+    /// Codex P1 on PR #113: "already signed out" can still hold the vault key and the email (R9). Both
+    /// sign-out branches verify that nothing of the account is left before they report success.
+    #[test]
+    fn a_switch_after_a_revoked_token_leaves_no_vault_key_behind() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let clear = &production[production.find("async fn clear_session_impl(").unwrap()..];
+        let clear = &clear[..clear.find("\n}\n").unwrap()];
+        let already = &clear[clear.find("if already_signed_out {\n        // Already signed out").expect("the already-signed-out branch")..];
+        let already = &already[..already.find("return Ok(SignOutOutcome::NotSignedIn);").unwrap()];
+        assert!(already.contains("ensure_keychain_holds_no_account(acct.id.as_str())?;"), "the already-signed-out branch verifies");
+        let tail = &clear[clear.rfind("clear_keychain_session(acct.id.as_str())?;").unwrap()..];
+        assert!(tail.contains("ensure_keychain_holds_no_account(acct.id.as_str())?;"), "the signed-in branch verifies");
+    }
 ```
 
 Extend the test helper: `impl AuthMeMockServer { fn start_with_body(status_line: &'static str, body: &'static str) -> Self }`, the same as `start` but replying with `body` (and `Content-Type: application/json`). `start(status_line)` becomes `start_with_body(status_line, "{}")`. Update the existing probe tests' `StartupSessionCheck::Authorized` assertions to `StartupSessionCheck::Authorized { profile: None }`.
@@ -6595,6 +6871,36 @@ fn clear_keychain_session_token(account_id: &str) -> Result<(), String> {
         .map_err(|e| keychain_error("clear legacy Keychain session token", e))
 }
 ```
+
+And the verification an account switch needs (Spec issue 24):
+
+```rust
+/// Codex P1 on PR #113: a startup 401 keeps the vault key and the email (R9), so a sign-out (and
+/// with it "Sign out and switch") must leave neither for the next account. A key that cannot be
+/// read counts as still there (fail closed); a store that cannot hold secrets has nothing to leave.
+#[cfg(not(target_os = "windows"))]
+fn ensure_keychain_holds_no_account(account_id: &str) -> Result<(), String> {
+    if keychain_vault_key_present(account_id) || keychain_account_email(account_id).is_some() {
+        return Err(SIGN_OUT_KEYCHAIN_NOT_CLEARED.to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+const SIGN_OUT_KEYCHAIN_NOT_CLEARED: &str =
+    "Sign-out paused: Beebeeb couldn’t remove the previous account’s keys from this computer. Try again; if it keeps happening, restart Beebeeb.";
+```
+
+In `clear_session_impl`, call it in both branches:
+- In the already-signed-out branch, directly after its `if let Err(error) = clear_keychain_session(acct.id.as_str()) { … }` block.
+- In the signed-in branch, directly after `clear_keychain_session(acct.id.as_str())?;`.
+
+```rust
+    #[cfg(not(target_os = "windows"))]
+    ensure_keychain_holds_no_account(acct.id.as_str())?;
+```
+
+In the already-signed-out branch's comment, replace "the trio should already be gone" with "after a startup 401 (R9) the vault key and the email can still be here".
 
 Split `discard_unusable_startup_session`. The existing function gets `#[cfg(target_os = "windows")]` and stays byte-for-byte as it is. Add:
 
@@ -6660,7 +6966,7 @@ Expected: `0 failed` everywhere, with the counts recorded in Notes. The `keychai
 
 - [ ] **Step 4: Mutation check**
 
-In the non-Windows discard, replace `clear_keychain_session_token(` with `clear_keychain_session(`. Expected: `a_startup_401_drops_only_the_token_…` fails. Restore it. In `clear_session_token`, also call `self.store.delete_wrapped_master_key()?;`. Expected: `clearing_the_session_token_keeps_the_key_and_the_email` fails. Restore it.
+In the non-Windows discard, replace `clear_keychain_session_token(` with `clear_keychain_session(`. Expected: `a_startup_401_drops_only_the_token_…` fails. Restore it. In `clear_session_token`, also call `self.store.delete_wrapped_master_key()?;`. Expected: `clearing_the_session_token_keeps_the_key_and_the_email` fails. Restore it. Delete the `ensure_keychain_holds_no_account(acct.id.as_str())?;` call in the already-signed-out branch. Expected: `a_switch_after_a_revoked_token_leaves_no_vault_key_behind` fails (`the already-signed-out branch verifies`). Restore it. The RED for that test is the same failure, seen before the calls are added: paste it into Notes.
 
 - [ ] **Step 5: Commit**
 
@@ -9194,7 +9500,8 @@ Guus deletes the two profiles in the developer portal. If `ls -la@ ~/Library/Clo
 
 Round 3 (replaces the round-2 paragraph; issue 1 is answered by R8, issues 6 and 16 are settled in the amended spec, and issue 18 by R9). Create `.claude/tasks/decisions/<next id>-finder-reconciler-open-questions.md` with:
 - Spec issue 11 (`/Volumes/*/Applications`).
-- Spec issue 17's **Windows** gap: R10 refuses instead of resetting, Windows sign-out refuses while unsent changes exist, and Windows sign-in refuses while a session is present, so a PC in that state has no in-app way forward. Options for Guus: a Windows switch warning plus discard, as on macOS; or keep refusing and document the support path.
+- ~~Spec issue 17's **Windows** gap: R10 refuses instead of resetting, Windows sign-out refuses while unsent changes exist, and Windows sign-in refuses while a session is present, so a PC in that state has no in-app way forward. Options for Guus: a Windows switch warning plus discard, as on macOS; or keep refusing and document the support path.~~
+  Ruled R11: Windows stays fail-closed here, and the escape hatch is private task 1837. Nothing to queue.
 - Spec issue 19 (the email fallback and the upgrade adoption), with the security review's answer to question 1 quoted.
 - Spec issue 21 (the switch-warning copy, linking the design commit).
 - Spec issue 23 (a failed sign-out stops).
@@ -9213,7 +9520,7 @@ $LOCK cargo-build -- cargo test --locked --no-run > $EVID/final-no-run.log 2>&1;
 $LOCK cargo-build -- cargo test --locked > $EVID/final-cargo-test.log 2>&1; echo $? > $EVID/final-cargo-test.exit
 python3 ../scripts/assert-cargo-test-counts.py $EVID/final-cargo-test.log --cargo-exit-code $(cat $EVID/final-cargo-test.exit)
 grep -E "test result:" $EVID/final-cargo-test.log | head -3
-grep -E "reauth|startup_401|clearing_the_session_token|authorized_probe|caches_the_probed_profile" $EVID/final-cargo-test.log | grep -c ' ok$'   # R8 tests that ran: 13 are defined (2 in reauth::tests, 7 in reauth_tests, 4 in Task 12); must equal the count in Task 11/12 Notes
+grep -E "reauth|startup_401|clearing_the_session_token|authorized_probe|caches_the_probed_profile|no_vault_key|holds_vault_key|queued_or_staged_counts" $EVID/final-cargo-test.log | grep -c ' ok$'   # R8 tests that ran: 22 are defined (6 in reauth::tests, 8 in reauth_tests, 2 Task 11 probes, 6 in Task 12); must equal the count in Task 11/12 Notes
 grep -E "account_binding" $EVID/final-cargo-test.log | grep -c ' ok$'   # R10 tests that ran: 15 (7 + 8) plus 3 in state_db; must equal Task 10's Notes
 grep "test result:" $EVID/final-cargo-test.log           # every binary: ok. N passed; 0 failed
 $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/final-clippy.log 2>&1
@@ -9296,7 +9603,7 @@ The phrase `adding domain` is a guess at fileproviderd's wording. In D0, read `$
 | D4b | Settings → Sync → **Repair…** → **Repair**. | The lifecycle shows `trigger repair`, `ready→missing`, then back to `ready` with no click. `D4b-add-count.txt` ≤ 4. |
 | ~~D5~~ | ~~In the local web app (same test account): Settings → sessions → revoke the desktop session. Or use the API: `GET /api/v1/auth/sessions` with the web token, then `DELETE /api/v1/auth/sessions/<desktop id>`. Wait for the desktop's "signed out on this device" banner. `echo "D5 $(date)" >> ~/Library/CloudStorage/Beebeeb-Beebeeb/d5.txt`. Then sign in through the path the app offers.~~ | ~~**Before sign-in:** `"$CTL" status` = `installed` (Finder stays, R2) and the sign-in request is shown. **After sign-in:** per Spec issue 1, today's re-auth path is `clear_session`. Record honestly whether the domain was removed and whether `d5.txt`'s new version reached the server (web version history). If not, D5's line is amended to "blocked by decision <id>". It is not marked passed.~~ |
 | D5 | Revoke the desktop session from the local web app (Settings → sessions; or `GET /api/v1/auth/sessions` with the web token, then `DELETE /api/v1/auth/sessions/<desktop id>`). Wait for "You're signed out on this device". `echo "D5 $(date)" >> ~/Library/CloudStorage/Beebeeb-Beebeeb/d5.txt`. Press **Sign in again** and sign in as the **same** test account. Then repeat with a relaunch in between: revoke again, quit, `open -a /Applications/Beebeeb.app`, sign in. | Before sign-in: `"$CTL" status` = `installed` (R2), and the window opens at sign-in. After sign-in: no recovery-phrase step; no `trigger sign_out` and no `ready→missing` line in `D5-lifecycle.log`; `"$CTL" status` = `installed` throughout; the `d5.txt` edit appears as a new version in the web app's version history (screenshot). Relaunch variant: the same, with no recovery phrase (Task 12). If the security review dropped Task 12's discard change, the recovery phrase is asked exactly once and that is the expected result. Record which. |
-| D5b | Revoke the desktop session again, as in D5. While it is revoked, with an edit waiting (`echo "D5b" >> ~/Library/CloudStorage/Beebeeb-Beebeeb/d5b.txt`), sign in as a **different** test account. | The switch warning shows a count ≥ 1 (D5b-warning.png). **Cancel**: nothing changed (`"$CTL" status` = `installed`, the banner is still there, no `trigger sign_out`). Do it again, then **Sign out and switch**: `trigger sign_out`, `ready→missing`, `"$CTL" status` = `missing`. The second account then signs in fresh and Beebeeb comes back for it. The second account's vault on the web lists only its own files (screenshot). |
+| D5b | Revoke the desktop session again, as in D5. While it is revoked, with an edit waiting (`echo "D5b" >> ~/Library/CloudStorage/Beebeeb-Beebeeb/d5b.txt`), sign in as a **different** test account. | The switch warning shows a count ≥ 1 (D5b-warning.png). **Cancel**: nothing changed (`"$CTL" status` = `installed`, the banner is still there, no `trigger sign_out`). Do it again, then **Sign out and switch**: `trigger sign_out`, `ready→missing`, `"$CTL" status` = `missing`. The second account then signs in fresh. It is asked for its own recovery phrase, because the first account's vault key is gone (Spec issue 24). Beebeeb comes back for it. The second account's vault on the web lists only its own files (screenshot). |
 | D6 | System Settings → General → Login Items & Extensions → File Providers → turn Beebeeb **off**. Open Beebeeb Settings → Sync. Then turn it **on** while that window is visible. | While off: the notice `Beebeeb is turned off in System Settings.` with **Open System Settings** (D6-off.png), and no error surface. After on: `to=ready` with no click in Beebeeb. The add count after the flip is ≤ 1 (§5.5 step 3 predicts 0 app-initiated adds; Spec issue 16). |
 | D7 | Sign out; quit. `hdiutil create -volname Beebeeb -srcfolder /Applications/Beebeeb.app -ov -format UDZO $EVID/../qa-$TASK.dmg; hdiutil attach $EVID/../qa-$TASK.dmg; open /Volumes/Beebeeb/Beebeeb.app`. In Safari → Develop → this Mac → Beebeeb, run `await window.__TAURI_INTERNALS__.invoke('finder_setup_state')` in the console. | The lifecycle `launch … location=disk_image`. The invoke returns `reason: "not_in_applications"`, `launch_location: "disk_image"`, before any sign-in (saved to `D7-finder-setup-state.json`). Afterwards: `hdiutil detach /Volumes/Beebeeb; rm $EVID/../qa-$TASK.dmg`. |
 
@@ -9374,7 +9681,7 @@ Sign in with the **production** test account from the test-accounts skill. Setti
   - D0 (the classifier row is provisional until it runs).
   - The D5 relaunch variant, which depends on Task 12 surviving the security review.
   - D9, which needs a second build (`origin/main`).
-- **Decisions for Guus** (Task 21 step 1): Spec issues 11, 17 (the Windows gap), 19, 21 and 23.
+- **Decisions for Guus** (Task 21 step 1): Spec issues 11, 19, 21 and 23. The Windows gap (17) is ruled by R11, and its escape hatch is private task 1837.
 
 ### Spec coverage map
 
@@ -9401,4 +9708,4 @@ Sign in with the **production** test account from the test-accounts skill. Setti
 | §13.1 automated tests + gates (no new clippy warnings vs baseline; R8 and R10 tests; security review) | every task; 11 step 9; 21 step 2 |
 | §13.2 device checks D0–D9 incl. D5/D5b | 21 |
 | §14 docs | 19, 21 step 9 |
-| §15 open items | D0 (folder_taken), Task 20 step 1 (App IDs), Spec issues 6, 11, 17–19, 23 |
+| §15 open items | D0 (folder_taken), Task 20 step 1 (App IDs), Spec issues 6, 11, 17 (R11), 18 (R9), 19, 23, 24 |

@@ -1,7 +1,7 @@
 # 2026-10-06 — macOS: Beebeeb in Finder just works (spec A of 3)
 
 **Status:** design approved section by section by Guus on 2026-10-06; written spec awaiting his review.
-**Amended:** 2026-10-06 after the plan review, for rulings R8, R9 and R10 and the plan's findings (`docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`, "Spec issues found"). Each amendment is inline: the original is struck through and kept readable, and the replacement sits beneath it. — lead, 2026-10-06 (plan review)
+**Amended:** 2026-10-06 after the plan review, for rulings R8–R11 and the plan's findings (`docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`, "Spec issues found"). Each amendment is inline: the original is struck through and kept readable, and the replacement sits beneath it. — lead, 2026-10-06 (plan review)
 **Date:** 6 Oct 2026
 **Repo:** desktop (macOS only; Windows and Linux behaviour is unchanged)
 **Task:** allocated together with the implementation plan.
@@ -50,6 +50,7 @@ The 1696 forensics line "we registered 'Drive' while the system showed 'Beebeeb'
 - **R8: re-sign-in in place** (2026-10-06, after the plan review). Question: "Sign in again" after a revoked session currently signs you out fully (Finder entry removed, edits not yet uploaded thrown away); how should it work? Answer: **"Re-sign-in in place, in spec A (Recommended)"**. The option he chose: "Sign in again as the same account and only the session token is replaced. Finder, keys, cache and pending edits all stay, and the edits upload afterwards. Signing in as a different account is an account switch: full sign-out, with a warning if edits haven't uploaded yet. Adds auth code to A, with a security review." — lead, 2026-10-06 (plan review)
 - **R9: the vault key stays after a remote revocation** (2026-10-06). Question: keep the vault key on this Mac after its session is revoked, so the same account signs in again without its recovery phrase? Answer: **"Keep the key, review decides (Recommended)"**. The Mac keeps its key. The change merges only if the security review agrees; if the review disagrees, the decision returns to Guus. — lead, 2026-10-06 (plan review)
 - **R10: local data is bound to the account that created it** (2026-10-06). Answer: **"Fold into 1834"**: this spec also owns that binding. A different account never reuses this computer's local data. Behaviour in §5.6; background in private workspace task 1835. — lead, 2026-10-06 (plan review)
+- **R11: Windows stays fail-closed** (2026-10-06), on the Windows gap of R10. Answer: **"Refuse now, escape hatch as its own task (Recommended)"**. This spec keeps Windows refusing (§5.6). An explicit "Discard and switch" escape hatch is private workspace task 1837, verified on Windows CI and a Windows PC. — lead, 2026-10-06 (plan review)
 
 ## 4. Goal and non-goals
 
@@ -149,6 +150,7 @@ Added for ruling R10. — lead, 2026-10-06 (plan review)
 - A failed reset, or a failed sign-out purge on macOS or Linux, stops: no engine starts, and sign-out reports the failure instead of completing.
 - Upgrade: local data from before this binding is adopted at startup by the account this computer's Keychain still names. A same-account re-sign-in (R8) records the owner too.
 - A sign-out by choice forgets the owner and also deletes staged uploads.
+- A sign-in counts as a first sign-in only when nothing of a previous account remains: no recorded owner, no Keychain email, no vault key, no cached profile, and no queued or staged data. Anything else is compared, and an account that does not match takes the switch (R8). The switch leaves no vault key and no account email behind, or it stops. The previous account's key is never used for, or left next to, another account. (Codex review of the plan, PR #113.) — lead, 2026-10-06 (plan review)
 
 ## 6. Failure reasons, copy and actions
 
@@ -307,6 +309,11 @@ Every new test is seen failing before it passes, and the failure output is paste
   - every engine start goes through the binding
   - Windows refuses, tested on CI's Windows job
   The same security review covers R9 and R10; its R10 findings also go to private task 1835. — lead, 2026-10-06 (plan review)
+- **Every retained trace counts**, tests seen failing first and mutation-checked. After a revoked token, with nothing queued, on an install from before R10:
+  - another account is a switch, never a first sign-in
+  - after "Sign out and switch", no vault key or email of the first account remains
+  - the same account signs in again in place and keeps its keys (R8, R9)
+  — lead, 2026-10-06 (plan review)
 - **Frontend (bun)**:
   - the Finder step advances on a `Ready` event
   - each reason renders exactly one notice and the action from 6.2
@@ -369,5 +376,6 @@ Evidence for every check goes under `.claude/tasks/_qa-evidence/<task>/`:
   Ruled R9 (§3): the key stays, and the security review decides. — lead, 2026-10-06 (plan review)
 - ~~Identity for installs that predate `signed_in_user_id`: the plan falls back to the account email recorded on this Mac (case-insensitive), and an unknown identity counts as a different account (fail closed). The security review confirms this.~~ — lead, 2026-10-06 (plan review)
   Identity for installs from before R10: their local data is adopted at startup by the account email this Mac's Keychain still holds. Elsewhere R8 falls back to the recorded email (case-insensitive). An identity that cannot be compared is never treated as the same account. The security review confirms this. — lead, 2026-10-06 (plan review)
-- Windows and R10: the binding refuses instead of resetting, and Windows sign-out refuses while unsent changes exist. A Windows PC that holds another account's unsent changes therefore has no in-app way forward. Owner Guus (decision). — lead, 2026-10-06 (plan review)
+- ~~Windows and R10: the binding refuses instead of resetting, and Windows sign-out refuses while unsent changes exist. A Windows PC that holds another account's unsent changes therefore has no in-app way forward. Owner Guus (decision).~~ — lead, 2026-10-06 (plan review)
+  Ruled R11 (§3): Windows stays fail-closed in this spec. The "Discard and switch" escape hatch is private workspace task 1837. — lead, 2026-10-06 (plan review)
 - An app on an external disk's Applications folder (`/Volumes/<disk>/Applications`) is refused by the 6.2 rule. Is that intended? Owner Guus. — lead, 2026-10-06 (plan review)
