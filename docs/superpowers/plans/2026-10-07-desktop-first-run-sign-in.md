@@ -34,9 +34,41 @@ Each item is a place where the spec, read literally against the code on spec A's
 16. **Carry-over T11-M5 changes the switch warning's copy.** Making the pending-changes count `null` on an unreadable `state.db` (instead of 0) needs a sentence that does not claim a number. It is new copy, so Task 1 draws it and the lead approves it with the mocks. Proposed: "This Mac is signed in to another Beebeeb account. Beebeeb couldn’t count the changes on this Mac that haven’t uploaded yet. Switching signs that account out of this Mac and removes any that are left." Tasks 12 and 16 implement it only if Task 0 finds M5 still open at HEAD.
 17. **The 15-minute re-check starts before the browser opens.** §7.4 says the click "starts the 15-minute re-check (C-D4) whether or not the browser opened". The button calls `account_view_plan_opened` first and opens the link second, so a failed open still polls and still shows the address with "Copy link". Task 17, `the_plan_poll_starts_before_the_browser_opens`.
 18. **The variant B icon files live in the workspace repo.** They are committed at `$WS/design/desktop-first-run/tray-icon/` (workspace commit `39494ebcf`): `tray-template-disconnected.png`, `tray-template-disconnected@2x.png` and `tray-template-disconnected.svg`, with the generator scripts and fitted glyph parameters in `source/`. Their SHA-256 sums are recorded in Task 1 and were checked against these copies on 2026-10-07 (3 of 3 match). If a file is missing or differs, Task 1 stops; it never redraws them.
+19. **Checking has a 15 s limit** (lead ruling 2026-10-07, plan review I5). The spec ends Checking only on a concluded first fetch, and the startup restore holds the fetch until it reports back, so a restore task that dies would leave the view in Checking for the whole process. The plan ends Checking at the latest 15 s after it began (a launch, or a new session generation): the 5 s probe cap plus margin. That concludes "document unavailable", which fails open like any failed first fetch: Ready with the key in memory, Locked without it (C-R4 still applies), Signed out without a session. A sign-in always leaves Checking, at the latest 15 s after it. Task 6 `checking_gives_up_15s_after_it_began`; Task 10 `a_dead_restore_task_still_ends_checking_after_15s`, `a_sign_in_during_a_stuck_restore_leaves_checking`; Task 11, the restore's drop guard.
+20. **The gate is closed for a session generation the account view has not derived** (lead ruling 2026-10-07, plan review I1). C-R10 reads open in Signed out, and spec A's `apply_session` installs a sign-in's keys and starts the engine in the same command, before the account view can derive anything. The gate therefore carries the generation it was derived for and reads closed for every other one, evaluated at the point of action (spec ruling I-4). The engine start a sign-in makes finds it closed; the account view's entry into Ready starts the engine afterwards (C-R12). Linux arms the gate so that it never holds; unit tests that build an `AppState` get an unarmed gate. Task 9 `a_generation_the_driver_has_not_derived_is_closed`, `a_first_sign_in_with_a_blocking_account_starts_no_engine`; Task 10 `the_driver_sets_the_gate_for_its_own_generation`.
+21. **A wake needs no separate path.** §10 detects a wake "when the wall clock moves more than 60 s across one 30 s probe tick" and re-probes on it. While offline the only tick is the 30 s re-probe itself, and at that tick the re-probe is due anyway: the timer runs on the monotonic clock, which does not advance while the Mac sleeps, so the tick comes at most 30 s of awake time after the last probe, wake or not. A wake branch can never change what happens, and no test of it could fail its mutation (plan review I8). The plan builds none: the 30 s offline re-probe is the wake re-probe. Task 23 checks it on the Mac (a wake while offline re-probes within 30 s). Task 6, Task 10.
 
 ## Global Constraints
 
+- **Environment (every task; a task's steps use these names).**
+  ```bash
+  WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io
+  LOCK=$WS/scripts/coord/with-lock.sh                 # every cargo build or test: $LOCK cargo-build -- <cmd>
+  EVID=$WS/.claude/tasks/_qa-evidence/1747            # Windows rungs (Task 24): EVID1748=$WS/.claude/tasks/_qa-evidence/1748
+  WTR=~/code/bb-worktrees/desktop-1747-r              # Lane R, branch feat/1747-first-run-sign-in
+  WTT=~/code/bb-worktrees/desktop-1747-t              # Lane T, branch feat/1747-first-run-sign-in-ui
+  WT=$WTR                                             # in Tasks 1–14 (Task 1 writes the icons there); WT=$WTT in Tasks 15–21
+  ```
+  - **The Rust loop command** ("run with filter X"), from `$WT/src-tauri`:
+    ```bash
+    cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib <filter> > $EVID/t<N>-<step>.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "test result:|error\[|FAILED|panicked" $EVID/t<N>-<step>.log | head -20
+    ```
+    `<filter>` is one substring, or `-- <name> <name> …` for several exact names (libtest runs every test that matches any of them). A step that expects N tests compares N with the `test result:` line; fewer means a filter missed.
+    Before every Rust commit also run `cd $WT/src-tauri && $LOCK cargo-build -- cargo check --locked --all-targets > $EVID/t<N>-check.log 2>&1; echo "rc=$?"` and expect `rc=0`.
+  - **The TypeScript loop command**, from `$WT`:
+    ```bash
+    cd $WT && bun test tests/<file> > $EVID/t<N>-<step>.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)|error:" $EVID/t<N>-<step>.log
+    ```
+    Before every TS commit also run `bunx tsc --noEmit > $EVID/t<N>-tsc.log 2>&1; echo "rc=$?"` and `bun run lint > $EVID/t<N>-eslint.log 2>&1; echo "rc=$?"` (the repo's `eslint .`), both `rc=0`.
+  - `grep` in a guard or a check is always `/usr/bin/grep` (the shell's `grep` is a ugrep function with other exit codes).
+  - Task 0 writes `$EVID/t0-record.md`: the facts about spec A as merged that Tasks 9–13 branch on (`SESSION_TRANSITION` on every platform or Windows only; the session generation's name, type and bump sites; the six `spawn_bound_engine` callers; the startup 401's behaviour; T11-M5; the signatures). A step that says "per `t0-record.md`" reads it there.
+- **Lane rules (binding on every implementer; spec A's `lane-rules.md`, copied here).**
+  - The first action of every task is one Bash block: `cd $WT && git status --short && git log --oneline -1`. Report a blocker within 5 minutes; never sit silent.
+  - Work only in your lane's worktree; never in `$WS/repos/desktop` (the primary checkout stays on `main`, clean) and never in the other lane's tree.
+  - Never `git add` or commit anything in the workspace repo (`$WS`): evidence and Notes go under `$EVID`, and the lead commits them.
+  - No network installs. The only install is Task 0's `bun install --frozen-lockfile` in each lane's tree (lockfile-pinned).
+  - If the plan is wrong against the code (a line moved, a signature differs), adapt minimally and say so in the report; if it is wrong in substance, report NEEDS_CONTEXT or BLOCKED with `file:line` evidence.
+- **Intermediate states.** Between Task 2 and Task 11 the new Rust items are not called from the app: Task 2's module and Task 9's `hold_for_account` carry `#[allow(dead_code)]`, both removed in Task 11. Clippy is compared with the baseline at Task 14 and Task 22; no task may add a clippy warning in a file this plan creates.
 - **Order.** Spec C executes only on a `main` that contains spec A's merged Lane R (`feat/1834-finder-reconciler`) and Lane T (`feat/1834-finder-reconciler-ui`). Task 0 proves it.
 - **Design before code.** Task 1's mocks (light and dark) and icon assets are approved by the lead before any code task runs. The copy is verbatim from the spec. Where an approved mock and the spec disagree, the mock wins and the spec is amended in the same change (spec §12).
 - **Copy (exact, typographic `’` in code, spec §7):**
@@ -50,7 +82,7 @@ Each item is a place where the spec, read literally against the code on spec A's
   - Tooltips: `Beebeeb: Signed out`, `Beebeeb: Sign in again`, `Beebeeb: Offline`.
 - **Dates** are day-month (`18 Oct`), UTC, English month abbreviations, formatted in Rust (`account_view::notice::day_month`), identical to the server's `onboarding::day_month`.
 - **Links.** Built-in addresses: `https://app.beebeeb.io/signup` (create account), `https://app.beebeeb.io/billing` (web billing), `https://beebeeb.io/support` (support). A server link counts only if it is `https`, has a host, has no user-info, and the host is `beebeeb.io` or a subdomain; debug builds also accept `http://localhost`. In TypeScript no file but `src/accountLinks.ts` contains those three literals.
-- **Schedule (C-D4):** account ttl 60 s, pre_account ttl 300 s, plan poll 3 s for 15 minutes; ttl clamped to 30–900 s, poll to 2–30 s, absent or 0 takes the built-in; first-failure retry 10 s; Offline after 2 network failures at least 10 s apart; 30 s re-probe while offline; wake = wall clock moved more than 60 s across one probe tick; 429 waits `Retry-After` or ttl, capped at 300 s; macOS launch settle 5 s after the restore probe.
+- **Schedule (C-D4):** account ttl 60 s, pre_account ttl 300 s, plan poll 3 s for 15 minutes; ttl clamped to 30–900 s, poll to 2–30 s, absent or 0 takes the built-in; first-failure retry 10 s; Offline after 2 network failures at least 10 s apart; 30 s re-probe while offline, which is also the wake re-probe (Spec issue 21); Checking ends at the latest 15 s after it began (Spec issue 19); 429 waits `Retry-After` or ttl, capped at 300 s; macOS launch settle 5 s after the restore probe.
 - **Request (C-D2):** `GET {BB_API_BASE}/api/v1/onboarding` with today's `X-Beebeeb-Client: desktop` and `X-Beebeeb-Client-Version`, plus `X-Beebeeb-Onboarding-Schema: 1` and `X-Beebeeb-Client-OS: macos|windows|linux`; Bearer only while signed in.
 - **Never logged (C-D6):** the document body never reaches `tracing`, the lifecycle log, "Copy details" or the support bundle. Lifecycle lines are the three closed-vocabulary events of §10, macOS only (Windows and Linux: `tracing` only), with no email, account id or URL.
 - **Platforms.** macOS gets the launch policy (C3), the detached menu, the account window and the removals (§11). Windows gets the states, copy and crossed icon in its existing windows, no launch policy and no click change. Linux gets the Rust state, the fetch, the icon and the shared sign-in window changes; its gate never holds and nothing Linux-specific is built.
@@ -73,12 +105,38 @@ Each item is a place where the spec, read literally against the code on spec A's
 - **Git.** Every task commits with an explicit pathspec (`git commit -m "…" -- <paths>`) and checks `git show --stat HEAD`. Forbidden: `git stash`, `reset`, `checkout --`, `restore`, `clean`, `switch`, rebase (except the lead's Task 21 rebase), push. Lanes never commit `graphify-out/`. Each commit ends with the trailer of the model that wrote it, never the lead's.
 - **Process.** One worktree per lane, allocated by the lead. `CARGO_TARGET_DIR` stays unset. Every cargo build or test runs through `$LOCK cargo-build -- …` (rc 75 = busy: wait ~30 s and rerun; never a result). Foreground commands only. No `pkill`/`killall`. Redirect every run to a log under `$EVID`, then grep the log; never `cmd | tail`.
 - **Gates (spec §14):** `cargo test --locked` per-binary counts; `bun test` count; `bunx tsc --noEmit`; eslint; no new warnings from `cargo clippy --locked --all-targets` against the `origin/main` baseline Task 0 records.
+- **Expected test counts.** `B_lib` is Task 0's `cargo test --lib` count on macOS and `B_bun` its `bun test` pass count. After each task the lib count is `B_lib` plus the running total below, and `bun test` passes `B_bun` plus its running total minus the spec A tests Task 17 deletes (named in its Notes). M5 rows count only if Task 0 found T11-M5 open. A non-macOS lib run lacks the macOS-only tests marked (m). A task reports its own count against this table; a difference is a red until explained.
+
+  | Task | New Rust lib tests | Running (Rust) | New TS tests | Running (TS) |
+  |---|---|---|---|---|
+  | 2 | 10 | 10 | | |
+  | 3 | 7 | 17 | | |
+  | 4 | 12 | 29 | | |
+  | 5 | 22 | 51 | | |
+  | 6 | 15 | 66 | | |
+  | 7 | 6 (1 not on Windows) | 72 | | |
+  | 8 | 11 | 83 | | |
+  | 9 | 17 (gate 6, core 6, macos_ports 1 (m), lib 4) | 100 | | |
+  | 10 | 35 (driver 34, lifecycle_log 1) | 135 | | |
+  | 11 | 7 | 142 | | |
+  | 12 | 3 (+1 M5) | 145 | | |
+  | 13 | 19 (launch_kind 3, of them 1 (m); surfaces::policy 11; lib 5) | 164 | | |
+  | 14 | 17 (tray_presentation 13, icons 2, lib 2) | 181 | | |
+  | 15 | | | 17 | 17 |
+  | 16 | | | 18 (+2 M5) | 35 |
+  | 17 | | | 20 | 55 |
+  | 18 | | | 6 | 61 |
+  | 19 | | | 3 | 64 |
+  | 20 | | | 3 | 67 |
+  | 21 | | | 3 | 70 |
+
+  Running totals leave out the M5 rows. Task 14 also extends two of Task 10's driver tests; it adds none there.
 
 ## Review Focus
 
 The five conditions a real person is most likely to meet that the spec implies but its test list (§14) does not exercise. Each line names the test that pins it and the task that owns it.
 
-1. **Unlocking a no-plan account.** The cached account part says `needs_plan`; the person unlocks (Keychain or recovery phrase). They expect "Choose a plan", with no engine started and nothing added to Finder, not a burst of sync between the unlock and the screen. Pinned by `the_gate_follows_the_account_not_the_key` (Task 5) and `an_unlock_with_a_cached_no_plan_part_starts_no_engine` (Task 11). Spec issue 3.
+1. **Unlocking a no-plan account.** The cached account part says `needs_plan`; the person unlocks (Keychain or recovery phrase). They expect "Choose a plan", with no engine started and nothing added to Finder, not a burst of sync between the unlock and the screen. Pinned by `the_gate_follows_the_account_not_the_key` (Task 5) and `an_unlock_with_a_cached_no_plan_part_starts_no_engine` (Task 11). Spec issue 3. The same holds for a first sign-in of a plan-less account, whose engine start comes before the account view can derive anything: the gate is closed for a session generation the view has not derived (`a_first_sign_in_with_a_blocking_account_starts_no_engine`, Task 9; `the_driver_sets_the_gate_for_its_own_generation`, Task 10). Spec issue 20.
 2. **Launching with no connection and no cache** (a stored session, first launch after the upgrade, on a train). They expect today's behaviour within one failed fetch: no busy screen held for 10 s, sync starting as before, and no Offline line until the second failure. Pinned by `a_first_network_failure_ends_checking_without_showing_offline` (Task 10). Spec issue 5.
 3. **Sync running when an expired session recovers by itself** (spec A clears auth-expired after a later success, with no sign-in). On Windows and Linux they expect sync to carry on, not restart. Pinned by `account_ready_starts_the_engine_only_when_none_runs` (Task 11). Spec issue 2.
 4. **Relaunching offline with a no-plan account.** They expect "Choose a plan" to stay, with the offline line and "Try again" instead of the button, and still no Finder entry (C-R13: the cached blocking part keeps its gate). Pinned by `offline_relaunch_with_a_cached_no_plan_part_keeps_choose_a_plan` (Task 5) and `an_offline_relaunch_keeps_the_cached_gate_closed` (Task 10).
@@ -103,7 +161,7 @@ Paths are relative to the desktop repo root unless they start with `$WS` (the wo
 | `src-tauri/src/account_view/notice.rs` | create | Ready notices, `day_month` | 4 |
 | `src-tauri/src/account_view/derive.rs` | create | the §4.2 table, C-R8, `AccountView`, gate value | 5 |
 | `src-tauri/tests/fixtures/account-view/*.json` | create | the frontend contract examples | 5 |
-| `src-tauri/src/account_view/policy.rs` | create | schedule, bounds, offline, wake, settle | 6 |
+| `src-tauri/src/account_view/policy.rs` | create | schedule, bounds, offline, settle, the Checking limit | 6 |
 | `src-tauri/src/state_db.rs` | modify | the cache table, `ACCOUNT_BOUND_TABLES`, purges | 7 |
 | `src-tauri/src/reauth.rs` | modify | `LocalTraces.onboarding_cache` | 7 |
 | `src-tauri/src/account_view/fetch.rs` | create | the request, headers, outcome | 8 |
@@ -119,13 +177,13 @@ Paths are relative to the desktop repo root unless they start with `$WS` (the wo
 | `src-tauri/src/tray_presentation.rs` | create | icon, tooltip, click, menu | 14 |
 | `src-tauri/Cargo.toml` | modify | tauri `image-ico` | 14 |
 | `src/accountView.ts`, `src/accountViewCopy.ts`, `src/accountLinks.ts` | create | the frontend contract, copy, links | 15 |
-| `src/AuthExpiredBanner.tsx` | modify | reads the session-ended copy from `accountViewCopy.ts` | 15 |
 | `src/browserSignIn.ts`, `src/BrowserSignIn.tsx` | create | the shared browser handoff (moved from Windows) | 16 |
 | `src/onboardingSignIn.ts`, `src/accountSwitchCopy.ts` | modify | `fresh.vaultUnlocked`; M5 | 16 |
 | `src/accountScreens.tsx` | create | sign-in footer, offline line, update, choose a plan, busy, link fallback | 16, 17 |
 | `src/Onboarding.tsx` | modify | shared sign-in (16); macOS account window, removals (17) | 16, 17 |
 | `src/WindowsFirstRun.tsx` | modify | mounts the shared sign-in (16); C-R3/C-R5 before Files on demand (19) | 16, 19 |
 | `src/design.css` | modify | account window and sign-in classes | 16, 17 |
+| `src-tauri/capabilities/account-window.json` | create | `set-title` and `close` for the `onboarding` window | 17 |
 | `src/MacSettings.tsx`, `src/macSettingsModel.ts`, `src/pages/Account.tsx`, `src/pages/VersionCenter.tsx`, `src/desktopApi.ts` | modify | notice line, resolved billing link | 18 |
 | `src/windows/views/AccountView.tsx`, `src/WindowsApp.tsx` | modify | notice, frozen row, resolved links (18); C-R3/C-R5 in main-app (19) | 18, 19 |
 | `src/App.tsx`, `src/compactNavigation.ts` | modify | no Drive status on macOS | 20 |
@@ -148,43 +206,28 @@ git -C $WS/repos/desktop worktree add ~/code/bb-worktrees/desktop-1747-r -b feat
 git -C $WS/repos/desktop worktree add ~/code/bb-worktrees/desktop-1747-t -b feat/1747-first-run-sign-in-ui origin/main
 ```
 
-Each lane sets `WT` to its own worktree. `LOCK=$WS/scripts/coord/with-lock.sh`. `EVID=$WS/.claude/tasks/_qa-evidence/1747` (Windows rungs: `$WS/.claude/tasks/_qa-evidence/1748`). Lanes write evidence and Notes there; the lead commits them (the workspace `.git` is lead-only).
-
-The Rust loop command (from `$WT/src-tauri`):
-
-```bash
-cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib <filter> > $EVID/t<N>-<step>.log 2>&1; echo "rc=$?"; grep -E "test result:|error\[|FAILED|panicked" $EVID/t<N>-<step>.log | head -20
-```
-
-Before every Rust commit also run `$LOCK cargo-build -- cargo check --locked --all-targets > $EVID/t<N>-check.log 2>&1; echo "rc=$?"` and expect `rc=0`.
-
-The TypeScript loop command (from `$WT`):
-
-```bash
-cd $WT && bun test tests/<file> > $EVID/t<N>-<step>.log 2>&1; echo "rc=$?"; grep -E "^ *[0-9]+ (pass|fail)|error:" $EVID/t<N>-<step>.log
-```
-
-Before every TS commit also run `bunx tsc --noEmit > $EVID/t<N>-tsc.log 2>&1; echo "rc=$?"` and `bun run lint > $EVID/t<N>-eslint.log 2>&1; echo "rc=$?"` (the repo's `eslint .`), both `rc=0`.
+The variables, both loop commands and the lane rules are in Global Constraints. Task 0 runs `bun install --frozen-lockfile` in both lanes' trees.
 
 ---
+
 ## Task 0: Precondition — spec A is on `main`, and every interface this plan consumes is there (lead)
 
 **Lead only.** No code. Stops the plan if spec A is not merged or a consumed interface is missing.
 
 **Files:**
-- Create: `$EVID/t0-interfaces.sh`, `$EVID/t0-interfaces.tsv`, `$EVID/t0-baseline-*.log` (workspace evidence, lead commits)
+- Create: `$EVID/t0-interfaces.sh`, `$EVID/t0-interfaces.tsv`, `$EVID/t0-signatures.txt`, `$EVID/t0-record.md`, `$EVID/t0-baseline-*.log` (workspace evidence, lead commits)
 
 **Interfaces:**
 - Consumes: spec A as merged. Every name below is how it exists on `feat/1834-finder-reconciler` / `feat/1834-finder-reconciler-ui` (read 2026-10-07) or how spec A Task 12's rulings require it.
-- Produces: the drift list (any name that moved or was renamed, with its new spelling), the generation API's real name, whether T11-M5 is already fixed, and the baselines every later gate compares against.
+- Produces: the drift list (any name that moved or was renamed, with its new spelling); `t0-record.md` (the facts Tasks 9–13 branch on: `SESSION_TRANSITION` scope, the generation contract and its bump sites, the six `spawn_bound_engine` callers, the startup 401's behaviour, T11-M5, the signature table); and the baselines `B_lib`, `B_bun` and the clippy and lockfile counts every later gate compares against.
 
 - [ ] **Step 1: Prove spec A's two lanes are merged**
 
 ```bash
-WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io; D=$WS/repos/desktop; EVID=$WS/.claude/tasks/_qa-evidence/1747; mkdir -p $EVID
+D=$WS/repos/desktop; mkdir -p $EVID
 git -C $D fetch origin
-for pr in $(gh pr list -R beebeeb-io/desktop --state merged --search "1834" --json number --jq '.[].number'); do
-  gh pr view $pr -R beebeeb-io/desktop --json number,headRefName,mergedAt,mergeCommit --jq '"\(.number) \(.headRefName) \(.mergedAt) \(.mergeCommit.oid)"'
+for head in feat/1834-finder-reconciler feat/1834-finder-reconciler-ui; do
+  gh pr list -R beebeeb-io/desktop --state merged --head "$head" --json number,headRefName,mergedAt,mergeCommit --jq '.[] | "\(.number) \(.headRefName) \(.mergedAt) \(.mergeCommit.oid)"'
 done > $EVID/t0-spec-a-prs.txt; cat $EVID/t0-spec-a-prs.txt
 while read -r num head merged oid; do
   git -C $D merge-base --is-ancestor "$oid" origin/main && echo "$head on main ($oid)" || echo "$head NOT on main"
@@ -322,9 +365,71 @@ check src/windows/manualUpdateCheck.ts 'export const desktopUpdateCheck' desktop
 check src/WindowsFirstRun.tsx 'function SignInStep(' WindowsFirstRun-SignInStep
 check src/pages/SyncFolder.tsx 'export default function' SyncFolder-page
 check tests/fixtures/componentHarness.ts 'export function mount(' componentHarness.mount
+# Names the plan also consumes (plan review I3).
+check $R/surfaces/policy.rs 'pub enum Platform' surfaces::policy::Platform
+check $R/surfaces/policy.rs 'Macos,' Platform::Macos
+check $R/surfaces/policy.rs 'Windows,' Platform::Windows
+check $R/surfaces/policy.rs 'Linux,' Platform::Linux
+check $R/runner.rs 'pub fn api_base_url(' runner::api_base_url
+check $R/lib.rs 'fn state_db_from_state_dir(' state_db_from_state_dir
+check $R/state_paths.rs 'fn beebeeb_state_dir(' state_paths::beebeeb_state_dir
+check $R/state_paths.rs 'STATE_DB_FILENAME' state_paths::STATE_DB_FILENAME
+check $R/lifecycle_log.rs 'pub fn event(' lifecycle_log::event
+check $R/lifecycle_log.rs 'fn token(' lifecycle_log::token
+check $R/lifecycle_log.rs 'SignedOut,' LifecycleEvent::SignedOut
+check $R/diagnostic_redaction.rs 'pub struct KnownNames' KnownNames
+check $R/lib.rs 'async fn settle_sign_in(' settle_sign_in
+check $R/lib.rs 'fn revoke_desktop_session(' revoke_desktop_session
+check $R/lib.rs 'struct AuthorizeFixture' test-AuthorizeFixture
+check $R/lib.rs 'fn with_session(' test-AuthorizeFixture::with_session
+check $R/lib.rs 'fn local_data_of(' test-local_data_of
+check $R/lib.rs 'fn for_test(' test-LocalDataPaths/LocalSources::for_test
+check $R/runner.rs 'fn for_test_with_task(' test-EngineRunner::for_test_with_task
+check $R/lib.rs 'fn body_between' test-body_between
+check $R/lib.rs 'fn production_source()' test-production_source
+check src/desktopApi.ts 'export async function command<' desktopApi.command
+check src/desktopApi.ts 'export type CommandResult' desktopApi.CommandResult
+check src/desktopApi.ts 'export function commandUnavailableLabel(' desktopApi.commandUnavailableLabel
+check src/desktopApi.ts 'export interface DesktopLoginResult' desktopApi.DesktopLoginResult
+check src/finderSetupCopy.ts 'export const FINDER_SETUP_TITLE' FINDER_SETUP_TITLE
+check src/ManualUpdateFeedback.tsx 'export default function ManualUpdateFeedback(' ManualUpdateFeedback-default-export
+check src/Logo.tsx 'export function Wordmark(' Logo.Wordmark
+check src/windows/ui.tsx 'export function useToast(' windows/ui.useToast
 echo "missing=$missing"
 [ "$missing" -eq 0 ]
 ```
+
+- [ ] **Step 2b: Record the signatures the plan's code calls**
+
+A changed signature surfaces as a compile error in the middle of a task; read them all now. For each function below, print its signature as it is on `main`:
+
+```bash
+for sig in 'async fn start_engine_if_possible(' 'fn identity_of_session(' 'async fn settle_sign_in(' 'fn revoke_desktop_session(' \
+           'pub fn format_line(' 'fn account_mismatch(' 'fn authorize_engine_start(' 'fn start_engine_bound(' \
+           'async fn stop_engine_in_slot(' 'fn note_result(' 'fn state_db_from_state_dir(' 'fn load_session_token_from_keychain(' \
+           'pub async fn start_browser_login(' 'pub fn startup_surface('; do
+  echo "=== $sig"; git -C $D grep -n -A6 -F -- "$sig" origin/main -- src-tauri/src | /usr/bin/grep -v '^--$' | head -8
+done > $EVID/t0-signatures.txt 2>&1; echo "rc=$?"
+```
+
+Compare each with the shape the plan assumes, and write the result into the "Signatures" table of `t0-record.md` ("as assumed", or the actual line):
+
+| Function | The plan assumes |
+|---|---|
+| `start_engine_if_possible` | `(app: tauri::AppHandle, state: &State<'_, AppState>, #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>) -> Result<(), String>` |
+| `identity_of_session` | `(email: Option<&str>, profile: Option<&account_dto::AccountProfile>) -> account_binding::Identity` |
+| `settle_sign_in` | `(app, state, token: &str, profile: &AccountProfile) -> Result<SignInSettlement, F>` where `F` has `token_stored: bool` and `message: String` |
+| `revoke_desktop_session` | `(client: &reqwest::Client, base_url: &str, token: &str)` (async; result ignored) |
+| `lifecycle_log::format_line` | `(event: &LifecycleEvent, names: &KnownNames, at: SystemTime) -> String` |
+| `LoginOutcome::account_mismatch` | `(pending_changes: u64) -> Self` (`Option<u64>` once T11-M5 is fixed) |
+| `authorize_engine_start` | `(state: &AppState, acct: &account::AccountRuntime, engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>, paths: &LocalDataPaths) -> Result<StartPermit, String>` |
+| `start_engine_bound` | `(state, acct, engine_slot: &mut MutexGuard<'_, Option<EngineRunner>>, paths, spawn: impl FnOnce(PathBuf, Zeroizing<String>, Zeroizing<[u8; 32]>) -> EngineRunner) -> Result<EngineStart, String>` |
+| `stop_engine_in_slot` | `(acct: &account::AccountRuntime, engine: EngineRunner) -> runner::AbortOutcome` (with `is_stopped()`) |
+| `AuthHealth::note_result` | `(&self, error: Option<&anyhow::Error>)` |
+| `state_db_from_state_dir` | `(state_dir: &std::path::Path) -> Result<Option<state_db::StateDb>, String>` |
+| `load_session_token_from_keychain` | `(account_id: &str) -> Result<Option<String>, String>` |
+| `start_browser_login` | `(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String>` (Task 12 changes the `Ok` type) |
+| `surfaces::policy::startup_surface` | `(platform: Platform, no_sync_root: bool) -> StartupSurface` (Task 13 adds two parameters) |
 
 - [ ] **Step 3: Run it and record the drift**
 
@@ -342,38 +447,51 @@ The generation row is special (Spec issue 15). Find its real name:
 git -C $D grep -n -E 'fn session_generation|SESSION_GENERATION|fn .*generation\(' origin/main -- src-tauri/src/lib.rs > $EVID/t0-generation.txt; cat $EVID/t0-generation.txt
 ```
 
-Record the function the rest of the plan calls `crate::session_generation()` (returns `u64`, bumped on every session transition: sign-in, sign-out, switch, lock, restore install). If nothing like it exists: stop and queue the decision "spec C needs the session generation; add it in spec C (C-D5 fallback) or wait for spec A".
+Record the generation contract in `t0-record.md` (the plan calls it `crate::session_generation() -> u64`):
+- **Name and type** of the read function, and whether it returns a value that only ever grows.
+- **Bump sites**: every place that moves it (`git -C $D grep -n '<the bump function or counter>' origin/main -- src-tauri/src/lib.rs`), named by the enclosing function. C-D5 needs a bump in every session transition: each sign-in install, sign-out (`clear_session_impl`), lock, unlock and the startup restore's install.
+- **Order inside `clear_session_impl`**: the bump must come before `lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut)` (Task 11 clears the account view right after that line). Print the function's body (`git -C $D show origin/main:src-tauri/src/lib.rs | awk '/async fn clear_session_impl\(/,/^}/' > $EVID/t0-clear-session-body.txt`) and record the two line numbers.
+- **Order inside each sign-in install** (`apply_session`, and each unlock command that installs a key): the bump comes before that function's `start_engine_if_possible` call. Task 9's gate is closed for a generation the account view has not derived for, and that order is what makes a sign-in's own engine start find it closed. Record the line numbers.
+- **Scope**: whether the read function is process-wide (a static) or per `AppState`. Task 9's tests are written for a process-wide value that other tests may move.
 
-- [ ] **Step 4: Record two carry-over facts**
+If no such function exists, or it does not grow monotonically, or a transition above does not bump it, or a bump comes after the `SignedOut` line or after a sign-in's `start_engine_if_possible`: stop and queue the decision "spec C needs the session generation as C-D5 describes; add it in spec C (C-D5 fallback) or wait for spec A".
+
+- [ ] **Step 4: Record the facts later tasks branch on**
 
 ```bash
-git -C $D grep -n 'pending_changes: Option<u64>' origin/main -- src-tauri/src/lib.rs > $EVID/t0-m5.txt; echo "rc=$?"
-git -C $D grep -n 'clear_session_token' origin/main -- src-tauri/src/lib.rs | /usr/bin/grep -n discard > $EVID/t0-task12-401.txt; echo "rc=$?"
+git -C $D grep -n 'pending_changes: Option<u64>' origin/main -- src-tauri/src/lib.rs > $EVID/t0-m5.txt; echo "m5 rc=$?"
+git -C $D show origin/main:src-tauri/src/lib.rs | awk '/fn discard_unusable_startup_session\(/,/^}/' > $EVID/t0-discard-body.txt; wc -l < $EVID/t0-discard-body.txt
+git -C $D show origin/main:src-tauri/src/lib.rs | /usr/bin/grep -n -B2 'static SESSION_TRANSITION' > $EVID/t0-session-transition.txt; cat $EVID/t0-session-transition.txt
+git -C $D show origin/main:src-tauri/src/lib.rs | awk '/async fn start_engine_if_possible\(/,/\) -> Result/' > $EVID/t0-start-engine-signature.txt; cat $EVID/t0-start-engine-signature.txt
+git -C $D grep -n 'spawn_bound_engine(' origin/main -- src-tauri/src/lib.rs > $EVID/t0-spawn-callers.txt; cat $EVID/t0-spawn-callers.txt
 ```
 
-- `t0-m5.txt` non-empty (`rc=0`): T11-M5 is fixed on main; Tasks 12 and 16 skip their M5 steps. Empty (`rc=1`): Tasks 12 and 16 do them.
-- `t0-task12-401.txt` non-empty: spec A Task 12's startup 401 keeps the owner and the key (C-R2 (b) is reachable). Empty: stop; spec C's Session ended after a relaunch depends on it.
+Write each answer into `t0-record.md`:
+- **T11-M5:** `t0-m5.txt` non-empty means fixed on `main` (Tasks 12 and 16 skip their M5 steps); empty means open (they run them).
+- **The startup 401 (C-R2 (b), spec A Task 12):** read `t0-discard-body.txt`. It keeps the owner record (no call that purges `state.db` or deletes the owner) and the vault key (it clears the session token only, not the whole Keychain trio: no `clear_keychain_session(` call). Record "keeps owner and key: yes", naming the calls you read. If it clears the key or the owner, stop: spec C's Session ended after a relaunch depends on it.
+- **`SESSION_TRANSITION`:** "Windows only" when the line above `static SESSION_TRANSITION` is `#[cfg(target_os = "windows")]`, else "every platform". Also record whether `start_engine_if_possible`'s `_transition` parameter is still `#[cfg(target_os = "windows")]` (`t0-start-engine-signature.txt`). Tasks 9 and 11 branch on both.
+- **`spawn_bound_engine` callers:** from `t0-spawn-callers.txt`, name the enclosing function of each production call (not the definition, not a test). Expected exactly six: `start_engine_if_possible`, `ensure_sync_root_and_engine`, `persist_sync_root_and_start_engine`, `pick_sync_root`, `start_engine_for_pending_finder_install`, `start_check_engine`. A seventh caller stops Task 9 until the lead rules how it treats `AccountBlocked`.
 
 - [ ] **Step 5: Allocate the worktrees and record the baselines**
 
 Run the worktree commands in "Lanes, branches and order". Then from Lane R's fresh tree:
 
 ```bash
-WT=~/code/bb-worktrees/desktop-1747-r; LOCK=$WS/scripts/coord/with-lock.sh
-cd $WT && git log --oneline -1 > $EVID/t0-baseline-head.txt
-cd $WT/src-tauri && $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t0-baseline-clippy.log 2>&1; echo "rc=$?"
+cd $WTR && git log --oneline -1 > $EVID/t0-baseline-head.txt
+cd $WTR/src-tauri && $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t0-baseline-clippy.log 2>&1; echo "rc=$?"
 /usr/bin/grep -c '^warning' $EVID/t0-baseline-clippy.log > $EVID/t0-baseline-clippy-warnings.txt; cat $EVID/t0-baseline-clippy-warnings.txt
 SCRATCH=$(mktemp -d)
 RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" HOME="$SCRATCH" $LOCK cargo-build -- cargo test --locked > $EVID/t0-baseline-cargo-test.log 2>&1; echo "rc=$?"
 rm -rf "$SCRATCH"
 /usr/bin/grep "test result:" $EVID/t0-baseline-cargo-test.log
 /usr/bin/grep -c '^\[\[package\]\]' Cargo.lock > $EVID/t0-baseline-lock-packages.txt; cat $EVID/t0-baseline-lock-packages.txt
-cd $WT && bun install --frozen-lockfile > $EVID/t0-bun-install.log 2>&1; echo "rc=$?"
+cd $WTR && bun install --frozen-lockfile > $EVID/t0-bun-install-r.log 2>&1; echo "rc=$?"
+cd $WTT && bun install --frozen-lockfile > $EVID/t0-bun-install-t.log 2>&1; echo "rc=$?"
 bun test > $EVID/t0-baseline-bun-test.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t0-baseline-bun-test.log
 shasum -a 256 bun.lock > $EVID/t0-baseline-bun-lock.sha256
 ```
 
-Paste into the task Notes under "Baseline (origin/main <sha>)": the head, the clippy warning count, every `test result:` line, the `[[package]]` count, the bun pass/fail lines and the `bun.lock` hash.
+Both lanes' trees now have `node_modules` (Lane R's `tauri build` in Tasks 23–24 needs it too; the lanes themselves install nothing). Write into `t0-record.md` under "Baseline (origin/main <sha>)": the head, `B_lib` (the `--lib` binary's `test result:` count), every other binary's `test result:` line, the clippy warning count, the `[[package]]` count, `B_bun` (the pass count) and the `bun.lock` hash.
 
 ---
 
@@ -531,6 +649,8 @@ Expected: `rc=0` twice; six frames listed, each with some changed pixels and few
 
 - [ ] **Step 4: Draw the mocks**
 
+These mocks are specified in prose, not shown: the list below gives every screen, its exact strings and its states, and the skeleton leaves the token block to be copied. That is the one deliverable in this plan written that way, because it is a drawing gated by the lead. **The lead's approval in Step 7 checks every visible string in the renders word for word against the strings the spec gives for that screen**, not only the layout.
+
 Every mock file starts from this skeleton (tokens copied from the desktop repo's `src/design.css`, the same way the desktop repo's `design/hifi/macos-settings-dialogs.html` does, so the drawing matches the built window; theme from `?theme=light|dark`, else the OS):
 
 ```html
@@ -619,9 +739,10 @@ Expected: exactly the two files. Report the workspace files to the lead (the lea
 
 - [ ] **Step 7: Lead approval (lead)**
 
-The lead reviews the 8 renders, the icon checks and the HTML, then writes in the task Notes: "Mocks approved — lead, <date>" or the changes needed. If a mock and the spec disagree and the lead keeps the mock, the spec is amended in the same change (strike, replace, sign and date). **No code task is dispatched before this line exists.**
+The lead reviews the 8 renders, the icon checks and the HTML (every string word for word against the spec, see Step 4), then writes in the task Notes: "Mocks approved — lead, <date>" or the changes needed. If a mock and the spec disagree and the lead keeps the mock, the spec is amended in the same change (strike, replace, sign and date). **No code task is dispatched before this line exists.**
 
 ---
+
 ## Task 2: The vendored contract and the tolerant document parser (`account_view::doc`)
 
 **Lane R.** Pure. No OS, no clock, no network.
@@ -629,7 +750,7 @@ The lead reviews the 8 renders, the icon checks and the HTML, then writes in the
 **Files:**
 - Create (vendored, byte-identical): `contracts/onboarding/` (`README.md`, `schema.v1.json`, `fixtures/*.json`, `invalid/*.json`)
 - Create: `src-tauri/src/account_view/mod.rs`, `src-tauri/src/account_view/doc.rs`
-- Modify: `src-tauri/src/lib.rs` (module list, next to `mod finder_setup;`)
+- Modify: `src-tauri/src/lib.rs` (module list, above spec A's comment and attribute for `mod finder_setup;`)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -675,7 +796,7 @@ Expected: `rc=0`, an empty diff log, and at least 20 fixtures. Record the server
 pub mod doc;
 ```
 
-In `src-tauri/src/lib.rs`, directly above `mod finder_setup;`:
+In `src-tauri/src/lib.rs`, directly above spec A's two-line comment that starts `// Spec 2026-10-06 (macOS Finder setup reconciler).`, which sits above `#[cfg_attr(not(target_os = "macos"), allow(dead_code))]` and `mod finder_setup;`. Never between that attribute and its module: an item inserted there takes the attribute and leaves `finder_setup` without it.
 
 ```rust
 // Spec 2026-10-07: the account state the windows and the menu-bar icon render. Wired into the app in
@@ -1726,7 +1847,7 @@ Expected: `test result: ok. 12 passed; 0 failed`.
 
 - [ ] **Step 5: Mutation-check**
 
-1. In `read_only`, replace the `read_only_since` line with `read_only_since: lifecycle.and_then(|l| l.data_deletion_at).map(day_month),`. Expected: `every_read_only_state_takes_its_dates_from_lifecycle_and_links_to_choose_a_plan` fails on `lapsed` (left `Some("1 Dec")` for since). Revert.
+1. In `read_only`, replace the `read_only_since` line with `read_only_since: lifecycle.and_then(|l| l.data_deletion_at).map(day_month),`. Expected: `every_read_only_state_takes_its_dates_from_lifecycle_and_links_to_choose_a_plan` fails on its first case, `account.trial_cancelling.web.json` (left `(Some("1 Nov"), Some("1 Nov"))`, right `(Some("6 Oct"), Some("1 Nov"))`). Revert.
 2. Move `"past_due"` into the no-notice arm. Expected: `frozen_links_to_support_and_payment_failed_to_web_billing` fails (`called Option::unwrap() on a None value`). Revert.
 
 Paste both and the green rerun.
@@ -1741,6 +1862,7 @@ git show --stat HEAD
 ```
 
 ---
+
 ## Task 5: The account state — the §4.2 table, C-R8's precedence and the gate value (`account_view::derive`)
 
 **Lane R.** Pure. This is the function the spec's test list calls "the table": tested row by row, on every precedence overlap, and mutation-checked.
@@ -2108,6 +2230,20 @@ mod tests {
         }
     }
 
+    /// Spec §14 (C-S1): a browser sign-in that brought its keys goes to Checking and then on, never to
+    /// the recovery phrase. This view decides it, not the frontend's `vaultUnlocked` (Task 17's macOS
+    /// window renders only this view).
+    #[test]
+    fn a_browser_sign_in_with_its_keys_is_never_the_recovery_phrase() {
+        let signed_in = Inputs { key_in_memory: true, key_in_keychain: false, owner_recorded: false, first_fetch: FirstFetch::Pending, ..base() };
+        let d = derive(&signed_in);
+        assert_eq!((d.view.state, d.view.screen), (Checking, Screen::Busy));
+        for fresh in [None, Some(named("account.active.web.json")), Some(named("account.needs_plan.ios.json"))] {
+            let d = derive(&Inputs { fresh, first_fetch: FirstFetch::Concluded, ..signed_in });
+            assert_ne!(d.view.screen, Screen::RecoveryPhrase, "{:?}", d.view.state);
+        }
+    }
+
     /// C-R11's other entries: a sign-in or an unlock leaves the key in memory with no cached part and
     /// the first fetch pending (the same inputs, whichever of them got there).
     #[test]
@@ -2278,7 +2414,7 @@ mod tests {
 - [ ] **Step 3: Run the tests to see them fail**
 
 Add `pub mod derive;` to `mod.rs`. Run with filter `account_view::derive`.
-Expected: `test result: FAILED. 0 passed; 21 failed` (each `not yet implemented: Task 5 step 4`).
+Expected: `test result: FAILED. 0 passed; 22 failed` (each `not yet implemented: Task 5 step 4`).
 
 - [ ] **Step 4: Implement**
 
@@ -2365,16 +2501,17 @@ fn blocking_of(part: Option<&AccountPart>) -> Blocking {
 
 - [ ] **Step 5: Run the tests to see them pass**
 
-Expected: `test result: ok. 21 passed; 0 failed`.
+Expected: `test result: ok. 22 passed; 0 failed`.
 
 - [ ] **Step 6: Mutation-check the table (spec §14)**
 
 Flip one row at a time, run, paste the failing test names and assertions, revert:
 1. `TokenState::Absent if i.owner_recorded => SessionKind::Ended` → `SessionKind::None`. Expected failures: `a_missing_token_beside_a_recorded_owner_is_session_ended_and_without_one_signed_out`, `precedence_follows_c_r8` ("C-R2 over C-R1").
 2. In `condition`, move the `UpdateRequired` check below the `match session`. Expected: `update_required_outranks_every_other_state_and_holds_only_a_valid_session` ("signed out").
-3. Remove `i.token == TokenState::Restoring ||`. Expected: `checking_covers_the_startup_restore`.
+3. Remove `i.token == TokenState::Restoring ||`. Expected: `checking_covers_the_startup_restore` and `precedence_follows_c_r8` ("Checking over C-R5 and C-R6": left `NoPlan`).
 4. In `gate_open`, use `state` instead of `condition`. Expected: `the_gate_follows_the_account_not_the_key`.
 5. Remove `i.platform == Platform::Linux ||`. Expected: `the_gate_never_holds_on_linux`.
+6. In `derive`'s `state` match, replace `!i.key_in_memory` with `!i.key_in_keychain`. Expected: `a_browser_sign_in_with_its_keys_is_never_the_recovery_phrase` (left `(Locked, RecoveryPhrase)`, right `(Checking, Busy)`) and `locked_is_a_valid_session_without_the_key_in_memory`.
 
 - [ ] **Step 7: Commit**
 
@@ -2398,18 +2535,18 @@ git show --stat HEAD
 **Interfaces:**
 - Consumes: `doc::Stage` (Task 2).
 - Produces (`crate::account_view::policy`):
-  - constants `ACCOUNT_TTL` (60 s), `PRE_ACCOUNT_TTL` (300 s), `PLAN_POLL` (3 s), `TTL_MIN`/`TTL_MAX` (30/900 s), `POLL_MIN`/`POLL_MAX` (2/30 s), `FIRST_FAILURE_RETRY` (10 s), `OFFLINE_MIN_GAP` (10 s), `OFFLINE_PROBE` (30 s), `PLAN_POLL_WINDOW` (15 min), `RETRY_AFTER_CAP` (300 s), `WAKE_JUMP_SECS` (60), `LAUNCH_SETTLE` (5 s)
+  - constants `ACCOUNT_TTL` (60 s), `PRE_ACCOUNT_TTL` (300 s), `PLAN_POLL` (3 s), `TTL_MIN`/`TTL_MAX` (30/900 s), `POLL_MIN`/`POLL_MAX` (2/30 s), `FIRST_FAILURE_RETRY` (10 s), `OFFLINE_MIN_GAP` (10 s), `OFFLINE_PROBE` (30 s), `PLAN_POLL_WINDOW` (15 min), `RETRY_AFTER_CAP` (300 s), `LAUNCH_SETTLE` (5 s), `CHECKING_WATCHDOG` (15 s)
   - `fn ttl(server: Option<u64>, stage: Stage) -> Duration`, `fn poll(server: Option<u64>) -> Duration`
   - `enum Outcome { Document, Answered, RateLimited(Option<Duration>), Network }`
   - `struct Schedule` (Default) with `offline()`, `last_attempt()`, `record(outcome, now, ttl) -> bool` (Offline changed), `plan_opened(now)`, `plan_polling(now) -> bool`, `next_fetch_at(now, ttl, poll) -> Instant`, `focus_wants_fetch(now, poll) -> bool`
-  - `fn is_wake(previous_tick_wall_secs: i64, now_wall_secs: i64) -> bool`, `fn settle_deadline(probe_done: Instant) -> Instant`
+  - `fn settle_deadline(probe_done: Instant) -> Instant`, `fn checking_deadline(since: Instant) -> Instant` (no wake function: Spec issue 21)
 
 - [ ] **Step 1: Write `policy.rs` with its tests and `todo!()` bodies**
 
 ```rust
 //! Spec 2026-10-07 C-D4 and §10: when the onboarding document is fetched, and when Beebeeb counts
-//! as offline. The schedule and the clock live here and nowhere else; the clock itself is passed in
-//! (`now`, wall seconds), so every rule runs on a fake clock in the tests.
+//! as offline. The schedule lives here and nowhere else; the clock itself is passed in (`now`), so
+//! every rule runs on a fake clock in the tests.
 
 use std::time::{Duration, Instant};
 
@@ -2427,8 +2564,10 @@ pub const OFFLINE_MIN_GAP: Duration = Duration::from_secs(10);
 pub const OFFLINE_PROBE: Duration = Duration::from_secs(30);
 pub const PLAN_POLL_WINDOW: Duration = Duration::from_secs(15 * 60);
 pub const RETRY_AFTER_CAP: Duration = Duration::from_secs(300);
-pub const WAKE_JUMP_SECS: i64 = 60;
 pub const LAUNCH_SETTLE: Duration = Duration::from_secs(5);
+/// Checking ends at the latest this long after it began: the restore probe's 5 s cap plus margin.
+/// The driver then concludes "document unavailable" (plan review I5, lead ruling 2026-10-07).
+pub const CHECKING_WATCHDOG: Duration = Duration::from_secs(15);
 
 /// The server's `ttl_seconds`, bounded; absent or 0 takes the stage's built-in value.
 pub fn ttl(server: Option<u64>, stage: Stage) -> Duration {
@@ -2497,13 +2636,14 @@ impl Schedule {
     }
 }
 
-/// A wake (§10): the wall clock moved more than 60 s across one probe tick. No OS observer.
-pub fn is_wake(previous_tick_wall_secs: i64, now_wall_secs: i64) -> bool {
+/// C-W4: the macOS launch decision waits at most 5 s after the restore probe completes or times out.
+pub fn settle_deadline(probe_done: Instant) -> Instant {
     todo!("Task 6 step 3")
 }
 
-/// C-W4: the macOS launch decision waits at most 5 s after the restore probe completes or times out.
-pub fn settle_deadline(probe_done: Instant) -> Instant {
+/// When Checking gives up and the driver concludes "document unavailable", counted from the moment
+/// Checking began (a launch, or a session generation change).
+pub fn checking_deadline(since: Instant) -> Instant {
     todo!("Task 6 step 3")
 }
 
@@ -2678,17 +2818,15 @@ mod tests {
     }
 
     #[test]
-    fn a_wall_clock_jump_of_more_than_60s_across_a_tick_is_a_wake() {
-        assert!(!is_wake(1_000, 1_030));
-        assert!(!is_wake(1_000, 1_060));
-        assert!(is_wake(1_000, 1_061));
-        assert!(is_wake(1_000, 1_000 + 8 * 3600));
-    }
-
-    #[test]
     fn the_launch_settle_ends_5s_after_the_probe() {
         let t0 = Instant::now();
         assert_eq!(settle_deadline(t0), t0 + s(5));
+    }
+
+    #[test]
+    fn checking_gives_up_15s_after_it_began() {
+        let t0 = Instant::now();
+        assert_eq!(checking_deadline(t0), t0 + s(15), "the 5 s probe cap plus margin");
     }
 }
 ```
@@ -2788,12 +2926,12 @@ impl Schedule {
     }
 }
 
-pub fn is_wake(previous_tick_wall_secs: i64, now_wall_secs: i64) -> bool {
-    now_wall_secs - previous_tick_wall_secs > WAKE_JUMP_SECS
-}
-
 pub fn settle_deadline(probe_done: Instant) -> Instant {
     probe_done + LAUNCH_SETTLE
+}
+
+pub fn checking_deadline(since: Instant) -> Instant {
+    since + CHECKING_WATCHDOG
 }
 ```
 
@@ -2805,9 +2943,12 @@ Expected: `test result: ok. 15 passed; 0 failed`.
 
 - [ ] **Step 5: Mutation-check**
 
-1. Change `>= OFFLINE_MIN_GAP` to `>= Duration::ZERO`. Expected: `offline_needs_two_network_failures_at_least_10s_apart` ("not when the second came less than 10 s after the first"). Revert.
+1. Change `>= OFFLINE_MIN_GAP` to `>= Duration::ZERO`. Expected: `offline_needs_two_network_failures_at_least_10s_apart`, at the un-messaged `assertion failed: !schedule.record(Outcome::Network, t0 + s(4), s(60))` (the second failure already flips Offline, so the assert before the "not when the second came…" message fails first). Revert.
 2. Change `!self.offline && self.plan_poll_until…` to `self.plan_poll_until…`. Expected: `the_plan_poll_pauses_offline_and_resumes_within_its_15_minutes`. Revert.
 3. Remove `self.rate_limited_until = None;` from the `Network` arm. Expected: `a_network_failure_after_a_rate_limit_never_retries_at_once`. Revert.
+4. In `bounded`, replace `.clamp(min, max)` with `.max(min)`. Expected: `ttl_and_poll_take_the_built_in_when_absent_or_zero_and_are_clamped` at `ttl(Some(86_400), Stage::Account)` (left `86400s`, right `900s`). Revert.
+5. In `poll`, replace `PLAN_POLL` with `ACCOUNT_TTL`. Expected: the same test at `poll(None)` (left `60s`, right `3s`). Revert.
+6. In `checking_deadline`, replace `CHECKING_WATCHDOG` with `LAUNCH_SETTLE`. Expected: `checking_gives_up_15s_after_it_began` (left `t0 + 5s`). Revert.
 
 - [ ] **Step 6: Commit**
 
@@ -2819,6 +2960,7 @@ git show --stat HEAD
 ```
 
 ---
+
 ## Task 7: The cached account part in `state.db`, its trace and its purges (spec C-D5)
 
 **Lane R.** Touches spec A's R10 code: the account binding's classification of tables, the purges, and R8's trace list.
@@ -2921,7 +3063,7 @@ In `lib.rs`, in the R8 test module that defines `Fixture` (the one holding `a_po
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: the loop command with filter `onboarding_cache` (it matches the five new names). Expected: compile errors `no method named set_onboarding_cache` / `no field onboarding_cache`. Paste them; a compile error is this step's red.
+Run: the loop command with the six new names as the filter (`-- the_onboarding_cache_row_round_trips_and_a_second_write_replaces_it the_cache_row_is_never_account_data a_sign_out_purge_and_every_account_reset_delete_the_cache_row the_windows_sign_out_deletes_the_cache_row a_cached_onboarding_part_is_a_retained_trace a_cached_onboarding_part_is_counted_when_someone_signs_in`; the substring `onboarding_cache` matches only the first). Expected: compile errors `no method named set_onboarding_cache` / `no field onboarding_cache`. Paste them; a compile error is this step's red.
 
 - [ ] **Step 3: Implement in `state_db.rs`**
 
@@ -3062,8 +3204,8 @@ fn onboarding_cache_present(sources: &LocalSources) -> bool {
 
 - [ ] **Step 5: Run the tests to see them pass**
 
-Run with filter `onboarding_cache`, then with filter `state_db::tests::every_table_is_classified`, then the whole `reauth` and R8 modules (filters `reauth::` and the R8 module's name).
-Expected: the five new tests pass; `every_table_is_classified_for_the_account_binding` passes; every R8 test that passed at Task 0's baseline still passes (compare the counts with the baseline log).
+Run with the six names (`-- the_onboarding_cache_row_round_trips_and_a_second_write_replaces_it the_cache_row_is_never_account_data a_sign_out_purge_and_every_account_reset_delete_the_cache_row the_windows_sign_out_deletes_the_cache_row a_cached_onboarding_part_is_a_retained_trace a_cached_onboarding_part_is_counted_when_someone_signs_in`), then with filter `state_db::tests::every_table_is_classified`, then the whole `reauth` and R8 modules (filters `reauth::` and the R8 module's name).
+Expected: `test result: ok. 6 passed; 0 failed` for the six (on macOS and Linux; on Windows the R8 test is compiled out and the line says 5); `every_table_is_classified_for_the_account_binding` passes; the `reauth::` and R8 counts are Task 0's baseline counts plus 1 each.
 
 - [ ] **Step 6: Mutation-check**
 
@@ -3083,7 +3225,7 @@ git commit -m "desktop: keep one cached onboarding account part per account in s
 git show --stat HEAD
 ```
 
-Expected: `test result: ok. N passed; 0 failed` with N = Task 0's lib count + every test added since.
+Expected: `test result: ok. N passed; 0 failed` with N = `B_lib` + 72 (the running total in Global Constraints).
 
 ---
 
@@ -3433,9 +3575,12 @@ git show --stat HEAD
 ```
 
 ---
+
 ## Task 9: The account gate at the point of action (spec C-R10)
 
-**Lane R.** Changes spec A's engine-start gate and its Finder reconciler. Every engine start reads the gate under the engine slot; the reconciler's add reads it immediately before it acts; a closed gate is "held", never a failure; blocking never removes Finder.
+**Lane R.** Changes spec A's engine-start gate and its Finder reconciler. Every engine start reads the gate under the engine slot; the reconciler's add reads it immediately before it acts; both read it against the session generation that is current at that moment, and a generation the driver has not derived for is closed (Checking; plan review I1, lead ruling 2026-10-07). A closed gate is "held", never a failure; blocking never removes Finder.
+
+**Before you start:** read `$EVID/t0-record.md`. This task uses three of its facts: the session generation's read function (written `crate::session_generation()` below; use the recorded name), whether `SESSION_TRANSITION` is Windows-only, and the six `spawn_bound_engine` callers.
 
 **Files:**
 - Create: `src-tauri/src/account_view/gate.rs`
@@ -3449,36 +3594,48 @@ git show --stat HEAD
 **Interfaces:**
 - Consumes: spec A's `authorize_engine_start`, `start_engine_bound`, `spawn_bound_engine` and its six callers, `stop_engine_in_slot`, `finder_setup::{core, driver, macos_ports, error}`; the test fixtures `AuthorizeFixture::with_session`, `local_data_of`, `alice()`, `bob()`, `LocalDataPaths::for_test`, and the source helpers `finder_setup_command_tests::{body_between, production_source}`.
 - Produces:
-  - `crate::account_view::gate::{AccountGate, GateValue}`: `AccountGate::new(open)`, `Default` (open), `current() -> GateValue`, `set(open) -> Option<GateValue>` (Some when it changed; the epoch moves by one); `GateValue { open: bool, epoch: u64 }`, `GateValue::allows_add(self, started_under: Option<u64>) -> bool`
+  - `crate::account_view::gate::{AccountGate, GateValue}`: `Default` (unarmed: holds nothing), `arm(holds: bool)`, `current() -> GateValue`, `set(open, generation: u64) -> Option<GateValue>` (Some when the value or the generation changed; the epoch moves by one); `GateValue { open: bool, epoch: u64, generation: Option<u64>, always_open: bool }`, `GateValue::open_for(self, current_generation: u64) -> bool`, `GateValue::allows_add(self, started_under: Option<u64>, current_generation: u64) -> bool`
   - `AppState.account_gate: AccountGate`
   - `StartPermit::AccountBlocked`, `EngineStart::AccountBlocked`
   - `finder_setup::error::app_code::ACCOUNT_BLOCKED = 8`
   - `finder_setup::core::Trigger::{AccountHold, AccountReady}` (`as_str`: `account_hold`, `account_ready`)
   - `finder_setup::driver::Event::AccountHold { ack: oneshot::Sender<()> }`, `FinderSetupHandle::account_hold(&self, timeout: Duration) -> Result<(), String>`
-  - `lib.rs`: `async fn hold_for_account(state: &AppState)`
+  - `lib.rs`: `async fn hold_for_account(state: &AppState)` (`#[allow(dead_code)]` until Task 11 calls it)
 
 - [ ] **Step 1: The gate type, test first**
 
 `src-tauri/src/account_view/gate.rs`:
 
 ```rust
-//! Spec 2026-10-07 C-R10: the account gate, `{ open, epoch }`. The account-view driver writes it. Every engine start
-//! reads it under the engine slot (`authorize_engine_start`), and the Finder reconciler's add reads it immediately
-//! before it acts (`finder_setup::macos_ports`). Every change of `open` moves `epoch` on, so an add whose check began
-//! under another epoch does nothing. The gate only ever holds: nothing here removes Finder or stops an engine.
+//! Spec 2026-10-07 C-R10: the account gate, `{ open, epoch, generation }`. The account-view driver writes it for the
+//! session generation it derived. Every engine start reads it under the engine slot (`authorize_engine_start`), and the
+//! Finder reconciler's add reads it immediately before it acts (`finder_setup::macos_ports`). Both read it against the
+//! session generation that is current at that moment: a generation the driver has not derived for yet is closed
+//! (Checking), so the engine start a sign-in makes in the same command is held until the driver has derived for it.
+//! Every change moves `epoch` on, so an add whose check began under another epoch does nothing. The gate only ever
+//! holds: nothing here removes Finder or stops an engine.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateValue {
     pub open: bool,
     pub epoch: u64,
+    /// The session generation `open` was derived for; `None` until the driver first sets it.
+    pub generation: Option<u64>,
+    /// Unarmed: the gate holds nothing. Linux (C-R10), and every unit test that builds an `AppState`.
+    pub always_open: bool,
 }
 
 impl GateValue {
-    /// May an add whose check began under `started_under` act now? Only while open and only under the same epoch. A
-    /// check with no recorded epoch never adds (fail closed).
-    pub fn allows_add(self, started_under: Option<u64>) -> bool {
+    /// Open for the session generation that is current now. A generation the driver has not derived for is closed.
+    pub fn open_for(self, current_generation: u64) -> bool {
+        todo!("Task 9 step 2")
+    }
+
+    /// May an add whose check began under `started_under` act now? Only while open for the current generation, and only
+    /// under the epoch its check began under. A check with no recorded epoch never adds (fail closed).
+    pub fn allows_add(self, started_under: Option<u64>, current_generation: u64) -> bool {
         todo!("Task 9 step 2")
     }
 }
@@ -3487,26 +3644,33 @@ impl GateValue {
 #[derive(Debug, Clone)]
 pub struct AccountGate(Arc<Mutex<GateValue>>);
 
-/// Open: before anything is derived, and in every unit test that builds an `AppState`, nothing is held. `setup()`
-/// sets the launch value before the startup restore can start an engine (plan Task 11).
+/// Unarmed, so every unit test that builds an `AppState` holds nothing. `setup()` arms it before the startup restore can
+/// start an engine (plan Task 11).
 impl Default for AccountGate {
     fn default() -> Self {
-        Self::new(true)
+        Self(Arc::new(Mutex::new(GateValue { open: false, epoch: 0, generation: None, always_open: true })))
     }
 }
 
 impl AccountGate {
-    pub fn new(open: bool) -> Self {
-        Self(Arc::new(Mutex::new(GateValue { open, epoch: 0 })))
+    /// Arm the gate. `holds` is `false` on Linux, whose gate never holds (C-R10). Armed, the gate is closed for every
+    /// generation the driver has not set it for.
+    pub fn arm(&self, holds: bool) {
+        self.lock().always_open = !holds;
     }
 
     pub fn current(&self) -> GateValue {
-        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self.lock()
     }
 
-    /// The new value when `open` changed, `None` when it already was `open` (nothing moves).
-    pub fn set(&self, open: bool) -> Option<GateValue> {
+    /// The driver's value for `generation`. The new value when `open` or the generation changed (the epoch moves on by
+    /// one); `None` when both already are so (nothing moves).
+    pub fn set(&self, open: bool, generation: u64) -> Option<GateValue> {
         todo!("Task 9 step 2")
+    }
+
+    fn lock(&self) -> MutexGuard<'_, GateValue> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -3514,65 +3678,118 @@ impl AccountGate {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_new_gate_is_at_epoch_zero_and_a_repeat_changes_nothing() {
+    fn armed() -> AccountGate {
         let gate = AccountGate::default();
-        assert_eq!(gate.current(), GateValue { open: true, epoch: 0 });
-        assert_eq!(gate.set(true), None);
-        assert_eq!(gate.current().epoch, 0);
+        gate.arm(true);
+        gate
     }
 
     #[test]
-    fn every_change_moves_the_epoch_on_by_one() {
-        let gate = AccountGate::new(true);
-        assert_eq!(gate.set(false), Some(GateValue { open: false, epoch: 1 }));
-        assert_eq!(gate.set(false), None);
-        assert_eq!(gate.set(true), Some(GateValue { open: true, epoch: 2 }));
+    fn a_repeat_of_the_same_value_changes_nothing() {
+        let gate = armed();
+        assert_eq!(gate.current(), GateValue { open: false, epoch: 0, generation: None, always_open: false });
+        assert_eq!(gate.set(true, 3), Some(GateValue { open: true, epoch: 1, generation: Some(3), always_open: false }));
+        assert_eq!(gate.set(true, 3), None);
+        assert_eq!(gate.current().epoch, 1);
     }
 
     #[test]
-    fn an_add_needs_the_gate_open_and_the_epoch_its_check_began_under() {
-        assert!(GateValue { open: true, epoch: 4 }.allows_add(Some(4)));
-        assert!(!GateValue { open: false, epoch: 4 }.allows_add(Some(4)));
-        assert!(!GateValue { open: true, epoch: 5 }.allows_add(Some(4)), "closed and reopened since the check began");
-        assert!(!GateValue { open: true, epoch: 4 }.allows_add(None), "no recorded epoch: fail closed");
+    fn every_change_of_value_or_generation_moves_the_epoch_on_by_one() {
+        let gate = armed();
+        gate.set(true, 1);
+        assert_eq!(gate.set(false, 1).map(|v| (v.open, v.epoch)), Some((false, 2)));
+        assert_eq!(gate.set(false, 1), None);
+        assert_eq!(gate.set(true, 1).map(|v| (v.open, v.epoch)), Some((true, 3)));
+        assert_eq!(gate.set(true, 2).map(|v| (v.generation, v.epoch)), Some((Some(2), 4)), "a new generation alone moves it");
+    }
+
+    /// Plan review I1: the engine start a sign-in makes in the same command finds the gate closed.
+    #[test]
+    fn a_generation_the_driver_has_not_derived_is_closed() {
+        let gate = armed();
+        assert!(!gate.current().open_for(1), "nothing derived yet");
+        gate.set(true, 1);
+        assert!(gate.current().open_for(1));
+        assert!(!gate.current().open_for(2), "a sign-in moved the generation on; the driver has not derived for it");
+        gate.set(false, 2);
+        assert!(!gate.current().open_for(2));
+    }
+
+    #[test]
+    fn an_unarmed_gate_holds_nothing() {
+        let gate = AccountGate::default();
+        assert!(gate.current().open_for(7));
+        gate.set(false, 7);
+        assert!(gate.current().open_for(7), "unarmed: the derived value is kept but never holds");
+        let linux = AccountGate::default();
+        linux.arm(false);
+        linux.set(false, 1);
+        assert!(linux.current().open_for(1), "Linux arms with holds = false");
+    }
+
+    #[test]
+    fn an_add_needs_the_gate_open_for_this_generation_and_the_epoch_its_check_began_under() {
+        let open = GateValue { open: true, epoch: 4, generation: Some(2), always_open: false };
+        assert!(open.allows_add(Some(4), 2));
+        assert!(!GateValue { open: false, ..open }.allows_add(Some(4), 2));
+        assert!(!GateValue { epoch: 5, ..open }.allows_add(Some(4), 2), "closed and reopened since the check began");
+        assert!(!open.allows_add(None, 2), "no recorded epoch: fail closed");
+        assert!(!open.allows_add(Some(4), 3), "the generation moved on since the driver derived");
     }
 
     #[test]
     fn clones_share_one_gate() {
-        let gate = AccountGate::default();
+        let gate = armed();
         let driver_side = gate.clone();
-        driver_side.set(false);
-        assert!(!gate.current().open);
+        driver_side.set(true, 1);
+        assert!(gate.current().open_for(1));
     }
 }
 ```
 
-Add `pub mod gate;` to `account_view/mod.rs`. Run with filter `account_view::gate`. Expected: `test result: FAILED. 0 passed; 4 failed` (every test reaches a `todo!()`).
+Add `pub mod gate;` to `account_view/mod.rs`. Run with filter `account_view::gate`. Expected: `test result: FAILED. 0 passed; 6 failed` (every test reaches a `todo!()`).
 
 - [ ] **Step 2: Implement the gate**
 
 ```rust
-    pub fn allows_add(self, started_under: Option<u64>) -> bool {
-        self.open && started_under == Some(self.epoch)
+    pub fn open_for(self, current_generation: u64) -> bool {
+        self.always_open || (self.open && self.generation == Some(current_generation))
+    }
+
+    pub fn allows_add(self, started_under: Option<u64>, current_generation: u64) -> bool {
+        self.open_for(current_generation) && started_under == Some(self.epoch)
     }
 ```
 
 ```rust
-    pub fn set(&self, open: bool) -> Option<GateValue> {
-        let mut value = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if value.open == open {
+    pub fn set(&self, open: bool, generation: u64) -> Option<GateValue> {
+        let mut value = self.lock();
+        if value.open == open && value.generation == Some(generation) {
             return None;
         }
         value.open = open;
+        value.generation = Some(generation);
         value.epoch += 1;
         Some(*value)
     }
 ```
 
-Run with filter `account_view::gate`. Expected: `test result: ok. 4 passed; 0 failed`.
+Run with filter `account_view::gate`. Expected: `test result: ok. 6 passed; 0 failed`.
+
+- [ ] **Step 2b: Mutation-check the gate**
+
+1. In `open_for`, drop `&& self.generation == Some(current_generation)`. Expected: `a_generation_the_driver_has_not_derived_is_closed` ("a sign-in moved the generation on…") and `an_add_needs_…` ("the generation moved on since the driver derived"). Revert.
+2. In `set`, drop `&& value.generation == Some(generation)` from the early return. Expected: `every_change_of_value_or_generation_moves_the_epoch_on_by_one` ("a new generation alone moves it"). Revert.
+3. In `set`, delete `value.epoch += 1;`. Expected: `a_repeat_of_the_same_value_changes_nothing` (left `epoch: 0`). Revert.
+4. In `allows_add`, drop `&& started_under == Some(self.epoch)`. Expected: `an_add_needs_…` ("closed and reopened since the check began"). Revert.
+5. In `arm`, write `always_open = holds`. Expected: `an_unarmed_gate_holds_nothing` ("Linux arms with holds = false") and `a_generation_the_driver_has_not_derived_is_closed` ("nothing derived yet"). Revert.
+6. Replace `#[derive(Debug, Clone)]` on `AccountGate` with `#[derive(Debug)]` and a manual `impl Clone for AccountGate { fn clone(&self) -> Self { Self(Arc::new(Mutex::new(self.current()))) } }` (a copy, not the same gate). Expected: `clones_share_one_gate`. Revert.
+
+Paste each failure and the green rerun.
 
 - [ ] **Step 3: Write the failing reconciler tests**
+
+First run the loop command with filter `finder_setup::` on the unchanged tree and note its `test result:` count (the before-count Step 4 compares with).
 
 In `finder_setup/core.rs`'s `mod tests` (the module can read the private `held` field):
 
@@ -3806,13 +4023,15 @@ and on `FinderSetupHandle`, after `lock`:
 
 If a test or helper matches `Event` exhaustively, add the arm the compiler names. If a lifecycle-log test pins the list of trigger names, add `account_hold` and `account_ready` to it.
 
-Run with filter `finder_setup::`. Expected: every `finder_setup` test passes, the six new ones included. Paste the count.
+Run with filter `finder_setup::`. Expected: `test result: ok. N passed; 0 failed` with N = the before-count from Step 3 + 6. Paste the line.
 
 - [ ] **Step 5: Mutation-check the reconciler**
 
 1. Delete the `if account_blocked(&result) { … }` block. Expected: `an_account_blocked_engine_start_ends_the_check_with_no_failure_and_holds` and `an_account_blocked_add_…` fail (a `Failed` transition or a persisted failure). Revert.
 2. Route `Trigger::AccountHold` to the `Trigger::SignOut` arm. Expected: `blocking_never_removes_finder` (`RemoveDomain` ran). Revert.
 3. Drop `| Trigger::AccountReady` from the clearing arm (send it to the `TryAgain` arm). Expected: `account_ready_clears_the_hold_and_requests_a_check`. Revert.
+4. Send `Trigger::AccountHold` to the `TryAgain` arm instead of `hold`. Expected: `a_check_in_flight_when_the_account_turns_blocking_adds_nothing` ("no AddDomain after the hold"). Revert.
+5. Swap the two `as_str` names. Expected: `the_two_account_triggers_have_their_log_names`. Revert.
 
 - [ ] **Step 6: The add's guard in `macos_ports.rs`**
 
@@ -3841,7 +4060,7 @@ and directly above the existing `Op::AddDomain =>` arm:
 ```rust
                 // Spec 2026-10-07 C-R10: the account gate at the point of action. Closed, or changed since this check
                 // observed: add nothing; the core holds with no failure reason.
-                Op::AddDomain if !app.state::<AppState>().account_gate.current().allows_add(check_epoch) => {
+                Op::AddDomain if !app.state::<AppState>().account_gate.current().allows_add(check_epoch, crate::session_generation()) => {
                     OpResult::Added(Err(FpError::app(app_code::ACCOUNT_BLOCKED, "the account is not ready for Finder")))
                 }
 ```
@@ -3849,7 +4068,8 @@ and directly above the existing `Op::AddDomain =>` arm:
 Add to `macos_ports.rs`'s tests:
 
 ```rust
-    /// Spec 2026-10-07 C-R10: the add reads the gate, with the epoch its check observed under, before the bridge call.
+    /// Spec 2026-10-07 C-R10: the add reads the gate, with the epoch its check observed under and the session generation
+    /// current at that moment, before the bridge call.
     #[test]
     fn the_add_reads_the_account_gate_under_the_epoch_of_its_observe() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/finder_setup/macos_ports.rs")).unwrap();
@@ -3858,7 +4078,7 @@ Add to `macos_ports.rs`'s tests:
         let guard = run.find("Op::AddDomain if !").expect("a guarded add arm");
         let add = run.find("Op::AddDomain =>").expect("the add arm");
         assert!(capture < guard && guard < add, "capture, then the guard, then the real add");
-        assert!(run[guard..add].contains("allows_add(check_epoch)"), "{}", &run[guard..add]);
+        assert!(run[guard..add].contains("allows_add(check_epoch,"), "{}", &run[guard..add]);
         assert!(!run[guard..add].contains("macos_file_provider::add_domain"), "the guard never calls the bridge");
     }
 ```
@@ -3875,7 +4095,8 @@ In the R10 test module that holds `another_accounts_engine_starts_only_after_the
         rt.block_on(async {
             let local = local_data_of(Some(alice()));
             let fx = AuthorizeFixture::with_session(&bob());
-            assert!(fx.state.account_gate.set(false).is_some());
+            fx.state.account_gate.arm(true);
+            assert!(fx.state.account_gate.set(false, crate::session_generation()).is_some());
             let mut slot = fx.acct.engine.lock().await;
             let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
             let called = std::cell::Cell::new(false);
@@ -3887,11 +4108,55 @@ In the R10 test module that holds `another_accounts_engine_starts_only_after_the
             assert!(!called.get() && slot.is_none(), "no engine was created");
             assert_eq!(local.data.db.owner().unwrap(), Some(alice()), "nothing was bound or reset");
             assert_eq!(local.data.db.list_due_operations(i64::MAX).unwrap().len(), 1, "the queue is untouched");
-            fx.state.account_gate.set(true);
-            let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+            let result = start_open(&fx, &mut slot, &paths);
+            assert_ne!(result, Ok(EngineStart::AccountBlocked), "the open gate lets the start go on to the binding");
+        });
+    }
+
+    /// Opens the gate for the current generation and starts. Other lib tests may move a process-wide generation between
+    /// the two reads; a start whose generation moved underneath it is repeated (at most three times).
+    fn start_open(
+        fx: &AuthorizeFixture,
+        slot: &mut tokio::sync::MutexGuard<'_, Option<crate::runner::EngineRunner>>,
+        paths: &LocalDataPaths,
+    ) -> Result<EngineStart, String> {
+        let mut result = Err("not run".to_string());
+        for _ in 0..3 {
+            let now = crate::session_generation();
+            fx.state.account_gate.set(true, now);
+            result = start_engine_bound(&fx.state, &fx.acct, slot, paths, |_root, _token, _key| {
                 crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
             });
-            assert_ne!(result, Ok(EngineStart::AccountBlocked), "the open gate lets the start go on to the binding");
+            if crate::session_generation() == now {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Plan review I1 (lead ruling 2026-10-07): a first sign-in of an account that turns out to be blocking starts no
+    /// engine. A sign-in moves the session generation on before its own engine start (Task 0 recorded the order); the
+    /// driver last set the gate for the signed-out generation before it, open (Signed out holds nothing). The start the
+    /// sign-in makes in the same command must find the gate closed; the driver's Ready starts the engine later.
+    #[test]
+    fn a_first_sign_in_with_a_blocking_account_starts_no_engine() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let local = local_data_of(None);
+            let fx = AuthorizeFixture::with_session(&bob());
+            fx.state.account_gate.arm(true);
+            let signed_out_generation = crate::session_generation().wrapping_sub(1);
+            assert!(fx.state.account_gate.set(true, signed_out_generation).is_some(), "Signed out: open, for the old generation");
+            let mut slot = fx.acct.engine.lock().await;
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let called = std::cell::Cell::new(false);
+            let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                called.set(true);
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
+            assert_eq!(result, Ok(EngineStart::AccountBlocked), "the driver has not derived for this generation: Checking");
+            assert!(!called.get() && slot.is_none(), "no engine was created");
+            assert_eq!(local.data.db.owner().unwrap(), None, "nothing was bound");
         });
     }
 ```
@@ -3917,12 +4182,12 @@ In `finder_setup_command_tests` (it has `production_source` and `body_between`):
         }
         let check = body_between(&production, "async fn start_check_engine(", "\n}\n");
         let reuse = check.find("if let Some(existing) = engine_slot.as_ref()").expect("the reused-engine branch");
-        let gate = check[reuse..].find("account_gate.current().open").expect("the reused engine reads the gate");
+        let gate = check[reuse..].find("account_gate.current().open_for(").expect("the reused engine reads the gate");
         let handle = check[reuse..].find("existing.ipc_bind_error_handle()").expect("the reuse");
         assert!(gate < handle, "the gate is read before the running engine is reused");
         assert!(check.contains("app_code::ACCOUNT_BLOCKED"));
         let authorize = body_between(&production, "fn authorize_engine_start(", "\n}\n");
-        let gate = authorize.find("account_gate.current().open").expect("authorize reads the gate");
+        let gate = authorize.find("account_gate.current().open_for(").expect("authorize reads the gate for the current generation");
         let bind = authorize.find("bind_local_data_to_session(").expect("the binding");
         assert!(gate < bind, "a closed gate returns before anything is bound");
     }
@@ -3942,7 +4207,7 @@ In `finder_setup_command_tests` (it has `production_source` and `body_between`):
     }
 ```
 
-Run with filter `account_gate` and then `every_spawn_bound_engine_caller_treats_account_blocked_as_held`, `closing_the_account_gate_holds_then_stops_and_never_removes`. Expected: compile errors (`no field account_gate`, `no variant AccountBlocked`), then — once those compile — assertion failures. Paste them.
+Run with the filter `-- a_closed_account_gate_starts_nothing_and_binds_nothing a_first_sign_in_with_a_blocking_account_starts_no_engine every_spawn_bound_engine_caller_treats_account_blocked_as_held closing_the_account_gate_holds_then_stops_and_never_removes`. Expected: compile errors (`no field account_gate`, `no variant AccountBlocked`), then — once those compile — assertion failures. Paste them.
 
 - [ ] **Step 8: Implement the engine-start side in `lib.rs`**
 
@@ -3969,9 +4234,10 @@ and in `impl Default for AppState`: `account_gate: account_view::gate::AccountGa
 `authorize_engine_start`, directly after the `let (keys, identity) = match keys_for_engine_start(acct) { … };` statement:
 
 ```rust
-    // Spec 2026-10-07 C-R10: the account gate, read under the engine slot. A locked vault answered `NoSession` above;
-    // a closed gate returns before anything is bound, adopted or reset.
-    if !state.account_gate.current().open {
+    // Spec 2026-10-07 C-R10: the account gate, read under the engine slot for the session generation current now. A
+    // locked vault answered `NoSession` above; a closed gate, or a generation the account view has not derived for yet,
+    // returns before anything is bound, adopted or reset.
+    if !state.account_gate.current().open_for(crate::session_generation()) {
         return Ok(StartPermit::AccountBlocked);
     }
 ```
@@ -4026,8 +4292,8 @@ The six callers:
 
 ```rust
         if let Some(existing) = engine_slot.as_ref() {
-            // Spec 2026-10-07 C-R10: a running engine is reused only while the account gate is open.
-            if !state.account_gate.current().open {
+            // Spec 2026-10-07 C-R10: a running engine is reused only while the account gate is open for this generation.
+            if !state.account_gate.current().open_for(crate::session_generation()) {
                 return Err(FpError::app(app_code::ACCOUNT_BLOCKED, ACCOUNT_HELD_FOR_FINDER));
             }
             (false, existing.ipc_bind_error_handle())
@@ -4056,12 +4322,16 @@ Then the closing helper, after `stop_engine_in_slot`:
 /// Spec 2026-10-07 C-R10: the account gate just closed. The Finder reconciler is held first (its acknowledgement means
 /// no check is in flight and none starts), then a running engine is stopped through the one stop helper, which keeps
 /// its unconfirmed-stop semantics. Finder is never removed: the gate only holds adds.
+// The account view calls this from the app's ports (plan Task 11, which removes this allow).
+#[allow(dead_code)]
 async fn hold_for_account(state: &AppState) {
     #[cfg(target_os = "macos")]
-    if let Some(handle) = state.finder_setup.get()
-        && let Err(error) = handle.account_hold(ACCOUNT_HOLD_ACK_LIMIT).await
     {
-        tracing::warn!(%error, "account gate: the Finder reconciler did not acknowledge the hold");
+        if let Some(handle) = state.finder_setup.get()
+            && let Err(error) = handle.account_hold(ACCOUNT_HOLD_ACK_LIMIT).await
+        {
+            tracing::warn!(%error, "account gate: the Finder reconciler did not acknowledge the hold");
+        }
     }
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
@@ -4081,19 +4351,20 @@ async fn hold_for_account(state: &AppState) {
 const ACCOUNT_HOLD_ACK_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 ```
 
-If Task 0 recorded that `SESSION_TRANSITION` is no longer Windows-only (spec A Task 12 may generalize it), drop the `#[cfg(target_os = "windows")]` on the `_transition` line so the stop is serialized with sign-in and sign-out on every platform.
+Per `t0-record.md`: if `SESSION_TRANSITION` is on every platform, drop the `#[cfg(target_os = "windows")]` on the `_transition` line so the stop is serialized with sign-in and sign-out everywhere; if it is Windows-only, keep it as shown. (The `#[cfg]` on the macOS hold wraps a block, not the `if let` itself, so the attribute sits on a statement every edition accepts.)
 
 - [ ] **Step 9: Run the tests to see them pass**
 
-Run with filters `account_gate`, `every_spawn_bound_engine_caller`, `closing_the_account_gate`, then the whole lib under the scratch-HOME recipe.
-Expected: the new tests pass; `every_engine_start_is_bound_first` (spec A) still passes with six callers; every count at least the baseline.
+Run with the four names from Step 7, then the whole lib under the scratch-HOME recipe (Global Constraints).
+Expected: `test result: ok. 4 passed; 0 failed` for the four; `every_engine_start_is_bound_first` (spec A) still passes with six callers; on macOS the lib's `test result:` is `B_lib` + 100 (the running total in Global Constraints). Spec A tests that build an `AppState` with `Default` keep passing because the default gate is unarmed.
 
 - [ ] **Step 10: Mutation-check**
 
 1. Move the gate check in `authorize_engine_start` below `bind_local_data_to_session`. Expected: `a_closed_account_gate_starts_nothing_and_binds_nothing` (the owner or the queue changed) and the source test. Revert.
 2. Delete the reused-engine gate check. Expected: `every_spawn_bound_engine_caller_treats_account_blocked_as_held`. Revert.
 3. In `hold_for_account`, put the stop before the hold. Expected: `closing_the_account_gate_holds_then_stops_and_never_removes`. Revert.
-4. In `macos_ports.rs`, replace `allows_add(check_epoch)` with `open`. Expected: `the_add_reads_the_account_gate_under_the_epoch_of_its_observe`. Revert.
+4. In `macos_ports.rs`, replace `allows_add(check_epoch, crate::session_generation())` with `open`. Expected: `the_add_reads_the_account_gate_under_the_epoch_of_its_observe`. Revert.
+5. In `authorize_engine_start`, replace `.open_for(crate::session_generation())` with `.open`. Expected: `a_first_sign_in_with_a_blocking_account_starts_no_engine` (left `Ok(Started)` or another non-blocked value) and `every_spawn_bound_engine_caller_treats_account_blocked_as_held` ("authorize reads the gate for the current generation"). Revert.
 
 - [ ] **Step 11: Commit**
 
@@ -4105,6 +4376,7 @@ git show --stat HEAD
 ```
 
 ---
+
 ## Task 10: The driver — one task that fetches, binds, caches, derives and acts (`account_view::driver`)
 
 **Lane R.** Async, generic over `Ports` and `Clock`; the tests run the real loop with fake ports on a manual clock. Also adds the three lifecycle events (§10).
@@ -4123,15 +4395,16 @@ git show --stat HEAD
   - `enum Event { Launch { restoring: bool }, RestoreFinished, SessionChanged, WindowFocused, PlanOpened, Retry }`
   - `enum HeldReason { Checking, AccountBlocking, UpdateRequired }`, `enum DocumentOutcome { UnavailableHttp, Unreadable, UnknownSchema, BlockingVerifyEmail, BlockingUnknownStep }` (both with `as_str`)
   - `enum AccountLog { State { from, to, offline }, EngineHeld(HeldReason), Document(DocumentOutcome) }` with `lifecycle_event(self) -> LifecycleEvent` and `line(self) -> String`
-  - `trait Ports` (below), `struct AccountViewHandle` with `send(Event)`, `state() -> AccountView`, `clear_for_sign_out()`, `settled(deadline: tokio::time::Instant) -> AccountView`, `for_test(view)`
-  - `fn start<P: Ports, C: Clock>(ports, clock, gate: AccountGate, initial: AccountView) -> (AccountViewHandle, impl Future<Output = ()> + Send)`, `fn spawn(...) -> AccountViewHandle` (on Tauri's runtime)
+  - `trait Ports` (below), `trait Publisher: Send + Sync + 'static { fn publish(&self, view: &AccountView); }` (the event and the menu-bar icon: Task 11's `AppPublisher`), `struct AccountViewHandle` with `send(Event)`, `state() -> AccountView`, `clear_for_sign_out()`, `settled(deadline: tokio::time::Instant) -> AccountView`, `for_test(view)`
+  - `fn start<P: Ports, C: Clock>(ports, clock, gate: AccountGate, publisher: Arc<dyn Publisher>, initial: AccountView) -> (AccountViewHandle, impl Future<Output = ()> + Send)` (publishes `initial` before it returns), `fn spawn(...) -> AccountViewHandle` (same parameters, on Tauri's runtime)
+  - **Every view change goes through one publish** (plan review C1, lead ruling 2026-10-07): the driver's derived views and the sign-out/switch clear alike. It compares with the last *published* view, sets the watch channel, then calls the `Publisher`; nothing else writes the watch channel.
   - `lifecycle_log::LifecycleEvent::{AccountState { from: &'static str, to: &'static str, offline: bool }, EngineHeld { reason: &'static str }, OnboardingDocument { outcome: &'static str }}`
 
 ```rust
 pub trait Ports: Send + 'static {
     fn platform(&self) -> Platform;
     fn facts(&self) -> Facts;
-    /// Only the session generation (cheap; read while publishing).
+    /// Only the session generation (cheap; read under the publish lock).
     fn generation(&self) -> u64;
     /// `bearer`: send the session's token (signed in) or nothing (signed out).
     fn fetch(&mut self, bearer: bool) -> impl Future<Output = FetchOutcome> + Send;
@@ -4140,7 +4413,6 @@ pub trait Ports: Send + 'static {
     fn delete_cache(&mut self);
     /// Spec A's `AuthHealth::note_result` for a signed-in fetch: `true` for a 401, `false` for a usable document.
     fn note_auth(&mut self, unauthorized: bool);
-    fn publish(&mut self, view: &AccountView);
     fn log(&mut self, entry: AccountLog);
     /// The gate closed: hold the reconciler, then stop a running engine (`hold_for_account`).
     fn gate_closed(&mut self) -> impl Future<Output = ()> + Send;
@@ -4197,13 +4469,15 @@ Test, in `lifecycle_log.rs`'s tests:
 ```rust
 //! Spec 2026-10-07 §5 and §13 (`account_view::driver`): the one task. It fetches the onboarding document on the
 //! schedule (`policy`), drops every result fetched for an earlier session (C-D5), keeps one cached account part per
-//! account, derives the `AccountView` (`derive`), publishes it, and acts on the account gate: when it closes, the
+//! account, derives the `AccountView` (`derive`), publishes it through the one publish path, and acts on the account
+//! gate, which it sets for the session generation it derived: when it closes, the
 //! Finder reconciler is held and a running engine stops; every transition into Ready fires the account trigger
 //! (C-R12). Generic over `Ports` and `Clock`, so the tests run the whole loop on a manual clock. The document body is
 //! never logged (C-D6): only the closed vocabulary of `AccountLog` is.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::sync::{mpsc, watch};
 
@@ -4328,7 +4602,7 @@ impl AccountLog {
 pub trait Ports: Send + 'static {
     fn platform(&self) -> Platform;
     fn facts(&self) -> Facts;
-    /// Only the session generation (cheap; read while publishing).
+    /// Only the session generation (cheap; read under the publish lock).
     fn generation(&self) -> u64;
     /// `bearer`: send the session's token (signed in) or nothing (signed out).
     fn fetch(&mut self, bearer: bool) -> impl Future<Output = FetchOutcome> + Send;
@@ -4337,7 +4611,6 @@ pub trait Ports: Send + 'static {
     fn delete_cache(&mut self);
     /// Spec A's `AuthHealth::note_result` for a signed-in fetch: `true` for a 401, `false` for a usable document.
     fn note_auth(&mut self, unauthorized: bool);
-    fn publish(&mut self, view: &AccountView);
     fn log(&mut self, entry: AccountLog);
     /// The gate closed: hold the reconciler, then stop a running engine (`hold_for_account`).
     fn gate_closed(&mut self) -> impl Future<Output = ()> + Send;
@@ -4345,11 +4618,45 @@ pub trait Ports: Send + 'static {
     fn account_ready(&mut self) -> impl Future<Output = ()> + Send;
 }
 
+/// Where a published view goes besides the watch channel: the `account-view-changed` event and the menu-bar icon
+/// (Task 11's `AppPublisher`). It is called under the publish lock, so it must not block (post to the main thread,
+/// never wait for it).
+pub trait Publisher: Send + Sync + 'static {
+    fn publish(&self, view: &AccountView);
+}
+
+/// The one way a view becomes visible (plan review C1). It compares with the last view it published, never with the
+/// watch channel, so a clear followed by the driver's own Signed out publishes exactly once.
+struct Published {
+    view: watch::Sender<AccountView>,
+    last: Mutex<Option<AccountView>>,
+    publisher: Arc<dyn Publisher>,
+}
+
+impl Published {
+    fn new(initial: AccountView, publisher: Arc<dyn Publisher>) -> Arc<Self> {
+        Arc::new(Self { view: watch::channel(initial).0, last: Mutex::new(None), publisher })
+    }
+
+    /// Publish `view` unless `still_current()` says its session has ended or it equals the last published view.
+    /// `true` when it published.
+    fn publish(&self, view: AccountView, still_current: impl FnOnce() -> bool) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !still_current() || last.as_ref() == Some(&view) {
+            return false;
+        }
+        self.view.send_replace(view.clone());
+        self.publisher.publish(&view);
+        *last = Some(view);
+        true
+    }
+}
+
 /// The handle every command, window and wiring point uses. Cloning it shares the one task.
 #[derive(Clone)]
 pub struct AccountViewHandle {
     tx: mpsc::UnboundedSender<Event>,
-    view: Arc<watch::Sender<AccountView>>,
+    published: Arc<Published>,
 }
 
 impl AccountViewHandle {
@@ -4360,19 +4667,21 @@ impl AccountViewHandle {
     }
 
     pub fn state(&self) -> AccountView {
-        self.view.borrow().clone()
+        self.published.view.borrow().clone()
     }
 
     /// Called inside a sign-out by choice or an account switch, after the session generation moved on (C-D5): the old
-    /// account's document, notice and links are gone before the transition returns. The task re-derives right after.
+    /// account's document, notice and links are gone before the transition returns, and the cleared view is published
+    /// like any other (windows re-render, the menu-bar icon changes). The task re-derives right after.
     pub fn clear_for_sign_out(&self) {
-        self.view.send_modify(|view| *view = AccountView::signed_out(view.offline));
+        let offline = self.state().offline;
+        self.published.publish(AccountView::signed_out(offline), || true);
         self.send(Event::SessionChanged);
     }
 
     /// C-W4: the view once it has left Checking, or at `deadline`, whichever comes first.
     pub async fn settled(&self, deadline: tokio::time::Instant) -> AccountView {
-        let mut changes = self.view.subscribe();
+        let mut changes = self.published.view.subscribe();
         let left_checking = changes.wait_for(|view| view.state != AccountState::Checking);
         match tokio::time::timeout_at(deadline, left_checking).await {
             Ok(Ok(view)) => view.clone(),
@@ -4384,16 +4693,26 @@ impl AccountViewHandle {
     #[cfg(test)]
     pub fn for_test(view: AccountView) -> (Self, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx, view: Arc::new(watch::channel(view).0) }, rx)
+        (Self { tx, published: Published::new(view, Arc::new(NoPublisher)) }, rx)
     }
+}
+
+#[cfg(test)]
+struct NoPublisher;
+
+#[cfg(test)]
+impl Publisher for NoPublisher {
+    fn publish(&self, _view: &AccountView) {}
 }
 
 struct Driver {
     gate: AccountGate,
-    view: Arc<watch::Sender<AccountView>>,
+    published: Arc<Published>,
     schedule: Schedule,
     launched: bool,
     restoring: bool,
+    /// Plan review I5: Checking ends at the latest here (a launch or a new generation set it; `None` once it fired).
+    checking_until: Option<Instant>,
     generation: Option<u64>,
     fresh: Option<Doc>,
     first_fetch: FirstFetch,
@@ -4407,23 +4726,26 @@ struct Driver {
     last_held: Option<HeldReason>,
     fetch_now: bool,
     token_stored: bool,
-    last_tick_wall: Option<i64>,
 }
 
 pub fn start<P: Ports, C: Clock>(
     ports: P,
     clock: C,
     gate: AccountGate,
+    publisher: Arc<dyn Publisher>,
     initial: AccountView,
 ) -> (AccountViewHandle, impl Future<Output = ()> + Send) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let view = Arc::new(watch::channel(initial).0);
+    let published = Published::new(initial.clone(), publisher);
+    // The launch view goes out through the same path as every later one (the menu-bar icon included).
+    published.publish(initial, || true);
     let driver = Driver {
         gate,
-        view: view.clone(),
+        published: published.clone(),
         schedule: Schedule::default(),
         launched: false,
         restoring: false,
+        checking_until: None,
         generation: None,
         fresh: None,
         first_fetch: FirstFetch::Pending,
@@ -4437,14 +4759,19 @@ pub fn start<P: Ports, C: Clock>(
         last_held: None,
         fetch_now: false,
         token_stored: false,
-        last_tick_wall: None,
     };
-    (AccountViewHandle { tx, view }, run(driver, ports, clock, rx))
+    (AccountViewHandle { tx, published }, run(driver, ports, clock, rx))
 }
 
 /// `start`, on Tauri's runtime.
-pub fn spawn<P: Ports, C: Clock>(ports: P, clock: C, gate: AccountGate, initial: AccountView) -> AccountViewHandle {
-    let (handle, task) = start(ports, clock, gate, initial);
+pub fn spawn<P: Ports, C: Clock>(
+    ports: P,
+    clock: C,
+    gate: AccountGate,
+    publisher: Arc<dyn Publisher>,
+    initial: AccountView,
+) -> AccountViewHandle {
+    let (handle, task) = start(ports, clock, gate, publisher, initial);
     tauri::async_runtime::spawn(task);
     handle
 }
@@ -4463,12 +4790,23 @@ async fn run<P: Ports, C: Clock>(mut d: Driver, mut ports: P, clock: C, mut rx: 
             }
             continue;
         }
-        d.refresh(&mut ports).await;
+        d.watchdog(clock.now());
+        d.refresh(&mut ports, clock.now()).await;
         if d.restoring {
-            // No fetch until the restore has said whether the stored token still works.
-            match rx.recv().await {
-                Some(event) => d.event(event, &clock),
-                None => return,
+            // No fetch until the restore has said whether the stored token still works, or until the watchdog.
+            let watchdog = d.checking_until;
+            tokio::select! {
+                biased;
+                event = rx.recv() => match event {
+                    Some(event) => d.event(event, &clock),
+                    None => return,
+                },
+                () = async {
+                    match watchdog {
+                        Some(at) => clock.sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
             continue;
         }
@@ -4485,7 +4823,8 @@ async fn run<P: Ports, C: Clock>(mut d: Driver, mut ports: P, clock: C, mut rx: 
                 Some(event) => d.event(event, &clock),
                 None => return,
             },
-            () = clock.sleep_until(due) => d.tick(&clock),
+            // A due fetch, the offline re-probe included (which is also the wake re-probe, plan "Spec issues" 21).
+            () = clock.sleep_until(due) => {}
         }
     }
 }
@@ -4497,10 +4836,13 @@ impl Driver {
                 self.launched = true;
                 self.restoring = restoring;
                 self.fetch_now = !restoring;
+                self.checking_until = Some(policy::checking_deadline(clock.now()));
             }
             Event::RestoreFinished => {
-                self.restoring = false;
-                self.fetch_now = true;
+                // Only a launch that waited for the restore fetches now; a signed-out launch already did.
+                if std::mem::take(&mut self.restoring) {
+                    self.fetch_now = true;
+                }
             }
             // `refresh` re-reads the facts; a new generation fetches at once.
             Event::SessionChanged => {}
@@ -4532,16 +4874,22 @@ impl Driver {
         policy::poll(self.part().and_then(|part| part.poll_seconds))
     }
 
-    /// §10: a wake is noticed at a probe tick while offline, and re-probes at once.
-    fn tick<C: Clock>(&mut self, clock: &C) {
-        let wall = clock.unix_now();
-        if self.schedule.offline()
-            && let Some(previous) = self.last_tick_wall
-            && policy::is_wake(previous, wall)
-        {
+    /// Plan review I5 (lead ruling 2026-10-07): Checking ends at the latest 15 s after it began, even when the restore
+    /// never reports back. That concludes "document unavailable", which fails open like any failed first fetch (the
+    /// table then gives Ready with the key, Locked without it, Signed out without a session), and fetches at once.
+    fn watchdog(&mut self, now: Instant) {
+        let Some(until) = self.checking_until else {
+            return;
+        };
+        if now < until {
+            return;
+        }
+        self.checking_until = None;
+        if self.restoring || self.first_fetch == FirstFetch::Pending {
+            self.restoring = false;
+            self.first_fetch = FirstFetch::Concluded;
             self.fetch_now = true;
         }
-        self.last_tick_wall = Some(wall);
     }
 
     /// C-D5: the cached part is used only for the same account; another account's row is deleted, never shown; a row
@@ -4560,11 +4908,13 @@ impl Driver {
         }
     }
 
-    async fn refresh<P: Ports>(&mut self, ports: &mut P) {
+    async fn refresh<P: Ports>(&mut self, ports: &mut P, now: Instant) {
         let facts = ports.facts();
         self.token_stored = facts.token_stored;
         if self.generation != Some(facts.generation) {
             self.generation = Some(facts.generation);
+            // A new session gets its own 15 s of Checking (plan review I5).
+            self.checking_until = Some(policy::checking_deadline(now));
             self.fresh = None;
             self.first_fetch = FirstFetch::Pending;
             self.cached = None;
@@ -4621,7 +4971,10 @@ impl Driver {
             AccountState::NoPlan => HeldReason::AccountBlocking,
             _ => HeldReason::Checking,
         });
-        let closed_now = self.gate.set(derived.gate_open).is_some_and(|changed| !changed.open);
+        // The value is for the generation this view was derived for; any other generation reads closed (plan review I1).
+        let changed = self.gate.set(derived.gate_open, generation);
+        let closed_now = changed.is_some_and(|value| !value.open);
+        let opened_now = changed.is_some_and(|value| value.open);
         if held != self.last_held {
             if let Some(reason) = held {
                 ports.log(AccountLog::EngineHeld(reason));
@@ -4645,22 +4998,15 @@ impl Driver {
         {
             ports.log(AccountLog::State { from, to: state, offline });
         }
-        // C-R12: every transition into Ready fires the account trigger, at launch from the cache included.
-        let entered_ready = state == AccountState::Ready && self.last_state != Some(AccountState::Ready);
+        // C-R12: every transition into Ready fires the account trigger, at launch from the cache included. So does a
+        // gate that opened for a new session generation while Ready: that generation's own engine start was held.
+        let fire_ready = state == AccountState::Ready && (self.last_state != Some(AccountState::Ready) || opened_now);
         self.last_state = Some(state);
         self.last_offline = offline;
-        // C-D5: a view derived for a session that has since ended is never published over the cleared one.
-        let published = self.view.send_if_modified(|current| {
-            if ports.generation() != generation || *current == derived.view {
-                return false;
-            }
-            *current = derived.view.clone();
-            true
-        });
-        if published {
-            ports.publish(&derived.view);
-        }
-        if entered_ready {
+        // C-D5 and plan review C1: the one publish path. A view derived for a session that has since ended is never
+        // published over the cleared one, and a view equal to the last published one is not published again.
+        self.published.publish(derived.view, || ports.generation() == generation);
+        if fire_ready {
             ports.account_ready().await;
         }
     }
@@ -4804,9 +5150,6 @@ mod tests {
         fn note_auth(&mut self, unauthorized: bool) {
             self.0.lock().unwrap().auth.push(unauthorized);
         }
-        fn publish(&mut self, view: &AccountView) {
-            self.0.lock().unwrap().published.push(view.clone());
-        }
         fn log(&mut self, entry: AccountLog) {
             self.0.lock().unwrap().logs.push(entry);
         }
@@ -4826,6 +5169,15 @@ mod tests {
         fn account_ready(&mut self) -> impl Future<Output = ()> + Send {
             let world = self.0.clone();
             async move { world.lock().unwrap().ready += 1 }
+        }
+    }
+
+    /// Records every published view, the launch view included.
+    struct FakePublisher(Arc<Mutex<World>>);
+
+    impl Publisher for FakePublisher {
+        fn publish(&self, view: &AccountView) {
+            self.0.lock().unwrap().published.push(view.clone());
         }
     }
 
@@ -4881,7 +5233,9 @@ mod tests {
             let world = Arc::new(Mutex::new(world));
             let clock = ManualClock::new();
             let gate = AccountGate::default();
-            let (handle, task) = start(FakePorts(world.clone()), clock.clone(), gate.clone(), AccountView::signed_out(false));
+            gate.arm(true);
+            let publisher = Arc::new(FakePublisher(world.clone()));
+            let (handle, task) = start(FakePorts(world.clone()), clock.clone(), gate.clone(), publisher, AccountView::signed_out(false));
             tokio::spawn(task);
             Self { world, clock, handle, gate }
         }
@@ -4954,6 +5308,9 @@ mod tests {
         assert_eq!(h.handle.state().screen, derive::Screen::SignIn);
         assert!(h.gate.current().open);
         assert_eq!(h.world.lock().unwrap().auth, Vec::<bool>::new(), "an anonymous fetch never reports to AuthHealth");
+        h.handle.send(Event::RestoreFinished);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(h.fetches(), 1, "the restore's end after a signed-out launch fetches nothing more");
     }
 
     #[tokio::test]
@@ -5263,6 +5620,124 @@ mod tests {
         assert!(!h.world.lock().unwrap().published.iter().any(|v| v.state == AccountState::NoPlan), "the ended session's view was never published");
     }
 
+    /// Plan review C1: a live sign-out publishes Signed out inside the transition (the windows re-render and the
+    /// menu-bar icon changes from that publish; Task 14 adds the icon's assertion), and the driver's own Signed out
+    /// afterwards is not published a second time.
+    #[tokio::test]
+    async fn a_live_sign_out_publishes_signed_out() {
+        let h = ready_with(document("account.trialing.desktop.json")).await;
+        h.until("Ready with a notice", |_, v| v.notice.is_some()).await;
+        h.world.lock().unwrap().facts = Facts { generation: 2, ..Facts::default() };
+        h.handle.clear_for_sign_out();
+        let last = h.world.lock().unwrap().published.last().cloned().expect("a published view");
+        assert_eq!((last.state, last.notice.as_ref()), (AccountState::SignedOut, None), "published inside the transition");
+        h.until("the signed-out fetch", |w, _| w.fetches.last() == Some(&false)).await;
+        let w = h.world.lock().unwrap();
+        let after_ready: Vec<AccountState> = w.published.iter().map(|v| v.state).skip_while(|s| *s != AccountState::Ready).collect();
+        assert_eq!(after_ready.iter().filter(|s| **s == AccountState::SignedOut).count(), 1, "{after_ready:?}");
+    }
+
+    /// Plan review C1: an account switch publishes Signed out inside the transition, then the next account's views.
+    #[tokio::test]
+    async fn a_switch_publishes_signed_out_and_then_the_next_account() {
+        let h = ready_with(document("account.trialing.desktop.json")).await;
+        h.until("Ready", |_, v| v.state == AccountState::Ready).await;
+        h.world.lock().unwrap().facts = Facts { generation: 2, ..Facts::default() };
+        h.handle.clear_for_sign_out();
+        let cleared = h.world.lock().unwrap().published.last().cloned().expect("a published view");
+        assert_eq!(cleared.state, AccountState::SignedOut, "inside the transition");
+        h.respond(document("account.active.web.json"));
+        h.with(|w| w.facts = Facts { identity: Identity::new(Some("u-2"), Some("kim@beebeeb.io")), ..signed_in(3) });
+        h.until("Ready for the next account", |w, v| v.state == AccountState::Ready && w.fetches.len() >= 2).await;
+        let w = h.world.lock().unwrap();
+        let after_ready: Vec<AccountState> = w.published.iter().map(|v| v.state).skip_while(|s| *s != AccountState::Ready).collect();
+        let out = after_ready.iter().position(|s| *s == AccountState::SignedOut).expect("Signed out was published after Ready");
+        assert!(after_ready[out + 1..].contains(&AccountState::Ready), "the next account's view follows: {after_ready:?}");
+    }
+
+    /// Plan review I1: the driver sets the gate for the generation it derived. A generation it has not derived for reads
+    /// closed; once it has, Ready under the new generation fires the account trigger (its own engine start was held).
+    #[tokio::test]
+    async fn the_driver_sets_the_gate_for_its_own_generation() {
+        let h = ready_with(document("account.active.web.json")).await;
+        h.until("Ready", |w, v| v.state == AccountState::Ready && w.ready == 1).await;
+        assert_eq!(h.gate.current().generation, Some(1));
+        assert!(h.gate.current().open_for(1));
+        assert!(!h.gate.current().open_for(2), "a generation the driver has not derived for is closed");
+        h.with(|w| w.facts.generation = 2);
+        h.until("the gate follows the new generation", |_, _| h.gate.current().generation == Some(2)).await;
+        assert!(h.gate.current().open_for(2));
+        h.until("Ready under the new generation fires the trigger", |w, _| w.ready == 2).await;
+    }
+
+    /// Plan review I5 (lead ruling 2026-10-07): the restore task died and never reports. Checking still ends 15 s after
+    /// the launch, as "document unavailable", and fails open; the fetches start.
+    #[tokio::test]
+    async fn a_dead_restore_task_still_ends_checking_after_15s() {
+        let h = Harness::new(World { facts: signed_in(1), ..World::default() });
+        h.handle.send(Event::Launch { restoring: true });
+        h.until("Checking during the restore", |_, v| v.state == AccountState::Checking).await;
+        h.clock.advance(Duration::from_secs(14));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!((h.handle.state().state, h.fetches()), (AccountState::Checking, 0), "before the watchdog");
+        h.respond(document("account.active.web.json"));
+        h.clock.advance(Duration::from_secs(1));
+        h.until("left Checking and fetched with the bearer", |w, v| v.state == AccountState::Ready && w.fetches == [true]).await;
+        assert!(h.gate.current().open_for(1));
+    }
+
+    /// Plan review I5: a sign-in while the restore is stuck gets its own 15 s. It always leaves Checking, and the
+    /// launch's limit does not end it before its own first fetch could conclude.
+    #[tokio::test]
+    async fn a_sign_in_during_a_stuck_restore_leaves_checking() {
+        let h = Harness::new(World { facts: signed_in(1), ..World::default() });
+        h.handle.send(Event::Launch { restoring: true });
+        h.until("Checking during the restore", |_, v| v.state == AccountState::Checking).await;
+        h.clock.advance(Duration::from_secs(10));
+        h.with(|w| w.facts = Facts { identity: Identity::new(Some("u-2"), Some("kim@beebeeb.io")), ..signed_in(2) });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.clock.advance(Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(h.handle.state().state, AccountState::Checking, "the launch's 15 s do not end the new session's Checking");
+        assert!(!h.gate.current().open_for(2));
+        h.clock.advance(Duration::from_secs(10));
+        h.until("left Checking 15 s after the sign-in", |w, v| v.state == AccountState::Ready && w.fetches == [true]).await;
+    }
+
+    /// Spec §14 Binding: the cached row is kept after a session ended; only the in-memory copy goes.
+    #[tokio::test]
+    async fn the_cache_row_is_kept_after_a_session_ended() {
+        let h = ready_with(document("account.needs_plan.ios.json")).await;
+        h.until("No plan, cached", |w, v| v.state == AccountState::NoPlan && w.cache.is_some()).await;
+        h.with(|w| w.facts.auth_expired = true);
+        h.until("Session ended", |_, v| v.state == AccountState::SessionEnded).await;
+        h.with(|w| w.facts = Facts { owner_recorded: true, generation: 2, ..Facts::default() });
+        h.until("the relaunch's anonymous fetch", |w, v| w.fetches.last() == Some(&false) && v.state == AccountState::SessionEnded).await;
+        let w = h.world.lock().unwrap();
+        assert_eq!(w.deletes, 0, "never deleted");
+        assert_eq!(w.cache.as_ref().map(|(identity, _)| identity.clone()), Some(sam()));
+    }
+
+    /// §10: a 401 or a 429 keeps the last document; only a new document replaces it.
+    #[tokio::test]
+    async fn a_401_or_a_429_keeps_the_last_document() {
+        let h = ready_with(document("account.trialing.desktop.json")).await;
+        h.until("Ready with the trial notice", |_, v| v.notice.is_some()).await;
+        let before = h.handle.state();
+        let hold = Arc::new(Notify::new());
+        h.world.lock().unwrap().hold_fetch = Some(hold.clone());
+        for (n, outcome) in [(2, FetchOutcome::Unauthorized), (3, FetchOutcome::RateLimited { retry_after: None })] {
+            h.respond(outcome);
+            h.handle.send(Event::Retry);
+            h.until("the fetch is in flight", |w, _| w.fetches.len() == n).await;
+            hold.notify_one();
+        }
+        h.handle.send(Event::Retry);
+        h.until("the next fetch is in flight: both answers were applied and derived", |w, _| w.fetches.len() == 4).await;
+        assert_eq!(h.handle.state(), before, "the trial notice and links are still the last document's");
+        hold.notify_one();
+    }
+
     #[tokio::test]
     async fn settled_returns_once_checking_ends_or_at_the_deadline() {
         let (handle, _rx) = AccountViewHandle::for_test(AccountView { state: AccountState::Checking, ..AccountView::signed_out(false) });
@@ -5272,7 +5747,7 @@ mod tests {
             let handle = handle.clone();
             tokio::spawn(async move { handle.settled(tokio::time::Instant::now() + Duration::from_secs(5)).await })
         };
-        handle.view.send_replace(AccountView::signed_out(false));
+        handle.published.publish(AccountView::signed_out(false), || true);
         assert_eq!(waiter.await.unwrap().state, AccountState::SignedOut);
     }
 
@@ -5296,8 +5771,8 @@ mod tests {
 
 - [ ] **Step 4: Run them to see them fail, then pass**
 
-First commit the step 2 code with every method body replaced by `todo!()` except the type definitions, run with filter `account_view::driver`, and paste the failure summary (every async test panics with `not yet implemented`). Then restore the bodies from step 2 and run again.
-Expected: `test result: ok. 27 passed; 0 failed`. If any `until` panics with "never:", read its view in the message before touching code: a stuck wait is first a question about the harness (did the test queue a response? did the clock move?).
+First save (do not commit) the step 2 code with every method body replaced by `todo!()` except the type definitions, run with filter `account_view::driver`, and paste the failure summary (every async test panics with `not yet implemented`). Then restore the bodies from step 2 and run again.
+Expected: `test result: ok. 34 passed; 0 failed`. Then the whole lib under the scratch-HOME recipe: on macOS `B_lib` + 135 (the running total in Global Constraints). If any `until` panics with "never:", read its view in the message before touching code: a stuck wait is first a question about the harness (did the test queue a response? did the clock move?).
 
 - [ ] **Step 5: Mutation-check (spec §14: binding, trigger, schedule)**
 
@@ -5306,8 +5781,16 @@ Expected: `test result: ok. 27 passed; 0 failed`. If any `until` panics with "ne
 3. In `load_cache`, return `Some(part)` for `Some(false)`. Expected: `another_accounts_cache_row_is_deleted_and_never_shown`. Revert.
 4. In `fetch`, drop `if after.identity.user_id.is_some()` (always write). Expected: `an_unidentified_session_keeps_its_document_in_memory_until_its_identity_is_known`. Revert.
 5. In `fetch`'s `Network` arm, also skip `self.first_fetch = FirstFetch::Concluded;` (move that line into the other arms only). Expected: `a_first_network_failure_ends_checking_without_showing_offline`. Revert.
-6. In `apply`, drop the `ports.generation() != generation ||` check. Expected: `a_view_derived_for_an_ended_session_never_overwrites_the_cleared_one` ("the ended session's view was never published"). Revert.
+6. In `apply`, replace `|| ports.generation() == generation` with `|| true`. Expected: `a_view_derived_for_an_ended_session_never_overwrites_the_cleared_one` ("the ended session's view was never published"). Revert.
 7. In `apply`, log `EngineHeld` only when `closed_now`. Expected: `closing_the_gate_holds_once_and_says_why` (no `account_blocking` line: the gate was already closed for Checking). Revert.
+8. In `clear_for_sign_out`, replace the `self.published.publish(…)` call with `self.published.view.send_replace(AccountView::signed_out(offline));` (the clear writes only the watch). Expected: `a_live_sign_out_publishes_signed_out` ("published inside the transition": the last published view is still Ready) and `a_switch_publishes_signed_out_and_then_the_next_account` ("inside the transition"). Revert.
+9. In `apply`, pass `0` instead of `generation` to `self.gate.set`. Expected: `the_driver_sets_the_gate_for_its_own_generation` (left `Some(0)`). Revert.
+10. Drop `|| opened_now` from `fire_ready`. Expected: `the_driver_sets_the_gate_for_its_own_generation` ("never: Ready under the new generation fires the trigger"). Revert.
+11. Make `watchdog` return at once. Expected: `a_dead_restore_task_still_ends_checking_after_15s` and `a_sign_in_during_a_stuck_restore_leaves_checking` ("never: left Checking…"). Revert.
+12. In `refresh`, delete the `self.checking_until = Some(…)` line of the generation change. Expected: `a_sign_in_during_a_stuck_restore_leaves_checking` ("the launch's 15 s do not end the new session's Checking"). Revert.
+13. In `refresh`'s `else` branch (no token), add `ports.delete_cache();`. Expected: `the_cache_row_is_kept_after_a_session_ended` ("never deleted"). Revert.
+14. In `fetch`'s `Unauthorized` arm, add `self.fresh = None;`. Expected: `a_401_or_a_429_keeps_the_last_document` (the right side has the trial notice, the left has none). Revert.
+15. In `Event::RestoreFinished`, set `self.fetch_now = true;` unconditionally. Expected: `a_launch_without_a_session_fetches_anonymously_and_shows_sign_in` ("the restore's end after a signed-out launch fetches nothing more"). Revert.
 
 - [ ] **Step 6: Commit**
 
@@ -5319,20 +5802,24 @@ git show --stat HEAD
 ```
 
 ---
+
 ## Task 11: Wire the account view into the app — ports, launch, commands and session events
 
-**Lane R.** The production `Ports`, the launch value of the gate, the four commands, and one event from every place the session changes.
+**Lane R.** The production `Ports` and `Publisher`, arming the gate, the four commands, and one event from every place the session changes.
+
+**Before you start:** read `$EVID/t0-record.md` (the session generation's name, and whether `SESSION_TRANSITION` and `start_engine_if_possible`'s `_transition` parameter are Windows-only).
 
 **Files:**
 - Create: `src-tauri/src/account_view/app_ports.rs`
 - Modify: `src-tauri/src/account_view/mod.rs` (`pub mod app_ports;`)
-- Modify: `src-tauri/src/lib.rs` (drop the `#[allow(dead_code)]` on `mod account_view;`; `AppState.account_view`; `account_view_facts`, `account_view_token`, `notify_account_view`, `start_engine_when_none_runs`; `setup()`; `keys_arrived`; `clear_session_impl`; `lock_vault`; `desktop_login`; `desktop_login_2fa`; the focus handler; `attach_tray_status_listener`; four commands; tests)
+- Modify: `src-tauri/src/lib.rs` (drop the `#[allow(dead_code)]` on `mod account_view;` and on `hold_for_account`; `AppState.account_view`; `account_view_facts`, `account_view_token`, `notify_account_view`, `start_engine_when_none_runs`, `RestoreFinishedGuard`; `setup()`; `keys_arrived`; `clear_session_impl`; `lock_vault`; `desktop_login`; `desktop_login_2fa`; the focus handler; `attach_tray_status_listener`; four commands; tests)
 
 **Interfaces:**
-- Consumes: `driver::{spawn, AccountViewHandle, Event, Facts, CacheRead, Ports, AccountLog, ACCOUNT_VIEW_CHANGED_EVENT}` (Task 10), `derive::{derive, Inputs, TokenState, FirstFetch, AccountView}` (Task 5), `fetch::{client, fetch, FetchOutcome, UnavailableKind}` (Task 8), `gate::AccountGate` and `hold_for_account` (Task 9), `StateDb::{onboarding_cache, set_onboarding_cache, delete_onboarding_cache, owner}` (Task 7); spec A's `identity_of_session`, `keychain_vault_key_present`, `load_session_token_from_keychain`, `state_db_from_state_dir`, `state_paths::{beebeeb_state_dir, STATE_DB_FILENAME}`, `runner::api_base_url`, `AuthHealth::note_result`, `notify_finder`, `start_engine_if_possible`, `lifecycle_log::event`, `finder_setup::driver::SystemClock`, and Task 12-of-spec-A's `session_generation()` (its real name from Task 0).
+- Consumes: `driver::{spawn, AccountViewHandle, Event, Facts, CacheRead, Ports, Publisher, AccountLog, ACCOUNT_VIEW_CHANGED_EVENT}` (Task 10), `derive::{derive, Inputs, TokenState, FirstFetch, AccountView}` (Task 5), `fetch::{client, fetch, FetchOutcome, UnavailableKind}` (Task 8), `gate::AccountGate` and `hold_for_account` (Task 9), `StateDb::{onboarding_cache, set_onboarding_cache, delete_onboarding_cache, owner}` (Task 7); spec A's `identity_of_session`, `keychain_vault_key_present`, `load_session_token_from_keychain`, `state_db_from_state_dir`, `state_paths::{beebeeb_state_dir, STATE_DB_FILENAME}`, `runner::api_base_url`, `AuthHealth::note_result`, `notify_finder`, `start_engine_if_possible`, `lifecycle_log::event`, `finder_setup::driver::SystemClock`, and Task 12-of-spec-A's `session_generation()` (its real name from Task 0).
 - Produces:
   - `AppState.account_view: std::sync::OnceLock<account_view::driver::AccountViewHandle>`
-  - `account_view::app_ports::AppPorts::new(app: tauri::AppHandle)`
+  - `account_view::app_ports::AppPorts::new(app: tauri::AppHandle)`, `account_view::app_ports::AppPublisher::new(app: tauri::AppHandle)` (`impl Publisher`: emits `account-view-changed`; Task 14 adds the menu-bar icon)
+  - `lib.rs`: `struct RestoreFinishedGuard(tauri::AppHandle)` (sends `RestoreFinished` when dropped)
   - `lib.rs`: `pub(crate) fn account_view_facts(state: &AppState) -> account_view::driver::Facts`, `fn account_view_token(state: &AppState) -> Option<zeroize::Zeroizing<String>>`, `fn notify_account_view(state: &AppState, event: account_view::driver::Event)`, `async fn start_engine_when_none_runs(app: tauri::AppHandle, state: &State<'_, AppState>)` (not macOS)
   - Tauri commands: `account_view_state() -> Result<AccountView, String>`, `account_view_retry() -> Result<(), String>`, `account_view_plan_opened() -> Result<(), String>`, `quit_app()`
 
@@ -5370,15 +5857,27 @@ In `finder_setup_command_tests` (it has `production_source` and `body_between`):
         assert!(signed_out < cleared, "cleared once the sign-out is done");
     }
 
-    /// C-R10: the launch value of the gate is set before the restore can start an engine, and the restore ends with
-    /// `RestoreFinished`.
+    /// C-R10 and plan review I1: the gate is armed before the restore can start an engine, so every generation the
+    /// account view has not derived for reads closed from the first moment.
     #[test]
     fn the_launch_gate_is_set_before_the_restore_can_start_an_engine() {
         let production = production_source();
-        let gate = production.find("account_gate.set(launch.gate_open)").expect("the launch gate");
+        let gate = production.find("state.account_gate.arm(").expect("the gate is armed in setup");
         let restore = production.find("restore_session_on_startup(&h).await").expect("the restore");
-        let finished = production.find("Event::RestoreFinished").expect("RestoreFinished");
-        assert!(gate < restore && restore < finished);
+        assert!(gate < restore);
+    }
+
+    /// Plan review I5: the startup restore ends with `RestoreFinished` even when it panics or its task is aborted. A
+    /// drop guard is created before the restore and dropped right after it.
+    #[test]
+    fn the_restore_always_ends_with_restore_finished() {
+        let production = production_source();
+        let guard = production.find("let restore_finished = RestoreFinishedGuard(").expect("the guard");
+        let restore = production.find("restore_session_on_startup(&h).await").expect("the restore");
+        let dropped = production.find("drop(restore_finished);").expect("dropped after the restore");
+        assert!(guard < restore && restore < dropped);
+        let on_drop = body_between(&production, "impl Drop for RestoreFinishedGuard", "\n}\n");
+        assert!(on_drop.contains("Event::RestoreFinished"), "{on_drop}");
     }
 
     /// Review Focus 3, plan "Spec issues" 2: on Windows and Linux the account trigger starts the engine only when none
@@ -5432,7 +5931,9 @@ In the R10 test module (beside Task 9's `a_closed_account_gate_starts_nothing_an
         rt.block_on(async {
             let local = local_data_of(Some(bob()));
             let fx = AuthorizeFixture::with_session(&bob());
-            fx.state.account_gate.set(locked.gate_open);
+            let platform = crate::surfaces::policy::Platform::current();
+            fx.state.account_gate.arm(platform != crate::surfaces::policy::Platform::Linux);
+            fx.state.account_gate.set(locked.gate_open, crate::session_generation());
             let mut slot = fx.acct.engine.lock().await;
             let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
             let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
@@ -5448,7 +5949,7 @@ In the R10 test module (beside Task 9's `a_closed_account_gate_starts_nothing_an
     }
 ```
 
-Run with filters `the_account_view_is_told`, `a_sign_out_clears_the_account_view`, `the_launch_gate_is_set`, `account_ready_starts_the_engine_only`, `the_account_view_commands_are_registered`, `an_unlock_with_a_cached_no_plan_part`. Expected: the five source tests fail on their `expect` (nothing is wired yet); `an_unlock_with_a_cached_no_plan_part_starts_no_engine` already passes (Tasks 5 and 9 did the work) — note that in the Notes, and mutation-check it in step 6 instead.
+Run with the filter `-- the_account_view_is_told_about_every_session_transition a_sign_out_clears_the_account_view_inside_its_transition the_launch_gate_is_set_before_the_restore_can_start_an_engine the_restore_always_ends_with_restore_finished account_ready_starts_the_engine_only_when_none_runs the_account_view_commands_are_registered an_unlock_with_a_cached_no_plan_part_starts_no_engine`. Expected: `7` tests run; the six source tests fail on their `expect` (nothing is wired yet); `an_unlock_with_a_cached_no_plan_part_starts_no_engine` already passes (Tasks 5 and 9 did the work) — note that in the Notes, and mutation-check it in step 6 instead.
 
 - [ ] **Step 2: The production ports**
 
@@ -5465,7 +5966,7 @@ use tauri::{Emitter, Manager};
 
 use super::derive::AccountView;
 use super::doc::AccountPart;
-use super::driver::{AccountLog, CacheRead, Facts, Ports, ACCOUNT_VIEW_CHANGED_EVENT};
+use super::driver::{AccountLog, CacheRead, Facts, Ports, Publisher, ACCOUNT_VIEW_CHANGED_EVENT};
 use super::fetch::{self, FetchOutcome, UnavailableKind};
 use crate::account_binding::Identity;
 use crate::surfaces::policy::Platform;
@@ -5486,6 +5987,27 @@ impl AppPorts {
             }
         };
         Self { app, client }
+    }
+}
+
+/// Plan review C1: where every published view goes besides the account view's watch channel. It is called under the
+/// publish lock, so it never blocks: the event is queued for the windows, and the menu-bar icon (Task 14) is posted to
+/// the main thread, in publish order.
+pub struct AppPublisher {
+    app: tauri::AppHandle,
+}
+
+impl AppPublisher {
+    pub fn new(app: tauri::AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl Publisher for AppPublisher {
+    fn publish(&self, view: &AccountView) {
+        if let Err(error) = self.app.emit(ACCOUNT_VIEW_CHANGED_EVENT, view) {
+            tracing::warn!(%error, "account view: could not emit the changed event");
+        }
     }
 }
 
@@ -5576,12 +6098,6 @@ impl Ports for AppPorts {
         }
     }
 
-    fn publish(&mut self, view: &AccountView) {
-        if let Err(error) = self.app.emit(ACCOUNT_VIEW_CHANGED_EVENT, view) {
-            tracing::warn!(%error, "account view: could not emit the changed event");
-        }
-    }
-
     fn log(&mut self, entry: AccountLog) {
         tracing::info!(target: "account_view", "{}", entry.line());
         #[cfg(target_os = "macos")]
@@ -5629,6 +6145,11 @@ Beside `keys_arrived`:
 ```rust
 /// Spec 2026-10-07 §4.1: what the account view derives from, read from the app's real sources. An owner record that
 /// cannot be read counts as recorded (fail closed: the person is asked to sign in again, never treated as new).
+///
+/// The account view refreshes on every event, tick and fetch, so the two slow reads (`state.db` and the Keychain) run
+/// only where the table reads them (plan review M7): the owner record decides only without a stored token (C-R1 or
+/// C-R2), and the Keychain only for a stored token whose key is not in memory (which C-R4 screen). Elsewhere they are
+/// `false` without a read. No cache: a cached owner record could outlive the sign-out's purge.
 pub(crate) fn account_view_facts(state: &AppState) -> account_view::driver::Facts {
     let acct = state.active_account().ok();
     let (key_in_memory, session_email) = acct
@@ -5637,17 +6158,20 @@ pub(crate) fn account_view_facts(state: &AppState) -> account_view::driver::Fact
         .unwrap_or((false, None));
     let email = session_email.or_else(|| acct.as_ref().and_then(|acct| acct.auth_email.lock().ok().and_then(|guard| guard.clone())));
     let profile = acct.as_ref().and_then(|acct| acct.cached_profile.lock().ok().and_then(|guard| guard.clone()));
-    let owner_recorded = match state_paths::beebeeb_state_dir().and_then(|dir| state_db_from_state_dir(&dir)) {
-        Ok(Some(db)) => db.owner().map(|owner| owner.is_some()).unwrap_or(true),
-        Ok(None) => false,
-        Err(_) => true,
-    };
+    let token_stored = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
+    let owner_recorded = !token_stored
+        && match state_paths::beebeeb_state_dir().and_then(|dir| state_db_from_state_dir(&dir)) {
+            Ok(Some(db)) => db.owner().map(|owner| owner.is_some()).unwrap_or(true),
+            Ok(None) => false,
+            Err(_) => true,
+        };
+    let key_in_keychain = token_stored && !key_in_memory && acct.as_ref().is_some_and(|acct| vault_key_in_keychain(acct.id.as_str()));
     account_view::driver::Facts {
-        token_stored: state.auth_present.lock().map(|guard| *guard).unwrap_or(false),
+        token_stored,
         auth_expired: acct.as_ref().is_some_and(|acct| acct.auth_health.is_expired()),
         owner_recorded,
         key_in_memory,
-        key_in_keychain: acct.as_ref().is_some_and(|acct| vault_key_in_keychain(acct.id.as_str())),
+        key_in_keychain,
         identity: identity_of_session(email.as_deref(), profile.as_ref()),
         generation: session_generation(),
     }
@@ -5706,15 +6230,34 @@ pub(crate) async fn start_engine_when_none_runs(app: tauri::AppHandle, state: &S
 }
 ```
 
-`identity_of_session`'s first parameter is the session email; check its signature at HEAD and adapt the call if Task 0 recorded drift.
+`identity_of_session`'s first parameter is the session email; use the signature `t0-record.md` records. Per `t0-record.md`: if `SESSION_TRANSITION` is on every platform and `start_engine_if_possible`'s `_transition` parameter is no longer Windows-only, take the lock on every platform and pass it unconditionally (drop both `#[cfg(target_os = "windows")]` lines in `start_engine_when_none_runs`); if both are still Windows-only, keep them as shown. On Linux the function must compile with the argument list `start_engine_if_possible` has there.
+
+Remove the `#[allow(dead_code)]` line and its comment above `hold_for_account` (Task 9): `AppPorts::gate_closed` calls it now.
+
+Beside `notify_account_view`:
+
+```rust
+/// Plan review I5: tells the account view that the startup restore is over when it is dropped, so also when the
+/// restore panics or its task is aborted. The account view never waits for a restore that cannot finish.
+struct RestoreFinishedGuard(tauri::AppHandle);
+
+impl Drop for RestoreFinishedGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.try_state::<AppState>() {
+            notify_account_view(&state, account_view::driver::Event::RestoreFinished);
+        }
+    }
+}
+```
 
 - [ ] **Step 4: Launch, restore, session events, focus, auth-expired, commands**
 
 In `setup()`, directly after the block that seeds `auth_present` (`*guard = keychain_session_present(&account_id);`) and before the Finder reconciler block:
 
 ```rust
-            // Spec 2026-10-07: the account view. Its gate takes the launch value before the restore below can start an
-            // engine: a stored token is Checking until the restore and the first document say otherwise (C-R11).
+            // Spec 2026-10-07: the account view. Its gate is armed before the restore below can start an engine: armed,
+            // it reads closed for every session generation the account view has not derived for (C-R11, plan review
+            // I1). Linux arms it so that it never holds (C-R10). The launch view is the first view published.
             {
                 use account_view::derive::{FirstFetch, Inputs, TokenState};
                 let state = app.state::<AppState>();
@@ -5732,11 +6275,12 @@ In `setup()`, directly after the block that seeds `auth_present` (`*guard = keyc
                     first_fetch: FirstFetch::Pending,
                     offline: false,
                 });
-                state.account_gate.set(launch.gate_open);
+                state.account_gate.arm(surfaces::policy::Platform::current() != surfaces::policy::Platform::Linux);
                 let handle = account_view::driver::spawn(
                     account_view::app_ports::AppPorts::new(app.handle().clone()),
                     finder_setup::driver::SystemClock,
                     state.account_gate.clone(),
+                    std::sync::Arc::new(account_view::app_ports::AppPublisher::new(app.handle().clone())),
                     launch.view,
                 );
                 handle.send(account_view::driver::Event::Launch { restoring });
@@ -5744,11 +6288,16 @@ In `setup()`, directly after the block that seeds `auth_present` (`*guard = keyc
             }
 ```
 
-In the restore task, between `restore_session_on_startup(&h).await;` and the Finder `Launch` trigger:
+In the restore task, around `restore_session_on_startup(&h).await;`:
 
 ```rust
-                    notify_account_view(&h.state::<AppState>(), account_view::driver::Event::RestoreFinished);
+                    // Plan review I5: the account view hears `RestoreFinished` even if the restore panics or is aborted.
+                    let restore_finished = RestoreFinishedGuard(h.clone());
+                    restore_session_on_startup(&h).await;
+                    drop(restore_finished);
 ```
+
+Spec A's `the_launch_trigger_follows_the_startup_restore` allows at most 400 characters from `restore_session_on_startup(&h).await` to the Finder `Launch` trigger (267 at spec A's HEAD). Only the `drop(restore_finished);` line goes between them; the comment and the guard sit above the restore call. Measure the new distance and paste it in the Notes.
 
 `keys_arrived`: after the `notify_finder(…KeysArrived)` line:
 
@@ -5830,8 +6379,8 @@ and add `account_view_state, account_view_retry, account_view_plan_opened, quit_
 
 - [ ] **Step 5: Run the tests to see them pass**
 
-Run the step 1 filters, then the whole lib under the scratch-HOME recipe, then `cargo test --locked` for every binary.
-Expected: the six tests pass; every binary's count is at least Task 0's baseline plus the tests added since; `0 failed`.
+Run the step 1 filter, then the whole lib under the scratch-HOME recipe, then `cargo test --locked` for every binary.
+Expected: `test result: ok. 7 passed; 0 failed` for the filter; on macOS the lib is `B_lib` + 142 (the running total in Global Constraints); every other binary has Task 0's baseline count; `0 failed` everywhere. `the_launch_trigger_follows_the_startup_restore` (spec A) passes.
 
 - [ ] **Step 6: Mutation-check**
 
@@ -5839,6 +6388,8 @@ Expected: the six tests pass; every binary's count is at least Task 0's baseline
 2. Move `handle.clear_for_sign_out()` above the `SignedOut` log line. Expected: `a_sign_out_clears_the_account_view_inside_its_transition`. Revert.
 3. In `start_engine_when_none_runs`, delete the `if running { return; }`. Expected: no test fails on it alone, because the source test reads the order of the two calls; replace `engine.lock().await.is_some()` with `false`, then expect `account_ready_starts_the_engine_only_when_none_runs`. Revert.
 4. In `derive.rs`, compute `gate_open` from `state` (Task 5's mutation 4) and run `an_unlock_with_a_cached_no_plan_part_starts_no_engine`. Expected: it fails on macOS and Windows. Revert.
+5. Delete the `drop(restore_finished);` line. Expected: `the_restore_always_ends_with_restore_finished` ("dropped after the restore"). Revert. Then delete the `notify_account_view(…RestoreFinished)` call inside `impl Drop`. Expected: the same test (the `on_drop` assertion). Revert.
+6. Delete the `state.account_gate.arm(…)` line in `setup()`. Expected: `the_launch_gate_is_set_before_the_restore_can_start_an_engine`. Revert.
 
 - [ ] **Step 7: Commit**
 
@@ -5868,7 +6419,7 @@ git show --stat HEAD
     - another account: `{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"account_mismatch":{"pending_changes":N}}` (`N` is `null` after step 8 when the count cannot be read)
     - `Err(SIGN_IN_ACCOUNT_UNKNOWN)` stays the retryable "couldn't confirm" sentence (ruling T11f1-c2)
   - `LoginOutcome::browser_signed_in() -> LoginOutcome`
-  - `enum BrowserSettlement { Return(Result<LoginOutcome, String>), RevokeAndReturn(Result<LoginOutcome, String>), Install { reauthenticated: bool } }`, `fn browser_settlement(Option<SignInSettlement>) -> BrowserSettlement`, `fn browser_installed_outcome(reauthenticated: bool) -> LoginOutcome` (not Windows)
+  - `enum BrowserSettlement { Return(Result<LoginOutcome, String>), RevokeAndReturn(Result<LoginOutcome, String>), Install { reauthenticated: bool } }`, `fn browser_settlement(Option<SignInSettlement>) -> BrowserSettlement`, `fn browser_installed_outcome(reauthenticated: bool) -> LoginOutcome` (every platform: Windows calls it at the end of `run_handoff` too)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6008,8 +6559,8 @@ The old `emit(app, "account_mismatch", …)` line and `return Err("account_misma
 
 - [ ] **Step 4: Run the tests to see them pass**
 
-Run the step 1 filters, then filter `login_outcome_json_is_the_frontends_contract` (spec A's pin; its shapes are unchanged).
-Expected: all pass. Paste the counts.
+Run with the filter `-- a_browser_sign_in_reports_the_vault_unlocked a_browser_sign_in_settles_like_the_password_path the_browser_sign_in_returns_the_shared_outcome`, then with filter `login_outcome_json_is_the_frontends_contract` (spec A's pin; its shapes are unchanged).
+Expected: `test result: ok. 3 passed; 0 failed`, then `test result: ok. 1 passed; 0 failed`. Paste both lines.
 
 - [ ] **Step 5: Mutation-check**
 
@@ -6069,7 +6620,10 @@ git commit -m "desktop: the browser sign-in returns the same outcome as the pass
 git show --stat HEAD
 ```
 
+Expected: every binary `0 failed`; on macOS the lib is `B_lib` + 145 (+ 1 if steps 6–8 ran), the running total in Global Constraints.
+
 ---
+
 ## Task 13: The macOS launch — login or manual, the settle, the one window rule (spec §6.1, §6.2)
 
 **Lane R.** macOS only in behaviour; Windows and Linux keep today's startup, and their pin tests keep their assertions.
@@ -6084,7 +6638,7 @@ git show --stat HEAD
 - Consumes: `derive::{AccountView, Screen}` (Task 5), `policy::settle_deadline` (Task 6), `AccountViewHandle::{settled, state}` (Task 10), `AppState.account_view` (Task 11); spec A's `open_onboarding_window_impl`, `open_reauth_window`, `show_macos_settings_window`, `show_compact_app_window_with_nav`, `DesktopConfig`.
 - Produces:
   - `crate::launch_kind::{LaunchKind { Login, Manual }, launch_kind(Option<bool>) -> LaunchKind, from_bridge(i32) -> Option<bool>, current() -> LaunchKind}`
-  - ObjC `int beebeeb_launched_as_login_item(void)` (1 present, 0 absent, -1 unreadable)
+  - ObjC `int beebeeb_launched_as_login_item(void)` (1 the `keyAELaunchedAsLogInItem` parameter is present, 2 `keyAEPropData` carries the enum `'lgit'`, 0 neither, -1 unreadable)
   - `surfaces::policy::StartupSurface::{Onboarding, MainWindow, AccountWindow, SettingsAccount, Nothing}`; `startup_surface(platform: Platform, no_sync_root: bool, launch: LaunchKind, account: Option<&AccountView>) -> StartupSurface`
   - `lib.rs` (macOS): `fn open_surface(app: &tauri::AppHandle, surface: StartupSurface, view: &AccountView)`, `fn show_macos_settings_window_on_account(app: &tauri::AppHandle)`, `fn open_reauth_window_impl(app: &tauri::AppHandle) -> Result<(), String>`; command `show_settings_on_account() -> Result<(), String>` (Task 17's hand-over)
   - the macOS account window's URL carries `platform=macos`: `index.html?window=onboarding&platform=macos`, and in reauth mode `index.html?window=onboarding&mode=reauth&platform=macos` (Task 17's `main.tsx` routes on it). Linux keeps `index.html?window=onboarding` and `…&mode=reauth`.
@@ -6095,10 +6649,12 @@ git show --stat HEAD
 
 ```rust
 //! Spec 2026-10-07 C-W1: was this launch started by the login items, or by a person? Read once, at launch, from the
-//! open-application Apple event's `keyAELaunchedAsLogInItem` (`'lgit'`) parameter (macOS SDK `AERegistry.h`: "If
-//! present in a kAEOpenApplication event, application was launched as a login item"). Present: a login launch.
-//! Absent, unreadable, or a launch by any other mechanism (Finder, the Dock, Spotlight, the updater's relaunch, which
-//! spawns the binary directly): manual, so the window shows. Failing safe costs one window at login.
+//! open-application Apple event: its `keyAELaunchedAsLogInItem` (`'lgit'`) parameter (macOS SDK 27.0
+//! `AERegistry.h:1052`: "If present in a kAEOpenApplication event, application was launched as a login item"), or its
+//! `keyAEPropData` (`'prdt'`, `AERegistry.h:364`) parameter carrying the enum `'lgit'`, the form some login-item
+//! detectors read. Either one: a login launch. Neither, unreadable, or a launch by any other mechanism (Finder, the
+//! Dock, Spotlight, the updater's relaunch, which spawns the binary directly): manual, so the window shows. Failing
+//! safe costs one window at login.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -6111,7 +6667,8 @@ pub fn launch_kind(lgit_present: Option<bool>) -> LaunchKind {
     todo!("Task 13 step 3")
 }
 
-/// The bridge's answer (`beebeeb_launched_as_login_item`): 1 present, 0 absent, anything else unreadable.
+/// The bridge's answer (`beebeeb_launched_as_login_item`): 1 or 2 present (the keyword, or `keyAEPropData`), 0 absent,
+/// anything else unreadable.
 pub fn from_bridge(answer: i32) -> Option<bool> {
     todo!("Task 13 step 3")
 }
@@ -6124,7 +6681,10 @@ pub fn current() -> LaunchKind {
             fn beebeeb_launched_as_login_item() -> i32;
         }
         // SAFETY: a plain C function with no arguments; it reads the current Apple event inside an autorelease pool.
-        launch_kind(from_bridge(unsafe { beebeeb_launched_as_login_item() }))
+        let answer = unsafe { beebeeb_launched_as_login_item() };
+        // Which field the OS set is recorded on the Mac (Task 23's login rung).
+        tracing::info!(bridge = answer, "launch kind read from the open-application event");
+        launch_kind(from_bridge(answer))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -6146,6 +6706,7 @@ mod tests {
     #[test]
     fn the_bridge_answer_maps_to_present_absent_or_unreadable() {
         assert_eq!(from_bridge(1), Some(true));
+        assert_eq!(from_bridge(2), Some(true), "keyAEPropData carrying 'lgit'");
         assert_eq!(from_bridge(0), Some(false));
         assert_eq!(from_bridge(-1), None);
         assert_eq!(from_bridge(7), None);
@@ -6167,27 +6728,43 @@ Add `mod launch_kind;` to `lib.rs`'s module list. Run with filter `launch_kind`.
 `src-tauri/macos/LaunchEvent.m`:
 
 ```objc
-// Spec 2026-10-07 C-W1: was this launch started by the login items? The open-application Apple event carries
-// keyAELaunchedAsLogInItem ('lgit') when it was. Read while the app finishes launching (the Rust side calls this first
-// thing in setup()). Foundation only: the event codes are written as four-character constants.
+// Spec 2026-10-07 C-W1: was this launch started by the login items? Read while the app finishes launching (the Rust
+// side calls this first thing in setup()). Foundation only: the event codes are written as four-character constants,
+// with the macOS SDK 27.0 header lines they come from.
 #import <Foundation/Foundation.h>
 
-static const FourCharCode kBeebeebCoreEventClass = 'aevt';
-static const FourCharCode kBeebeebOpenApplication = 'oapp';
-static const FourCharCode kBeebeebLaunchedAsLogInItem = 'lgit';
+static const FourCharCode kBeebeebCoreEventClass = 'aevt';       // kCoreEventClass, AppleEvents.h:58
+static const FourCharCode kBeebeebOpenApplication = 'oapp';      // kAEOpenApplication, AppleEvents.h:63
+static const FourCharCode kBeebeebLaunchedAsLogInItem = 'lgit';  // keyAELaunchedAsLogInItem, AERegistry.h:1052
+static const FourCharCode kBeebeebPropData = 'prdt';             // keyAEPropData, AERegistry.h:364
 
-/// 1: the parameter is present (a login launch). 0: an open-application event without it. -1: no current event, or
-/// another event, so nothing to read (the caller counts that as a manual launch).
+/// 1: the keyAELaunchedAsLogInItem parameter is present, as the SDK documents it. 2: keyAEPropData carries the enum
+/// 'lgit', the form some login-item detectors read. Either is a login launch. 0: an open-application event with
+/// neither. -1: no current event, or another event, so nothing to read (the caller counts that as a manual launch).
 int beebeeb_launched_as_login_item(void) {
     @autoreleasepool {
         NSAppleEventDescriptor *event = [[NSAppleEventManager sharedAppleEventManager] currentAppleEvent];
         if (event == nil || event.eventClass != kBeebeebCoreEventClass || event.eventID != kBeebeebOpenApplication) {
             return -1;
         }
-        return [event paramDescriptorForKeyword:kBeebeebLaunchedAsLogInItem] != nil ? 1 : 0;
+        if ([event paramDescriptorForKeyword:kBeebeebLaunchedAsLogInItem] != nil) {
+            return 1;
+        }
+        NSAppleEventDescriptor *property = [event paramDescriptorForKeyword:kBeebeebPropData];
+        return (property != nil && property.enumCodeValue == kBeebeebLaunchedAsLogInItem) ? 2 : 0;
     }
 }
 ```
+
+Before you write it, check the four constants against the SDK on this Mac and paste the lines into the Notes (they were checked on 2026-10-07 against SDK 27.0):
+
+```bash
+H=$(xcrun --show-sdk-path)/System/Library/Frameworks/CoreServices.framework/Frameworks/AE.framework/Headers
+/usr/bin/grep -n "keyAELaunchedAsLogInItem *=\|keyAEPropData *=" $H/AERegistry.h > $EVID/t13-sdk-keywords.txt
+/usr/bin/grep -n "kCoreEventClass *=\|kAEOpenApplication *=" $H/AppleEvents.h >> $EVID/t13-sdk-keywords.txt; cat $EVID/t13-sdk-keywords.txt
+```
+
+Expected: `'lgit'`, `'prdt'`, `'aevt'`, `'oapp'`. A different value stops the task.
 
 `src-tauri/build.rs`: compile it beside the bridge and archive both objects. Replace `build_macos_file_provider_bridge` with:
 
@@ -6241,7 +6818,7 @@ pub fn launch_kind(lgit_present: Option<bool>) -> LaunchKind {
 
 pub fn from_bridge(answer: i32) -> Option<bool> {
     match answer {
-        1 => Some(true),
+        1 | 2 => Some(true),
         0 => Some(false),
         _ => None,
     }
@@ -6249,6 +6826,11 @@ pub fn from_bridge(answer: i32) -> Option<bool> {
 ```
 
 Run with filter `launch_kind`. Expected: `test result: ok. 3 passed; 0 failed` on macOS (2 elsewhere).
+
+Mutation-check (paste each failure, revert, paste the green):
+1. In `launch_kind`, write `if lgit_present != Some(false)`. Expected: `only_the_parameter_present_is_a_login_launch` ("unreadable or another mechanism").
+2. In `from_bridge`, write `1 => Some(true),` (drop `| 2`). Expected: `the_bridge_answer_maps_to_present_absent_or_unreadable` ("keyAEPropData carrying 'lgit'").
+3. In `LaunchEvent.m`, make the function `return 1;` first. Expected: `a_test_process_is_a_manual_launch` (left `Login`).
 
 - [ ] **Step 4: Write the `startup_surface` tests**
 
@@ -6397,7 +6979,14 @@ pub fn startup_surface(platform: Platform, no_sync_root: bool, launch: LaunchKin
 }
 ```
 
-Update the module comment's "Today:" sentence for `startup_surface` to say the macOS row changed in spec 2026-10-07. Run with filter `surfaces::policy`. Expected: every test passes (the new 11 and the old ones).
+Update the module comment's "Today:" sentence for `startup_surface` to say the macOS row changed in spec 2026-10-07. Run with filter `surfaces::policy`. Expected: `test result: ok. N passed; 0 failed`, N = the filter's count before this task + 11.
+
+Mutation-check (paste each failure, revert, paste the green):
+1. `(LaunchKind::Login, _) => today`. Expected: `login_launch_never_opens_a_window`.
+2. `Screen::KeychainUnlock => StartupSurface::AccountWindow`. Expected: `manual_launch_locked_with_keychain_key_opens_settings`.
+3. `Screen::Nothing => StartupSurface::AccountWindow`. Expected: `manual_launch_ready_without_sync_root_opens_onboarding` and `manual_launch_ready_with_sync_root_opens_compact_window`.
+4. `_ => today` in the last arm. Expected: the six `manual_launch_…` tests that expect `AccountWindow`.
+5. Route `Platform::Windows | Platform::Linux` into the macOS `match`. Expected: `windows_and_linux_ignore_the_launch_kind_and_the_account_view`.
 
 - [ ] **Step 6: Wire the launch in `lib.rs`**
 
@@ -6438,6 +7027,12 @@ const REAUTH_SEARCH: &str = "?window=onboarding&mode=reauth";
 and in `open_reauth_window_impl`, `const URL` becomes `let url = format!("index.html{REAUTH_SEARCH}");` and the `eval` string `format!("window.location.search = '{REAUTH_SEARCH}'")`.
 
 Split `open_reauth_window` so Rust can call it: move its body into `pub(crate) fn open_reauth_window_impl(app: &tauri::AppHandle) -> Result<(), String>` (same code, `app` borrowed), and make the command `open_reauth_window_impl(&app)`.
+
+That breaks a spec A pin, which this task updates (plan review M9): `the_commands_and_the_window_the_frontend_calls_exist` reads `body_between(&production, "async fn open_reauth_window(", "\n}\n")` and asserts `const URL: &str = "index.html?window=onboarding&mode=reauth";` and the `eval` string in it. Change that test so that:
+- `window` is read from `"fn open_reauth_window_impl("`, and it asserts `window.contains("let url = format!(\"index.html{REAUTH_SEARCH}\");")` and `window.contains("format!(\"window.location.search = '{REAUTH_SEARCH}'\")")` in place of the two literal strings (the values are pinned by `the_macos_account_window_is_tagged_for_the_frontend` below);
+- the command's own body (`body_between(&production, "async fn open_reauth_window(", "\n}\n")`) contains `open_reauth_window_impl(&app)`;
+- its Windows-arm assertion reads the impl's body, unchanged otherwise.
+Run it (filter `the_commands_and_the_window_the_frontend_calls_exist`) before and after the edit and paste both lines: red after the split, green after the test change.
 
 The Settings hand-over (C-W7, Review Focus 5):
 
@@ -6524,7 +7119,7 @@ fn open_surface_on_reopen(app: &tauri::AppHandle) {
 }
 ```
 
-In `setup()`: first statement of the closure, `let launch = launch_kind::current();`. In the restore task, after `notify_account_view(…RestoreFinished)` and the Finder `Launch` trigger:
+In `setup()`: first statement of the closure, `let launch = launch_kind::current();`. In the restore task, after `drop(restore_finished);` (Task 11) and the Finder `Launch` trigger, so spec A's `the_launch_trigger_follows_the_startup_restore` (at most 400 characters from the restore call to that trigger) is unaffected:
 
 ```rust
                     #[cfg(target_os = "macos")]
@@ -6541,8 +7136,10 @@ In `setup()`: first statement of the closure, `let launch = launch_kind::current
         .run(|app, event| {
             // Spec 2026-10-07 C-W2: reopening the running app is a manual launch.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                open_surface_on_reopen(app);
+            {
+                if let tauri::RunEvent::Reopen { .. } = event {
+                    open_surface_on_reopen(app);
+                }
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
@@ -6608,7 +7205,14 @@ In `finder_setup_command_tests`:
     }
 ```
 
-(The path in `include_str!` is relative to `src/lib.rs`; adjust it if the test module lives elsewhere.) Run with filters `settle_starts_after`, `the_keychain_unlock_opens_settings`, `the_account_window_is_titled`, `the_macos_account_window_is_tagged`, `reopening_the_running_app`. Expected: pass. Mutation: change `tab=account` to `tab=general` in `show_macos_settings_window_on_account`; expect `the_keychain_unlock_opens_settings_on_the_account_tab`; revert.
+(The path in `include_str!` is relative to `src/lib.rs`; adjust it if the test module lives elsewhere.) Run with the filter `-- settle_starts_after_the_restore_probe the_keychain_unlock_opens_settings_on_the_account_tab the_account_window_is_titled_sign_in_on_macos_only the_macos_account_window_is_tagged_for_the_frontend reopening_the_running_app_is_a_manual_launch`. Expected: `test result: ok. 5 passed; 0 failed`.
+
+Mutation-check (paste each failure, revert, paste the green):
+1. `tab=account` → `tab=general` in `show_macos_settings_window_on_account`. Expected: `the_keychain_unlock_opens_settings_on_the_account_tab`.
+2. Move `open_startup_surface_after_settle(&h, launch).await` above `restore_session_on_startup(&h).await`. Expected: `settle_starts_after_the_restore_probe`.
+3. Make the macOS `ONBOARDING_TITLE` `"Welcome to Beebeeb"`. Expected: `the_account_window_is_titled_sign_in_on_macos_only`.
+4. Drop `&platform=macos` from the macOS `ONBOARDING_URL`. Expected: `the_macos_account_window_is_tagged_for_the_frontend`.
+5. Pass `LaunchKind::Login` in `open_surface_on_reopen`. Expected: `reopening_the_running_app_is_a_manual_launch`.
 
 - [ ] **Step 8: Run everything and commit**
 
@@ -6622,6 +7226,8 @@ git commit -m "desktop: on macOS, open the window the account state asks for, an
 git show --stat HEAD
 ```
 
+Expected: every binary `0 failed`; on macOS the lib is `B_lib` + 164 (+ 1 if Task 12's M5 steps ran); `the_commands_and_the_window_the_frontend_calls_exist` and `the_launch_trigger_follows_the_startup_restore` (spec A) pass.
+
 ---
 
 ## Task 14: The menu-bar icon — the crossed b, its tooltip, the click and the menu (spec §8, C-W3, C-W10, C-W11)
@@ -6632,7 +7238,8 @@ git show --stat HEAD
 - Create: `src-tauri/src/tray_presentation.rs`
 - Modify: `src-tauri/Cargo.toml` (tauri `image-ico`)
 - Modify: `src-tauri/src/lib.rs` (`mod tray_presentation;`; the embedded icons; `TRAY_STATE`; `apply_tray_presentation`; `attach_tray_status_listener`; `setup_tray`'s click handler; tests)
-- Modify: `src-tauri/src/account_view/app_ports.rs` (`publish` applies the presentation)
+- Modify: `src-tauri/src/account_view/app_ports.rs` (`AppPublisher::publish` posts the presentation to the main thread)
+- Modify: `src-tauri/src/account_view/driver.rs` (tests: the crossed b on the two published sign-out views)
 
 **Interfaces:**
 - Consumes: `derive::{AccountView, Screen, SessionKind}` (Task 5), `open_surface` and `show_macos_settings_window_on_account` (Task 13), `surfaces::policy::StartupSurface`, the icon files from Task 1; spec A's `setup_tray`, `build_tray_menu`, `attach_tray_status_listener`, `engine_status::tray_tooltip`.
@@ -7038,7 +7645,19 @@ In `attach_tray_status_listener`, replace the final `set_tooltip` block with:
         }
 ```
 
-In `app_ports.rs`'s `publish`, after the emit: `crate::apply_tray_presentation(&self.app, view);`. In `setup()`, right after the account-view block of Task 11 (the tray exists by then: `setup_tray` ran earlier), apply the launch view once: `apply_tray_presentation(app.handle(), &launch_view)` (keep a clone of `launch.view` before passing it to `spawn`).
+In `app_ports.rs`'s `AppPublisher::publish`, after the emit (plan review C1: every published view, the launch view and the sign-out/switch clear included, reaches the icon from here, and only from here):
+
+```rust
+        // The publish lock is held: post the icon change to the main thread instead of waiting for it. The main thread
+        // runs the posts in publish order.
+        let app = self.app.clone();
+        let view = view.clone();
+        if let Err(error) = self.app.run_on_main_thread(move || crate::apply_tray_presentation(&app, &view)) {
+            tracing::warn!(%error, "tray: could not post the presentation");
+        }
+```
+
+No call in `setup()`: `driver::start` publishes the launch view (Task 10), and the account-view block of Task 11 runs after `setup_tray`, so the tray exists when the post runs.
 
 The click (macOS). At the top of the closure given to `tray.on_tray_icon_event`:
 
@@ -7046,33 +7665,47 @@ The click (macOS). At the top of the closure given to `tray.on_tray_icon_event`:
         // Spec 2026-10-07 C-W3/C-W10/C-W11 (macOS): any state but Ready opens its window; with the menu detached both
         // buttons do. Ready falls through to today's toggle, which lands on the Finder location view (plan Task 20).
         #[cfg(target_os = "macos")]
-        if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = &event {
-            let app = tray.app_handle();
-            let pressed = match button {
-                MouseButton::Left => Some(tray_presentation::Button::Left),
-                MouseButton::Right => Some(tray_presentation::Button::Right),
-                _ => None,
-            };
-            if let Some(view) = app.state::<AppState>().account_view.get().map(|handle| handle.state())
-                && let Some(pressed) = pressed
-            {
-                let presentation = tray_presentation::present(&view, surfaces::policy::Platform::Macos);
-                match tray_presentation::click_action(&presentation, pressed) {
-                    Some(tray_presentation::ClickAction::OpenAccountWindow) => {
-                        open_surface(app, surfaces::policy::StartupSurface::AccountWindow, &view);
-                        return;
+        {
+            if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = &event {
+                let app = tray.app_handle();
+                let pressed = match button {
+                    MouseButton::Left => Some(tray_presentation::Button::Left),
+                    MouseButton::Right => Some(tray_presentation::Button::Right),
+                    _ => None,
+                };
+                if let Some(view) = app.state::<AppState>().account_view.get().map(|handle| handle.state())
+                    && let Some(pressed) = pressed
+                {
+                    let presentation = tray_presentation::present(&view, surfaces::policy::Platform::Macos);
+                    match tray_presentation::click_action(&presentation, pressed) {
+                        Some(tray_presentation::ClickAction::OpenAccountWindow) => {
+                            open_surface(app, surfaces::policy::StartupSurface::AccountWindow, &view);
+                            return;
+                        }
+                        Some(tray_presentation::ClickAction::OpenSettingsAccount) => {
+                            show_macos_settings_window_on_account(app);
+                            return;
+                        }
+                        _ => {}
                     }
-                    Some(tray_presentation::ClickAction::OpenSettingsAccount) => {
-                        show_macos_settings_window_on_account(app);
-                        return;
-                    }
-                    _ => {}
                 }
             }
         }
 ```
 
-(`event` is taken by reference here so today's `if let TrayIconEvent::Click { button: MouseButton::Left, … } = event` below still matches it.)
+(`event` is taken by reference here so today's `if let TrayIconEvent::Click { button: MouseButton::Left, … } = event` below still matches it. The `#[cfg]` sits on a block, not on the `if let` statement.)
+
+The crossed b after a live sign-out and a switch (plan review C1, lead ruling): in `account_view/driver.rs`'s tests, at the end of `a_live_sign_out_publishes_signed_out` and of `a_switch_publishes_signed_out_and_then_the_next_account`, add (with `last` in the first and `cleared` in the second):
+
+```rust
+        assert_eq!(
+            crate::tray_presentation::present(&last, Platform::Macos).icon,
+            crate::tray_presentation::TrayIcon::Crossed,
+            "the published Signed out view shows the crossed b"
+        );
+```
+
+These two read the views the publisher received, and `AppPublisher::publish` is the one place that applies the icon (pinned in Step 7).
 
 - [ ] **Step 7: Source tests for the runtime wiring**
 
@@ -7091,7 +7724,10 @@ In `finder_setup_command_tests`:
         let listener = body_between(&production, "fn attach_tray_status_listener", "\n}\n");
         assert!(listener.contains("engine_may_set_tooltip("));
         let ports = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_view/app_ports.rs")).unwrap();
-        assert!(ports[ports.find("fn publish(").unwrap()..].contains("apply_tray_presentation("));
+        let publish = &ports[ports.find("impl Publisher for AppPublisher").expect("the app's publisher")..];
+        let publish = &publish[..publish.find("\n}\n").expect("its end")];
+        assert!(publish.contains("run_on_main_thread(") && publish.contains("apply_tray_presentation("), "every published view reaches the icon, posted:\n{publish}");
+        assert_eq!(production.matches("apply_tray_presentation(").count(), 1, "only its definition in lib.rs; the publisher is the one caller");
     }
 
     /// C-W10: with no valid session the click opens the window from either button, before today's handler runs.
@@ -7106,7 +7742,14 @@ In `finder_setup_command_tests`:
     }
 ```
 
-Run with filters `tray`, `the_macos_click_follows`. Expected: pass. Mutation: delete the `if tray_state.applied == Some(presentation) { return; }`; expect `the_tray_swaps_only_on_a_change…`; revert.
+Run with the filter `-- the_tray_swaps_only_on_a_change_and_the_engine_respects_the_crossed_b the_macos_click_follows_the_account_view_before_todays_toggle a_live_sign_out_publishes_signed_out a_switch_publishes_signed_out_and_then_the_next_account`. Expected: `test result: ok. 4 passed; 0 failed`.
+
+Mutation-check (paste each failure, revert, paste the green):
+1. Delete `if tray_state.applied == Some(presentation) { return; }`. Expected: `the_tray_swaps_only_on_a_change_and_the_engine_respects_the_crossed_b`.
+2. Delete the `run_on_main_thread(…)` statement from `AppPublisher::publish`. Expected: the same test ("every published view reaches the icon, posted").
+3. Add `apply_tray_presentation(app.handle(), &launch.view);` back into `setup()`. Expected: the same test ("the publisher is the one caller").
+4. Delete the macOS `#[cfg]` click block. Expected: `the_macos_click_follows_the_account_view_before_todays_toggle`.
+5. In `present`, give `SessionKind::None` the `Normal` icon. Expected: `a_live_sign_out_publishes_signed_out` and `a_switch_publishes_signed_out_and_then_the_next_account` ("the published Signed out view shows the crossed b"), with Step 2's `the_icon_tooltip_and_menu_follow_the_session_and_connectivity`.
 
 - [ ] **Step 8: Run everything, check clippy against the baseline, commit**
 
@@ -7116,14 +7759,15 @@ RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" HOME="$SCRATCH" $LOCK carg
 rm -rf "$SCRATCH"; /usr/bin/grep "test result:" $EVID/t14-all.log
 $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t14-clippy.log 2>&1; echo "rc=$?"
 /usr/bin/grep -c '^warning' $EVID/t14-clippy.log; cat $EVID/t0-baseline-clippy-warnings.txt
-cd $WT && git add src-tauri/src/tray_presentation.rs src-tauri/Cargo.toml src-tauri/src/lib.rs src-tauri/src/account_view/app_ports.rs
-git commit -m "desktop: show a crossed menu-bar icon while disconnected and open the account window from it" -m "Co-Authored-By: <your model> <noreply@anthropic.com>" -- src-tauri/src/tray_presentation.rs src-tauri/Cargo.toml src-tauri/src/lib.rs src-tauri/src/account_view/app_ports.rs
+cd $WT && git add src-tauri/src/tray_presentation.rs src-tauri/Cargo.toml src-tauri/src/lib.rs src-tauri/src/account_view/app_ports.rs src-tauri/src/account_view/driver.rs
+git commit -m "desktop: show a crossed menu-bar icon while disconnected and open the account window from it" -m "Co-Authored-By: <your model> <noreply@anthropic.com>" -- src-tauri/src/tray_presentation.rs src-tauri/Cargo.toml src-tauri/src/lib.rs src-tauri/src/account_view/app_ports.rs src-tauri/src/account_view/driver.rs
 git show --stat HEAD
 ```
 
-Expected: every binary `0 failed`; the clippy warning count is not above the baseline (list any new warning in a file this plan created and fix it before the commit).
+Expected: every binary `0 failed`; on macOS the lib is `B_lib` + 181 (+ 1 if Task 12's M5 steps ran); the clippy warning count is not above the baseline (list any new warning in a file this plan created and fix it before the commit).
 
 ---
+
 ## Task 15: The frontend contract — the view, its copy and its links
 
 **Lane T.** No UI yet. Everything later TS tasks import. The commands are mocked through the harness's `__TAURI_INTERNALS__` (the same technique as `tests/finderSetup.test.ts`).
@@ -7656,7 +8300,7 @@ git show --stat HEAD
 **Files:**
 - Create: `src/browserSignIn.ts`, `src/BrowserSignIn.tsx`, `src/accountScreens.tsx`
 - Modify: `src/browserLoginCopy.ts` (the panel's inline words move here, unchanged), `src/onboardingSignIn.ts` (`fresh.vaultUnlocked`; M5), `src/accountSwitchCopy.ts` (M5), `src/Onboarding.tsx` (`SignInStep` gains `onBack`; new `SignInMethods`, `LaunchLocationNotice`; the step flow's `afterSignIn`), `src/WindowsFirstRun.tsx` (mounts `BrowserSignIn`, the footer and the offline line), `src/design.css` (classes)
-- Test: `tests/browserSignIn.test.ts`, `tests/signInMethods.test.tsx`; modify `tests/onboardingSignIn.test.ts`, `tests/reauthInPlace.test.tsx`, `tests/onboardingFinderStep.test.tsx` (`{ kind: 'fresh' }` gains `vaultUnlocked: false`)
+- Test: `tests/browserSignIn.test.ts`, `tests/signInMethods.test.tsx`; modify `tests/onboardingSignIn.test.ts`, `tests/reauthInPlace.test.tsx`, `tests/onboardingFinderStep.test.tsx` (`{ kind: 'fresh' }` gains `vaultUnlocked: false`; two Linux step-flow tests)
 
 **Interfaces:**
 - Consumes: Task 15's `AccountView`, `linkFor`, `openAccountLink`, `copyAccountLink`, `retryAccountView`, the copy; Task 12's `start_browser_login` result; spec A's `settledFrom`, `SignInSettled`, `SIGN_IN_OUTCOME_UNREADABLE`, `useFinderSetup`, `browserLoginCopy.ts`; command `quit_app` (Task 11).
@@ -7664,7 +8308,7 @@ git show --stat HEAD
   - `src/onboardingSignIn.ts`: `SignInSettled` = `{ kind: 'fresh'; vaultUnlocked: boolean } | { kind: 'reauthenticated'; vaultUnlocked: boolean } | { kind: 'account_mismatch'; pendingChanges: number }` (`number | null` after step 8)
   - `src/browserSignIn.ts`: `BROWSER_LOGIN_EVENT`, `BrowserPhase`, `BrowserLoginEvent`, `BrowserSignInState`, `BROWSER_IDLE`, `onBrowserEvent(state, event)`, `BrowserSignInResult`, `browserResult(result)`
   - `src/BrowserSignIn.tsx`: default export `BrowserSignIn({ onSettled })`
-  - `src/accountScreens.tsx`: `AccountCard({ title, copy, children })`, `SignInFooter({ createAccountUrl, onOpen?, onQuit? })`, `OfflineLine({ busy, onRetry })`, `LinkFallback({ url, onCopy? })`
+  - `src/accountScreens.tsx`: `AccountCard({ title, copy, children })`, `SignInFooter({ createAccountUrl, onOpen?, onQuit? })`, `OfflineLine({ busy, onRetry })`, `LinkFallback({ url, onCopy? })`, `useLinkOpener(open?: (url) => Promise<LinkOpen>): { openLink(url): Promise<void>; failedUrl: string | null; fallback: ReactNode }` (§10 "Browser won't open" at every link site, plan review I7: Tasks 17 and 18 use it everywhere a link opens)
   - `src/Onboarding.tsx`: `SignInMethods({ view, again, onSettled })`, `LaunchLocationNotice()`
 
 - [ ] **Step 1: Move the panel's words into `browserLoginCopy.ts`**
@@ -7829,7 +8473,9 @@ describe('SignInFooter', () => {
     const m = mount('accountScreens.tsx', 'SignInFooter', {
       backend: {},
       props: { createAccountUrl: LINKS.create_account, onOpen: open, onQuit: async () => { quits.push(1) } },
-      bindings: { LinkFallback, CREATE_ACCOUNT_PROMPT: copy.CREATE_ACCOUNT_PROMPT, CREATE_ACCOUNT_LINK: copy.CREATE_ACCOUNT_LINK, QUIT_BEEBEEB: copy.QUIT_BEEBEEB },
+      // The real `useLinkOpener` runs inside this mount (plan review I7: the one fallback every link site uses).
+      hookModules: [{ file: 'accountScreens.tsx', name: 'useLinkOpener', bindings: { LinkFallback, openAccountLink: open } }],
+      bindings: { CREATE_ACCOUNT_PROMPT: copy.CREATE_ACCOUNT_PROMPT, CREATE_ACCOUNT_LINK: copy.CREATE_ACCOUNT_LINK, QUIT_BEEBEEB: copy.QUIT_BEEBEEB },
     })
     mounted.push(m)
     const link = () => m.elements().find((el) => el.type === 'a')!
@@ -7871,7 +8517,28 @@ describe('the shared screen is mounted by every sign-in window', () => {
 })
 ```
 
-Update the existing tests for the new `fresh` shape and the new sign-in step: in `tests/onboardingSignIn.test.ts`, `tests/reauthInPlace.test.tsx` and `tests/onboardingFinderStep.test.tsx`, every `{ kind: 'fresh' }` becomes `{ kind: 'fresh', vaultUnlocked: false }`. The step flow now mounts `SignInMethods` for its sign-in step, so in `tests/reauthInPlace.test.tsx` and `tests/onboardingFinderStep.test.tsx` add `'SignInMethods'` to the stubbed step names and replace each `find('SignInStep')!.props.onDone(x)` (or `props('SignInStep').onDone(x)`) with `find('SignInMethods')!.props.onSettled(x)` (`props('SignInMethods').onSettled(x)`); the assertions stay. Then add to `tests/onboardingSignIn.test.ts`'s `settledFrom (R8)` block:
+Update the existing tests for the new `fresh` shape and the new sign-in step: in `tests/onboardingSignIn.test.ts`, `tests/reauthInPlace.test.tsx` and `tests/onboardingFinderStep.test.tsx`, every `{ kind: 'fresh' }` becomes `{ kind: 'fresh', vaultUnlocked: false }`. The step flow now mounts `SignInMethods` for its sign-in step, so in `tests/reauthInPlace.test.tsx` and `tests/onboardingFinderStep.test.tsx` add `'SignInMethods'` to the stubbed step names and replace each `find('SignInStep')!.props.onDone(x)` (or `props('SignInStep').onDone(x)`) with `find('SignInMethods')!.props.onSettled(x)` (`props('SignInMethods').onSettled(x)`); the assertions stay. In `tests/onboardingFinderStep.test.tsx`, add `SignInMethods: make('SignInMethods'),` to `stubs()` and these two tests (plan review I6: the Linux step flow is the one consumer of `fresh.vaultUnlocked`; spec §14 "a fresh browser result with `vault_unlocked: true` goes on, never to `UnlockStep`"). If `OnboardingView` on Linux asks a command these do not script, script it the way the file's existing Linux tests do.
+
+```tsx
+describe('the Linux step flow after a sign-in (C-S1)', () => {
+  const signedOut = () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 })
+
+  test('a fresh browser result that brought the keys skips the recovery phrase', async () => {
+    const o = await openOnboarding({ sync_status: () => signedOut(), desktop_platform: () => 'linux' })
+    expect(o.shown()).toEqual(['SignInMethods'])
+    o.props('SignInMethods').onSettled({ kind: 'fresh', vaultUnlocked: true }); o.m.render()
+    expect(o.shown()).toEqual(['FinderInstallStep'])
+  })
+
+  test('a fresh result without the keys asks for the recovery phrase', async () => {
+    const o = await openOnboarding({ sync_status: () => signedOut(), desktop_platform: () => 'linux' })
+    o.props('SignInMethods').onSettled({ kind: 'fresh', vaultUnlocked: false }); o.m.render()
+    expect(o.shown()).toEqual(['UnlockStep'])
+  })
+})
+```
+
+Then add to `tests/onboardingSignIn.test.ts`'s `settledFrom (R8)` block:
 
 ```ts
   test('a fresh result keeps vault_unlocked (C-S1): the browser path delivers the keys', () => {
@@ -7881,7 +8548,7 @@ Update the existing tests for the new `fresh` shape and the new sign-in step: in
   })
 ```
 
-Run: `bun test tests/browserSignIn.test.ts tests/signInMethods.test.tsx tests/onboardingSignIn.test.ts > $EVID/t16-red.log 2>&1; echo "rc=$?"`. Expected: `rc=1` with module-not-found and `settledFrom` mismatches; paste them.
+Run: `bun test tests/browserSignIn.test.ts tests/signInMethods.test.tsx tests/onboardingSignIn.test.ts tests/onboardingFinderStep.test.tsx > $EVID/t16-red.log 2>&1; echo "rc=$?"`. Expected: `rc=1` with module-not-found, `settledFrom` mismatches and the Linux flow showing `SignInStep`; paste them.
 
 - [ ] **Step 3: `settledFrom` keeps the keys of a fresh result**
 
@@ -8070,6 +8737,24 @@ export function OfflineLine({ busy, onRetry }: { busy: boolean; onRetry: () => v
   )
 }
 
+/**
+ * §10 "Browser won't open", the one way every link site opens an address (plan review I7): the system browser, and when
+ * that fails, `fallback` is the address as selectable text with "Copy link", rendered under the link. A later open that
+ * works clears it.
+ */
+export function useLinkOpener(open: (url: string) => Promise<LinkOpen> = openAccountLink): {
+  openLink: (url: string) => Promise<void>
+  failedUrl: string | null
+  fallback: ReactNode
+} {
+  const [failed, setFailed] = useState<string | null>(null)
+  const openLink = async (url: string) => {
+    const result = await open(url)
+    setFailed(result.opened ? null : result.url)
+  }
+  return { openLink, failedUrl: failed, fallback: failed ? <LinkFallback url={failed} /> : null }
+}
+
 /** §7.1: "New to Beebeeb? Create an account on beebeeb.io" (the account view's address, system browser) and "Quit Beebeeb". */
 export function SignInFooter({
   createAccountUrl,
@@ -8080,20 +8765,16 @@ export function SignInFooter({
   onOpen?: (url: string) => Promise<LinkOpen>
   onQuit?: () => Promise<CommandResult<void> | void>
 }) {
-  const [fallback, setFallback] = useState<string | null>(null)
-  const open = async () => {
-    const result = await onOpen(createAccountUrl)
-    setFallback(result.opened ? null : result.url)
-  }
+  const { openLink, fallback } = useLinkOpener(onOpen)
   return (
     <footer className="sign-in-footer">
       <p className="page-copy">
         {CREATE_ACCOUNT_PROMPT}{' '}
-        <a className="text-link" href={createAccountUrl} onClick={(event) => { event.preventDefault(); void open() }}>
+        <a className="text-link" href={createAccountUrl} onClick={(event) => { event.preventDefault(); void openLink(createAccountUrl) }}>
           {CREATE_ACCOUNT_LINK}
         </a>
       </p>
-      {fallback ? <LinkFallback url={fallback} /> : null}
+      {fallback}
       <button className="text-link quiet" onClick={() => void onQuit()}>
         {QUIT_BEEBEEB}
       </button>
@@ -8294,10 +8975,12 @@ If the token names differ in `design.css` (`--font-mono`, `--amber-bg`, `--amber
 cd $WT && bun test > $EVID/t16-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t16-all.log
 ```
 
-Expected: `rc=0`, `0 fail`, pass count = Task 15's count + this task's new tests. Mutations (paste each failure, revert):
-1. `settledFrom` returns `{ kind: 'fresh', vaultUnlocked: false }` always. Expected: `a fresh browser sign-in carries the keys` and `a fresh result keeps vault_unlocked`.
+Expected: `rc=0`, `0 fail`, and the pass count is `B_bun` + 35 (Global Constraints: Task 15's 17 plus this task's 18, which are `browserSignIn` 6, `signInMethods` 9, `onboardingSignIn` 1, the Linux flow 2; + 2 more when step 8 ran). Mutations (paste each failure, revert):
+1. `settledFrom` returns `{ kind: 'fresh', vaultUnlocked: false }` always. Expected: `a fresh browser sign-in carries the keys`, `a fresh result keeps vault_unlocked` and `a fresh browser result that brought the keys skips the recovery phrase`.
 2. `onBrowserEvent`'s `'error'` case returns `{ ...state, error: event.message ?? null }`. Expected: `an error event never puts raw text on the screen`.
 3. In `SignInMethods`, render `BrowserSignIn` even when offline. Expected: `offline: the offline line replaces both methods`.
+4. In `afterSignIn`, `setStep('unlock')` for every fresh result. Expected: `a fresh browser result that brought the keys skips the recovery phrase`.
+5. In `useLinkOpener`, `setFailed(null)` always. Expected: `when the browser does not open, the address and Copy link show`.
 
 ```bash
 bunx tsc --noEmit > $EVID/t16-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t16-eslint.log 2>&1; echo "rc=$?"
@@ -8309,6 +8992,7 @@ git show --stat HEAD
 (Drop `src/desktopApi.ts` from both lists if step 8 did not run.)
 
 ---
+
 ## Task 17: The macOS account window — every screen, the removals, after sign-in (spec §6.2 C-W8, §7, §11)
 
 **Lane T.** On macOS the `onboarding` window becomes the account window: it renders the view's screen and nothing else. The Finder step, the pinning and ready steps and the rail go on macOS (§11); Linux keeps its step flow.
@@ -8318,13 +9002,15 @@ git show --stat HEAD
 - Modify: `src/accountScreens.tsx` (`UpdateScreen`, `ChoosePlanScreen`, `BusyScreen`, `AccountUpdate`, `AccountChoosePlan`, `accountWindowTitle`)
 - Modify: `src/main.tsx` (`?window=onboarding&platform=macos` mounts `MacAccountWindow`)
 - Modify: `src/design.css`
+- Create: `src-tauri/capabilities/account-window.json` (plan review I2: `setTitle` and `close` for the `onboarding` window)
 - Test: `tests/macAccountWindow.test.tsx`, `tests/accountScreens.test.tsx` (new); `tests/reauthInPlace.test.tsx`, `tests/onboardingFinderStep.test.tsx` (modified, see step 6)
 
 **Interfaces:**
-- Consumes: Task 15 (`useAccountView`, `AccountView`, `AccountScreen`, `retryAccountView`, `accountViewPlanOpened`, copy, `openAccountLink`); Task 16 (`SignInMethods`, `AccountCard`, `OfflineLine`, `LinkFallback`); Task 13 (the URL tag, `show_settings_on_account`); spec A (`UnlockStep`, `AccountSwitchStep`, `useFinderSetup`, `FINDER_SETUP_TITLE`, `desktopUpdateCheck`, `ManualUpdateFeedback`, `ACCOUNT_SWITCH_FAILED`).
+- Consumes: Task 15 (`useAccountView`, `AccountView`, `AccountScreen`, `retryAccountView`, `accountViewPlanOpened`, copy, `openAccountLink`); Task 16 (`SignInMethods`, `AccountCard`, `OfflineLine`, `LinkFallback`, `useLinkOpener`); Task 13 (the URL tag, `show_settings_on_account`); spec A (`UnlockStep`, `AccountSwitchStep`, `useFinderSetup`, `FINDER_SETUP_TITLE`, `desktopUpdateCheck`, the default export `ManualUpdateFeedback`, `ACCOUNT_SWITCH_FAILED`).
 - Produces:
   - `src/Onboarding.tsx`: `export function MacAccountWindow()`
-  - `src/accountScreens.tsx`: `UpdateScreen({ offline, busy, onUpdate, onRetry })`, `ChoosePlanScreen({ offline, waiting, busy, fallbackUrl, onChoose, onRetry, onSignOut })`, `BusyScreen()`, `AccountUpdate({ view, check?, install? })`, `AccountChoosePlan({ view, open?, planOpened?, retry?, signOut? })`, `accountWindowTitle(screen: AccountScreen): string` (Task 19 reuses the first five on Windows)
+  - `src-tauri/capabilities/account-window.json`: `core:window:allow-set-title` and `core:window:allow-close` for the window labelled `onboarding` (`core:window:default` grants neither)
+  - `src/accountScreens.tsx`: `UpdateScreen({ offline, busy, onUpdate, onRetry })`, `ChoosePlanScreen({ offline, waiting, busy, fallbackUrl, onChoose, onRetry, onSignOut })`, `BusyScreen()`, `AccountUpdate({ view })`, `AccountChoosePlan({ view, open?, planOpened?, retry?, signOut? })`, `accountWindowTitle(screen: AccountScreen): string` (Task 19 reuses the first five on Windows)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8365,6 +9051,7 @@ describe('AccountChoosePlan', () => {
         retry: async () => { order.push('retry'); return { ok: true, value: undefined } },
         signOut: async () => { order.push('sign_out'); return signOut() },
       },
+      hookModules: [{ file: 'accountScreens.tsx', name: 'useLinkOpener', bindings: { LinkFallback: s.LinkFallback, openAccountLink: open } }],
       bindings: { ...s, ...words, ChoosePlanScreen, ACCOUNT_SWITCH_FAILED: 'Couldn’t sign out' },
     })
     mounted.push(m)
@@ -8460,6 +9147,15 @@ describe('AccountUpdate', () => {
   })
 })
 
+describe('BusyScreen', () => {
+  test('Checking shows the busy indicator and no words (C-R11)', () => {
+    const m = mount('accountScreens.tsx', 'BusyScreen', { backend: {}, bindings: {} })
+    mounted.push(m)
+    expect(textOf(m.tree())).toBe('')
+    expect(m.tree().props['aria-busy']).toBe('true')
+  })
+})
+
 describe('accountWindowTitle', () => {
   test('the title bar follows the heading', async () => {
     const { accountWindowTitle } = await import('../src/accountScreens')
@@ -8535,7 +9231,10 @@ describe('MacAccountWindow', () => {
     expect(failed.find('SignInMethods')!.props.view).toBeNull()
   })
 
-  test('C-S1: a fresh browser sign-in with its keys goes to Checking, never to the recovery phrase', async () => {
+  /** C-S1: whether a sign-in brought its keys is decided in Rust (Task 12's outcome, Task 5's
+   *  `a_browser_sign_in_with_its_keys_is_never_the_recovery_phrase`). This window renders only the view, so what it
+   *  must do is wait: busy from the sign-in until the view moves on, then the view's own screen. */
+  test('after a sign-in the window is busy until the account view moves on, then shows what it says', async () => {
     const w = windowOn({ status: 'ready', view: viewOn('sign_in') })
     w.find('SignInMethods')!.props.onSettled({ kind: 'fresh', vaultUnlocked: true }); w.m.render()
     expect(w.shown()).toEqual(['BusyScreen'])
@@ -8614,6 +9313,17 @@ describe('AfterSignInFinder (§7.6)', () => {
     const failed = finderWith({ kind: 'notice', tone: 'alert', sentence: 'macOS hasn’t finished loading Beebeeb’s Finder extension.', actionLabel: 'Try again', action: 'try_again' })
     await failed.m.click('Try again')
     expect(failed.run).toEqual(['try_again'])
+  })
+})
+
+describe('the account window may set its title and close itself (C-W8, §7.6; plan review I2)', () => {
+  test('one capability grants exactly those two to the onboarding window', () => {
+    const capability = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/account-window.json', import.meta.url), 'utf8'))
+    expect(capability.windows).toEqual(['onboarding'])
+    expect([...capability.permissions].sort()).toEqual(['core:window:allow-close', 'core:window:allow-set-title'])
+    const source = readFileSync(new URL('../src/Onboarding.tsx', import.meta.url), 'utf8')
+    expect(source).toContain('getCurrentWindow().setTitle(')
+    expect(source).toContain('getCurrentWindow().close()')
   })
 })
 
@@ -8734,12 +9444,12 @@ export function AccountChoosePlan({
   const { showToast } = useToast()
   const [waiting, setWaiting] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [fallback, setFallback] = useState<string | null>(null)
+  // §10 at this link too (plan review I7): the one opener every link site uses.
+  const { openLink, failedUrl } = useLinkOpener(open)
   const choose = async () => {
     await planOpened()
     setWaiting(true)
-    const opened = await open(view.links.step)
-    setFallback(opened.opened ? null : opened.url)
+    await openLink(view.links.step)
   }
   const signOutNow = async () => {
     setBusy(true)
@@ -8757,7 +9467,7 @@ export function AccountChoosePlan({
       offline={view.offline}
       waiting={waiting}
       busy={busy}
-      fallbackUrl={fallback}
+      fallbackUrl={failedUrl}
       onChoose={() => void choose()}
       onRetry={() => void retryNow()}
       onSignOut={() => void signOutNow()}
@@ -8780,7 +9490,7 @@ export function accountWindowTitle(screen: AccountScreen): string {
 }
 ```
 
-Imports to add: `AccountScreen`, `AccountView`, `accountViewPlanOpened`, `retryAccountView` from `./accountView`; the update, choose-a-plan, sign-in and sign-out words from `./accountViewCopy`; `commandUnavailableLabel` from `./desktopApi`; `desktopUpdateCheck` from `./windows/manualUpdateCheck`; `ManualUpdateFeedback` from `./ManualUpdateFeedback`; `useToast` from `./windows/ui`; `ACCOUNT_SWITCH_FAILED` from `./accountSwitchCopy`. In the step 1 tests, `AccountChoosePlan`'s `ChoosePlanScreen` and `AccountUpdate`'s `UpdateScreen` are stubbed so their props can be driven directly.
+Imports to add: `AccountScreen`, `AccountView`, `accountViewPlanOpened`, `retryAccountView` from `./accountView`; the update, choose-a-plan, sign-in and sign-out words from `./accountViewCopy`; `commandUnavailableLabel` from `./desktopApi`; `desktopUpdateCheck` from `./windows/manualUpdateCheck`; the default export `ManualUpdateFeedback` (`import ManualUpdateFeedback from './ManualUpdateFeedback'`); `useToast` from `./windows/ui`; `ACCOUNT_SWITCH_FAILED` from `./accountSwitchCopy`. In the step 1 tests, `AccountChoosePlan`'s `ChoosePlanScreen` and `AccountUpdate`'s `UpdateScreen` are stubbed so their props can be driven directly.
 
 - [ ] **Step 3: The window in `Onboarding.tsx`**
 
@@ -8935,31 +9645,55 @@ and `import Onboarding, { MacAccountWindow } from './Onboarding'`. Append to `sr
 
 (the spinner is neutral: amber is for primary actions and encryption state only).
 
+The window calls `getCurrentWindow().setTitle(…)` (C-W8) and `getCurrentWindow().close()` (§7.6), and `core:window:default` grants neither, so without a capability both are refused silently (the calls are `void`ed). Create `src-tauri/capabilities/account-window.json` (add `src-tauri/tauri.conf.json` to Step 8's two pathspec lists if you change it below):
+
+```json
+{
+  "identifier": "account-window",
+  "description": "Spec 2026-10-07 C-W8 and §7.6: the account window sets its title to its heading and closes itself once Finder is ready.",
+  "windows": ["onboarding"],
+  "permissions": ["core:window:allow-set-title", "core:window:allow-close"]
+}
+```
+
+Copy `default.json`'s `$schema` line into it if `default.json` has one. If `tauri.conf.json` lists capabilities by identifier (`app.security.capabilities`), add `"account-window"` there. Then let tauri-build check the permission names: `cd $WT/src-tauri && $LOCK cargo-build -- cargo check --locked > $EVID/t17-cargo-check.log 2>&1; echo "rc=$?"`, expect `rc=0` (an unknown permission fails the build).
+
 - [ ] **Step 5: Run the new tests**
 
-`bun test tests/accountScreens.test.tsx tests/macAccountWindow.test.tsx > $EVID/t17-green.log 2>&1; echo "rc=$?"`. Expected: `rc=0`, `0 fail`, the count of the two files' tests (`18 pass`).
+`bun test tests/accountScreens.test.tsx tests/macAccountWindow.test.tsx > $EVID/t17-green.log 2>&1; echo "rc=$?"`. Expected: `rc=0`, `20 pass`, `0 fail` (`accountScreens` 9, `macAccountWindow` 11).
 
 - [ ] **Step 6: Bring spec A's step-flow tests in line**
 
-- `tests/onboardingFinderStep.test.tsx`: the cases that mount `MacFinderStep`, or `OnboardingView` with `desktop_platform: () => 'macos'` expecting the macOS Finder step, test the step this spec deletes (§11; spec A §10 handed the deletion here). Delete those cases. Keep every `FinderInstallStep` (Windows/Linux) case and the Linux routing cases. The behaviour they pinned now lives in `tests/macAccountWindow.test.tsx` (`AfterSignInFinder`: Adding, Ready closes, a failed add shows one sentence and one action).
+- `tests/onboardingFinderStep.test.tsx`: the cases that mount `MacFinderStep`, or `OnboardingView` with `desktop_platform: () => 'macos'` expecting the macOS Finder step, test the step this spec deletes (§11; spec A §10 handed the deletion here). Delete those cases. Keep every `FinderInstallStep` (Windows/Linux) case, the Linux routing cases and Task 16's two Linux step-flow tests. The behaviour they pinned now lives in `tests/macAccountWindow.test.tsx` (`AfterSignInFinder`: Adding, Ready closes, a failed add shows one sentence and one action).
+- `OnboardingView` now calls `useAccountView()`, so every mount of it needs that binding (the harness only sees what it is given). In `tests/onboardingFinderStep.test.tsx`'s `openOnboarding`, add to its `bindings`:
+
+  ```ts
+      // Task 17: OnboardingView reads the account view for its sign-in step; these tests drive the steps, not the view.
+      useAccountView: () => ({ status: 'loading' }),
+  ```
+
+  and add the same line to the `bindings` of `tests/reauthInPlace.test.tsx`'s `mount('Onboarding.tsx', 'OnboardingView', …)`.
 - `tests/reauthInPlace.test.tsx`: `OnboardingView` is the Linux step flow now. Change its `desktop_platform` answer from `'macos'` to `'linux'` and its `useCapabilities` to `host_os: 'linux'`; the R8 assertions stay (Linux has R8, spec A). The macOS window's R8 rules are in `tests/macAccountWindow.test.tsx`. `AccountSwitchStep`'s own tests (exactly one `clear_session`, after the click) stay as they are.
 
 Record in the task Notes the names of every deleted test and the test that now covers its behaviour (or "covered by: none — the behaviour was removed by §11").
 
-Run: `bun test > $EVID/t17-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t17-all.log`. Expected: `0 fail`.
+Run: `bun test > $EVID/t17-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t17-all.log`. Expected: `0 fail`, and the pass count is `B_bun` + 55 minus the spec A tests this step deleted (their number is in the Notes; Global Constraints).
 
 - [ ] **Step 7: Mutation-check**
 
-1. In `MacAccountWindow.afterSignIn`, route a fresh result with `vaultUnlocked` to `<UnlockStep>` (`body` for `settlingFrom` → `UnlockStep`). Expected: `C-S1: a fresh browser sign-in…`. Revert.
-2. In `AccountChoosePlan.choose`, call `open` before `planOpened`. Expected: `the 15-minute re-check starts before the browser opens…`. Revert.
+1. In `MacAccountWindow.afterSignIn`, delete `setSettlingFrom(screen)`. Expected: `after a sign-in the window is busy until the account view moves on…` (it shows `SignInMethods`). Revert.
+2. In `AccountChoosePlan.choose`, call `openLink` before `planOpened`. Expected: `the 15-minute re-check starts before the browser opens…`. Revert.
 3. Remove the `'keychain_unlock'` effect. Expected: `the Keychain unlock hands over…`. Revert.
+4. Add `<p className="page-copy">Checking…</p>` inside `BusyScreen`. Expected: `Checking shows the busy indicator and no words`. Revert.
+5. Delete `"core:window:allow-close"` from `account-window.json`. Expected: `one capability grants exactly those two to the onboarding window`. Revert.
+6. In `AccountChoosePlan`, pass `fallbackUrl={null}`. Expected: `when the browser does not open, the address shows and the re-check still runs`. Revert.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 cd $WT && bunx tsc --noEmit > $EVID/t17-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t17-eslint.log 2>&1; echo "rc=$?"
-git add src/Onboarding.tsx src/accountScreens.tsx src/main.tsx src/design.css tests/accountScreens.test.tsx tests/macAccountWindow.test.tsx tests/onboardingFinderStep.test.tsx tests/reauthInPlace.test.tsx
-git commit -m "desktop: on macOS the first-run window is the account window: sign in, update, choose a plan, then Finder" -m "Co-Authored-By: <your model> <noreply@anthropic.com>" -- src/Onboarding.tsx src/accountScreens.tsx src/main.tsx src/design.css tests/accountScreens.test.tsx tests/macAccountWindow.test.tsx tests/onboardingFinderStep.test.tsx tests/reauthInPlace.test.tsx
+git add src/Onboarding.tsx src/accountScreens.tsx src/main.tsx src/design.css src-tauri/capabilities/account-window.json tests/accountScreens.test.tsx tests/macAccountWindow.test.tsx tests/onboardingFinderStep.test.tsx tests/reauthInPlace.test.tsx
+git commit -m "desktop: on macOS the first-run window is the account window: sign in, update, choose a plan, then Finder" -m "Co-Authored-By: <your model> <noreply@anthropic.com>" -- src/Onboarding.tsx src/accountScreens.tsx src/main.tsx src/design.css src-tauri/capabilities/account-window.json tests/accountScreens.test.tsx tests/macAccountWindow.test.tsx tests/onboardingFinderStep.test.tsx tests/reauthInPlace.test.tsx
 git show --stat HEAD
 ```
 
@@ -8975,7 +9709,7 @@ git show --stat HEAD
 - Test: `tests/accountNotices.test.tsx` (new); `tests/accountLinks.test.ts` (the scan); `tests/macSettingsTabs.test.tsx`, `tests/macosAccountPlanUi.test.ts`, `tests/macSettingsModel.test.ts` (follow the new source)
 
 **Interfaces:**
-- Consumes: Task 15 (`useAccountView`, `AccountNotice`, `noticeLine`, `NOTICE_LINK_LABEL`, `linkFor`, `openAccountLink`, `BUILT_IN_LINKS`), Task 16 (`LinkFallback`).
+- Consumes: Task 15 (`useAccountView`, `AccountNotice`, `noticeLine`, `NOTICE_LINK_LABEL`, `linkFor`, `openAccountLink`, `BUILT_IN_LINKS`), Task 16 (`LinkFallback`, `useLinkOpener`).
 - Produces: `src/accountScreens.tsx` `AccountNoticeLine({ notice })`; `src/accountLinks.ts` `planButton(view: AccountView | null, todayLabel: string): { label: string; url: string }`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -9030,7 +9764,23 @@ describe('AccountNoticeLine', () => {
     expect(line(notice({ kind: 'trial' }))).toBeNull()
   })
 })
+
+/** §10 "Browser won't open" at every place an account link opens (plan review I7): each site opens through
+ *  `useLinkOpener` and renders its fallback (the address and "Copy link"), and none opens an account link directly. */
+describe('every account link shows its address when the browser does not open', () => {
+  test('each link site uses the one opener and renders its fallback', () => {
+    const sites = ['accountScreens.tsx', 'MacSettings.tsx', 'windows/views/AccountView.tsx', 'WindowsApp.tsx', 'pages/Account.tsx', 'pages/VersionCenter.tsx']
+    for (const site of sites) {
+      const text = readFileSync(new URL(`../src/${site}`, import.meta.url), 'utf8')
+      const direct = ['openUrl(linkFor(', 'openUrl(BILLING', 'openAccountLink(notice.url', 'openAccountLink(url', 'openUrl(button.url'].filter((call) => text.includes(call))
+      expect({ site, opener: text.includes('useLinkOpener('), fallback: /\{fallback\}|fallback=\{fallback\}|fallbackUrl=\{failedUrl\}/.test(text), direct })
+        .toEqual({ site, opener: true, fallback: true, direct: [] })
+    }
+  })
+})
 ```
+
+(Add `import { readFileSync } from 'node:fs'` to the file's imports.)
 
 In `tests/accountLinks.test.ts` add:
 
@@ -9095,16 +9845,14 @@ export function AccountNoticeLine({ notice }: { notice: AccountNotice }) {
 
 - `src/desktopApi.ts`: delete `export const BILLING_URL = …` and its comment.
 - `src/macSettingsModel.ts`: `export const HELP_URL = BUILT_IN_LINKS.support` (import `BUILT_IN_LINKS` from `./accountLinks`).
+Every link below opens through Task 16's `useLinkOpener()` and renders its `fallback` right under the control that opened it (plan review I7: §10's "Browser won't open" holds at every site, not only the three the screens already had).
+
 - `src/MacSettings.tsx`, `AccountTab`: add
 
 ```tsx
   const accountLoad = useAccountView()
   const accountView = accountLoad.status === 'ready' ? accountLoad.view : null
-  const [linkFallback, setLinkFallback] = useState<string | null>(null)
-  const openLink = async (url: string) => {
-    const opened = await openAccountLink(url)
-    setLinkFallback(opened.opened ? null : opened.url)
-  }
+  const { openLink, fallback } = useLinkOpener()
 ```
 
   under the plan text (`{planText ? … : null}`): `{accountView?.notice ? <AccountNoticeLine notice={accountView.notice} /> : null}`; replace the plan button with
@@ -9116,22 +9864,24 @@ export function AccountNoticeLine({ notice }: { notice: AccountNotice }) {
           })() : null}
 ```
 
-  and after the account row's group, `{linkFallback ? <LinkFallback url={linkFallback} /> : null}`. Remove the `BILLING_URL` import.
-- `src/pages/Account.tsx` and `src/pages/VersionCenter.tsx`: `useAccountView()` as above; `openUrl(BILLING_URL)` becomes `openUrl(linkFor(accountView, 'billing'))`; remove the `BILLING_URL` import.
-- `src/WindowsApp.tsx`: `useAccountView()` near the top of the component; `const openUpgrade = () => { void openUrl(linkFor(accountView, 'billing')) }`.
-- `src/windows/views/AccountView.tsx`: delete `const BILLING_URL = …`; `useAccountView()` in the component that renders the account card; the billing button opens `linkFor(accountView, 'billing')`. Render the notice (any kind) as a row in the same visual style as `FrozenRow`, and when the notice is `frozen` it replaces `FrozenRow` (§7.5):
+  and after the account row's group, `{fallback}`. Remove the `BILLING_URL` import.
+- `src/pages/Account.tsx` and `src/pages/VersionCenter.tsx`: `useAccountView()` as above and `const { openLink, fallback } = useLinkOpener()`; `openUrl(BILLING_URL)` becomes `openLink(linkFor(accountView, 'billing'))`, with `{fallback}` under that button; remove the `BILLING_URL` import (other `openUrl` calls in these files, such as `WEB_APP_URL`, are not account links and stay).
+- `src/WindowsApp.tsx`: `useAccountView()` and `const { openLink, fallback } = useLinkOpener()` near the top of the component; `const openUpgrade = () => { void openLink(linkFor(accountView, 'billing')) }`. `openUpgrade` goes to `<StorageWidget … onUpgrade={openUpgrade} />`: pass `fallback={fallback}` beside it and render `{fallback}` under the widget's upgrade control (one optional `fallback?: ReactNode` prop on `StorageWidget`, which is defined in the same file).
+- `src/windows/views/AccountView.tsx`: delete `const BILLING_URL = …`; `useAccountView()` and `useLinkOpener()` in the component that renders the account card; the billing button calls `openLink(linkFor(accountView, 'billing'))`, with `{fallback}` under it. Render the notice (any kind) as a row in the same visual style as `FrozenRow`, and when the notice is `frozen` it replaces `FrozenRow` (§7.5):
 
 ```tsx
 function NoticeRow({ notice }: { notice: AccountNotice }) {
+  const { openLink, fallback } = useLinkOpener()
   const line = noticeLine(notice)
   if (!line) return null
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 18px', borderTop: `1px solid ${T.line}` }}>
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ink }}>{line}</div>
+        {fallback}
       </div>
       {notice.link && notice.url ? (
-        <button onClick={() => void openAccountLink(notice.url as string)} style={{ fontSize: 12, fontFamily: T.fontSans, border: `1px solid ${T.line2}`, borderRadius: 6, background: T.paper, color: T.ink, padding: '6px 10px', cursor: 'pointer' }}>
+        <button onClick={() => void openLink(notice.url as string)} style={{ fontSize: 12, fontFamily: T.fontSans, border: `1px solid ${T.line2}`, borderRadius: 6, background: T.paper, color: T.ink, padding: '6px 10px', cursor: 'pointer' }}>
           {NOTICE_LINK_LABEL[notice.link]}
         </button>
       ) : null}
@@ -9145,7 +9895,7 @@ function NoticeRow({ notice }: { notice: AccountNotice }) {
 - [ ] **Step 4: Bring the existing tests in line**
 
 - `tests/macosAccountPlanUi.test.ts`: the check `expect(src).toContain('BILLING_URL')` becomes `expect(src).toContain('planButton(')`.
-- `tests/macSettingsTabs.test.tsx`: add to the `AccountTab` bindings `useAccountView: () => ({ status: 'failed' })`, `planButton`, `linkFor`, `openAccountLink`, `AccountNoticeLine: () => null`, `LinkFallback: () => null`; the open-url expectation at the plan button becomes `{ url: BUILT_IN_LINKS.billing }` (no view loaded in that test).
+- `tests/macSettingsTabs.test.tsx`: add to the `AccountTab` bindings `useAccountView: () => ({ status: 'failed' })`, `planButton`, `linkFor`, `AccountNoticeLine: () => null`, and run the real hook with `hookModules: [{ file: 'accountScreens.tsx', name: 'useLinkOpener', bindings: { LinkFallback: () => null, openAccountLink } }]` (`openAccountLink` from `../src/accountLinks`, which calls the harness's `plugin:opener|open_url`); the open-url expectation at the plan button becomes `{ url: BUILT_IN_LINKS.billing }` (no view loaded in that test). Any other test that mounts one of the six sites gets the same `hookModules` entry.
 - `tests/macSettingsModel.test.ts`: `expect(HELP_URL).toBe('https://beebeeb.io/support')` stays as it is (the value is unchanged).
 
 - [ ] **Step 5: Run, mutation-check, commit**
@@ -9154,7 +9904,11 @@ function NoticeRow({ notice }: { notice: AccountNotice }) {
 cd $WT && bun test > $EVID/t18-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t18-all.log
 ```
 
-Expected: `0 fail`; the scan test passes with no offenders. Mutations: put `const BILLING = 'https://app.beebeeb.io/billing'` back into `src/WindowsApp.tsx`; expect the scan test to name that file; revert. Make `planButton` ignore the notice; expect `a notice’s link replaces the plan button`; revert.
+Expected: `0 fail`; the pass count is `B_bun` + 61 minus Task 17's deleted spec A tests (Global Constraints); the scan test passes with no offenders. Mutations (paste each failure, revert):
+1. Put `const BILLING = 'https://app.beebeeb.io/billing'` back into `src/WindowsApp.tsx`. Expected: the scan test names that file.
+2. Make `planButton` ignore the notice. Expected: `a notice’s link replaces the plan button`.
+3. In `src/pages/VersionCenter.tsx`, open the billing link with `openUrl(linkFor(accountView, 'billing'))` again. Expected: `each link site uses the one opener and renders its fallback` (`direct` names the call for that site).
+4. In `NoticeRow`, delete `{fallback}`. Expected: the same test does not fail on it alone, because the file still renders the billing button's `{fallback}`; so also delete that one, and expect the test to fail for `windows/views/AccountView.tsx` (`fallback: false`). Revert both.
 
 ```bash
 bunx tsc --noEmit > $EVID/t18-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t18-eslint.log 2>&1; echo "rc=$?"
@@ -9265,7 +10019,7 @@ and guard the existing `step === 'signin'` and `step === 'sync-mode'` branches w
 
 - [ ] **Step 3: Run, mutation-check, commit**
 
-`bun test > $EVID/t19-all.log 2>&1; echo "rc=$?"`. Expected `0 fail`. Mutation: return `null` for `no_plan` in `accountGateScreen`; expect `update required and no plan, and nothing else`; revert.
+`bun test > $EVID/t19-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t19-all.log`. Expected `0 fail` and `B_bun` + 64 pass, minus Task 17's deleted spec A tests (Global Constraints). Mutation: return `null` for `no_plan` in `accountGateScreen`; expect `update required and no plan, and nothing else`; revert.
 
 ```bash
 bunx tsc --noEmit > $EVID/t19-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t19-eslint.log 2>&1; echo "rc=$?"
@@ -9346,11 +10100,11 @@ function initialPage(): Page {
 }
 ```
 
-the nav list renders `compactNavItems(URL_PLATFORM)` instead of `COMPACT_NAV_ITEMS`, and every `setPage(x)` that comes from navigation (the nav buttons, `COMPACT_APP_NAV_EVENT`, `onNavigate`) goes through `setPage(compactPageFor(x, URL_PLATFORM))`. The `case 'status'` route stays for Linux.
+the nav list renders `compactNavItems(URL_PLATFORM)` instead of `COMPACT_NAV_ITEMS`, keeping its `.filter((item) => supportsRoute(caps, item.id))` exactly as it is (`compactNavItems(URL_PLATFORM).filter((item) => supportsRoute(caps, item.id)).map(…)`), and every `setPage(x)` that comes from navigation (the nav buttons, `COMPACT_APP_NAV_EVENT`, `onNavigate`) goes through `setPage(compactPageFor(x, URL_PLATFORM))`. The `case 'status'` route stays for Linux.
 
 - [ ] **Step 3: Run, mutation-check, commit**
 
-`bun test > $EVID/t20-all.log 2>&1; echo "rc=$?"`. Expected `0 fail`. Mutation: make `compactNavItems` return `COMPACT_NAV_ITEMS` always; expect `macOS has no Status entry…`; revert.
+`bun test > $EVID/t20-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t20-all.log`. Expected `0 fail` and `B_bun` + 67 pass, minus Task 17's deleted spec A tests. Mutation: make `compactNavItems` return `COMPACT_NAV_ITEMS` always; expect `macOS has no Status entry…`; revert.
 
 ```bash
 bunx tsc --noEmit > $EVID/t20-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t20-eslint.log 2>&1; echo "rc=$?"
@@ -9460,9 +10214,10 @@ git commit -m "desktop: pin the account view's contract across Rust and TypeScri
 git show --stat HEAD
 ```
 
-(add the spec file to both lists if it was amended).
+Expected: `0 fail` and `B_bun` + 70 pass, minus Task 17's deleted spec A tests (Global Constraints; + 2 if T11-M5 ran). Add the spec file to both lists if it was amended.
 
 ---
+
 ## Task 22: The gates (lead)
 
 **Lead only.** Each lane's head in a fresh tree carrying only its own commits, then the merged `main`. Counts, never adjectives.
@@ -9486,7 +10241,7 @@ RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" HOME="$SCRATCH" $LOCK carg
 rm -rf "$SCRATCH"
 python3 ../scripts/assert-cargo-test-counts.py $EVID/t22-cargo-test.log --cargo-exit-code $(cat $EVID/t22-cargo-test.exit)
 /usr/bin/grep "test result:" $EVID/t22-cargo-test.log
-/usr/bin/grep -cE "account_view::|tray_presentation::|launch_kind::|surfaces::policy::" $EVID/t22-cargo-test.log
+/usr/bin/grep -cE "^test account_view::.* \.\.\. ok$" $EVID/t22-cargo-test.log
 $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t22-clippy.log 2>&1; echo "rc=$?"
 /usr/bin/grep -c '^warning' $EVID/t22-clippy.log; cat $EVID/t0-baseline-clippy-warnings.txt
 /usr/bin/grep -A3 '^warning' $EVID/t22-clippy.log | /usr/bin/grep -cE "account_view/|tray_presentation.rs|launch_kind.rs"
@@ -9494,30 +10249,32 @@ $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t22-clippy.log 
 git -C .. diff origin/main --stat -- bun.lock
 ```
 
-Expected: `--no-run` `rc=0`; every binary `test result: ok. N passed; 0 failed`, each N at least Task 0's baseline for that binary; the module count equals the sum of the new tests listed in Tasks 2–14's Notes; clippy warnings not above the baseline and 0 in the new files; the `[[package]]` count equal to Task 0's; `bun.lock` unchanged. Paste every `test result:` line into the task Notes.
+Expected: `--no-run` `rc=0`; every binary `test result: ok. N passed; 0 failed`; on macOS the lib's N is exactly `B_lib` + 181 (Global Constraints, Task 14's running total; + 1 if Task 12's M5 steps ran) and every other binary's N is Task 0's; `account_view::` alone counts 117 passing tests (doc 10, links 7, notice 12, derive 22, policy 15, fetch 11, gate 6, driver 34); clippy warnings not above the baseline and 0 in the new files; the `[[package]]` count equal to Task 0's; `bun.lock` unchanged. Paste every `test result:` line into the task Notes.
 
-- [ ] **Step 2: TypeScript, in the same gate tree at Lane T's head (after Task 21)**
+- [ ] **Step 2: TypeScript, in a second fresh tree at Lane T's head (after Task 21)**
+
+A new detached worktree, never a checkout inside the first one:
 
 ```bash
-git -C ~/code/bb-worktrees/desktop-1747-gate checkout --detach origin/feat/1747-first-run-sign-in-ui
-cd ~/code/bb-worktrees/desktop-1747-gate && bun install --frozen-lockfile > $EVID/t22-bun-install.log 2>&1; echo "rc=$?"
+git -C $WS/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-1747-gate-t origin/feat/1747-first-run-sign-in-ui
+cd ~/code/bb-worktrees/desktop-1747-gate-t && bun install --frozen-lockfile > $EVID/t22-bun-install.log 2>&1; echo "rc=$?"
 bun test > $EVID/t22-bun-test.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t22-bun-test.log
 bunx tsc --noEmit -p . > $EVID/t22-tsc.log 2>&1; echo "tsc rc=$?"
 bun run lint > $EVID/t22-eslint.log 2>&1; echo "eslint rc=$?"
 ```
 
-Expected: `N pass` with N above Task 0's baseline by the tests Tasks 15–21 added (minus the deleted macOS-step tests listed in Task 17's Notes); `0 fail`; tsc and eslint `rc=0`. (The gate tree is the lead's own, so a checkout in it is allowed.)
+Expected: `N pass` with N = `B_bun` + 70 minus the spec A tests Task 17 deleted (named in its Notes; + 2 if T11-M5 ran); `0 fail`; tsc and eslint `rc=0`.
 
 - [ ] **Step 3: After both PRs merge, on `main`**
 
-Repeat steps 1 and 2 on `origin/main` in the gate tree, then run the workspace's contract guard, which now finds the desktop copy:
+Remove both gate trees (`git -C $WS/repos/desktop worktree remove ~/code/bb-worktrees/desktop-1747-gate` and `…-gate-t`), then repeat steps 1 and 2 with `origin/main` in place of each branch, in fresh detached trees again. Then run the workspace's contract guard, which now finds the desktop copy:
 
 ```bash
 cd $WS && git -C repos/desktop pull --ff-only > $EVID/t22-pull.log 2>&1; echo "rc=$?"
 bash scripts/check-onboarding-contract.sh > $EVID/t22-contract-guard.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "client cop" $EVID/t22-contract-guard.log
 ```
 
-Expected `rc=0` and a line counting at least 1 client copy, the desktop's among them. Remove the gate tree afterwards: `git -C $WS/repos/desktop worktree remove ~/code/bb-worktrees/desktop-1747-gate`.
+Expected `rc=0` and a line counting at least 1 client copy, the desktop's among them. Remove both gate trees afterwards with `git worktree remove` as above.
 
 ---
 
@@ -9549,6 +10306,8 @@ runu() { BB_API_BASE=http://localhost:3001 HOME="$SCRATCH" "$APPU/Contents/MacOS
 ```
 
   (Quit it with the app's own "Quit Beebeeb", or `kill $(cat $EVID/1747-run-u.pid)`; never by name.) Its lifecycle log is `$SCRATCH/Library/Logs/Beebeeb/lifecycle.log`.
+
+  **Precondition for every Build U rung (plan review M12):** a scratch `HOME` moves the app's config and logs, but not the macOS Keychain, which belongs to the macOS user, and spec A's `keychain_session_present` keeps a legacy read fallback. Before the first rung, `runu` with the fresh `$SCRATCH` and confirm the window shows "Sign in to Beebeeb" with the crossed b (`1747-precondition-signed-out.png`). If it shows any session, **stop**: a session from this macOS user's Keychain is in play. Sign the installed app out first, or run Build U under a separate macOS user, and record which.
 - **Build S (signed, sandboxed)** for the Finder rungs and the login-launch rung: spec A's Task 21 steps 3 and 4 exactly (signing identity, both provisioning profiles, the installed app moved aside, `launchctl setenv BB_API_BASE http://localhost:3001`, `mark`/`collect`), including its precondition: Guus's installed app reports nothing waiting to upload (screenshot), and it is restored at the end.
 
 The lead accepted this two-build split on 2026-10-07 and amends 1747's Verification line in the workspace (strike "and `HOME=<scratch>` for every login", write "`HOME=<scratch>` for every login on the unsandboxed bundle; the Finder rungs on the signed, sandboxed build in its own container, with spec A Task 21's precondition", signed and dated). Before the Finder rungs, check that the amended line is in 1747's task file.
@@ -9589,7 +10348,8 @@ The no-card trial needs `server_config.no_card_trial_enabled = 'true'` locally; 
 | A failed first Finder add after sign-in (§7.6) | S | Turn Beebeeb off in System Settings → File Providers; sign in | The account window shows "Beebeeb is turned off in System Settings." with "Open System Settings" (`1747-first-add-failed.png`) |
 | "Browser won't open" | U | Make the opener fail in this window only (nothing system-wide changes): in Build U's Web Inspector (Safari → Develop → Beebeeb), run `window.__TAURI_INTERNALS__.invoke = ((orig) => (cmd, args) => cmd === 'plugin:opener\|open_url' ? Promise.reject('blocked for QA') : orig(cmd, args))(window.__TAURI_INTERNALS__.invoke)`, then click "Create an account on beebeeb.io" | The address as selectable text and "Copy link"; "Copy link" puts exactly that address on the clipboard (`pbpaste > $EVID/1747-copy-link.txt`) (`1747-link-fallback.png`) |
 | The crossed b, light and dark | U | Signed out, Session ended, and offline (Wi-Fi off after two failed fetches ≥ 10 s apart): switch System Settings → Appearance between Light and Dark | Six menu-bar captures (`screencapture -R` of the status-item area), `1747-tray-<state>-<light|dark>.png`; the tooltip in each |
-| Manual launch shows the centred window; a login launch shows only the icon | S | Signed out. `open -a /Applications/Beebeeb.app` | The centred "Sign in to Beebeeb" window (`1747-manual-launch.png`). The login half: only if "Start at login" actually starts this signed, sandboxed build at the next OS login (task 1845's finding). If it does not, write: "OPEN — login launch: autostart cannot start the sandboxed build (task 1845); the `keyAELaunchedAsLogInItem` property rung (spec §16) is open with it" |
+| Manual launch shows the centred window; a login launch shows only the icon | S | Signed out. `open -a /Applications/Beebeeb.app` | The centred "Sign in to Beebeeb" window (`1747-manual-launch.png`). The login half: only if "Start at login" actually starts this signed, sandboxed build at the next OS login (task 1845's finding). If it does, the app's log line `launch kind read from the open-application event` shows `bridge=1` (the `keyAELaunchedAsLogInItem` keyword) or `bridge=2` (`keyAEPropData` carrying `'lgit'`): record which in the Notes (spec §16), with only the icon showing (`1747-login-launch.png`). If it does not, write: "OPEN — login launch: autostart cannot start the sandboxed build (task 1845); which Apple-event field the OS sets at a login launch (spec §16, `bridge=1|2`) is open with it" |
+| Wake while offline re-probes (plan "Spec issues" 21) | U | Signed in, Ready. Wi-Fi off until the Offline overlay shows (two failures ≥ 10 s apart). Sleep the Mac (Apple menu → Sleep) for at least 2 minutes, wake it, Wi-Fi on | The overlay clears by itself within 30 s of Wi-Fi being back, with no click (`1747-wake-offline.png`, `1747-wake-online.png`; the lifecycle log's `account_state … offline=no` line, its time against the wake's) |
 | `cargo test` per-binary counts and `bun test` counts | — | Task 22 | Paste Task 22's truth lines |
 | A clean-machine first run of a notarized, Gatekeeper-checked build | — | — | "OPEN — needs a clean Mac and a notarized build (spec §16)", unless one is available; then record it |
 | Server links | — | — | "OPEN until task 1844 ships: the plan, support and payment links were the built-in addresses; rerun these rows then (spec §16)" |
@@ -9646,7 +10406,8 @@ For the whole-branch reviewer and the lead, after Task 24.
 
 - **Lane T rebase carry-over (spec A rulings).** Both are on surfaces this plan touches, so both are in the plan: T11-M5 (the switch warning's count is `null`, never `0`, on an unreadable `state.db`) is Task 12 steps 6–8 and Task 16 step 8, run only if Task 0 found it still open on `main`; T11f1-c2 (the retryable `SIGN_IN_ACCOUNT_UNKNOWN` sentence renders) holds on both paths: the password path already shows `result.reason`, and Task 16's `browserResult` passes the browser path's `Err` sentence through unchanged (`an error is the sentence Rust wrote, the account-unknown one included`). If Task 0 found M5 already fixed by spec A's rebase, confirm its frontend half renders `null` with words the lead approved, and note it here.
 - **Spec A items marked "final review must triage"** that this plan does not change: `[T11-sec-reinstall]` (a same-account reinstall of the stored key without a server check when user ids match) and `[T11-M8]` (revoking the replaced, still-live token on a same-account swap). Spec C's browser path reaches the same `settle_sign_in`, so a ruling on either applies to both sign-in paths.
-- **Spec issues found 1–18** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07.
+- **Spec issues found 1–21** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07. Issues 19 (the 15 s Checking limit) and 20 (the gate closed for an underived generation) are the lead's rulings on the plan review. Issue 21 (no separate wake path) is the writer's reading of plan review I8 and is open for the lead.
+- **Plan review (2026-10-07, `specC-plan-review.md`).** Applied: C1 (every view, the sign-out and switch clear included, goes through one publish path: `Published` in Task 10, `AppPublisher` in Tasks 11 and 14); I1 (Task 9's generation gate); I2 (Task 17's `account-window.json`); I3 and I4 (Task 0's `t0-record.md` and signature table; the environment, the loop commands and the lane rules in Global Constraints; `bun install` in both lanes' trees); I5 (Task 6's limit, Task 10's watchdog, Task 11's drop guard); I6 (a Rust derive test, two Linux step-flow tests, the macOS test reworded with a real mutation); I7 (`useLinkOpener` at all eight link sites, pinned in Task 18); I8 (three driver tests and the busy-screen test; the wake path removed, Spec issue 21); I9 (exact counts and per-test filters, the table in Global Constraints); M1–M14. M7's second half is done as reads only where the table uses them, not as a per-generation cache: a cached owner record could outlive the sign-out's purge if the view refreshed between the generation bump and the purge.
 - **The device rungs' isolation** (Task 23 step 1): the two-build split was accepted by the lead on 2026-10-07, who amends 1747's Verification line in the workspace.
 - **Not in this plan:** the server's account-stage `fallback` links and the `needs_plan.desktop` fixture (workspace task 1844), and macOS autostart in the sandboxed build (workspace task 1845).
 
@@ -9680,7 +10441,8 @@ For the whole-branch reviewer and the lead, after Task 24.
 | §7.6 | 17 |
 | §7.7 | 16, 18, 19 |
 | §9 (1844) | out of scope; built-in addresses (3) |
-| §10 errors table and lifecycle lines | 6, 8, 10 |
+| §10 errors table and lifecycle lines | 6, 8, 10 (the wake re-probe is the 30 s offline re-probe: Spec issue 21, checked in 23) |
+| §10 "Browser won't open" | 16 (`useLinkOpener`), 17, 18 (all eight link sites) |
 | §11 removals | 17, 18, 20 |
 | §12 design before code | 1 |
 | §13 units | 2–14 (doc split into `doc`, `links`, `notice`) |
@@ -9691,6 +10453,8 @@ For the whole-branch reviewer and the lead, after Task 24.
 
 **2. Placeholder scan.** The plan contains no "TBD", "TODO" or "implement later". `todo!()` appears only in step-1 skeletons that the next step replaces. Every code step shows the code. Task 23's SQL is given for the states whose columns the server code names (frozen, past due, update required); the others are produced from the same `load.rs` reads and written into `1747-state-sql.md` before they run, because the lead runs them against the local database's live schema.
 
-**3. Type consistency.** These names were checked across tasks: `Derived { view, gate_open, blocking, condition }` (5 → 10, 11), `AccountGate::set → Option<GateValue>` (9 → 10, 11), `GateValue::allows_add` (9), `Trigger::{AccountHold, AccountReady}` (9 → 11), `EngineStart::AccountBlocked` (9), `Facts` (10 → 11), `AccountViewHandle::{send, state, clear_for_sign_out, settled}` (10 → 11, 13, 14), `Event::{Launch, RestoreFinished, SessionChanged, WindowFocused, PlanOpened, Retry}` (10 → 11), `StartupSurface::{Onboarding, MainWindow, AccountWindow, SettingsAccount, Nothing}` (13 → 14), `open_surface`, `show_macos_settings_window_on_account` (13 → 14), `LoginOutcome::browser_signed_in`, `browser_settlement` (12), `SignInSettled.fresh.vaultUnlocked` (16 → 17), `AccountView` JSON (5 ↔ 15, pinned in 21), `BUILT_IN_LINKS` ↔ `CREATE_ACCOUNT_URL`/`BILLING_URL`/`SUPPORT_URL` (3 ↔ 15, pinned in 21), the tooltips (14 ↔ 21). `session_generation()` is the one name not yet on any branch (Spec issue 15; Task 0 resolves it).
+**3. Type consistency.** These names were checked across tasks: `Derived { view, gate_open, blocking, condition }` (5 → 10, 11), `AccountGate::{arm, set(open, generation) → Option<GateValue>}` (9 → 10, 11), `GateValue::{open_for, allows_add}` (9 → 10), `policy::checking_deadline` (6 → 10), `Publisher` / `AppPublisher` (10 → 11, 14), `RestoreFinishedGuard` (11), `useLinkOpener` (16 → 17, 18), `Trigger::{AccountHold, AccountReady}` (9 → 11), `EngineStart::AccountBlocked` (9), `Facts` (10 → 11), `AccountViewHandle::{send, state, clear_for_sign_out, settled}` (10 → 11, 13, 14), `Event::{Launch, RestoreFinished, SessionChanged, WindowFocused, PlanOpened, Retry}` (10 → 11), `StartupSurface::{Onboarding, MainWindow, AccountWindow, SettingsAccount, Nothing}` (13 → 14), `open_surface`, `show_macos_settings_window_on_account` (13 → 14), `LoginOutcome::browser_signed_in`, `browser_settlement` (12), `SignInSettled.fresh.vaultUnlocked` (16 → 17), `AccountView` JSON (5 ↔ 15, pinned in 21), `BUILT_IN_LINKS` ↔ `CREATE_ACCOUNT_URL`/`BILLING_URL`/`SUPPORT_URL` (3 ↔ 15, pinned in 21), the tooltips (14 ↔ 21). `session_generation()` is the one name not yet on any branch (Spec issue 15; Task 0 records it in `t0-record.md`, with its bump sites and order).
+
+**5. After the plan review (2026-10-07).** Recounted every task's tests against its code (the table in Global Constraints); rechecked that every test this revision adds or changes names a mutation that fails it, with the assertion that fails (tests the first version already mutation-checked keep their checks; the driver's older tests are covered by Task 10's mutations 1–7 as before); rechecked that no step writes the watch channel except through `Published::publish`, and that every `#[cfg]` added on an `if let` sits on a block.
 
 **4. Review Focus.** Five conditions, each with its test in its owning task (Tasks 5, 10, 11, 13). Checked and not added: a sign-out during a fetch (in the spec's list: C-D5's generation test), the plan poll while offline (in the spec's list), an off-domain server link (in the spec's list), a 429 storm at launch (in the spec's list).
