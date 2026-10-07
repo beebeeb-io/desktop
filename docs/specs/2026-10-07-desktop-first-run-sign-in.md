@@ -47,14 +47,14 @@ Quoted as given. C6-links is not item C6 of 1748, which is a Windows copy fix (�
 
 ### 4.1 Inputs
 
-Rust derives one `AccountView`, with one code path on all three operating systems. The app's windows and the menu-bar icon only render it, the same pattern as spec A's `FinderSetupView` (spec A `finder_setup/driver.rs`). The inputs:
+Rust derives one `AccountView`, with one code path on all three operating systems; only the gate's hold is off on Linux (C-R14). The app's windows and the menu-bar icon only render it, the same pattern as spec A's `FinderSetupView` (spec A `finder_setup/driver.rs`). The inputs:
 
 - **Session:** none, valid or ended. "Ended" holds in either of two cases:
   - **(a) spec A's existing auth-expired state,** `AuthHealth::is_expired()` (spec A `runner.rs`). `sync_status` reports it as `auth_expired`, and it drives `AuthExpiredBanner` and "Sign in again" (spec A `src/AuthExpiredBanner.tsx`). Spec C changes nothing in spec A's 401 handling: the threshold of 3 consecutive 401s and the clearing on any success stay. The onboarding fetch reports its own result to the same `AuthHealth::note_result`, so a revoked session is seen even while the engine is held.
-  - **(b) no usable token, while a recorded owner with retained local data exists.** The source is spec A's owner record (Task 10, R10: `StateDb::owner()` in spec A `state_db.rs`), which lives in `state.db` beside that local data. This is what spec A Task 12's startup 401 leaves behind: the token dropped, keys and Finder kept (`discard_unusable_startup_session`, spec A). A relaunch after a revoked session therefore shows Session ended, not Signed out.
-- **None** means no usable token and no recorded owner. A sign-out by choice, or an account switch, purges the local data and forgets the owner (spec A §5.6), so only those reach Signed out.
+  - **(b) no usable token while a recorded owner exists,** whether or not local data remains. The source is spec A's owner record (Task 10, R10: `StateDb::owner()` in spec A `state_db.rs`). This is what spec A Task 12's startup 401 leaves behind: the token dropped, keys and Finder kept (`discard_unusable_startup_session`, spec A). A relaunch after a revoked session therefore shows Session ended, not Signed out.
+- **None** means no usable token and no recorded owner. A full sign-out (by choice, or an account switch) purges the owner record (spec A §5.6), so only those reach Signed out.
 - **Keys:** whether the vault key is in memory, and for C-R4 whether it is in the Keychain (`keychain_vault_key_present`, spec A).
-- **Document:** a fresh onboarding document, the cached account part (C-D5), or nothing.
+- **Document:** a fresh onboarding document; the cached account part (C-D5); "pending", while the first fetch since the session began has not concluded; or "unavailable", when that fetch ended without a usable document (§10).
 - **Connectivity:** online, or offline at network level only (C-R7, §10).
 
 ### 4.2 Requirements
@@ -62,9 +62,10 @@ Rust derives one `AccountView`, with one code path on all three operating system
 | ID | State | When | Window | Menu-bar icon | Finder + sync |
 |---|---|---|---|---|---|
 | C-R1 | Signed out | no usable token and no recorded owner | Sign-in (browser first, password second) + "Create account" (server's link) | crossed b | off |
-| C-R2 | Session ended | spec A's auth-expired state, or no usable token while a recorded owner with retained local data exists (§4.1) | the same sign-in window, sign-in-again mode | crossed b | as spec A: Finder kept (R8), sync paused until sign-in |
-| C-R3 | Update required | a fresh document has `client.status == update_required` | "Update Beebeeb" (existing updater) | normal b when signed in, crossed b when signed out (C-I1) | off |
+| C-R2 | Session ended | spec A's auth-expired state, or no usable token while a recorded owner exists (§4.1) | the same sign-in window, sign-in-again mode | crossed b | as spec A: Finder kept (R8), sync paused until sign-in |
+| C-R3 | Update required | a fresh document has `client.status == update_required` | "Update Beebeeb" (existing updater) | normal b with a valid session; crossed b when signed out or the session ended (C-I1) | off |
 | C-R4 | Locked | valid session, no vault key in memory | Unlock (as today, C-W7) | normal b | off |
+| C-R11 | Checking | a stored token whose startup restore and probe are running; or a valid session with the key in memory, no usable cached account part, and the document "pending" | the busy screen | normal b | off (the gate) |
 | C-R5 | No plan yet | `blocking` and `account.state == needs_plan` | "Choose a plan on beebeeb.io" + one button | normal b | off |
 | C-R6 | Ready | none of the above | nothing to do; one-line notice (§7.5) | normal b | spec A starts it (Windows, Linux: today's start) |
 | C-R7 | Offline | an overlay on any state: a network-level failure | the state's own screen says offline | crossed b | unchanged |
@@ -75,9 +76,12 @@ Rust derives one `AccountView`, with one code path on all three operating system
 - **C-R9 What "off" means.**
   - In C-R1 and C-R4 it is spec A's own behaviour. With no session or no keys, no engine starts. The reconciler takes no action, or wants Finder absent after a sign-out by choice (spec A §5.1).
   - In C-R2 it is spec A's handling, unchanged: Finder is kept (R8), and sync is paused until sign-in. Spec C neither stops nor starts the engine for C-R2.
-  - In Checking, C-R3 and C-R5 it is the account gate (C-R10), which applies only while there is a session. A signed-out C-R3 therefore keeps spec A's absent or no-action, and a launch can still remove a Finder entry whose sign-out removal failed (spec A §5.3, trigger 1).
+  - In Checking, C-R3 and C-R5 it is the account gate (C-R10), which applies only while the session is valid.
+    - A C-R3 while signed out keeps spec A's absent or no action, so a launch can still remove a Finder entry whose sign-out removal failed (spec A §5.3, trigger 1).
+    - A C-R3 with an ended session keeps C-R2's handling.
+    - On Linux the gate never holds (C-R14).
 - **C-R10 The account gate is enforced at the point of action.**
-  - **The value.** The gate is `{ open, epoch }` in Rust: closed in Checking, C-R3 and C-R5 while a session exists, open otherwise. Every change increments `epoch`.
+  - **The value.** The gate is `{ open, epoch }` in Rust. On macOS and Windows it is closed in Checking, C-R3 and C-R5 while the session is valid, and open otherwise. On Linux it is always open (C-R14). Every change increments `epoch`.
   - **The reconciler's add.** `Op::AddDomain` (spec A `finder_setup/core.rs`) reads the gate immediately before it acts. It does nothing if the gate is closed, or if the epoch differs from the one its check started under.
   - **Every engine start reads it too.** `authorize_engine_start` reads the gate under the engine slot and returns a new permit, `AccountBlocked`, beside `NoSession` and `FinderRemovalOwed` (spec A `lib.rs`). The branch of `start_check_engine` that reuses a running engine (spec A) checks it as well.
   - **The six callers of `spawn_bound_engine`** (spec A `lib.rs`) treat `AccountBlocked` as held, never as an error:
@@ -89,7 +93,12 @@ Rust derives one `AccountView`, with one code path on all three operating system
     - a running engine is stopped with spec A's single stop helper, `stop_engine_in_slot`, keeping its unconfirmed-stop semantics (`engine_stop_unconfirmed`)
     - Finder is never removed because of blocking: the gate only holds adds
 - **C-R11 Checking.**
-  - **When.** Checking is entered after every sign-in that leaves the keys in memory, and at a launch with a session and keys but no usable cached account part. The gate is closed.
+  - **When.** Checking is entered on each of these, every one shown in the diagram (§4.3). The gate is closed throughout.
+    - at launch, while spec A's startup restore and its probe run for a stored token (`probe_startup_session`, capped at 5 s, `lib.rs:561`, `:563`, `:573`)
+    - at launch, once the restore has finished, with a session and the key but no usable cached account part
+    - after a sign-in that leaves the key in memory: a browser sign-in, or a password sign-in with the key in the Keychain
+    - after an unlock (the Keychain unlock or the recovery phrase) with no usable cached account part
+    - after the same account signs in again from Session ended (R8)
   - **Screen.** The busy screen: the window's busy indicator, with no new words.
   - **Exit.** Checking ends with the first fresh document, or when the document is unavailable (§10: an HTTP status, a 429, an unreadable body, or offline). If the document is unavailable, the cache decides if there is one; otherwise the app proceeds as today (C-R6, gate open).
   - **Purpose.** Spec A's "keys arrived" cannot add Finder before the server has said whether the account is blocking.
@@ -100,19 +109,19 @@ Rust derives one `AccountView`, with one code path on all three operating system
 - **C-R13 The server enforces; the client explains.** The server refuses uploads for a no-plan account, so the client gate is for clarity, not enforcement. That is why offline never locks anyone out: offline uses the cached account part, and with no cache the app proceeds as today. A cached blocking account part keeps its gate until the next fresh document decides.
 - **C-R14 Platforms.**
   - **Windows:** the same state, copy and crossed-b icon, rendered in its existing windows (§7.7), with no new launch policy (§6).
-  - **Linux:** the same Rust state and gate. Linux gets the changes to the shared sign-in window (§7.8), but nothing Linux-specific is built.
+  - **Linux:** the same Rust state. The document fetch and the icon run on the shared paths, and Linux gets the changes to the shared sign-in window (§7.8). But the account gate never holds the engine on Linux, because Linux has no screens to explain a hold. The server still enforces (C-R13). Nothing Linux-specific is built.
 - **C-R15 Blocking without `needs_plan`.** A document whose state is not `needs_plan`, and which is blocking only through a required `verify_email` step or a required step this client does not know, proceeds as today (C-R6, gate open). It writes one lifecycle-log line (§10) and gets no new screen. The server already refuses uploads and shares for an unverified email.
 
 ### 4.3 State diagram
 
-Drawn from the table and C-R8. Offline (C-R7) overlays every state. Spec A's own transitions (keys, sign-out, switch) are named on the edges.
+Drawn from the table and C-R8. Offline (C-R7) overlays every state. Spec A's own transitions (keys, sign-out, switch) are named on the edges. A sign-in from Session ended goes through Checking; Session ended reaches Ready, No plan or Update required directly only when spec A clears the auth-expired state after a later success, with no sign-in.
 
 ```mermaid
 stateDiagram-v2
     [*] --> SignedOut: no usable token, no recorded owner
-    [*] --> SessionEnded: no usable token, recorded owner with retained local data
+    [*] --> SessionEnded: no usable token, recorded owner
     [*] --> Locked: session, no key in memory
-    [*] --> Checking: session and key, no cached account part
+    [*] --> Checking: restore and probe running, or session and key with no cached account part
     [*] --> NoPlan: cached account part blocking (needs_plan)
     [*] --> Ready: cached account part not blocking
     SignedOut --> Locked: password sign-in, no key on this device
@@ -127,15 +136,20 @@ stateDiagram-v2
     Checking --> Ready: not blocking, or document unavailable
     Checking --> UpdateRequired: fresh document, update_required
     Checking --> SessionEnded: auth expired
+    Checking --> Locked: Lock now
+    Checking --> SignedOut: sign out by choice
     NoPlan --> Ready: fresh document not blocking
     Ready --> NoPlan: fresh document turns blocking
     NoPlan --> UpdateRequired: fresh document, update_required
     Ready --> UpdateRequired: fresh document, update_required
-    UpdateRequired --> Ready: fresh document no longer update_required
+    UpdateRequired --> Ready: fresh document no longer update_required, not blocking
+    UpdateRequired --> NoPlan: fresh document no longer update_required, blocking
     UpdateRequired --> [*]: update installs, app relaunches
     NoPlan --> SessionEnded: auth expired
     Ready --> SessionEnded: auth expired
-    SessionEnded --> Ready: auth-expired state clears by itself (a later success)
+    SessionEnded --> Ready: auth-expired clears after a later success (no sign-in)
+    SessionEnded --> NoPlan: auth-expired clears after a later success (no sign-in), cached part blocking
+    SessionEnded --> UpdateRequired: fresh document, update_required
     SessionEnded --> Checking: the same account signs in again (R8)
     SessionEnded --> SignedOut: sign out by choice, or another account (switch, R8)
     Ready --> Locked: Lock now
@@ -226,12 +240,12 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
 ### 6.2 Which window opens: one rule
 
 - **C-W3 Icon click.**
-  - In any state other than Ready, Checking included, a click opens the account window on that state's screen: sign-in (C-R1), sign-in again (C-R2, spec A's `open_reauth_window`), update (C-R3), unlock (C-R4, C-W7), choose a plan (C-R5), or busy (Checking).
+  - In any state other than Ready, Checking included, a click opens the account window on that state's screen: sign-in (C-R1), sign-in again (C-R2, spec A's `open_reauth_window`), update (C-R3), unlock (C-R4, C-W7), choose a plan (C-R5), or busy (Checking). The exception is C-R4 with the key in the Keychain, which opens the Settings window (C-W7).
   - In Ready, a click opens the compact window on spec A's Finder location view (`src/pages/SyncFolder.tsx`, compact page `finder`) until spec B. It toggles as today (`lib.rs:9904-9912`).
 - **C-W4 Manual launch.**
-  - The decision waits until the state has settled: spec A's session restore has finished and the state is out of Checking. It waits at most 5 s from launch.
-  - If the state is still Checking after 5 s, the account window opens in the busy state.
-  - A settled state other than Ready opens the account window on that state's screen.
+  - The decision waits until the state has settled, that is, until it is out of Checking. The 5 s settle starts when spec A's restore probe completes or times out (`probe_startup_session`, itself capped at 5 s, `lib.rs:561`).
+  - If the state is still Checking at the end of the settle, the account window opens in the busy state.
+  - A settled state other than Ready opens the account window on that state's screen, except C-R4 with the key in the Keychain, which opens the Settings window (C-W7).
   - In Ready, today's launch behaviour stays: `startup_surface` opens onboarding when no `sync_root` is set, else the compact window, which now lands on the Finder location view.
 - **C-W5 Login launch.** It never opens a window.
 - **C-W6 Nothing else** opens the account window by itself. A window that is already open re-renders when the state changes.
@@ -247,7 +261,9 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
 
 ### 6.3 The menu
 
-- **C-W10 No session.** In C-R1, C-R2, and C-R3 while signed out, the tray menu is detached (`set_menu(None)`), and both mouse buttons act as the click in C-W3. Today's handler acts on the left button only (`lib.rs:9850-9930`).
+- **C-W10 No valid session.** In C-R1 and C-R2, and in C-R3 while signed out or with an ended session, the tray menu is detached (`set_menu(None)`), and both mouse buttons act as the click in C-W3. Today's handler acts on the left button only (`lib.rs:9850-9930`).
+  - The window follows precedence: a C-R3 with an ended session opens the update screen.
+  - The icon, tooltip and menu follow the session and connectivity instead (C-I1, C-I2).
 - **C-W11 With a session.** The menu stays attached and unchanged until spec B. A left click follows C-W3.
 
 ### 6.4 Boundary with the popover spec
@@ -336,7 +352,7 @@ Each row was checked against the server's golden fixture (server `contracts/onbo
 
 - **Unknown `account.state`.** It is decided from `capabilities`. If `upload.allowed` is false, the reason decides:
   - a plan reason (`plan_required`, `billing_read_only`, `account_lapsed`, `trial_ended`, `trial_cancelled_read_only`; server `onboarding/derive.rs:37-44`): the read-only variants
-  - any other reason: "Read-only." alone
+  - any other reason: "Read-only." alone. That is the first clause of the approved line with no date and no second clause; it is not a new string.
   - If upload is allowed, there is no notice.
 - **Windows frozen notice.** On Windows the frozen notice replaces the whole `FrozenRow` text, "Frozen since … Reach support at beebeeb.io …" (`src/windows/views/AccountView.tsx:187-205`).
 
@@ -356,9 +372,12 @@ The removed steps (§11) are not replaced by other steps. While spec A's reconci
 ### 7.8 Linux
 
 - **What reaches Linux:**
-  - the Rust account state and gate, which are platform-neutral, with one code path on all three operating systems
+  - the Rust account state, which is platform-neutral, with one code path on all three operating systems
+  - the document fetch and the icon, on the shared paths
   - the shared sign-in window's changes: the sign-in methods, "Create account" and the offline line. Linux reaches them because it shares `Onboarding.tsx` (`src/main.tsx:58-60`) and the `onboarding` window (`lib.rs:886-896`).
-  - C-R3 and C-R5, which show in that same window
+- **The account gate never holds the engine on Linux.**
+  - Linux has no C-R3 or C-R5 screens to explain a hold: its onboarding window keeps today's steps after sign-in, and a set-up machine opens today's main window.
+  - A no-plan or update-required account on Linux therefore syncs as today, and the server still enforces (C-R13).
 - **Nothing Linux-specific is built:**
   - No Finder work. Linux keeps `FinderInstallStep` (its FUSE registration) and the pinning and ready steps, as spec A keeps them for Linux and for an unknown platform (spec A `src/Onboarding.tsx`, the `finder` step's platform branch).
   - No launch policy, and the tray clicks are unchanged.
@@ -369,8 +388,13 @@ The removed steps (§11) are not replaced by other steps. While spec A's reconci
 
 ## 8. The menu-bar icon (C4, C4a, C4b)
 
-- **C-I1 Rule.** The crossed b shows when the session is none or ended, or when C-R7 (offline) applies; otherwise the normal b shows. It depends only on the session and connectivity, so a signed-out C-R3 also shows the crossed b, with "Beebeeb: Signed out". One pure function, `tray_presentation`, maps the `AccountView` to the icon, the tooltip, the click action and whether the menu is attached.
+- **C-I1 Rule.** The crossed b shows when the session is none or ended, or when C-R7 (offline) applies; otherwise the normal b shows. It depends only on the session and connectivity, never on the window's state:
+  - a C-R3 while signed out shows the crossed b, with "Beebeeb: Signed out"
+  - a C-R3 with an ended session shows the crossed b, with "Beebeeb: Sign in again", the menu detached, and a click opening the update screen (C-W10)
+
+  One pure function, `tray_presentation`, maps the `AccountView` to the icon, the tooltip, the click action and whether the menu is attached.
 - **C-I2 Tooltips.** "Beebeeb: Signed out", "Beebeeb: Sign in again", "Beebeeb: Offline".
+  - The tooltip follows the session (none: "Signed out"; ended: "Sign in again") and connectivity, not the winning state, so C-R3 never changes it.
   - When offline applies together with one of the others, "Offline" wins, because it is the fix that comes first.
   - With the normal b, today's engine tooltip applies (`engine_status::tray_tooltip`, `lib.rs:9784-9789`). While the b is crossed, the engine listener does not overwrite the tooltip.
   - Leaving the crossed b re-applies the last engine tooltip at once, without waiting for the next engine event.
@@ -460,7 +484,9 @@ Every new test is seen failing before it passes, and its failure output is paste
 
 **Rust:**
 - **The table.** The §4.2 table is one pure function, tested row by row and on the C-R8 precedence. It is mutation-checked: flip one row, confirm that row's test fails, revert.
-- **Session ended.** C-R2 is derived from the auth-expired state, and from a missing token beside a recorded owner. C-R1 needs both no token and no owner. After a startup 401 that kept the owner, the relaunch derives C-R2; after a sign-out by choice, it derives C-R1.
+- **Session ended.** C-R2 is derived from the auth-expired state, and from a missing token beside a recorded owner, with and without local data remaining. C-R1 needs both no token and no owner. After a startup 401 that kept the owner, the relaunch derives C-R2; after a sign-out by choice, it derives C-R1.
+- **Checking.** Every entry in C-R11 derives Checking, the restore period included. Checking ends on a fresh or unavailable document.
+- **Linux.** The gate never holds the engine on Linux.
 - **The trigger.** `account_ready` fires on every edge into Ready, with one test per incoming edge: from Checking, C-R5, C-R4, C-R3 and C-R2, and at launch from the cache. On no other edge does it fire. On macOS it clears the reconciler's `held` flag.
 - **The gate:**
   - a reconcile in flight when the document turns blocking adds nothing
@@ -484,8 +510,21 @@ Every new test is seen failing before it passes, and its failure output is paste
   - an unidentified session's document stays in memory
   - "cannot compare" keeps the row
   - the row is purged on a sign-out by choice and on a switch, kept after a session ended, never used for another identity, and counted as a trace
-- **Launch (macOS):** `launch_kind` for the parameter present, absent and unreadable. A launch at 5 s still in Checking opens the busy screen. The Windows and Linux `startup_surface` pins are unchanged.
-- **Icon:** the icon, tooltip and menu attachment for every state (C-I1, C-I2, C-W10), and the tooltip re-applied on leaving the crossed b.
+- **Launch (macOS):** `launch_kind` for the parameter present, absent and unreadable. The Windows and Linux `startup_surface` pins are unchanged.
+- **`startup_surface`, macOS row, one named test per settled state (C-W4):**
+  - `manual_launch_signed_out_opens_sign_in`
+  - `manual_launch_session_ended_opens_sign_in_again`
+  - `manual_launch_update_required_opens_update`
+  - `manual_launch_locked_with_keychain_key_opens_settings`
+  - `manual_launch_locked_without_key_opens_recovery_phrase`
+  - `manual_launch_no_plan_opens_choose_a_plan`
+  - `manual_launch_still_checking_after_settle_opens_busy`
+  - `manual_launch_ready_without_sync_root_opens_onboarding`
+  - `manual_launch_ready_with_sync_root_opens_compact_window`
+  - `login_launch_never_opens_a_window`, run for every state
+  - `settle_starts_after_the_restore_probe`
+- **The icon click per state (C-W3, C-W10), one named test each:** `click_signed_out_opens_sign_in`, `click_session_ended_opens_sign_in_again`, `click_update_required_opens_update` (also with an ended session), `click_locked_with_keychain_key_opens_settings`, `click_locked_without_key_opens_recovery_phrase`, `click_no_plan_opens_choose_a_plan`, `click_checking_opens_busy`, `click_ready_toggles_compact_window`.
+- **Icon:** the icon, tooltip and menu attachment for every state (C-I1, C-I2, C-W10), including a C-R3 with an ended session, and the tooltip re-applied on leaving the crossed b.
 - **Links:** the scheme, host, user-info, allowlist and debug-only localhost checks.
 - **Errors:** each row of §10.
 - **Dependencies:** `Cargo.lock` adds no package after `image-ico` (C-I4).
@@ -585,7 +624,11 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
 - **I-6 "Locked" could be read two ways.**
   - **Ruled:** a valid session with no key in memory, shown through today's unlock flow: the Keychain unlock or the recovery phrase. → C-W7.
 - **I-7 The diagram contradicted the table** (`SessionEnded --> Ready` skipped Checking) and left out common transitions.
-  - **Ruled:** rebuild it from the table and the precedence, with a sign-in from session ended going through Checking. → §4.3.
+  - **Ruled:** rebuild it from the table and the precedence; remove `SessionEnded --> Ready`; Session ended goes back through Checking after the sign-in. → §4.3.
+  - **Corrected (lead, 2026-10-07, after the re-review):** the removal was wrong.
+    - Spec A clears the auth-expired state after any later success, with no sign-in. So `SessionEnded --> Ready` stays, labelled "auth-expired clears after a later success (no sign-in)".
+    - The implied edges are added: SessionEnded→NoPlan, SessionEnded→UpdateRequired, Checking→Locked, Checking→SignedOut, UpdateRequired→NoPlan.
+    - A sign-in from Session ended still goes through Checking.
 - **I-8 `trial_cancelling` was mapped to "Free trial until …",** but the server sends it read-only with no trial block.
   - **Ruled:** map each state as its golden fixture sends it, and list the fixture per row. → §7.5.
 - **I-9 Gaps in binding the cached document** to the account, to the session, and to the app version.
@@ -599,12 +642,30 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
   - **The onboarding fetch reports to `AuthHealth::note_result`:** accepted.
   - **A relaunch after a revoked session read as Signed out.** Spec A's startup 401 drops the token without setting the auth-expired state.
     **Ruled:** Session ended also holds when there is no usable token while a recorded owner with retained local data exists, the source being spec A's owner record (Task 10). Signed out needs no recorded owner. → §4.1, C-R1, C-R2, C-R8, §4.3, §15.
+    **Refined (re-review N-2):** a recorded owner with no usable token is Session ended whether or not local data remains. A full sign-out purges the owner record.
   - **The session generation:** provided by spec A Task 12, whose rulings now require it as a small public API; spec C adds it only if absent. → C-D5.
   - **Accepted as written:** the macOS startup row reads `no_sync_root` in Ready (C-W9), and Linux gets the colour crossed `.ico` (§7.8).
 - **Minor findings:** all 19 applied (M-1 to M-19).
   - M-5: spec A is cited by symbol.
   - M-11: the updater relaunch counts as manual (C-W1).
   - M-14: the Windows machine is not named.
+
+### 17.3 The scoped re-review (lead rulings, 2026-10-07)
+
+- **I-7:** see the correction under I-7 in §17.2.
+- **M-4: a C-R3 with an ended session** left its menu and tooltip open.
+  - **Ruled:** the window follows precedence (update). The icon, tooltip and menu follow the session and connectivity: crossed b, "Beebeeb: Sign in again", menu detached, and a click opens the window. → C-W10, C-I1, C-I2.
+- **M-13: no named tests** for the macOS `startup_surface` rows or the click per state.
+  - **Ruled:** add them. → §14.
+- **N-1: Checking had no table row,** and its entries were partly unlisted.
+  - **Ruled:** add the row; Checking covers the restore period and every entry the diagram shows, unlock included; the 5 s settle starts after the restore probe. → §4.1, §4.2, C-R11, C-W4.
+- **N-2: a hole between Signed out and Session ended.**
+  - **Ruled:** a recorded owner with no usable token is Session ended, with or without local data. → §4.1, C-R2.
+- **N-3: Linux had the gate but no screen** to explain it.
+  - **Ruled:** on Linux the gate never holds the engine; the fetch and the icon still run on the shared paths. → C-R14, C-R10, §7.8.
+- **N-4 and N-5, wording:**
+  - C-W3 and C-W4 name the C-R4 Settings exception.
+  - The bare "Read-only." is the first clause of the approved line.
 
 ## 18. Non-goals
 
