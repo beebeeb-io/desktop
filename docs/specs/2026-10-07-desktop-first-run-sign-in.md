@@ -49,10 +49,10 @@ Quoted as given. C6-links is not item C6 of 1748, which is a Windows copy fix (�
 
 Rust derives one `AccountView`, with one code path on all three operating systems. The app's windows and the menu-bar icon only render it, the same pattern as spec A's `FinderSetupView` (spec A `finder_setup/driver.rs`). The inputs:
 
-- **Session:** none, valid or ended.
-  - "Ended" is spec A's existing auth-expired state, `AuthHealth::is_expired()` (spec A `runner.rs`). `sync_status` reports it as `auth_expired`, and it drives `AuthExpiredBanner` and "Sign in again" (spec A `src/AuthExpiredBanner.tsx`).
-  - Spec C changes nothing in spec A's 401 handling: the threshold of 3 consecutive 401s, and the clearing on any success, stay. The onboarding fetch only reports its own result to the same `AuthHealth::note_result`, so a revoked session is seen even while the engine is held.
-  - After a relaunch, spec A's startup 401 drops the token without setting the auth-expired state (`discard_unusable_startup_session`, spec A). The person then sees C-R1, and signing in as the same account is still R8's re-sign-in in place.
+- **Session:** none, valid or ended. "Ended" holds in either of two cases:
+  - **(a) spec A's existing auth-expired state,** `AuthHealth::is_expired()` (spec A `runner.rs`). `sync_status` reports it as `auth_expired`, and it drives `AuthExpiredBanner` and "Sign in again" (spec A `src/AuthExpiredBanner.tsx`). Spec C changes nothing in spec A's 401 handling: the threshold of 3 consecutive 401s and the clearing on any success stay. The onboarding fetch reports its own result to the same `AuthHealth::note_result`, so a revoked session is seen even while the engine is held.
+  - **(b) no usable token, while a recorded owner with retained local data exists.** The source is spec A's owner record (Task 10, R10: `StateDb::owner()` in spec A `state_db.rs`), which lives in `state.db` beside that local data. This is what spec A Task 12's startup 401 leaves behind: the token dropped, keys and Finder kept (`discard_unusable_startup_session`, spec A). A relaunch after a revoked session therefore shows Session ended, not Signed out.
+- **None** means no usable token and no recorded owner. A sign-out by choice, or an account switch, purges the local data and forgets the owner (spec A §5.6), so only those reach Signed out.
 - **Keys:** whether the vault key is in memory, and for C-R4 whether it is in the Keychain (`keychain_vault_key_present`, spec A).
 - **Document:** a fresh onboarding document, the cached account part (C-D5), or nothing.
 - **Connectivity:** online, or offline at network level only (C-R7, §10).
@@ -61,15 +61,17 @@ Rust derives one `AccountView`, with one code path on all three operating system
 
 | ID | State | When | Window | Menu-bar icon | Finder + sync |
 |---|---|---|---|---|---|
-| C-R1 | Signed out | no session | Sign-in (browser first, password second) + "Create account" (server's link) | crossed b | off |
-| C-R2 | Session ended | spec A's auth-expired state | the same sign-in window, sign-in-again mode | crossed b | as spec A: Finder kept (R8), sync paused until sign-in |
+| C-R1 | Signed out | no usable token and no recorded owner | Sign-in (browser first, password second) + "Create account" (server's link) | crossed b | off |
+| C-R2 | Session ended | spec A's auth-expired state, or no usable token while a recorded owner with retained local data exists (§4.1) | the same sign-in window, sign-in-again mode | crossed b | as spec A: Finder kept (R8), sync paused until sign-in |
 | C-R3 | Update required | a fresh document has `client.status == update_required` | "Update Beebeeb" (existing updater) | normal b when signed in, crossed b when signed out (C-I1) | off |
 | C-R4 | Locked | valid session, no vault key in memory | Unlock (as today, C-W7) | normal b | off |
 | C-R5 | No plan yet | `blocking` and `account.state == needs_plan` | "Choose a plan on beebeeb.io" + one button | normal b | off |
 | C-R6 | Ready | none of the above | nothing to do; one-line notice (§7.5) | normal b | spec A starts it (Windows, Linux: today's start) |
 | C-R7 | Offline | an overlay on any state: a network-level failure | the state's own screen says offline | crossed b | unchanged |
 
-- **C-R8 Precedence.** When several rows match, the first one in this order wins: C-R3, C-R1, C-R2, C-R4, Checking (C-R11), C-R5, C-R6. C-R7 overlays the winner. Update required comes first because no other screen works on a version the server refuses.
+- **C-R8 Precedence.** When several rows match, the first one in this order wins: C-R3, C-R2, C-R1, C-R4, Checking (C-R11), C-R5, C-R6. C-R7 overlays the winner.
+  - Update required comes first because no other screen works on a version the server refuses.
+  - Session ended comes before Signed out, so a missing token with a recorded owner always reads as Session ended. The two rows' conditions do not otherwise overlap.
 - **C-R9 What "off" means.**
   - In C-R1 and C-R4 it is spec A's own behaviour. With no session or no keys, no engine starts. The reconciler takes no action, or wants Finder absent after a sign-out by choice (spec A §5.1).
   - In C-R2 it is spec A's handling, unchanged: Finder is kept (R8), and sync is paused until sign-in. Spec C neither stops nor starts the engine for C-R2.
@@ -107,7 +109,8 @@ Drawn from the table and C-R8. Offline (C-R7) overlays every state. Spec A's own
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SignedOut: no session
+    [*] --> SignedOut: no usable token, no recorded owner
+    [*] --> SessionEnded: no usable token, recorded owner with retained local data
     [*] --> Locked: session, no key in memory
     [*] --> Checking: session and key, no cached account part
     [*] --> NoPlan: cached account part blocking (needs_plan)
@@ -134,7 +137,7 @@ stateDiagram-v2
     Ready --> SessionEnded: auth expired
     SessionEnded --> Ready: auth-expired state clears by itself (a later success)
     SessionEnded --> Checking: the same account signs in again (R8)
-    SessionEnded --> SignedOut: another account, switch (R8)
+    SessionEnded --> SignedOut: sign out by choice, or another account (switch, R8)
     Ready --> Locked: Lock now
     NoPlan --> Locked: Lock now
     Ready --> SignedOut: sign out by choice
@@ -162,7 +165,7 @@ stateDiagram-v2
   - **Retries.** After a first failure the fetch is retried after 10 s. While offline, a 30 s probe replaces the schedule and the plan poll pauses; the poll resumes when the app is back online, if the 15 minutes have not run out.
   - **One fetch at a time.** A trigger during a fetch sets a "fetch again" flag (the pattern of spec A §5.4). The schedule and the clock live in one policy struct and are injected in tests.
 - **C-D5 Binding the document to its account and session.**
-  - **Generation.** Every fetch captures the session generation: the counter that each session transition increments under the session-transition serialization spec A's Task 12 introduces. A result whose generation has changed is dropped, never applied or cached. Spec C adds the counter if that serialization has none. The in-memory document and `AccountView` are cleared inside the same transition as a sign-out or a switch.
+  - **Generation.** Every fetch captures the session generation, which each session transition increments. It is provided by spec A Task 12; spec C adds it only if absent. A result whose generation has changed is dropped, never applied or cached. The in-memory document and `AccountView` are cleared inside the same transition as a sign-out or a switch.
   - **What is cached.** Only the account part is cached: `account`, `blocking`, `steps`, `copy`, `fallback` and `purchase.checkout.poll_seconds`. `client.status` is never cached. "Update required" therefore comes only from a fresh document, and offline the app never blocks on an update.
   - **Where.** One row in `state.db` holds the account part, the fetch time and the `account_binding::Identity` it was fetched for (spec A `account_binding.rs`).
   - **Identity unknown.** A session whose identity is not yet known (no `user_id`) keeps its document in memory only. It is persisted once the identity is known.
@@ -394,7 +397,7 @@ The removed steps (§11) are not replaced by other steps. While spec A's reconci
 
 | Case | Behaviour |
 |---|---|
-| 401 | Reported to spec A's `AuthHealth`, whose auth-expired state alone makes C-R2 (I-5). The last document is kept. |
+| 401 | Reported to spec A's `AuthHealth::note_result`. Its auth-expired state makes C-R2, and so does, after a relaunch, a missing token beside a recorded owner (§4.1). The last document is kept. |
 | 429 | Keep the last document. The next fetch waits for `Retry-After`, or `ttl_seconds` when that header is absent or unreadable, capped at 300 s. It ends Checking as "document unavailable". |
 | Any HTTP status that is not a usable document (5xx, a 400 for the schema header at server `routes/onboarding.rs:55`, other 4xx), an unreadable body, or an unknown `schema` | "Document unavailable": proceed as today (or from the cache), keeping the built-in links and the sign-in buttons, plus one lifecycle-log line. Never offline. |
 | Network-level failure: DNS, connect, TLS, timeout, or the exchange breaking before any HTTP status | Offline (C-R7), shown only after 2 failures at least 10 s apart (C-D4), so it does not flicker. It clears on the next success. While offline, the app re-probes every 30 s and on wake. `link_health::classify_reqwest` minus its HTTP-status arm (`src-tauri/src/link_health.rs:131-136`) is the classifier. A wake is detected when the wall clock moves more than 60 s across one 30 s probe tick; no new OS observer is added. |
@@ -457,6 +460,7 @@ Every new test is seen failing before it passes, and its failure output is paste
 
 **Rust:**
 - **The table.** The §4.2 table is one pure function, tested row by row and on the C-R8 precedence. It is mutation-checked: flip one row, confirm that row's test fails, revert.
+- **Session ended.** C-R2 is derived from the auth-expired state, and from a missing token beside a recorded owner. C-R1 needs both no token and no owner. After a startup 401 that kept the owner, the relaunch derives C-R2; after a sign-out by choice, it derives C-R1.
 - **The trigger.** `account_ready` fires on every edge into Ready, with one test per incoming edge: from Checking, C-R5, C-R4, C-R3 and C-R2, and at launch from the cache. On no other edge does it fire. On macOS it clears the reconciler's `held` flag.
 - **The gate:**
   - a reconcile in flight when the document turns blocking adds nothing
@@ -507,6 +511,7 @@ Each task file keeps its original line struck through. These are the replacement
 
 - A debug `.app` bundle, `BB_API_BASE=http://localhost:3001` and `HOME=<scratch>` for every login.
 - Sign in by browser handoff, by password, and by password + 2FA. Each reaches Ready, with a capture of each. The browser sign-in on a Mac with no key never shows the recovery phrase.
+- A relaunch after a revoked session shows Session ended, with spec A's sign-in-again wording, the crossed b and "Beebeeb: Sign in again". A relaunch after a sign-out by choice shows Signed out.
 - "Create account" opens exactly the address the server document names.
 - A `needs_plan` account shows "Choose a plan". No Finder location is added and the engine does not start (lifecycle log). With the plan set active locally, the app continues by itself and spec A sets up Finder.
 - The read-only, lapsed, frozen and payment-failed notices are captured, with dates and links.
@@ -590,6 +595,12 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
 - **I-11 The login argument may never reach a login launch in the sandboxed build.**
   - **Ruled:** drop the argument, detect the launch from `keyAELaunchedAsLogInItem` with unknown treated as manual, add a device rung, and state the autostart finding. → §6.1, §16.
 - **A wrong citation** (`MacFinderStep` is added next to `FinderInstallStep`, not a rename) **and an incomplete list of billing-URL users:** both fixed. → §11, §5.1.
+- **Follow-up rulings on the writer's report (lead, 2026-10-07):**
+  - **The onboarding fetch reports to `AuthHealth::note_result`:** accepted.
+  - **A relaunch after a revoked session read as Signed out.** Spec A's startup 401 drops the token without setting the auth-expired state.
+    **Ruled:** Session ended also holds when there is no usable token while a recorded owner with retained local data exists, the source being spec A's owner record (Task 10). Signed out needs no recorded owner. → §4.1, C-R1, C-R2, C-R8, §4.3, §15.
+  - **The session generation:** provided by spec A Task 12, whose rulings now require it as a small public API; spec C adds it only if absent. → C-D5.
+  - **Accepted as written:** the macOS startup row reads `no_sync_root` in Ready (C-W9), and Linux gets the colour crossed `.ico` (§7.8).
 - **Minor findings:** all 19 applied (M-1 to M-19).
   - M-5: spec A is cited by symbol.
   - M-11: the updater relaunch counts as manual (C-W1).
