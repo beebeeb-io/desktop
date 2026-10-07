@@ -424,7 +424,7 @@ The removed steps (§11) are not replaced by other steps. While spec A's reconci
 | 401 | Reported to spec A's `AuthHealth::note_result`. Its auth-expired state makes C-R2, and so does, after a relaunch, a missing token beside a recorded owner (§4.1). The last document is kept. |
 | 429 | Keep the last document. The next fetch waits for `Retry-After`, or `ttl_seconds` when that header is absent or unreadable, capped at 300 s. It ends Checking as "document unavailable". |
 | Any HTTP status that is not a usable document (5xx, a 400 for the schema header at server `routes/onboarding.rs:55`, other 4xx), an unreadable body, or an unknown `schema` | "Document unavailable": proceed as today (or from the cache), keeping the built-in links and the sign-in buttons, plus one lifecycle-log line. Never offline. |
-| Network-level failure: DNS, connect, TLS, timeout, or the exchange breaking before any HTTP status | Offline (C-R7), shown only after 2 failures at least 10 s apart (C-D4), so it does not flicker. It clears on the next success. While offline, the app re-probes every 30 s and on wake. `link_health::classify_reqwest` minus its HTTP-status arm (`src-tauri/src/link_health.rs:131-136`) is the classifier. A wake is detected when the wall clock moves more than 60 s across one 30 s probe tick; no new OS observer is added. |
+| Network-level failure: DNS, connect, TLS, timeout, or the exchange breaking before any HTTP status | Offline (C-R7), shown only after 2 failures at least 10 s apart (C-D4), so it does not flicker. It clears on the next success. ~~While offline, the app re-probes every 30 s and on wake.~~ `link_health::classify_reqwest` minus its HTTP-status arm (`src-tauri/src/link_health.rs:131-136`) is the classifier. ~~A wake is detected when the wall clock moves more than 60 s across one 30 s probe tick; no new OS observer is added.~~<br>**Amended 2026-10-07 (§17.4):** While offline, the app re-probes every 30 s. A wake while offline is covered by the next 30 s re-probe, so there is no separate wake branch and no new OS observer. |
 | Unknown `account.state` | Decided from `capabilities` (§7.5); `blocking` still applies (C-R15). |
 | Unknown required step | Within C-R5: the button opens the server's link (§5.1, last row). Outside `needs_plan`: C-R15. |
 | Browser won't open | Show the address as selectable text + "Copy link". |
@@ -467,14 +467,15 @@ Guus approves the mocks before any code. The icon is variant B. Where an approve
 |---|---|---|
 | `account_view::derive` (new, pure) | the §4.2 table and C-R8 | `derive(&Inputs) -> AccountView` |
 | `account_view::doc` (new, pure) | tolerant v1 parse, link checks and resolution (§5.1) | `parse(&[u8]) -> Result<Doc, Unavailable>` |
-| `account_view::policy` (new, pure) | schedule, bounds, offline debounce, wake, the 5 s launch settle | `next_fetch_at(..)`, `connectivity(..)` |
+| `account_view::policy` (new, pure) | schedule, bounds, offline debounce, ~~wake,~~ the 5 s launch settle<br>**Amended 2026-10-07 (§17.4):** no wake function; the 30 s offline re-probe covers a wake | `next_fetch_at(..)`, `connectivity(..)` |
 | `account_view::gate` (new) | `{ open, epoch }`, read at every add and engine start | `AccountGate::current()` |
 | `account_view::driver` (new) | the one task: fetch, cache, emit `account-view-changed` | `AccountViewHandle::send(Event)`; `state() -> AccountView` |
 | `launch_kind` (new, pure) | login or manual launch (C-W1) | `launch_kind(lgit_present: Option<bool>) -> LaunchKind` |
 | `tray_presentation` (new, pure) | icon, tooltip, click action, menu (§8) | `present(&AccountView) -> TrayPresentation` |
 
 - **The `AccountView` fields the frontend reads:** `state`, `session` (none, valid or ended), `offline`, `screen`, `busy`, `links` (`create_account`, `billing`, `support`, `step`), and `notice` (`kind`, formatted dates, `link`).
-- **Driver events:** launch, restore finished, sign-in completed (with its `LoginOutcome`), sign-out, account switch, lock, unlock, window focus, wake, plan opened, "Try again", and timer.
+- **Driver events:** launch, restore finished, sign-in completed (with its `LoginOutcome`), sign-out, account switch, lock, unlock, window focus, ~~wake,~~ plan opened, "Try again", and timer.
+  - **Amended 2026-10-07 (§17.4):** no wake event; a wake while offline is covered by the next 30 s re-probe (the timer).
 - **Tauri commands:** `account_view_state` (read), `account_view_retry` ("Try again") and `account_view_plan_opened`, which starts the 15-minute re-check.
 - **Opening links.** The frontend opens links with `openUrl` (`src/desktopApi.ts:425`). When that fails, it shows the address as selectable text with "Copy link".
 
@@ -502,7 +503,8 @@ Every new test is seen failing before it passes, and its failure output is paste
   - focus, and 429 ending Checking
   - the bounds
   - the 10 s retry; offline after exactly 2 network failures at least 10 s apart (never after 1), and never after an HTTP 5xx
-  - cleared by 1 success; the 30 s re-probe; wake
+  - cleared by 1 success; the 30 s re-probe; ~~wake~~
+    - **Amended 2026-10-07 (§17.4):** a wake while offline is covered by the next 30 s re-probe, so there is no separate wake test; the 1747 device rung checks it on the Mac.
   - the plan poll pausing while offline
 - **Binding:**
   - a result is dropped when the session generation changed
@@ -666,6 +668,11 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
 - **N-4 and N-5, wording:**
   - C-W3 and C-W4 name the C-R4 Settings exception.
   - The bare "Read-only." is the first clause of the approved line.
+
+### 17.4 The plan review (lead ruling, 2026-10-07)
+
+- **Wake (plan, "Spec issues found" 21).** §10 detected a wake "when the wall clock moves more than 60 s across one 30 s probe tick" and re-probed on it. While offline, the only tick is the 30 s re-probe itself, and at that tick the re-probe is due anyway: the timer runs on the monotonic clock, which does not advance while the Mac sleeps, so the tick comes at most 30 s of awake time after the last probe, wake or not. A wake branch could never change what happens, and no test of it could fail.
+  - **Ruled:** a wake while offline is covered by the next 30 s re-probe. There is no separate wake branch, event, function or test. The plan's 1747 device rung "Wake while offline re-probes" checks the behaviour on the Mac. → §10 (network-level failure row), §13 (`account_view::policy`, driver events), §14 (schedule).
 
 ## 18. Non-goals
 
