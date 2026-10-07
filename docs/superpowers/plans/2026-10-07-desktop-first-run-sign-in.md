@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024 (Tauri 2.11, tokio, serde, chrono, reqwest; no new crate, one new tauri feature `image-ico`), Objective-C (Foundation, compiled by `src-tauri/build.rs`), React 19 + TypeScript (bun test with `tests/fixtures/componentHarness.ts`), eslint. Design mocks in plain HTML.
 
-**Spec:** `docs/specs/2026-10-07-desktop-first-run-sign-in.md` (HEAD `f80922b`, approved by Guus 2026-10-07 in three parts with rulings C1–C7, amended by the lead's rulings in §17). It builds on spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`, and its plan `docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`. Executors read the spec and this plan together. Where they disagree, "Spec issues found" below says how, with evidence; nothing there is decided silently.
+**Spec:** `docs/specs/2026-10-07-desktop-first-run-sign-in.md` (last changed in `7c64cb0`, the wake amendment; approved by Guus 2026-10-07 in three parts with rulings C1–C7, amended by the lead's rulings in §17). It builds on spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`, and its plan `docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`. Executors read the spec and this plan together. Where they disagree, "Spec issues found" below says how, with evidence; nothing there is decided silently.
 
 ---
 
@@ -30,7 +30,7 @@ Each item is a place where the spec, read literally against the code on spec A's
 12. **C-W7 needs Settings opened on its Account tab.** C-W3 and C-W4 open "the Settings window" for C-R4 with the key in the Keychain. The Unlock button is on the Account tab, and `show_macos_settings_window` opens whatever tab the window last showed. The plan opens it on `?tab=account` (the query `settingsTabFromSearch` reads). Task 13, `the_keychain_unlock_opens_settings_on_the_account_tab`. Review Focus 5. **Confirmed by the lead 2026-10-07.**
 13. **The account window cannot unlock from the Keychain by itself.** If the account window is already open when the state becomes C-R4 with the key in the Keychain (C-W6: it re-renders), there is no approved screen for the Keychain unlock inside it. The plan hands over: the window asks Rust to open Settings on the Account tab and hides itself. No new copy. Task 17.
 14. **`start_browser_login` returns `LoginOutcome`.** C-S1 makes the browser command return the same shape as `desktop_login`. Windows' first-run screen consumed `Result<(), String>` and the `done` event; it now routes on the returned outcome through `settledFrom` like macOS and Linux. Task 12, Task 16.
-15. **The session generation is spec A Task 12's.** C-D5 binds every fetch to a session generation "provided by spec A Task 12; spec C adds it only if absent". Task 12's rulings (item 11) require "one small, documented API (e.g. `session_generation()` plus a check)". Task 12 is not written yet, so the exact name is unknown today. This plan consumes `crate::session_generation() -> u64`. Task 0 records the name Task 12 actually merged and the executor substitutes it everywhere this plan says `session_generation`. If Task 0 finds no generation API at all, Task 0 stops and the lead decides between adding it (C-D5's fallback) and waiting.
+15. **The session generation is spec A Task 12's, consumed as an opaque token** (lead ruling 2026-10-07, plan re-check N1). C-D5 binds every fetch to a session generation "provided by spec A Task 12; spec C adds it only if absent". Task 12 (still in progress; `c60d0ce` on `desktop-1834-r`) delivers `AccountRuntime::session_generation(&self) -> SessionGeneration`: per account, a newtype with a private field, `Copy + Eq`, no accessor, no arithmetic and no constructor outside `account.rs`; `claim_session_write` and `end_sessions_in_flight` move it on. This plan only stores, copies and compares it: `Facts.generation` is the active account's (`Option`, `None` only with no account runtime), "changed" means `!=`, the gate keeps the one it was derived for and reads the account's own at the point of action (`acct.session_generation()`), and no step reads a number out of it. Tests get an old value only by capturing it before a real bump (`claim_session_write`, `end_sessions_in_flight`, or `advance_session_generation`, which both call), never by arithmetic. Task 0 records Task 12's final name and shape (it may still move until Task 12 completes) and checks `Copy` and `Eq`: a missing one of those Task 9 adds and nothing else; any other mismatch stops Task 0. Tasks 9–11.
 16. **Carry-over T11-M5 changes the switch warning's copy.** Making the pending-changes count `null` on an unreadable `state.db` (instead of 0) needs a sentence that does not claim a number. It is new copy, so Task 1 draws it and the lead approves it with the mocks. Proposed: "This Mac is signed in to another Beebeeb account. Beebeeb couldn’t count the changes on this Mac that haven’t uploaded yet. Switching signs that account out of this Mac and removes any that are left." Tasks 12 and 16 implement it only if Task 0 finds M5 still open at HEAD.
 17. **The 15-minute re-check starts before the browser opens.** §7.4 says the click "starts the 15-minute re-check (C-D4) whether or not the browser opened". The button calls `account_view_plan_opened` first and opens the link second, so a failed open still polls and still shows the address with "Copy link". Task 17, `the_plan_poll_starts_before_the_browser_opens`.
 18. **The variant B icon files live in the workspace repo.** They are committed at `$WS/design/desktop-first-run/tray-icon/` (workspace commit `39494ebcf`): `tray-template-disconnected.png`, `tray-template-disconnected@2x.png` and `tray-template-disconnected.svg`, with the generator scripts and fitted glyph parameters in `source/`. Their SHA-256 sums are recorded in Task 1 and were checked against these copies on 2026-10-07 (3 of 3 match). If a file is missing or differs, Task 1 stops; it never redraws them.
@@ -44,7 +44,8 @@ Each item is a place where the spec, read literally against the code on spec A's
   ```bash
   WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io
   LOCK=$WS/scripts/coord/with-lock.sh                 # every cargo build or test: $LOCK cargo-build -- <cmd>
-  EVID=$WS/.claude/tasks/_qa-evidence/1747            # Windows rungs (Task 24): EVID1748=$WS/.claude/tasks/_qa-evidence/1748
+  EVID=$WS/.claude/tasks/_qa-evidence/1747
+  EVID1748=$WS/.claude/tasks/_qa-evidence/1748        # the Windows rungs (Task 24)
   WTR=~/code/bb-worktrees/desktop-1747-r              # Lane R, branch feat/1747-first-run-sign-in
   WTT=~/code/bb-worktrees/desktop-1747-t              # Lane T, branch feat/1747-first-run-sign-in-ui
   WT=$WTR                                             # in Tasks 1–14 (Task 1 writes the icons there); WT=$WTT in Tasks 15–21
@@ -61,7 +62,7 @@ Each item is a place where the spec, read literally against the code on spec A's
     ```
     Before every TS commit also run `bunx tsc --noEmit > $EVID/t<N>-tsc.log 2>&1; echo "rc=$?"` and `bun run lint > $EVID/t<N>-eslint.log 2>&1; echo "rc=$?"` (the repo's `eslint .`), both `rc=0`.
   - `grep` in a guard or a check is always `/usr/bin/grep` (the shell's `grep` is a ugrep function with other exit codes).
-  - Task 0 writes `$EVID/t0-record.md`: the facts about spec A as merged that Tasks 9–13 branch on (`SESSION_TRANSITION` on every platform or Windows only; the session generation's name, type and bump sites; the six `spawn_bound_engine` callers; the startup 401's behaviour; T11-M5; the signatures). A step that says "per `t0-record.md`" reads it there.
+  - Task 0 writes `$EVID/t0-record.md`: the facts about spec A as merged that Tasks 9–13 branch on (`SESSION_TRANSITION` on every platform or Windows only; the session generation's final name and shape (spec A Task 12's opaque `SessionGeneration`), its `Copy`/`Eq` derives and its bump sites; the six `spawn_bound_engine` callers; the startup 401's behaviour; T11-M5; the signatures). A step that says "per `t0-record.md`" reads it there.
 - **Lane rules (binding on every implementer; spec A's `lane-rules.md`, copied here).**
   - The first action of every task is one Bash block: `cd $WT && git status --short && git log --oneline -1`. Report a blocker within 5 minutes; never sit silent.
   - Work only in your lane's worktree; never in `$WS/repos/desktop` (the primary checkout stays on `main`, clean) and never in the other lane's tree.
@@ -309,13 +310,19 @@ check $R/lib.rs 'fn show_macos_settings_window(' show_macos_settings_window
 check $R/lib.rs 'fn show_compact_app_window_with_nav(' show_compact_app_window_with_nav
 check $R/lib.rs 'fn setup_tray(' setup_tray
 check $R/lib.rs 'fn attach_tray_status_listener' attach_tray_status_listener
-check $R/lib.rs 'fn build_tray_menu(' build_tray_menu
+check $R/lib.rs 'fn build_tray_menu' build_tray_menu   # generic: fn build_tray_menu<M: …>(
 check $R/lib.rs 'async fn check_for_updates_now(' check_for_updates_now
 check $R/lib.rs 'async fn install_update(' install_update
 check $R/lib.rs 'pub finder_setup: std::sync::OnceLock<finder_setup::driver::FinderSetupHandle>' AppState.finder_setup
 check $R/lib.rs 'impl Default for AppState' AppState-Default
 check $R/lib.rs 'static SESSION_TRANSITION' SESSION_TRANSITION
-check $R/lib.rs 'session_generation' session-generation-API-from-Task-12
+check $R/account.rs 'pub struct SessionGeneration' account::SessionGeneration
+check $R/account.rs 'pub fn session_generation(&self) -> SessionGeneration' AccountRuntime::session_generation
+check $R/account.rs 'fn advance_session_generation(&self) -> SessionGeneration' AccountRuntime::advance_session_generation
+check $R/account.rs 'pub fn new(id: AccountId) -> Self' AccountRuntime::new
+check $R/account.rs 'pub fn new_v4() -> Self' AccountId::new_v4
+check $R/lib.rs 'fn claim_session_write(acct: &AccountRuntime, turn: &mut account::SessionGeneration)' claim_session_write
+check $R/lib.rs 'fn end_sessions_in_flight(acct: &AccountRuntime)' end_sessions_in_flight
 check $R/finder_setup/core.rs 'pub enum Trigger' core::Trigger
 check $R/finder_setup/core.rs 'KeysArrived,' Trigger::KeysArrived
 check $R/finder_setup/core.rs 'Lock,' Trigger::Lock
@@ -370,7 +377,7 @@ check $R/surfaces/policy.rs 'pub enum Platform' surfaces::policy::Platform
 check $R/surfaces/policy.rs 'Macos,' Platform::Macos
 check $R/surfaces/policy.rs 'Windows,' Platform::Windows
 check $R/surfaces/policy.rs 'Linux,' Platform::Linux
-check $R/runner.rs 'pub fn api_base_url(' runner::api_base_url
+check $R/runner.rs 'fn api_base_url(' runner::api_base_url   # pub(crate)
 check $R/lib.rs 'fn state_db_from_state_dir(' state_db_from_state_dir
 check $R/state_paths.rs 'fn beebeeb_state_dir(' state_paths::beebeeb_state_dir
 check $R/state_paths.rs 'STATE_DB_FILENAME' state_paths::STATE_DB_FILENAME
@@ -407,7 +414,7 @@ A changed signature surfaces as a compile error in the middle of a task; read th
 for sig in 'async fn start_engine_if_possible(' 'fn identity_of_session(' 'async fn settle_sign_in(' 'fn revoke_desktop_session(' \
            'pub fn format_line(' 'fn account_mismatch(' 'fn authorize_engine_start(' 'fn start_engine_bound(' \
            'async fn stop_engine_in_slot(' 'fn note_result(' 'fn state_db_from_state_dir(' 'fn load_session_token_from_keychain(' \
-           'pub async fn start_browser_login(' 'pub fn startup_surface('; do
+           'pub async fn start_browser_login(' 'pub fn startup_surface(' 'pub fn session_generation('; do
   echo "=== $sig"; git -C $D grep -n -A6 -F -- "$sig" origin/main -- src-tauri/src | /usr/bin/grep -v '^--$' | head -8
 done > $EVID/t0-signatures.txt 2>&1; echo "rc=$?"
 ```
@@ -429,6 +436,7 @@ Compare each with the shape the plan assumes, and write the result into the "Sig
 | `state_db_from_state_dir` | `(state_dir: &std::path::Path) -> Result<Option<state_db::StateDb>, String>` |
 | `load_session_token_from_keychain` | `(account_id: &str) -> Result<Option<String>, String>` |
 | `start_browser_login` | `(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String>` (Task 12 changes the `Ok` type) |
+| `AccountRuntime::session_generation` | `(&self) -> SessionGeneration` (`account.rs`; opaque, `Copy + Eq`) |
 | `surfaces::policy::startup_surface` | `(platform: Platform, no_sync_root: bool) -> StartupSurface` (Task 13 adds two parameters) |
 
 - [ ] **Step 3: Run it and record the drift**
@@ -439,22 +447,27 @@ bash $EVID/t0-interfaces.sh > $EVID/t0-interfaces.tsv 2>&1; echo "rc=$?"; /usr/b
 
 Expected: `rc=0`, the `ok` count equals the number of `check` lines (count them: `/usr/bin/grep -c '^check ' $EVID/t0-interfaces.sh`), no `MISSING` line.
 
+Writer's read-only run, 2026-10-07, before spec A merged: the same script with `/usr/bin/grep -F` on the files in place of `git grep`, Rust paths against `desktop-1834-r` (HEAD `584175b`) and TypeScript paths against `desktop-1834-t` (HEAD `6780cb8`): `ok=146 missing=0` of 146 `check` lines. On `main` the count must be the same.
+
 For each `MISSING` row, find where the name went (`git -C $D log origin/main -S '<old name>' --oneline -- <file>`, then `git grep` for the symbol's new spelling). Write a "Drift" table in the task Notes: old name, new name, file. **A renamed interface is substituted throughout this plan by the executor; a removed one stops the plan** (write "Blocked because: <name> is not on main" and queue a decision).
 
-The generation row is special (Spec issue 15). Find its real name:
+The generation is special (Spec issue 15; lead ruling 2026-10-07, plan re-check N1). Spec A Task 12 delivers it as a per-account, opaque token, and Task 12 may still move until it completes, so record its final name and shape:
 
 ```bash
-git -C $D grep -n -E 'fn session_generation|SESSION_GENERATION|fn .*generation\(' origin/main -- src-tauri/src/lib.rs > $EVID/t0-generation.txt; cat $EVID/t0-generation.txt
+git -C $D show origin/main:src-tauri/src/account.rs | /usr/bin/grep -n -B3 'pub struct SessionGeneration' > $EVID/t0-generation.txt
+git -C $D show origin/main:src-tauri/src/account.rs | /usr/bin/grep -n 'fn session_generation(\|fn session_unchanged_since(\|fn advance_session_generation(' >> $EVID/t0-generation.txt
+git -C $D grep -n 'fn claim_session_write(\|fn end_sessions_in_flight(\|advance_session_generation()' origin/main -- src-tauri/src/lib.rs >> $EVID/t0-generation.txt; cat $EVID/t0-generation.txt
 ```
 
-Record the generation contract in `t0-record.md` (the plan calls it `crate::session_generation() -> u64`):
-- **Name and type** of the read function, and whether it returns a value that only ever grows.
-- **Bump sites**: every place that moves it (`git -C $D grep -n '<the bump function or counter>' origin/main -- src-tauri/src/lib.rs`), named by the enclosing function. C-D5 needs a bump in every session transition: each sign-in install, sign-out (`clear_session_impl`), lock, unlock and the startup restore's install.
-- **Order inside `clear_session_impl`**: the bump must come before `lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut)` (Task 11 clears the account view right after that line). Print the function's body (`git -C $D show origin/main:src-tauri/src/lib.rs | awk '/async fn clear_session_impl\(/,/^}/' > $EVID/t0-clear-session-body.txt`) and record the two line numbers.
-- **Order inside each sign-in install** (`apply_session`, and each unlock command that installs a key): the bump comes before that function's `start_engine_if_possible` call. Task 9's gate is closed for a generation the account view has not derived for, and that order is what makes a sign-in's own engine start find it closed. Record the line numbers.
-- **Scope**: whether the read function is process-wide (a static) or per `AppState`. Task 9's tests are written for a process-wide value that other tests may move.
+Record in `t0-record.md`:
+- **Name and shape.** The type (on `desktop-1834-r` at `c60d0ce`, unchanged at `584175b`: `pub struct SessionGeneration(u64)` in `account.rs`, private field, no accessor, no arithmetic, no constructor outside `account.rs`); the read (`AccountRuntime::session_generation(&self) -> SessionGeneration`, per account); the bump (`pub(crate) fn advance_session_generation(&self) -> SessionGeneration`, called by `claim_session_write` and `end_sessions_in_flight`). This plan consumes it as an opaque comparable token: it stores it, copies it and compares it with `==`/`!=`, never reads a number out of it, and its tests make an old value only by capturing it before a real bump. A rename with the same shape is recorded here, and Tasks 9–11 use the recorded name.
+- **Derives.** The `#[derive(…)]` line above `pub struct SessionGeneration` must include `Copy`, `PartialEq` and `Eq` (it does at `c60d0ce` and `584175b`: `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`). If any of the three is missing, record "Task 9 adds <the missing derives>"; that is the only change spec C makes to it.
+- **Bump sites**: every place that moves it (`claim_session_write`, `end_sessions_in_flight`, and any direct `advance_session_generation()` call), named by the enclosing function. C-D5 needs a bump in every session transition: each sign-in install, sign-out (`clear_session_impl`), lock, unlock and the startup restore's install.
+- **Order inside `clear_session_impl`**: the bump (`end_sessions_in_flight`) must come before `lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut)` (Task 11 clears the account view right after that line). Print the function's body (`git -C $D show origin/main:src-tauri/src/lib.rs | awk '/async fn clear_session_impl\(/,/^}/' > $EVID/t0-clear-session-body.txt`) and record the two line numbers.
+- **Order inside each sign-in install** (`apply_session` through `install_new_session`, and each unlock command that installs a key): the turn (`claim_session_write`) comes before that function's `start_engine_if_possible` call. Task 9's gate is closed for a generation the account view has not derived for, and that order is what makes a sign-in's own engine start find it closed. Record the line numbers.
+- **Scope**: per account (`AccountRuntime`), so tests do not share it; Task 9's tests rely on that.
 
-If no such function exists, or it does not grow monotonically, or a transition above does not bump it, or a bump comes after the `SignedOut` line or after a sign-in's `start_engine_if_possible`: stop and queue the decision "spec C needs the session generation as C-D5 describes; add it in spec C (C-D5 fallback) or wait for spec A".
+**Stop** (write "Blocked because: …" and queue the decision "spec C needs the session generation as C-D5 describes; adapt spec C or wait for spec A") on any other mismatch: no such type or read method, a read that is not per account or does not return the type, a derive missing other than `Copy`/`PartialEq`/`Eq`, a transition above that does not bump it, or a bump after the `SignedOut` line or after a sign-in's `start_engine_if_possible`.
 
 - [ ] **Step 4: Record the facts later tasks branch on**
 
@@ -3580,7 +3593,9 @@ git show --stat HEAD
 
 **Lane R.** Changes spec A's engine-start gate and its Finder reconciler. Every engine start reads the gate under the engine slot; the reconciler's add reads it immediately before it acts; both read it against the session generation that is current at that moment, and a generation the driver has not derived for is closed (Checking; plan review I1, lead ruling 2026-10-07). A closed gate is "held", never a failure; blocking never removes Finder.
 
-**Before you start:** read `$EVID/t0-record.md`. This task uses three of its facts: the session generation's read function (written `crate::session_generation()` below; use the recorded name), whether `SESSION_TRANSITION` is Windows-only, and the six `spawn_bound_engine` callers.
+**Before you start:** read `$EVID/t0-record.md`. This task uses three of its facts: spec A Task 12's session generation (`AccountRuntime::session_generation() -> SessionGeneration`, written that way below; if Task 0 recorded a later rename, use it), whether `SESSION_TRANSITION` is Windows-only, and the six `spawn_bound_engine` callers.
+
+**The generation is an opaque token** (lead ruling 2026-10-07, plan re-check N1). `SessionGeneration` is per account, has no accessor, no arithmetic and no constructor outside `account.rs`. This plan only stores it, copies it and compares it for equality: "changed" means `!=`. A test gets an old value only by capturing it before a real bump (the sign-in's `claim_session_write`, the sign-out's `end_sessions_in_flight`, or `advance_session_generation`, which both call). If Task 0 recorded that `SessionGeneration` lacks `Copy` or `Eq`, add only the missing derive(s) to `src-tauri/src/account.rs` and add that file to Step 11's two pathspec lists; change nothing else there.
 
 **Files:**
 - Create: `src-tauri/src/account_view/gate.rs`
@@ -3589,12 +3604,14 @@ git show --stat HEAD
 - Modify: `src-tauri/src/finder_setup/error.rs` (`app_code::ACCOUNT_BLOCKED`)
 - Modify: `src-tauri/src/finder_setup/core.rs` (`Trigger::AccountHold`, `Trigger::AccountReady`, `hold`, the blocked-result rule)
 - Modify: `src-tauri/src/finder_setup/driver.rs` (`Event::AccountHold`, `FinderSetupHandle::account_hold`)
-- Modify: `src-tauri/src/finder_setup/macos_ports.rs` (`check_epoch`, the add's guard)
+- Modify: `src-tauri/src/finder_setup/macos_ports.rs` (`check_epoch`, `add_allowed`, the add's guard)
+- Modify, only if Task 0 recorded a missing derive: `src-tauri/src/account.rs` (`Copy` and/or `Eq` on `SessionGeneration`, nothing else)
 
 **Interfaces:**
 - Consumes: spec A's `authorize_engine_start`, `start_engine_bound`, `spawn_bound_engine` and its six callers, `stop_engine_in_slot`, `finder_setup::{core, driver, macos_ports, error}`; the test fixtures `AuthorizeFixture::with_session`, `local_data_of`, `alice()`, `bob()`, `LocalDataPaths::for_test`, and the source helpers `finder_setup_command_tests::{body_between, production_source}`.
 - Produces:
-  - `crate::account_view::gate::{AccountGate, GateValue}`: `Default` (unarmed: holds nothing), `arm(holds: bool)`, `current() -> GateValue`, `set(open, generation: u64) -> Option<GateValue>` (Some when the value or the generation changed; the epoch moves by one); `GateValue { open: bool, epoch: u64, generation: Option<u64>, always_open: bool }`, `GateValue::open_for(self, current_generation: u64) -> bool`, `GateValue::allows_add(self, started_under: Option<u64>, current_generation: u64) -> bool`
+  - `crate::account_view::gate::{AccountGate, GateValue}`: `Default` (unarmed: holds nothing), `arm(holds: bool)`, `current() -> GateValue`, `set(open, generation: SessionGeneration) -> Option<GateValue>` (Some when the value or the generation changed; the epoch moves by one); `GateValue { open: bool, epoch: u64, generation: Option<SessionGeneration>, always_open: bool }`, `GateValue::open_for(self, current: SessionGeneration) -> bool`, `GateValue::allows_add(self, started_under: Option<u64>, current: SessionGeneration) -> bool`
+  - `finder_setup::macos_ports`: `fn add_allowed(app: &tauri::AppHandle, check_epoch: Option<u64>) -> bool`
   - `AppState.account_gate: AccountGate`
   - `StartPermit::AccountBlocked`, `EngineStart::AccountBlocked`
   - `finder_setup::error::app_code::ACCOUNT_BLOCKED = 8`
@@ -3610,32 +3627,35 @@ git show --stat HEAD
 //! Spec 2026-10-07 C-R10: the account gate, `{ open, epoch, generation }`. The account-view driver writes it for the
 //! session generation it derived. Every engine start reads it under the engine slot (`authorize_engine_start`), and the
 //! Finder reconciler's add reads it immediately before it acts (`finder_setup::macos_ports`). Both read it against the
-//! session generation that is current at that moment: a generation the driver has not derived for yet is closed
-//! (Checking), so the engine start a sign-in makes in the same command is held until the driver has derived for it.
-//! Every change moves `epoch` on, so an add whose check began under another epoch does nothing. The gate only ever
-//! holds: nothing here removes Finder or stops an engine.
+//! account's session generation at that moment: a generation the driver has not derived for yet is closed (Checking),
+//! so the engine start a sign-in makes in the same command is held until the driver has derived for it. The generation
+//! is spec A's opaque `SessionGeneration`, only stored and compared. Every change moves `epoch` on, so an add whose
+//! check began under another epoch does nothing. The gate only ever holds: nothing here removes Finder or stops an
+//! engine.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use crate::account::SessionGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateValue {
     pub open: bool,
     pub epoch: u64,
     /// The session generation `open` was derived for; `None` until the driver first sets it.
-    pub generation: Option<u64>,
+    pub generation: Option<SessionGeneration>,
     /// Unarmed: the gate holds nothing. Linux (C-R10), and every unit test that builds an `AppState`.
     pub always_open: bool,
 }
 
 impl GateValue {
-    /// Open for the session generation that is current now. A generation the driver has not derived for is closed.
-    pub fn open_for(self, current_generation: u64) -> bool {
+    /// Open for the account's session generation of this moment. A generation the driver has not derived for is closed.
+    pub fn open_for(self, current: SessionGeneration) -> bool {
         todo!("Task 9 step 2")
     }
 
     /// May an add whose check began under `started_under` act now? Only while open for the current generation, and only
     /// under the epoch its check began under. A check with no recorded epoch never adds (fail closed).
-    pub fn allows_add(self, started_under: Option<u64>, current_generation: u64) -> bool {
+    pub fn allows_add(self, started_under: Option<u64>, current: SessionGeneration) -> bool {
         todo!("Task 9 step 2")
     }
 }
@@ -3665,7 +3685,7 @@ impl AccountGate {
 
     /// The driver's value for `generation`. The new value when `open` or the generation changed (the epoch moves on by
     /// one); `None` when both already are so (nothing moves).
-    pub fn set(&self, open: bool, generation: u64) -> Option<GateValue> {
+    pub fn set(&self, open: bool, generation: SessionGeneration) -> Option<GateValue> {
         todo!("Task 9 step 2")
     }
 
@@ -3677,6 +3697,7 @@ impl AccountGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::{AccountId, AccountRuntime};
 
     fn armed() -> AccountGate {
         let gate = AccountGate::default();
@@ -3684,65 +3705,83 @@ mod tests {
         gate
     }
 
+    /// A real account: its generation is the only source of `SessionGeneration` values (the type is opaque). An old
+    /// value is one captured before a real bump.
+    fn account() -> AccountRuntime {
+        AccountRuntime::new(AccountId::new_v4())
+    }
+
     #[test]
     fn a_repeat_of_the_same_value_changes_nothing() {
         let gate = armed();
+        let now = account().session_generation();
         assert_eq!(gate.current(), GateValue { open: false, epoch: 0, generation: None, always_open: false });
-        assert_eq!(gate.set(true, 3), Some(GateValue { open: true, epoch: 1, generation: Some(3), always_open: false }));
-        assert_eq!(gate.set(true, 3), None);
+        assert_eq!(gate.set(true, now), Some(GateValue { open: true, epoch: 1, generation: Some(now), always_open: false }));
+        assert_eq!(gate.set(true, now), None);
         assert_eq!(gate.current().epoch, 1);
     }
 
     #[test]
     fn every_change_of_value_or_generation_moves_the_epoch_on_by_one() {
         let gate = armed();
-        gate.set(true, 1);
-        assert_eq!(gate.set(false, 1).map(|v| (v.open, v.epoch)), Some((false, 2)));
-        assert_eq!(gate.set(false, 1), None);
-        assert_eq!(gate.set(true, 1).map(|v| (v.open, v.epoch)), Some((true, 3)));
-        assert_eq!(gate.set(true, 2).map(|v| (v.generation, v.epoch)), Some((Some(2), 4)), "a new generation alone moves it");
+        let acct = account();
+        let first = acct.session_generation();
+        gate.set(true, first);
+        assert_eq!(gate.set(false, first).map(|v| (v.open, v.epoch)), Some((false, 2)));
+        assert_eq!(gate.set(false, first), None);
+        assert_eq!(gate.set(true, first).map(|v| (v.open, v.epoch)), Some((true, 3)));
+        let next = acct.advance_session_generation();
+        assert_eq!(gate.set(true, next).map(|v| (v.generation, v.epoch)), Some((Some(next), 4)), "a new generation alone moves it");
     }
 
     /// Plan review I1: the engine start a sign-in makes in the same command finds the gate closed.
     #[test]
     fn a_generation_the_driver_has_not_derived_is_closed() {
         let gate = armed();
-        assert!(!gate.current().open_for(1), "nothing derived yet");
-        gate.set(true, 1);
-        assert!(gate.current().open_for(1));
-        assert!(!gate.current().open_for(2), "a sign-in moved the generation on; the driver has not derived for it");
-        gate.set(false, 2);
-        assert!(!gate.current().open_for(2));
+        let acct = account();
+        let signed_out = acct.session_generation();
+        assert!(!gate.current().open_for(signed_out), "nothing derived yet");
+        gate.set(true, signed_out);
+        assert!(gate.current().open_for(signed_out));
+        let signed_in = acct.advance_session_generation();
+        assert!(!gate.current().open_for(signed_in), "a sign-in moved the generation on; the driver has not derived for it");
+        gate.set(false, signed_in);
+        assert!(!gate.current().open_for(signed_in));
     }
 
     #[test]
     fn an_unarmed_gate_holds_nothing() {
+        let now = account().session_generation();
         let gate = AccountGate::default();
-        assert!(gate.current().open_for(7));
-        gate.set(false, 7);
-        assert!(gate.current().open_for(7), "unarmed: the derived value is kept but never holds");
+        assert!(gate.current().open_for(now));
+        gate.set(false, now);
+        assert!(gate.current().open_for(now), "unarmed: the derived value is kept but never holds");
         let linux = AccountGate::default();
         linux.arm(false);
-        linux.set(false, 1);
-        assert!(linux.current().open_for(1), "Linux arms with holds = false");
+        linux.set(false, now);
+        assert!(linux.current().open_for(now), "Linux arms with holds = false");
     }
 
     #[test]
     fn an_add_needs_the_gate_open_for_this_generation_and_the_epoch_its_check_began_under() {
-        let open = GateValue { open: true, epoch: 4, generation: Some(2), always_open: false };
-        assert!(open.allows_add(Some(4), 2));
-        assert!(!GateValue { open: false, ..open }.allows_add(Some(4), 2));
-        assert!(!GateValue { epoch: 5, ..open }.allows_add(Some(4), 2), "closed and reopened since the check began");
-        assert!(!open.allows_add(None, 2), "no recorded epoch: fail closed");
-        assert!(!open.allows_add(Some(4), 3), "the generation moved on since the driver derived");
+        let acct = account();
+        let derived = acct.session_generation();
+        let open = GateValue { open: true, epoch: 4, generation: Some(derived), always_open: false };
+        assert!(open.allows_add(Some(4), derived));
+        assert!(!GateValue { open: false, ..open }.allows_add(Some(4), derived));
+        assert!(!GateValue { epoch: 5, ..open }.allows_add(Some(4), derived), "closed and reopened since the check began");
+        assert!(!open.allows_add(None, derived), "no recorded epoch: fail closed");
+        let moved_on = acct.advance_session_generation();
+        assert!(!open.allows_add(Some(4), moved_on), "the generation moved on since the driver derived");
     }
 
     #[test]
     fn clones_share_one_gate() {
+        let now = account().session_generation();
         let gate = armed();
         let driver_side = gate.clone();
-        driver_side.set(true, 1);
-        assert!(gate.current().open_for(1));
+        driver_side.set(true, now);
+        assert!(gate.current().open_for(now));
     }
 }
 ```
@@ -3752,17 +3791,17 @@ Add `pub mod gate;` to `account_view/mod.rs`. Run with filter `account_view::gat
 - [ ] **Step 2: Implement the gate**
 
 ```rust
-    pub fn open_for(self, current_generation: u64) -> bool {
-        self.always_open || (self.open && self.generation == Some(current_generation))
+    pub fn open_for(self, current: SessionGeneration) -> bool {
+        self.always_open || (self.open && self.generation == Some(current))
     }
 
-    pub fn allows_add(self, started_under: Option<u64>, current_generation: u64) -> bool {
-        self.open_for(current_generation) && started_under == Some(self.epoch)
+    pub fn allows_add(self, started_under: Option<u64>, current: SessionGeneration) -> bool {
+        self.open_for(current) && started_under == Some(self.epoch)
     }
 ```
 
 ```rust
-    pub fn set(&self, open: bool, generation: u64) -> Option<GateValue> {
+    pub fn set(&self, open: bool, generation: SessionGeneration) -> Option<GateValue> {
         let mut value = self.lock();
         if value.open == open && value.generation == Some(generation) {
             return None;
@@ -3778,7 +3817,7 @@ Run with filter `account_view::gate`. Expected: `test result: ok. 6 passed; 0 fa
 
 - [ ] **Step 2b: Mutation-check the gate**
 
-1. In `open_for`, drop `&& self.generation == Some(current_generation)`. Expected: `a_generation_the_driver_has_not_derived_is_closed` ("a sign-in moved the generation on…") and `an_add_needs_…` ("the generation moved on since the driver derived"). Revert.
+1. In `open_for`, drop `&& self.generation == Some(current)`. Expected: `a_generation_the_driver_has_not_derived_is_closed` ("a sign-in moved the generation on…") and `an_add_needs_…` ("the generation moved on since the driver derived"). Revert.
 2. In `set`, drop `&& value.generation == Some(generation)` from the early return. Expected: `every_change_of_value_or_generation_moves_the_epoch_on_by_one` ("a new generation alone moves it"). Revert.
 3. In `set`, delete `value.epoch += 1;`. Expected: `a_repeat_of_the_same_value_changes_nothing` (left `epoch: 0`). Revert.
 4. In `allows_add`, drop `&& started_under == Some(self.epoch)`. Expected: `an_add_needs_…` ("closed and reopened since the check began"). Revert.
@@ -4060,9 +4099,20 @@ and directly above the existing `Op::AddDomain =>` arm:
 ```rust
                 // Spec 2026-10-07 C-R10: the account gate at the point of action. Closed, or changed since this check
                 // observed: add nothing; the core holds with no failure reason.
-                Op::AddDomain if !app.state::<AppState>().account_gate.current().allows_add(check_epoch, crate::session_generation()) => {
+                Op::AddDomain if !add_allowed(&app, check_epoch) => {
                     OpResult::Added(Err(FpError::app(app_code::ACCOUNT_BLOCKED, "the account is not ready for Finder")))
                 }
+```
+
+with, at module level in `macos_ports.rs`:
+
+```rust
+/// Spec 2026-10-07 C-R10: may the add act now? The gate, read for the active account's session generation of this
+/// moment. No account runtime refuses (fail closed).
+fn add_allowed(app: &tauri::AppHandle, check_epoch: Option<u64>) -> bool {
+    let state = app.state::<AppState>();
+    state.active_account().is_ok_and(|acct| state.account_gate.current().allows_add(check_epoch, acct.session_generation()))
+}
 ```
 
 Add to `macos_ports.rs`'s tests:
@@ -4075,11 +4125,13 @@ Add to `macos_ports.rs`'s tests:
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/finder_setup/macos_ports.rs")).unwrap();
         let run = &source[source.find("fn run(&mut self, op: Op)").expect("run")..];
         let capture = run.find("if op == Op::Observe {").expect("the epoch is captured at Observe");
-        let guard = run.find("Op::AddDomain if !").expect("a guarded add arm");
+        let guard = run.find("Op::AddDomain if !add_allowed(&app, check_epoch)").expect("a guarded add arm");
         let add = run.find("Op::AddDomain =>").expect("the add arm");
         assert!(capture < guard && guard < add, "capture, then the guard, then the real add");
-        assert!(run[guard..add].contains("allows_add(check_epoch,"), "{}", &run[guard..add]);
         assert!(!run[guard..add].contains("macos_file_provider::add_domain"), "the guard never calls the bridge");
+        let allowed = &source[source.find("fn add_allowed(").expect("add_allowed")..];
+        let allowed = &allowed[..allowed.find("\n}\n").expect("its end")];
+        assert!(allowed.contains("allows_add(check_epoch, acct.session_generation())"), "{allowed}");
     }
 ```
 
@@ -4096,7 +4148,7 @@ In the R10 test module that holds `another_accounts_engine_starts_only_after_the
             let local = local_data_of(Some(alice()));
             let fx = AuthorizeFixture::with_session(&bob());
             fx.state.account_gate.arm(true);
-            assert!(fx.state.account_gate.set(false, crate::session_generation()).is_some());
+            assert!(fx.state.account_gate.set(false, fx.acct.session_generation()).is_some());
             let mut slot = fx.acct.engine.lock().await;
             let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
             let called = std::cell::Cell::new(false);
@@ -4108,36 +4160,19 @@ In the R10 test module that holds `another_accounts_engine_starts_only_after_the
             assert!(!called.get() && slot.is_none(), "no engine was created");
             assert_eq!(local.data.db.owner().unwrap(), Some(alice()), "nothing was bound or reset");
             assert_eq!(local.data.db.list_due_operations(i64::MAX).unwrap().len(), 1, "the queue is untouched");
-            let result = start_open(&fx, &mut slot, &paths);
+            fx.state.account_gate.set(true, fx.acct.session_generation());
+            let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
             assert_ne!(result, Ok(EngineStart::AccountBlocked), "the open gate lets the start go on to the binding");
         });
     }
 
-    /// Opens the gate for the current generation and starts. Other lib tests may move a process-wide generation between
-    /// the two reads; a start whose generation moved underneath it is repeated (at most three times).
-    fn start_open(
-        fx: &AuthorizeFixture,
-        slot: &mut tokio::sync::MutexGuard<'_, Option<crate::runner::EngineRunner>>,
-        paths: &LocalDataPaths,
-    ) -> Result<EngineStart, String> {
-        let mut result = Err("not run".to_string());
-        for _ in 0..3 {
-            let now = crate::session_generation();
-            fx.state.account_gate.set(true, now);
-            result = start_engine_bound(&fx.state, &fx.acct, slot, paths, |_root, _token, _key| {
-                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
-            });
-            if crate::session_generation() == now {
-                break;
-            }
-        }
-        result
-    }
-
     /// Plan review I1 (lead ruling 2026-10-07): a first sign-in of an account that turns out to be blocking starts no
-    /// engine. A sign-in moves the session generation on before its own engine start (Task 0 recorded the order); the
-    /// driver last set the gate for the signed-out generation before it, open (Signed out holds nothing). The start the
-    /// sign-in makes in the same command must find the gate closed; the driver's Ready starts the engine later.
+    /// engine. The driver last set the gate for the signed-out generation, open (Signed out holds nothing). A sign-in
+    /// takes its turn (`claim_session_write`, which moves the generation on) before its own engine start (Task 0
+    /// recorded the order). The start the sign-in makes in the same command must find the gate closed; the driver's
+    /// Ready starts the engine later.
     #[test]
     fn a_first_sign_in_with_a_blocking_account_starts_no_engine() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -4145,8 +4180,11 @@ In the R10 test module that holds `another_accounts_engine_starts_only_after_the
             let local = local_data_of(None);
             let fx = AuthorizeFixture::with_session(&bob());
             fx.state.account_gate.arm(true);
-            let signed_out_generation = crate::session_generation().wrapping_sub(1);
-            assert!(fx.state.account_gate.set(true, signed_out_generation).is_some(), "Signed out: open, for the old generation");
+            let signed_out = fx.acct.session_generation();
+            assert!(fx.state.account_gate.set(true, signed_out).is_some(), "Signed out: open, for that generation");
+            let mut turn = signed_out;
+            drop(claim_session_write(&fx.acct, &mut turn).expect("the sign-in's turn"));
+            assert!(!fx.acct.session_unchanged_since(signed_out), "the sign-in moved the generation on");
             let mut slot = fx.acct.engine.lock().await;
             let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
             let called = std::cell::Cell::new(false);
@@ -4234,10 +4272,10 @@ and in `impl Default for AppState`: `account_gate: account_view::gate::AccountGa
 `authorize_engine_start`, directly after the `let (keys, identity) = match keys_for_engine_start(acct) { … };` statement:
 
 ```rust
-    // Spec 2026-10-07 C-R10: the account gate, read under the engine slot for the session generation current now. A
-    // locked vault answered `NoSession` above; a closed gate, or a generation the account view has not derived for yet,
-    // returns before anything is bound, adopted or reset.
-    if !state.account_gate.current().open_for(crate::session_generation()) {
+    // Spec 2026-10-07 C-R10: the account gate, read under the engine slot for the account's session generation of this
+    // moment. A locked vault answered `NoSession` above; a closed gate, or a generation the account view has not derived
+    // for yet, returns before anything is bound, adopted or reset.
+    if !state.account_gate.current().open_for(acct.session_generation()) {
         return Ok(StartPermit::AccountBlocked);
     }
 ```
@@ -4293,7 +4331,7 @@ The six callers:
 ```rust
         if let Some(existing) = engine_slot.as_ref() {
             // Spec 2026-10-07 C-R10: a running engine is reused only while the account gate is open for this generation.
-            if !state.account_gate.current().open_for(crate::session_generation()) {
+            if !state.account_gate.current().open_for(acct.session_generation()) {
                 return Err(FpError::app(app_code::ACCOUNT_BLOCKED, ACCOUNT_HELD_FOR_FINDER));
             }
             (false, existing.ipc_bind_error_handle())
@@ -4363,8 +4401,8 @@ Expected: `test result: ok. 4 passed; 0 failed` for the four; `every_engine_star
 1. Move the gate check in `authorize_engine_start` below `bind_local_data_to_session`. Expected: `a_closed_account_gate_starts_nothing_and_binds_nothing` (the owner or the queue changed) and the source test. Revert.
 2. Delete the reused-engine gate check. Expected: `every_spawn_bound_engine_caller_treats_account_blocked_as_held`. Revert.
 3. In `hold_for_account`, put the stop before the hold. Expected: `closing_the_account_gate_holds_then_stops_and_never_removes`. Revert.
-4. In `macos_ports.rs`, replace `allows_add(check_epoch, crate::session_generation())` with `open`. Expected: `the_add_reads_the_account_gate_under_the_epoch_of_its_observe`. Revert.
-5. In `authorize_engine_start`, replace `.open_for(crate::session_generation())` with `.open`. Expected: `a_first_sign_in_with_a_blocking_account_starts_no_engine` (left `Ok(Started)` or another non-blocked value) and `every_spawn_bound_engine_caller_treats_account_blocked_as_held` ("authorize reads the gate for the current generation"). Revert.
+4. In `add_allowed`, replace `.allows_add(check_epoch, acct.session_generation())` with `.open`. Expected: `the_add_reads_the_account_gate_under_the_epoch_of_its_observe`. Revert.
+5. In `authorize_engine_start`, replace `.open_for(acct.session_generation())` with `.open`. Expected: `a_first_sign_in_with_a_blocking_account_starts_no_engine` (left `Ok(Started)` or another non-blocked value) and `every_spawn_bound_engine_caller_treats_account_blocked_as_held` ("authorize reads the gate for the current generation"). Revert.
 
 - [ ] **Step 11: Commit**
 
@@ -4387,10 +4425,10 @@ git show --stat HEAD
 - Modify: `src-tauri/src/lifecycle_log.rs` (`LifecycleEvent` + `format_line` + a test)
 
 **Interfaces:**
-- Consumes: `derive::{derive, AccountState, AccountView, Blocking, Derived, FirstFetch, Inputs, TokenState}` (Task 5, `Derived.condition` included), `doc::{AccountPart, Doc, Stage}` (Task 2), `fetch::{FetchOutcome, UnavailableKind}` (Task 8), `gate::AccountGate` (Task 9), `policy::{self, Outcome, Schedule}` (Task 6), `account_binding::{same_account, Identity}` (spec A), `finder_setup::driver::Clock` (spec A: `now() -> Instant`, `unix_now() -> i64`, `sleep_until(Instant)`), `lifecycle_log::LifecycleEvent` (spec A).
+- Consumes: `derive::{derive, AccountState, AccountView, Blocking, Derived, FirstFetch, Inputs, TokenState}` (Task 5, `Derived.condition` included), `doc::{AccountPart, Doc, Stage}` (Task 2), `fetch::{FetchOutcome, UnavailableKind}` (Task 8), `gate::AccountGate` (Task 9), `policy::{self, Outcome, Schedule}` (Task 6), `account_binding::{same_account, Identity}` (spec A), `finder_setup::driver::Clock` (spec A: `now() -> Instant`, `unix_now() -> i64`, `sleep_until(Instant)`), `lifecycle_log::LifecycleEvent` (spec A), `account::SessionGeneration` (spec A Task 12: opaque, `Copy + Eq`, compared only).
 - Produces (`crate::account_view::driver`):
   - `ACCOUNT_VIEW_CHANGED_EVENT = "account-view-changed"`
-  - `struct Facts { token_stored: bool, auth_expired: bool, owner_recorded: bool, key_in_memory: bool, key_in_keychain: bool, identity: Identity, generation: u64 }` (Default)
+  - `struct Facts { token_stored: bool, auth_expired: bool, owner_recorded: bool, key_in_memory: bool, key_in_keychain: bool, identity: Identity, generation: Option<SessionGeneration> }` (Default; `None` only with no account runtime)
   - `enum CacheRead { Row { identity: Identity, part: AccountPart }, Empty, Unreadable }`
   - `enum Event { Launch { restoring: bool }, RestoreFinished, SessionChanged, WindowFocused, PlanOpened, Retry }`
   - `enum HeldReason { Checking, AccountBlocking, UpdateRequired }`, `enum DocumentOutcome { UnavailableHttp, Unreadable, UnknownSchema, BlockingVerifyEmail, BlockingUnknownStep }` (both with `as_str`)
@@ -4404,8 +4442,8 @@ git show --stat HEAD
 pub trait Ports: Send + 'static {
     fn platform(&self) -> Platform;
     fn facts(&self) -> Facts;
-    /// Only the session generation (cheap; read under the publish lock).
-    fn generation(&self) -> u64;
+    /// Only the active account's session generation (cheap; read under the publish lock). `None` with no account runtime.
+    fn generation(&self) -> Option<SessionGeneration>;
     /// `bearer`: send the session's token (signed in) or nothing (signed out).
     fn fetch(&mut self, bearer: bool) -> impl Future<Output = FetchOutcome> + Send;
     fn read_cache(&mut self) -> CacheRead;
@@ -4487,6 +4525,7 @@ use super::fetch::{FetchOutcome, UnavailableKind};
 use super::gate::AccountGate;
 use super::policy::{self, Outcome, Schedule};
 use crate::account_binding::{self, Identity};
+use crate::account::SessionGeneration;
 use crate::finder_setup::driver::Clock;
 use crate::lifecycle_log::LifecycleEvent;
 use crate::surfaces::policy::Platform;
@@ -4506,8 +4545,10 @@ pub struct Facts {
     pub key_in_keychain: bool,
     /// The session's identity (spec A `identity_of_session`); empty with no session.
     pub identity: Identity,
-    /// Spec A Task 12's session generation (plan "Spec issues" 15).
-    pub generation: u64,
+    /// The active account's session generation (spec A Task 12, plan "Spec issues" 15): an opaque token, only compared.
+    /// A different value means a session transition happened. `None` only with no account runtime (no engine can start
+    /// then either).
+    pub generation: Option<SessionGeneration>,
 }
 
 pub enum CacheRead {
@@ -4602,8 +4643,8 @@ impl AccountLog {
 pub trait Ports: Send + 'static {
     fn platform(&self) -> Platform;
     fn facts(&self) -> Facts;
-    /// Only the session generation (cheap; read under the publish lock).
-    fn generation(&self) -> u64;
+    /// Only the active account's session generation (cheap; read under the publish lock). `None` with no account runtime.
+    fn generation(&self) -> Option<SessionGeneration>;
     /// `bearer`: send the session's token (signed in) or nothing (signed out).
     fn fetch(&mut self, bearer: bool) -> impl Future<Output = FetchOutcome> + Send;
     fn read_cache(&mut self) -> CacheRead;
@@ -4713,7 +4754,8 @@ struct Driver {
     restoring: bool,
     /// Plan review I5: Checking ends at the latest here (a launch or a new generation set it; `None` once it fired).
     checking_until: Option<Instant>,
-    generation: Option<u64>,
+    /// The generation the driver last derived for (outer `None`: nothing seen yet).
+    generation: Option<Option<SessionGeneration>>,
     fresh: Option<Doc>,
     first_fetch: FirstFetch,
     cached: Option<AccountPart>,
@@ -4961,7 +5003,7 @@ impl Driver {
         self.apply(derived, facts.generation, ports).await;
     }
 
-    async fn apply<P: Ports>(&mut self, derived: Derived, generation: u64, ports: &mut P) {
+    async fn apply<P: Ports>(&mut self, derived: Derived, generation: Option<SessionGeneration>, ports: &mut P) {
         let state = derived.view.state;
         let offline = derived.view.offline;
         // C-R10: the gate first, so no start or add slips through while the rest of this runs. Closing it holds the
@@ -4972,7 +5014,8 @@ impl Driver {
             _ => HeldReason::Checking,
         });
         // The value is for the generation this view was derived for; any other generation reads closed (plan review I1).
-        let changed = self.gate.set(derived.gate_open, generation);
+        // With no account runtime there is no generation and no engine to hold.
+        let changed = generation.and_then(|generation| self.gate.set(derived.gate_open, generation));
         let closed_now = changed.is_some_and(|value| !value.open);
         let opened_now = changed.is_some_and(|value| value.open);
         if held != self.last_held {
@@ -5081,12 +5124,25 @@ mod tests {
     use crate::account_view::doc::parse;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use crate::account::{AccountId, AccountRuntime};
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
+
+    /// A real account runtime: the only source of the facts' session generation. The type is opaque, so a test moves it
+    /// on the way the app does (a real bump) and keeps an old value only by capturing it first.
+    struct TestAccount(AccountRuntime);
+
+    impl Default for TestAccount {
+        fn default() -> Self {
+            Self(AccountRuntime::new(AccountId::new_v4()))
+        }
+    }
 
     #[derive(Default)]
     struct World {
         platform: Option<Platform>,
+        account: TestAccount,
+        /// Every fact but the generation, which `FakePorts` reads from `account`.
         facts: Facts,
         responses: VecDeque<FetchOutcome>,
         /// When set, a fetch waits for it before answering (to act while a fetch is in flight).
@@ -5104,6 +5160,19 @@ mod tests {
         ready: usize,
     }
 
+    impl World {
+        /// A session transition (a sign-in, sign-out, switch, lock or unlock): the account's generation moves on.
+        fn bump(&mut self) {
+            self.account.0.advance_session_generation();
+        }
+
+        /// A sign-out by choice: no session facts left, and the generation moved on.
+        fn sign_out(&mut self) {
+            self.facts = Facts::default();
+            self.bump();
+        }
+    }
+
     #[derive(Clone)]
     struct FakePorts(Arc<Mutex<World>>);
 
@@ -5112,10 +5181,11 @@ mod tests {
             self.0.lock().unwrap().platform.unwrap_or(Platform::Macos)
         }
         fn facts(&self) -> Facts {
-            self.0.lock().unwrap().facts.clone()
+            let w = self.0.lock().unwrap();
+            Facts { generation: Some(w.account.0.session_generation()), ..w.facts.clone() }
         }
-        fn generation(&self) -> u64 {
-            self.0.lock().unwrap().facts.generation
+        fn generation(&self) -> Option<SessionGeneration> {
+            Some(self.0.lock().unwrap().account.0.session_generation())
         }
         fn fetch(&mut self, bearer: bool) -> impl Future<Output = FetchOutcome> + Send {
             let world = self.0.clone();
@@ -5267,14 +5337,19 @@ mod tests {
         fn ready_count(&self) -> usize {
             self.world.lock().unwrap().ready
         }
+
+        /// The account's session generation now.
+        fn generation(&self) -> SessionGeneration {
+            self.world.lock().unwrap().account.0.session_generation()
+        }
     }
 
     fn sam() -> Identity {
         Identity::new(Some("u-1"), Some("sam@beebeeb.io"))
     }
 
-    fn signed_in(generation: u64) -> Facts {
-        Facts { token_stored: true, owner_recorded: true, key_in_memory: true, key_in_keychain: true, identity: sam(), generation, ..Facts::default() }
+    fn signed_in() -> Facts {
+        Facts { token_stored: true, owner_recorded: true, key_in_memory: true, key_in_keychain: true, identity: sam(), ..Facts::default() }
     }
 
     fn document(name: &str) -> FetchOutcome {
@@ -5291,7 +5366,7 @@ mod tests {
 
     /// Signed in with the key, launched, restore finished, the first fetch answered with `first`.
     async fn ready_with(first: FetchOutcome) -> Harness {
-        let h = Harness::new(World { facts: signed_in(1), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), ..World::default() });
         h.respond(first);
         h.handle.send(Event::Launch { restoring: true });
         h.handle.send(Event::RestoreFinished);
@@ -5315,7 +5390,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stored_token_waits_for_the_restore_then_fetches_with_the_bearer() {
-        let h = Harness::new(World { facts: signed_in(1), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), ..World::default() });
         h.with(|w| w.facts.key_in_memory = false);
         h.respond(document("account.active.web.json"));
         h.handle.send(Event::Launch { restoring: true });
@@ -5334,11 +5409,11 @@ mod tests {
     #[tokio::test]
     async fn a_result_fetched_for_an_earlier_session_is_dropped_and_never_cached() {
         let hold = Arc::new(Notify::new());
-        let h = Harness::new(World { facts: signed_in(1), hold_fetch: Some(hold.clone()), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), hold_fetch: Some(hold.clone()), ..World::default() });
         h.respond(document("account.needs_plan.ios.json"));
         h.handle.send(Event::Launch { restoring: false });
         h.until("the fetch is in flight", |w, _| w.fetches.len() == 1).await;
-        h.world.lock().unwrap().facts.generation = 2;
+        h.world.lock().unwrap().bump();
         h.world.lock().unwrap().hold_fetch = None;
         hold.notify_waiters();
         h.until("a fetch for the new session", |w, _| w.fetches.len() >= 2).await;
@@ -5352,14 +5427,14 @@ mod tests {
         let h = ready_with(update_required()).await;
         h.until("Update required", |_, v| v.state == AccountState::UpdateRequired).await;
         assert_eq!(h.world.lock().unwrap().writes.len(), 1, "the account part was cached");
-        h.with(|w| w.facts.generation = 2);
+        h.with(|w| w.bump());
         h.until("the next session reads the cache and fetches", |w, _| w.fetches.len() == 2).await;
         h.until("Ready from the cache, never Update required", |_, v| v.state == AccountState::Ready).await;
     }
 
     #[tokio::test]
     async fn an_unidentified_session_keeps_its_document_in_memory_until_its_identity_is_known() {
-        let h = Harness::new(World { facts: Facts { identity: Identity::new(None, Some("sam@beebeeb.io")), ..signed_in(1) }, ..World::default() });
+        let h = Harness::new(World { facts: Facts { identity: Identity::new(None, Some("sam@beebeeb.io")), ..signed_in() }, ..World::default() });
         h.respond(document("account.active.web.json"));
         h.handle.send(Event::Launch { restoring: false });
         h.until("Ready", |_, v| v.state == AccountState::Ready).await;
@@ -5370,7 +5445,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cache_row_that_cannot_be_compared_is_kept_and_not_used() {
-        let h = Harness::new(World { facts: signed_in(1), cache: Some((Identity::default(), part("account.needs_plan.ios.json"))), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), cache: Some((Identity::default(), part("account.needs_plan.ios.json"))), ..World::default() });
         h.respond(FetchOutcome::Network);
         h.handle.send(Event::Launch { restoring: false });
         h.until("the fetch concluded", |w, v| w.fetches.len() == 1 && v.state == AccountState::Ready).await;
@@ -5382,7 +5457,7 @@ mod tests {
     #[tokio::test]
     async fn another_accounts_cache_row_is_deleted_and_never_shown() {
         let kim = Identity::new(Some("u-2"), Some("kim@beebeeb.io"));
-        let h = Harness::new(World { facts: signed_in(1), cache: Some((kim, part("account.needs_plan.ios.json"))), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), cache: Some((kim, part("account.needs_plan.ios.json"))), ..World::default() });
         h.respond(FetchOutcome::Network);
         h.handle.send(Event::Launch { restoring: false });
         h.until("the fetch concluded", |w, _| w.fetches.len() == 1).await;
@@ -5394,7 +5469,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_ready_fires_at_launch_from_the_cache() {
-        let h = Harness::new(World { facts: signed_in(1), cache: Some((sam(), part("account.active.web.json"))), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), cache: Some((sam(), part("account.active.web.json"))), ..World::default() });
         h.respond(FetchOutcome::Network);
         h.handle.send(Event::Launch { restoring: true });
         h.handle.send(Event::RestoreFinished);
@@ -5472,7 +5547,7 @@ mod tests {
         h.until("No plan", |_, v| v.state == AccountState::NoPlan).await;
         h.with(|w| w.facts.key_in_memory = false);
         h.until("Locked", |_, v| v.state == AccountState::Locked).await;
-        h.with(|w| w.facts = Facts { generation: 9, ..Facts::default() });
+        h.with(|w| w.sign_out());
         h.until("Signed out", |_, v| v.state == AccountState::SignedOut).await;
         assert_eq!(h.ready_count(), 1, "only the first transition into Ready fired");
     }
@@ -5539,7 +5614,7 @@ mod tests {
     /// Review Focus 4: C-R13.
     #[tokio::test]
     async fn an_offline_relaunch_keeps_the_cached_gate_closed() {
-        let h = Harness::new(World { facts: signed_in(1), cache: Some((sam(), part("account.needs_plan.ios.json"))), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), cache: Some((sam(), part("account.needs_plan.ios.json"))), ..World::default() });
         h.respond(FetchOutcome::Network);
         h.handle.send(Event::Launch { restoring: true });
         h.handle.send(Event::RestoreFinished);
@@ -5594,7 +5669,7 @@ mod tests {
     async fn a_sign_out_clears_the_view_inside_the_transition() {
         let h = ready_with(document("account.trialing.desktop.json")).await;
         h.until("Ready with a notice", |_, v| v.notice.is_some()).await;
-        h.world.lock().unwrap().facts = Facts { generation: 2, ..Facts::default() };
+        h.world.lock().unwrap().sign_out();
         h.handle.clear_for_sign_out();
         let view = h.handle.state();
         assert_eq!((view.state, view.notice.as_ref()), (AccountState::SignedOut, None), "cleared before anything awaits");
@@ -5611,7 +5686,7 @@ mod tests {
         h.respond(document("account.needs_plan.ios.json"));
         h.handle.send(Event::Retry);
         h.until("the gate is closing for No plan", |w, _| w.gate_closed == 2).await;
-        h.world.lock().unwrap().facts = Facts { generation: 2, ..Facts::default() };
+        h.world.lock().unwrap().sign_out();
         h.handle.clear_for_sign_out();
         h.world.lock().unwrap().hold_gate = None;
         hold.notify_waiters();
@@ -5627,7 +5702,7 @@ mod tests {
     async fn a_live_sign_out_publishes_signed_out() {
         let h = ready_with(document("account.trialing.desktop.json")).await;
         h.until("Ready with a notice", |_, v| v.notice.is_some()).await;
-        h.world.lock().unwrap().facts = Facts { generation: 2, ..Facts::default() };
+        h.world.lock().unwrap().sign_out();
         h.handle.clear_for_sign_out();
         let last = h.world.lock().unwrap().published.last().cloned().expect("a published view");
         assert_eq!((last.state, last.notice.as_ref()), (AccountState::SignedOut, None), "published inside the transition");
@@ -5642,12 +5717,15 @@ mod tests {
     async fn a_switch_publishes_signed_out_and_then_the_next_account() {
         let h = ready_with(document("account.trialing.desktop.json")).await;
         h.until("Ready", |_, v| v.state == AccountState::Ready).await;
-        h.world.lock().unwrap().facts = Facts { generation: 2, ..Facts::default() };
+        h.world.lock().unwrap().sign_out();
         h.handle.clear_for_sign_out();
         let cleared = h.world.lock().unwrap().published.last().cloned().expect("a published view");
         assert_eq!(cleared.state, AccountState::SignedOut, "inside the transition");
         h.respond(document("account.active.web.json"));
-        h.with(|w| w.facts = Facts { identity: Identity::new(Some("u-2"), Some("kim@beebeeb.io")), ..signed_in(3) });
+        h.with(|w| {
+            w.facts = Facts { identity: Identity::new(Some("u-2"), Some("kim@beebeeb.io")), ..signed_in() };
+            w.bump();
+        });
         h.until("Ready for the next account", |w, v| v.state == AccountState::Ready && w.fetches.len() >= 2).await;
         let w = h.world.lock().unwrap();
         let after_ready: Vec<AccountState> = w.published.iter().map(|v| v.state).skip_while(|s| *s != AccountState::Ready).collect();
@@ -5661,12 +5739,15 @@ mod tests {
     async fn the_driver_sets_the_gate_for_its_own_generation() {
         let h = ready_with(document("account.active.web.json")).await;
         h.until("Ready", |w, v| v.state == AccountState::Ready && w.ready == 1).await;
-        assert_eq!(h.gate.current().generation, Some(1));
-        assert!(h.gate.current().open_for(1));
-        assert!(!h.gate.current().open_for(2), "a generation the driver has not derived for is closed");
-        h.with(|w| w.facts.generation = 2);
-        h.until("the gate follows the new generation", |_, _| h.gate.current().generation == Some(2)).await;
-        assert!(h.gate.current().open_for(2));
+        let derived = h.generation();
+        assert_eq!(h.gate.current().generation, Some(derived));
+        assert!(h.gate.current().open_for(derived));
+        h.world.lock().unwrap().bump();
+        let next = h.generation();
+        assert!(!h.gate.current().open_for(next), "a generation the driver has not derived for is closed");
+        h.handle.send(Event::SessionChanged);
+        h.until("the gate follows the new generation", |_, _| h.gate.current().generation == Some(next)).await;
+        assert!(h.gate.current().open_for(next));
         h.until("Ready under the new generation fires the trigger", |w, _| w.ready == 2).await;
     }
 
@@ -5674,7 +5755,7 @@ mod tests {
     /// the launch, as "document unavailable", and fails open; the fetches start.
     #[tokio::test]
     async fn a_dead_restore_task_still_ends_checking_after_15s() {
-        let h = Harness::new(World { facts: signed_in(1), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), ..World::default() });
         h.handle.send(Event::Launch { restoring: true });
         h.until("Checking during the restore", |_, v| v.state == AccountState::Checking).await;
         h.clock.advance(Duration::from_secs(14));
@@ -5683,23 +5764,26 @@ mod tests {
         h.respond(document("account.active.web.json"));
         h.clock.advance(Duration::from_secs(1));
         h.until("left Checking and fetched with the bearer", |w, v| v.state == AccountState::Ready && w.fetches == [true]).await;
-        assert!(h.gate.current().open_for(1));
+        assert!(h.gate.current().open_for(h.generation()));
     }
 
     /// Plan review I5: a sign-in while the restore is stuck gets its own 15 s. It always leaves Checking, and the
     /// launch's limit does not end it before its own first fetch could conclude.
     #[tokio::test]
     async fn a_sign_in_during_a_stuck_restore_leaves_checking() {
-        let h = Harness::new(World { facts: signed_in(1), ..World::default() });
+        let h = Harness::new(World { facts: signed_in(), ..World::default() });
         h.handle.send(Event::Launch { restoring: true });
         h.until("Checking during the restore", |_, v| v.state == AccountState::Checking).await;
         h.clock.advance(Duration::from_secs(10));
-        h.with(|w| w.facts = Facts { identity: Identity::new(Some("u-2"), Some("kim@beebeeb.io")), ..signed_in(2) });
+        h.with(|w| {
+            w.facts = Facts { identity: Identity::new(Some("u-2"), Some("kim@beebeeb.io")), ..signed_in() };
+            w.bump();
+        });
         tokio::time::sleep(Duration::from_millis(50)).await;
         h.clock.advance(Duration::from_secs(5));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(h.handle.state().state, AccountState::Checking, "the launch's 15 s do not end the new session's Checking");
-        assert!(!h.gate.current().open_for(2));
+        assert!(!h.gate.current().open_for(h.generation()));
         h.clock.advance(Duration::from_secs(10));
         h.until("left Checking 15 s after the sign-in", |w, v| v.state == AccountState::Ready && w.fetches == [true]).await;
     }
@@ -5711,7 +5795,10 @@ mod tests {
         h.until("No plan, cached", |w, v| v.state == AccountState::NoPlan && w.cache.is_some()).await;
         h.with(|w| w.facts.auth_expired = true);
         h.until("Session ended", |_, v| v.state == AccountState::SessionEnded).await;
-        h.with(|w| w.facts = Facts { owner_recorded: true, generation: 2, ..Facts::default() });
+        h.with(|w| {
+            w.sign_out();
+            w.facts.owner_recorded = true;
+        });
         h.until("the relaunch's anonymous fetch", |w, v| w.fetches.last() == Some(&false) && v.state == AccountState::SessionEnded).await;
         let w = h.world.lock().unwrap();
         assert_eq!(w.deletes, 0, "never deleted");
@@ -5784,7 +5871,7 @@ Expected: `test result: ok. 34 passed; 0 failed`. Then the whole lib under the s
 6. In `apply`, replace `|| ports.generation() == generation` with `|| true`. Expected: `a_view_derived_for_an_ended_session_never_overwrites_the_cleared_one` ("the ended session's view was never published"). Revert.
 7. In `apply`, log `EngineHeld` only when `closed_now`. Expected: `closing_the_gate_holds_once_and_says_why` (no `account_blocking` line: the gate was already closed for Checking). Revert.
 8. In `clear_for_sign_out`, replace the `self.published.publish(…)` call with `self.published.view.send_replace(AccountView::signed_out(offline));` (the clear writes only the watch). Expected: `a_live_sign_out_publishes_signed_out` ("published inside the transition": the last published view is still Ready) and `a_switch_publishes_signed_out_and_then_the_next_account` ("inside the transition"). Revert.
-9. In `apply`, pass `0` instead of `generation` to `self.gate.set`. Expected: `the_driver_sets_the_gate_for_its_own_generation` (left `Some(0)`). Revert.
+9. In `apply`, set the gate only when its open/closed value changes (`if self.gate.current().open != derived.gate_open { … }` around the `set`), so a new generation alone never reaches it. Expected: `the_driver_sets_the_gate_for_its_own_generation` ("never: the gate follows the new generation"). Revert.
 10. Drop `|| opened_now` from `fire_ready`. Expected: `the_driver_sets_the_gate_for_its_own_generation` ("never: Ready under the new generation fires the trigger"). Revert.
 11. Make `watchdog` return at once. Expected: `a_dead_restore_task_still_ends_checking_after_15s` and `a_sign_in_during_a_stuck_restore_leaves_checking` ("never: left Checking…"). Revert.
 12. In `refresh`, delete the `self.checking_until = Some(…)` line of the generation change. Expected: `a_sign_in_during_a_stuck_restore_leaves_checking` ("the launch's 15 s do not end the new session's Checking"). Revert.
@@ -5815,7 +5902,7 @@ git show --stat HEAD
 - Modify: `src-tauri/src/lib.rs` (drop the `#[allow(dead_code)]` on `mod account_view;` and on `hold_for_account`; `AppState.account_view`; `account_view_facts`, `account_view_token`, `notify_account_view`, `start_engine_when_none_runs`, `RestoreFinishedGuard`; `setup()`; `keys_arrived`; `clear_session_impl`; `lock_vault`; `desktop_login`; `desktop_login_2fa`; the focus handler; `attach_tray_status_listener`; four commands; tests)
 
 **Interfaces:**
-- Consumes: `driver::{spawn, AccountViewHandle, Event, Facts, CacheRead, Ports, Publisher, AccountLog, ACCOUNT_VIEW_CHANGED_EVENT}` (Task 10), `derive::{derive, Inputs, TokenState, FirstFetch, AccountView}` (Task 5), `fetch::{client, fetch, FetchOutcome, UnavailableKind}` (Task 8), `gate::AccountGate` and `hold_for_account` (Task 9), `StateDb::{onboarding_cache, set_onboarding_cache, delete_onboarding_cache, owner}` (Task 7); spec A's `identity_of_session`, `keychain_vault_key_present`, `load_session_token_from_keychain`, `state_db_from_state_dir`, `state_paths::{beebeeb_state_dir, STATE_DB_FILENAME}`, `runner::api_base_url`, `AuthHealth::note_result`, `notify_finder`, `start_engine_if_possible`, `lifecycle_log::event`, `finder_setup::driver::SystemClock`, and Task 12-of-spec-A's `session_generation()` (its real name from Task 0).
+- Consumes: `driver::{spawn, AccountViewHandle, Event, Facts, CacheRead, Ports, Publisher, AccountLog, ACCOUNT_VIEW_CHANGED_EVENT}` (Task 10), `derive::{derive, Inputs, TokenState, FirstFetch, AccountView}` (Task 5), `fetch::{client, fetch, FetchOutcome, UnavailableKind}` (Task 8), `gate::AccountGate` and `hold_for_account` (Task 9), `StateDb::{onboarding_cache, set_onboarding_cache, delete_onboarding_cache, owner}` (Task 7); spec A's `identity_of_session`, `keychain_vault_key_present`, `load_session_token_from_keychain`, `state_db_from_state_dir`, `state_paths::{beebeeb_state_dir, STATE_DB_FILENAME}`, `runner::api_base_url`, `AuthHealth::note_result`, `notify_finder`, `start_engine_if_possible`, `lifecycle_log::event`, `finder_setup::driver::SystemClock`, and spec A Task 12's `AccountRuntime::session_generation() -> SessionGeneration` (an opaque token, only compared; its final name from Task 0).
 - Produces:
   - `AppState.account_view: std::sync::OnceLock<account_view::driver::AccountViewHandle>`
   - `account_view::app_ports::AppPorts::new(app: tauri::AppHandle)`, `account_view::app_ports::AppPublisher::new(app: tauri::AppHandle)` (`impl Publisher`: emits `account-view-changed`; Task 14 adds the menu-bar icon)
@@ -5933,7 +6020,7 @@ In the R10 test module (beside Task 9's `a_closed_account_gate_starts_nothing_an
             let fx = AuthorizeFixture::with_session(&bob());
             let platform = crate::surfaces::policy::Platform::current();
             fx.state.account_gate.arm(platform != crate::surfaces::policy::Platform::Linux);
-            fx.state.account_gate.set(locked.gate_open, crate::session_generation());
+            fx.state.account_gate.set(locked.gate_open, fx.acct.session_generation());
             let mut slot = fx.acct.engine.lock().await;
             let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
             let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
@@ -5968,6 +6055,7 @@ use super::derive::AccountView;
 use super::doc::AccountPart;
 use super::driver::{AccountLog, CacheRead, Facts, Ports, Publisher, ACCOUNT_VIEW_CHANGED_EVENT};
 use super::fetch::{self, FetchOutcome, UnavailableKind};
+use crate::account::SessionGeneration;
 use crate::account_binding::Identity;
 use crate::surfaces::policy::Platform;
 use crate::AppState;
@@ -6032,8 +6120,8 @@ impl Ports for AppPorts {
         crate::account_view_facts(&self.app.state::<AppState>())
     }
 
-    fn generation(&self) -> u64 {
-        crate::session_generation()
+    fn generation(&self) -> Option<SessionGeneration> {
+        self.app.state::<AppState>().active_account().ok().map(|acct| acct.session_generation())
     }
 
     fn fetch(&mut self, bearer: bool) -> impl Future<Output = FetchOutcome> + Send {
@@ -6173,7 +6261,7 @@ pub(crate) fn account_view_facts(state: &AppState) -> account_view::driver::Fact
         key_in_memory,
         key_in_keychain,
         identity: identity_of_session(email.as_deref(), profile.as_ref()),
-        generation: session_generation(),
+        generation: acct.as_ref().map(|acct| acct.session_generation()),
     }
 }
 
@@ -10406,7 +10494,8 @@ For the whole-branch reviewer and the lead, after Task 24.
 
 - **Lane T rebase carry-over (spec A rulings).** Both are on surfaces this plan touches, so both are in the plan: T11-M5 (the switch warning's count is `null`, never `0`, on an unreadable `state.db`) is Task 12 steps 6–8 and Task 16 step 8, run only if Task 0 found it still open on `main`; T11f1-c2 (the retryable `SIGN_IN_ACCOUNT_UNKNOWN` sentence renders) holds on both paths: the password path already shows `result.reason`, and Task 16's `browserResult` passes the browser path's `Err` sentence through unchanged (`an error is the sentence Rust wrote, the account-unknown one included`). If Task 0 found M5 already fixed by spec A's rebase, confirm its frontend half renders `null` with words the lead approved, and note it here.
 - **Spec A items marked "final review must triage"** that this plan does not change: `[T11-sec-reinstall]` (a same-account reinstall of the stored key without a server check when user ids match) and `[T11-M8]` (revoking the replaced, still-live token on a same-account swap). Spec C's browser path reaches the same `settle_sign_in`, so a ruling on either applies to both sign-in paths.
-- **Spec issues found 1–21** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07. Issues 19 (the 15 s Checking limit) and 20 (the gate closed for an underived generation) are the lead's rulings on the plan review. Issue 21 (no separate wake path) is the writer's reading of plan review I8 and is open for the lead.
+- **Plan re-check (2026-10-07, `specC-plan-recheck.md`).** N1: spec A Task 12's generation is consumed as an opaque, per-account `SessionGeneration` (Spec issue 15; Tasks 0, 9, 10, 11; no number is read out of it, and tests make old values by capturing before a real bump). N2: two of Task 0's check patterns matched nothing that exists (`build_tray_menu` is generic, `api_base_url` is `pub(crate)`); fixed. N3: stale statements fixed.
+- **Spec issues found 1–21** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07. Issues 19 (the 15 s Checking limit) and 20 (the gate closed for an underived generation) are the lead's rulings on the plan review. Issue 21 (no separate wake path) answers plan review I8; the lead accepted it on 2026-10-07 and the spec is amended (§10, §13, §14, §17.4, in `7c64cb0`).
 - **Plan review (2026-10-07, `specC-plan-review.md`).** Applied: C1 (every view, the sign-out and switch clear included, goes through one publish path: `Published` in Task 10, `AppPublisher` in Tasks 11 and 14); I1 (Task 9's generation gate); I2 (Task 17's `account-window.json`); I3 and I4 (Task 0's `t0-record.md` and signature table; the environment, the loop commands and the lane rules in Global Constraints; `bun install` in both lanes' trees); I5 (Task 6's limit, Task 10's watchdog, Task 11's drop guard); I6 (a Rust derive test, two Linux step-flow tests, the macOS test reworded with a real mutation); I7 (`useLinkOpener` at all eight link sites, pinned in Task 18); I8 (three driver tests and the busy-screen test; the wake path removed, Spec issue 21); I9 (exact counts and per-test filters, the table in Global Constraints); M1–M14. M7's second half is done as reads only where the table uses them, not as a per-generation cache: a cached owner record could outlive the sign-out's purge if the view refreshed between the generation bump and the purge.
 - **The device rungs' isolation** (Task 23 step 1): the two-build split was accepted by the lead on 2026-10-07, who amends 1747's Verification line in the workspace.
 - **Not in this plan:** the server's account-stage `fallback` links and the `needs_plan.desktop` fixture (workspace task 1844), and macOS autostart in the sandboxed build (workspace task 1845).
@@ -10453,7 +10542,7 @@ For the whole-branch reviewer and the lead, after Task 24.
 
 **2. Placeholder scan.** The plan contains no "TBD", "TODO" or "implement later". `todo!()` appears only in step-1 skeletons that the next step replaces. Every code step shows the code. Task 23's SQL is given for the states whose columns the server code names (frozen, past due, update required); the others are produced from the same `load.rs` reads and written into `1747-state-sql.md` before they run, because the lead runs them against the local database's live schema.
 
-**3. Type consistency.** These names were checked across tasks: `Derived { view, gate_open, blocking, condition }` (5 → 10, 11), `AccountGate::{arm, set(open, generation) → Option<GateValue>}` (9 → 10, 11), `GateValue::{open_for, allows_add}` (9 → 10), `policy::checking_deadline` (6 → 10), `Publisher` / `AppPublisher` (10 → 11, 14), `RestoreFinishedGuard` (11), `useLinkOpener` (16 → 17, 18), `Trigger::{AccountHold, AccountReady}` (9 → 11), `EngineStart::AccountBlocked` (9), `Facts` (10 → 11), `AccountViewHandle::{send, state, clear_for_sign_out, settled}` (10 → 11, 13, 14), `Event::{Launch, RestoreFinished, SessionChanged, WindowFocused, PlanOpened, Retry}` (10 → 11), `StartupSurface::{Onboarding, MainWindow, AccountWindow, SettingsAccount, Nothing}` (13 → 14), `open_surface`, `show_macos_settings_window_on_account` (13 → 14), `LoginOutcome::browser_signed_in`, `browser_settlement` (12), `SignInSettled.fresh.vaultUnlocked` (16 → 17), `AccountView` JSON (5 ↔ 15, pinned in 21), `BUILT_IN_LINKS` ↔ `CREATE_ACCOUNT_URL`/`BILLING_URL`/`SUPPORT_URL` (3 ↔ 15, pinned in 21), the tooltips (14 ↔ 21). `session_generation()` is the one name not yet on any branch (Spec issue 15; Task 0 records it in `t0-record.md`, with its bump sites and order).
+**3. Type consistency.** These names were checked across tasks: `Derived { view, gate_open, blocking, condition }` (5 → 10, 11), `AccountGate::{arm, set(open, generation: SessionGeneration) → Option<GateValue>}` (9 → 10, 11), `GateValue::{open_for, allows_add}` taking a `SessionGeneration` (9 → 10), `Facts.generation: Option<SessionGeneration>` and `Ports::generation` (10 → 11), `policy::checking_deadline` (6 → 10), `Publisher` / `AppPublisher` (10 → 11, 14), `RestoreFinishedGuard` (11), `useLinkOpener` (16 → 17, 18), `Trigger::{AccountHold, AccountReady}` (9 → 11), `EngineStart::AccountBlocked` (9), `Facts` (10 → 11), `AccountViewHandle::{send, state, clear_for_sign_out, settled}` (10 → 11, 13, 14), `Event::{Launch, RestoreFinished, SessionChanged, WindowFocused, PlanOpened, Retry}` (10 → 11), `StartupSurface::{Onboarding, MainWindow, AccountWindow, SettingsAccount, Nothing}` (13 → 14), `open_surface`, `show_macos_settings_window_on_account` (13 → 14), `LoginOutcome::browser_signed_in`, `browser_settlement` (12), `SignInSettled.fresh.vaultUnlocked` (16 → 17), `AccountView` JSON (5 ↔ 15, pinned in 21), `BUILT_IN_LINKS` ↔ `CREATE_ACCOUNT_URL`/`BILLING_URL`/`SUPPORT_URL` (3 ↔ 15, pinned in 21), the tooltips (14 ↔ 21). `SessionGeneration` / `AccountRuntime::session_generation()` (spec A Task 12, still in progress) is consumed as an opaque token in Tasks 9–11, never as a number (Spec issue 15; Task 0 records its final name, shape, derives, bump sites and order in `t0-record.md`).
 
 **5. After the plan review (2026-10-07).** Recounted every task's tests against its code (the table in Global Constraints); rechecked that every test this revision adds or changes names a mutation that fails it, with the assertion that fails (tests the first version already mutation-checked keep their checks; the driver's older tests are covered by Task 10's mutations 1–7 as before); rechecked that no step writes the watch channel except through `Published::publish`, and that every `#[cfg]` added on an `if let` sits on a block.
 
