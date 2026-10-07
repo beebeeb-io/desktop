@@ -37,6 +37,7 @@ Each item is a place where the spec, read literally against the code on spec A's
 19. **Checking has a 15 s limit** (lead ruling 2026-10-07, plan review I5). The spec ends Checking only on a concluded first fetch, and the startup restore holds the fetch until it reports back, so a restore task that dies would leave the view in Checking for the whole process. The plan ends Checking at the latest 15 s after it began (a launch, or a new session generation): the 5 s probe cap plus margin. That concludes "document unavailable", which fails open like any failed first fetch: Ready with the key in memory, Locked without it (C-R4 still applies), Signed out without a session. A sign-in always leaves Checking, at the latest 15 s after it. Task 6 `checking_gives_up_15s_after_it_began`; Task 10 `a_dead_restore_task_still_ends_checking_after_15s`, `a_sign_in_during_a_stuck_restore_leaves_checking`; Task 11, the restore's drop guard.
 20. **The gate is closed for a session generation the account view has not derived** (lead ruling 2026-10-07, plan review I1). C-R10 reads open in Signed out, and spec A's `apply_session` installs a sign-in's keys and starts the engine in the same command, before the account view can derive anything. The gate therefore carries the generation it was derived for and reads closed for every other one, evaluated at the point of action (spec ruling I-4). The engine start a sign-in makes finds it closed; the account view's entry into Ready starts the engine afterwards (C-R12). Linux arms the gate so that it never holds; unit tests that build an `AppState` get an unarmed gate. Task 9 `a_generation_the_driver_has_not_derived_is_closed`, `a_first_sign_in_with_a_blocking_account_starts_no_engine`; Task 10 `the_driver_sets_the_gate_for_its_own_generation`.
 21. **A wake needs no separate path.** §10 detects a wake "when the wall clock moves more than 60 s across one 30 s probe tick" and re-probes on it. While offline the only tick is the 30 s re-probe itself, and at that tick the re-probe is due anyway: the timer runs on the monotonic clock, which does not advance while the Mac sleeps, so the tick comes at most 30 s of awake time after the last probe, wake or not. A wake branch can never change what happens, and no test of it could fail its mutation (plan review I8). The plan builds none: the 30 s offline re-probe is the wake re-probe. Task 23 checks it on the Mac (a wake while offline re-probes within 30 s). Task 6, Task 10. **Accepted by the lead 2026-10-07; the spec is amended:** §10's network-level failure row now reads "A wake while offline is covered by the next 30 s re-probe, so there is no separate wake branch and no new OS observer" (the original wording struck through above it), with the same change in §13 and §14, resolved in §17.4.
+22. **A v1 document without `client` is unreadable** (lead ruling 2026-10-07, PR #116 review). `schema.v1.json` (server `d2e7f776`) does not list `client` in its top-level `required`, and every fixture carries it. Defaulting a missing `client` to `ok` would skip `update_required` and apply the rest of the document, so the parser requires it: a document without it is `Unavailable::Unreadable`, which proceeds as today with the one `onboarding_document outcome=unreadable` line (§10). Task 2, `garbage_and_wrong_types_are_unreadable`.
 
 ## Global Constraints
 
@@ -124,12 +125,12 @@ Each item is a place where the spec, read literally against the code on spec A's
   | 13 | 19 (launch_kind 3, of them 1 (m); surfaces::policy 11; lib 5) | 164 | | |
   | 14 | 17 (tray_presentation 13, icons 2, lib 2) | 181 | | |
   | 15 | | | 17 | 17 |
-  | 16 | | | 18 (+2 M5) | 35 |
-  | 17 | | | 20 | 55 |
-  | 18 | | | 6 | 61 |
-  | 19 | | | 3 | 64 |
-  | 20 | | | 3 | 67 |
-  | 21 | | | 3 | 70 |
+  | 16 | | | 19 (+2 M5) | 36 |
+  | 17 | | | 20 | 56 |
+  | 18 | | | 6 | 62 |
+  | 19 | | | 3 | 65 |
+  | 20 | | | 3 | 68 |
+  | 21 | | | 3 | 71 |
 
   Running totals leave out the M5 rows. Task 14 also extends two of Task 10's driver tests; it adds none there.
 
@@ -1015,8 +1016,9 @@ struct Wire {
     stage: String,
     #[serde(default)]
     ttl_seconds: Option<u64>,
-    #[serde(default)]
-    client: Option<WireClient>,
+    /// Required: a v1 document without `client` is unreadable, never `ok` by default. A default would skip
+    /// `update_required` and apply the rest of the document (plan "Spec issues" 22).
+    client: WireClient,
     #[serde(default)]
     signup: Option<WireSignup>,
     #[serde(default)]
@@ -1198,6 +1200,12 @@ pub(crate) mod tests {
         assert_eq!(parse(&no_account), Err(Unavailable::Unreadable));
         let bad_date = edited("account.trialing.desktop.json", |v| v["account"]["trial"]["ends_at"] = json!("soon"));
         assert_eq!(parse(&bad_date), Err(Unavailable::Unreadable));
+        for name in ["client.update_required.ios.json", "account.active.web.json", "pre_account.desktop.json"] {
+            let no_client = edited(name, |v| {
+                v.as_object_mut().unwrap().remove("client");
+            });
+            assert_eq!(parse(&no_client), Err(Unavailable::Unreadable), "{name} without client: never ok by default");
+        }
         let stage = edited("account.active.web.json", |v| v["stage"] = json!("future_stage"));
         assert_eq!(parse(&stage), Err(Unavailable::Unreadable));
         let copy = edited("account.trial_ended.ios.json", |v| v["copy"]["trial_ended_over_allowance"] = json!(42));
@@ -1236,7 +1244,7 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Unavailable> {
         return Err(Unavailable::UnknownSchema);
     }
     let wire: Wire = serde_json::from_slice(bytes).map_err(|_| Unavailable::Unreadable)?;
-    let client = wire.client.map_or(ClientStatus::Ok, |client| ClientStatus::parse(&client.status));
+    let client = ClientStatus::parse(&wire.client.status);
     match wire.stage.as_str() {
         "pre_account" => Ok(Doc::PreAccount(PreAccount {
             client,
@@ -1273,10 +1281,13 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Unavailable> {
 Run: the loop command with filter `account_view::doc`.
 Expected: `test result: ok. 10 passed; 0 failed`.
 
-- [ ] **Step 7: Mutation-check two tests**
+- [ ] **Step 7: Mutation-check three tests**
 
 1. Change `if head.schema != SCHEMA_MAJOR` to `if head.schema > 2`. Run. Expected: `a_schema_this_client_does_not_know_is_unknown_schema` fails (left `Err(Unreadable)`, right `Err(UnknownSchema)`). Revert.
 2. Change `signup_web_url: wire.signup.and_then(|signup| signup.web_url)` to `signup_web_url: None`. Run. Expected: `pre_account_reads_the_status_the_signup_url_and_the_fallback_and_never_the_steps` fails on `signup_web_url`. Revert.
+3. Make `client` optional again: `#[serde(default)] client: Option<WireClient>` and `let client = wire.client.map_or(ClientStatus::Ok, |client| ClientStatus::parse(&client.status));`. Run. Expected: `garbage_and_wrong_types_are_unreadable` fails on its first missing-client case ("client.update_required.ios.json without client: never ok by default", left `Ok(Account(…))`). Revert.
+
+An unreadable document proceeds as today: the driver logs `onboarding_document outcome=unreadable` once and concludes the fetch "unavailable" (spec §10's error row; Task 10).
 
 Paste each failing assertion, then the green rerun, into the Notes.
 
@@ -8497,9 +8508,10 @@ function methods(view: AccountView | null, again = false) {
   const stubs: Record<string, (props: any) => null> = {}
   for (const name of ['SignInStep', 'SignInFooter', 'LaunchLocationNotice', 'OfflineLine', 'BrowserSignIn']) stubs[name] = () => null
   const settled: unknown[] = []
+  const props: { view: AccountView | null; again: boolean; onSettled: (s: unknown) => void } = { view, again, onSettled: (s) => settled.push(s) }
   const m = mount('Onboarding.tsx', 'SignInMethods', {
     backend: { account_view_retry: () => null },
-    props: { view, again, onSettled: (s: unknown) => settled.push(s) },
+    props,
     bindings: {
       ...stubs, AccountCard, linkFor, retryAccountView: async () => ({ ok: true, value: undefined }),
       SIGN_IN_TITLE: copy.SIGN_IN_TITLE, SIGN_IN_AGAIN: copy.SIGN_IN_AGAIN, SESSION_ENDED_LINE: copy.SESSION_ENDED_LINE,
@@ -8508,7 +8520,9 @@ function methods(view: AccountView | null, again = false) {
   })
   mounted.push(m)
   const find = (name: string) => m.elements().find((el) => el.type === stubs[name])
-  return { m, find, settled }
+  /** The account view changes (the harness renders from this same props object). */
+  const setView = (next: AccountView | null) => { props.view = next; m.render() }
+  return { m, find, settled, setView }
 }
 
 describe('SignInMethods', () => {
@@ -8541,6 +8555,23 @@ describe('SignInMethods', () => {
     expect(v.find('BrowserSignIn')).toBeUndefined()
     expect(v.m.elements().some((el) => el.type === 'button' && textOf(el.props.children) === copy.USE_EMAIL_AND_PASSWORD)).toBe(false)
     expect(v.find('SignInFooter')).toBeDefined()
+  })
+
+  /** §7.1: the offline line replaces both methods, the password form included (PR #116 review). The typed email lives
+   *  in `SignInMethods`, so it is there again when the connection is back. */
+  test('offline replaces the password form too, and the typed email survives it', async () => {
+    const v = methods(signedOut())
+    await v.m.click(copy.USE_EMAIL_AND_PASSWORD)
+    v.find('SignInStep')!.props.onEmailChange('sam@beebeeb.io'); v.m.render()
+    expect(v.find('SignInStep')!.props.email).toBe('sam@beebeeb.io')
+    v.setView(signedOut({ offline: true }))
+    expect(v.find('OfflineLine')).toBeDefined()
+    expect(v.find('SignInStep')).toBeUndefined()
+    expect(v.find('BrowserSignIn')).toBeUndefined()
+    expect(v.find('SignInFooter')).toBeDefined()
+    v.setView(signedOut())
+    expect(v.find('OfflineLine')).toBeUndefined()
+    expect(v.find('SignInStep')!.props.email).toBe('sam@beebeeb.io')
   })
 
   test('sign-in-again mode uses spec A’s words', () => {
@@ -8873,7 +8904,7 @@ export function SignInFooter({
 
 - [ ] **Step 6: `SignInMethods` and the step flow in `Onboarding.tsx`**
 
-`SignInStep` takes `{ onDone, onBack }: { onDone: (settled: SignInSettled) => void; onBack?: () => void }` and, in its password mode, renders after the `</form>`:
+`SignInStep` takes `{ onDone, onBack, email, onEmailChange }: { onDone: (settled: SignInSettled) => void; onBack?: () => void; email?: string; onEmailChange?: Dispatch<SetStateAction<string>> }`. When `email` and `onEmailChange` are given, its email field uses them instead of its own `useState('')` (`const [ownEmail, setOwnEmail] = useState(''); const email = emailProp ?? ownEmail; const setEmail = onEmailChange ?? setOwnEmail;`), so the parent keeps what was typed; the prefill effect (`setEmail((current) => …)`) works with either. In its password mode it renders after the `</form>`:
 
 ```tsx
       {onBack ? (
@@ -8897,24 +8928,28 @@ New, after `SignInStep`:
 function SignInMethods({ view, again, onSettled }: { view: AccountView | null; again: boolean; onSettled: (settled: SignInSettled) => void }) {
   const [method, setMethod] = useState<'browser' | 'password'>('browser')
   const [retrying, setRetrying] = useState(false)
+  // The typed email lives here, not in `SignInStep`: offline replaces the form, and it must be there again after.
+  const [email, setEmail] = useState('')
+  const offline = view?.offline === true
   const footer = <SignInFooter createAccountUrl={linkFor(view, 'create_account')} />
-  if (method === 'password') {
-    return (
-      <>
-        <SignInStep onDone={onSettled} onBack={() => setMethod('browser')} />
-        {footer}
-      </>
-    )
-  }
   const retry = async () => {
     setRetrying(true)
     await retryAccountView()
     setRetrying(false)
   }
+  // Offline first: the offline line replaces both methods, the password form included (§7.1).
+  if (method === 'password' && !offline) {
+    return (
+      <>
+        <SignInStep email={email} onEmailChange={setEmail} onDone={onSettled} onBack={() => setMethod('browser')} />
+        {footer}
+      </>
+    )
+  }
   return (
     <AccountCard title={again ? SIGN_IN_AGAIN : SIGN_IN_TITLE} copy={again ? SESSION_ENDED_LINE : BROWSER_SIGN_IN_INTRO}>
       <LaunchLocationNotice />
-      {view?.offline ? (
+      {offline ? (
         <OfflineLine busy={retrying} onRetry={() => void retry()} />
       ) : (
         <>
@@ -8948,7 +8983,7 @@ function LaunchLocationNotice() {
 }
 ```
 
-Imports to add to `Onboarding.tsx`: `AccountView` and `retryAccountView` from `./accountView`; `linkFor` from `./accountLinks`; `SIGN_IN_TITLE`, `SIGN_IN_AGAIN`, `SESSION_ENDED_LINE`, `USE_EMAIL_AND_PASSWORD` from `./accountViewCopy`; `BROWSER_SIGN_IN_INTRO` from `./browserLoginCopy`; `AccountCard`, `OfflineLine`, `SignInFooter` from `./accountScreens`; `BrowserSignIn` from `./BrowserSignIn`.
+Imports to add to `Onboarding.tsx`: the types `Dispatch` and `SetStateAction` from `react`; `AccountView` and `retryAccountView` from `./accountView`; `linkFor` from `./accountLinks`; `SIGN_IN_TITLE`, `SIGN_IN_AGAIN`, `SESSION_ENDED_LINE`, `USE_EMAIL_AND_PASSWORD` from `./accountViewCopy`; `BROWSER_SIGN_IN_INTRO` from `./browserLoginCopy`; `AccountCard`, `OfflineLine`, `SignInFooter` from `./accountScreens`; `BrowserSignIn` from `./BrowserSignIn`.
 
 In the step flow (`OnboardingView`, used by Linux and an unknown platform; macOS moves to Task 17's window), mount `SignInMethods` for the sign-in step and let a fresh browser sign-in skip the recovery phrase:
 
@@ -9063,12 +9098,14 @@ If the token names differ in `design.css` (`--font-mono`, `--amber-bg`, `--amber
 cd $WT && bun test > $EVID/t16-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t16-all.log
 ```
 
-Expected: `rc=0`, `0 fail`, and the pass count is `B_bun` + 35 (Global Constraints: Task 15's 17 plus this task's 18, which are `browserSignIn` 6, `signInMethods` 9, `onboardingSignIn` 1, the Linux flow 2; + 2 more when step 8 ran). Mutations (paste each failure, revert):
+Expected: `rc=0`, `0 fail`, and the pass count is `B_bun` + 36 (Global Constraints: Task 15's 17 plus this task's 19, which are `browserSignIn` 6, `signInMethods` 10, `onboardingSignIn` 1, the Linux flow 2; + 2 more when step 8 ran). Mutations (paste each failure, revert):
 1. `settledFrom` returns `{ kind: 'fresh', vaultUnlocked: false }` always. Expected: `a fresh browser sign-in carries the keys`, `a fresh result keeps vault_unlocked` and `a fresh browser result that brought the keys skips the recovery phrase`.
 2. `onBrowserEvent`'s `'error'` case returns `{ ...state, error: event.message ?? null }`. Expected: `an error event never puts raw text on the screen`.
 3. In `SignInMethods`, render `BrowserSignIn` even when offline. Expected: `offline: the offline line replaces both methods`.
 4. In `afterSignIn`, `setStep('unlock')` for every fresh result. Expected: `a fresh browser result that brought the keys skips the recovery phrase`.
 5. In `useLinkOpener`, `setFailed(null)` always. Expected: `when the browser does not open, the address and Copy link show`.
+6. In `SignInMethods`, drop `&& !offline` from the password branch. Expected: `offline replaces the password form too, and the typed email survives it` (`SignInStep` still rendered while offline).
+7. In `SignInMethods`, render `<SignInStep onDone={onSettled} onBack={…} />` without `email` and `onEmailChange`. Expected: the same test (`props.email` is `undefined`).
 
 ```bash
 bunx tsc --noEmit > $EVID/t16-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t16-eslint.log 2>&1; echo "rc=$?"
@@ -9765,7 +9802,7 @@ Copy `default.json`'s `$schema` line into it if `default.json` has one. If `taur
 
 Record in the task Notes the names of every deleted test and the test that now covers its behaviour (or "covered by: none — the behaviour was removed by §11").
 
-Run: `bun test > $EVID/t17-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t17-all.log`. Expected: `0 fail`, and the pass count is `B_bun` + 55 minus the spec A tests this step deleted (their number is in the Notes; Global Constraints).
+Run: `bun test > $EVID/t17-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t17-all.log`. Expected: `0 fail`, and the pass count is `B_bun` + 56 minus the spec A tests this step deleted (their number is in the Notes; Global Constraints).
 
 - [ ] **Step 7: Mutation-check**
 
@@ -9992,7 +10029,7 @@ function NoticeRow({ notice }: { notice: AccountNotice }) {
 cd $WT && bun test > $EVID/t18-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t18-all.log
 ```
 
-Expected: `0 fail`; the pass count is `B_bun` + 61 minus Task 17's deleted spec A tests (Global Constraints); the scan test passes with no offenders. Mutations (paste each failure, revert):
+Expected: `0 fail`; the pass count is `B_bun` + 62 minus Task 17's deleted spec A tests (Global Constraints); the scan test passes with no offenders. Mutations (paste each failure, revert):
 1. Put `const BILLING = 'https://app.beebeeb.io/billing'` back into `src/WindowsApp.tsx`. Expected: the scan test names that file.
 2. Make `planButton` ignore the notice. Expected: `a notice’s link replaces the plan button`.
 3. In `src/pages/VersionCenter.tsx`, open the billing link with `openUrl(linkFor(accountView, 'billing'))` again. Expected: `each link site uses the one opener and renders its fallback` (`direct` names the call for that site).
@@ -10107,7 +10144,7 @@ and guard the existing `step === 'signin'` and `step === 'sync-mode'` branches w
 
 - [ ] **Step 3: Run, mutation-check, commit**
 
-`bun test > $EVID/t19-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t19-all.log`. Expected `0 fail` and `B_bun` + 64 pass, minus Task 17's deleted spec A tests (Global Constraints). Mutation: return `null` for `no_plan` in `accountGateScreen`; expect `update required and no plan, and nothing else`; revert.
+`bun test > $EVID/t19-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t19-all.log`. Expected `0 fail` and `B_bun` + 65 pass, minus Task 17's deleted spec A tests (Global Constraints). Mutation: return `null` for `no_plan` in `accountGateScreen`; expect `update required and no plan, and nothing else`; revert.
 
 ```bash
 bunx tsc --noEmit > $EVID/t19-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t19-eslint.log 2>&1; echo "rc=$?"
@@ -10192,7 +10229,7 @@ the nav list renders `compactNavItems(URL_PLATFORM)` instead of `COMPACT_NAV_ITE
 
 - [ ] **Step 3: Run, mutation-check, commit**
 
-`bun test > $EVID/t20-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t20-all.log`. Expected `0 fail` and `B_bun` + 67 pass, minus Task 17's deleted spec A tests. Mutation: make `compactNavItems` return `COMPACT_NAV_ITEMS` always; expect `macOS has no Status entry…`; revert.
+`bun test > $EVID/t20-all.log 2>&1; echo "rc=$?"; /usr/bin/grep -E "^ *[0-9]+ (pass|fail)" $EVID/t20-all.log`. Expected `0 fail` and `B_bun` + 68 pass, minus Task 17's deleted spec A tests. Mutation: make `compactNavItems` return `COMPACT_NAV_ITEMS` always; expect `macOS has no Status entry…`; revert.
 
 ```bash
 bunx tsc --noEmit > $EVID/t20-tsc.log 2>&1; echo "rc=$?"; bun run lint > $EVID/t20-eslint.log 2>&1; echo "rc=$?"
@@ -10302,7 +10339,7 @@ git commit -m "desktop: pin the account view's contract across Rust and TypeScri
 git show --stat HEAD
 ```
 
-Expected: `0 fail` and `B_bun` + 70 pass, minus Task 17's deleted spec A tests (Global Constraints; + 2 if T11-M5 ran). Add the spec file to both lists if it was amended.
+Expected: `0 fail` and `B_bun` + 71 pass, minus Task 17's deleted spec A tests (Global Constraints; + 2 if T11-M5 ran). Add the spec file to both lists if it was amended.
 
 ---
 
@@ -10351,7 +10388,7 @@ bunx tsc --noEmit -p . > $EVID/t22-tsc.log 2>&1; echo "tsc rc=$?"
 bun run lint > $EVID/t22-eslint.log 2>&1; echo "eslint rc=$?"
 ```
 
-Expected: `N pass` with N = `B_bun` + 70 minus the spec A tests Task 17 deleted (named in its Notes; + 2 if T11-M5 ran); `0 fail`; tsc and eslint `rc=0`.
+Expected: `N pass` with N = `B_bun` + 71 minus the spec A tests Task 17 deleted (named in its Notes; + 2 if T11-M5 ran); `0 fail`; tsc and eslint `rc=0`.
 
 - [ ] **Step 3: After both PRs merge, on `main`**
 
@@ -10495,7 +10532,8 @@ For the whole-branch reviewer and the lead, after Task 24.
 - **Lane T rebase carry-over (spec A rulings).** Both are on surfaces this plan touches, so both are in the plan: T11-M5 (the switch warning's count is `null`, never `0`, on an unreadable `state.db`) is Task 12 steps 6–8 and Task 16 step 8, run only if Task 0 found it still open on `main`; T11f1-c2 (the retryable `SIGN_IN_ACCOUNT_UNKNOWN` sentence renders) holds on both paths: the password path already shows `result.reason`, and Task 16's `browserResult` passes the browser path's `Err` sentence through unchanged (`an error is the sentence Rust wrote, the account-unknown one included`). If Task 0 found M5 already fixed by spec A's rebase, confirm its frontend half renders `null` with words the lead approved, and note it here.
 - **Spec A items marked "final review must triage"** that this plan does not change: `[T11-sec-reinstall]` (a same-account reinstall of the stored key without a server check when user ids match) and `[T11-M8]` (revoking the replaced, still-live token on a same-account swap). Spec C's browser path reaches the same `settle_sign_in`, so a ruling on either applies to both sign-in paths.
 - **Plan re-check (2026-10-07, `specC-plan-recheck.md`).** N1: spec A Task 12's generation is consumed as an opaque, per-account `SessionGeneration` (Spec issue 15; Tasks 0, 9, 10, 11; no number is read out of it, and tests make old values by capturing before a real bump). N2: two of Task 0's check patterns matched nothing that exists (`build_tray_menu` is generic, `api_base_url` is `pub(crate)`); fixed. N3: stale statements fixed.
-- **Spec issues found 1–21** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07. Issues 19 (the 15 s Checking limit) and 20 (the gate closed for an underived generation) are the lead's rulings on the plan review. Issue 21 (no separate wake path) answers plan review I8; the lead accepted it on 2026-10-07 and the spec is amended (§10, §13, §14, §17.4, in `7c64cb0`).
+- **PR #116 review (2026-10-07, two findings, both accepted by the lead).** The parser requires `client` (Spec issue 22; Task 2, mutation 3). `SignInMethods` handles offline before the method, so the offline line replaces the password form too, and the typed email lives in `SignInMethods` (Task 16, `offline replaces the password form too, and the typed email survives it`, mutations 6 and 7).
+- **Spec issues found 1–22** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07. Issues 19 (the 15 s Checking limit) and 20 (the gate closed for an underived generation) are the lead's rulings on the plan review. Issue 21 (no separate wake path) answers plan review I8; the lead accepted it on 2026-10-07 and the spec is amended (§10, §13, §14, §17.4, in `7c64cb0`). Issue 22 (a document without `client` is unreadable) is the lead's ruling on the PR #116 review.
 - **Plan review (2026-10-07, `specC-plan-review.md`).** Applied: C1 (every view, the sign-out and switch clear included, goes through one publish path: `Published` in Task 10, `AppPublisher` in Tasks 11 and 14); I1 (Task 9's generation gate); I2 (Task 17's `account-window.json`); I3 and I4 (Task 0's `t0-record.md` and signature table; the environment, the loop commands and the lane rules in Global Constraints; `bun install` in both lanes' trees); I5 (Task 6's limit, Task 10's watchdog, Task 11's drop guard); I6 (a Rust derive test, two Linux step-flow tests, the macOS test reworded with a real mutation); I7 (`useLinkOpener` at all eight link sites, pinned in Task 18); I8 (three driver tests and the busy-screen test; the wake path removed, Spec issue 21); I9 (exact counts and per-test filters, the table in Global Constraints); M1–M14. M7's second half is done as reads only where the table uses them, not as a per-generation cache: a cached owner record could outlive the sign-out's purge if the view refreshed between the generation bump and the purge.
 - **The device rungs' isolation** (Task 23 step 1): the two-build split was accepted by the lead on 2026-10-07, who amends 1747's Verification line in the workspace.
 - **Not in this plan:** the server's account-stage `fallback` links and the `needs_plan.desktop` fixture (workspace task 1844), and macOS autostart in the sandboxed build (workspace task 1845).
