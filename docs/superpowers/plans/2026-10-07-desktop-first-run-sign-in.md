@@ -18,22 +18,22 @@ Each item is a place where the spec, read literally against the code on spec A's
 
 1. **The unknown-step fixture is a pre_account document.** `contracts/onboarding/fixtures/forward_compat.unknown_step.ios.json` has `"stage": "pre_account"` (server `d2e7f776`), and the desktop never reads `steps` from a pre_account document (C-D3). It therefore proves only that unknown steps and unknown fields parse. The C-R5 button's "unknown required step" link rule (§5.1, last row) is tested on an account-stage document derived in the test from `account.needs_plan.web.coupon.json` with one extra required step `future_step` carrying a `fallback.url`. Task 3, `the_step_link_is_the_first_required_step_with_a_checked_url`.
 2. **`account_ready` on Windows and Linux must not restart a running engine.** C-R12 says it "calls today's engine start, `start_engine_if_possible`". That function stops and respawns an engine already in the slot (spec A `lib.rs`, the `engine_slot.take()` branch). Two of C-R12's edges reach Ready with an engine running: Session ended → Ready when spec A's auth-expired state clears by itself, and launch on Linux, where the gate never holds. Calling it there would restart sync for no reason. The plan calls `start_engine_if_possible` only when the engine slot is empty (`start_engine_when_none_runs`). Task 11, `account_ready_starts_the_engine_only_when_none_runs`. Review Focus 3.
-3. **The gate follows the account, not the key.** C-R10 says the gate is closed "in Checking, C-R3 and C-R5 while the session is valid, and open otherwise", so it reads open in Locked (C-R4). But spec A's unlock paths (`unlock_vault`, `desktop_unlock_with_recovery_phrase`, `apply_session`) install the key and call `start_engine_if_possible` in the same command, before the account-view driver has re-derived anything. A no-plan account with a cached blocking part would then start its engine between the unlock and the view update. The plan computes the gate from the account's condition with the key assumed present: it is closed while the session is valid and the account would be Checking, Update required or No plan, whether or not the key is in memory. In every state where the literal rule and this one differ, no engine can start anyway (no key), so the only behaviour that changes is that gap. Task 5, `the_gate_follows_the_account_not_the_key`. Review Focus 1.
+3. **The gate follows the account, not the key.** C-R10 says the gate is closed "in Checking, C-R3 and C-R5 while the session is valid, and open otherwise", so it reads open in Locked (C-R4). But spec A's unlock paths (`unlock_vault`, `desktop_unlock_with_recovery_phrase`, `apply_session`) install the key and call `start_engine_if_possible` in the same command, before the account-view driver has re-derived anything. A no-plan account with a cached blocking part would then start its engine between the unlock and the view update. The plan computes the gate from the account's condition with the key assumed present: it is closed while the session is valid and the account would be Checking, Update required or No plan, whether or not the key is in memory. In every state where the literal rule and this one differ, no engine can start anyway (no key), so the only behaviour that changes is that gap. Task 5, `the_gate_follows_the_account_not_the_key`. Review Focus 1. **Confirmed by the lead 2026-10-07.**
 4. **"Valid session" excludes the startup restore.** The §4.2 table puts Checking's first entry ("a stored token whose startup restore and probe are running") after C-R4 in C-R8's order, and during the restore no key is in memory, so a literal reading derives Locked for every launch. The plan reads "valid session" in C-R4 as "a stored token whose restore has finished and that is not auth-expired", so the restore derives Checking as the table's Checking row says. Task 5, `checking_covers_the_startup_restore`.
-5. **A single network failure ends Checking.** §4.1 defines "unavailable" as "that fetch ended without a usable document (§10)". The Offline overlay (C-R7) needs 2 network failures at least 10 s apart. The plan ends Checking on the first concluded fetch of any kind (network failure included) and still shows Offline only after the second failure. Without this, a launch with no connection would sit on the busy screen for at least 10 s. Task 10, `a_first_network_failure_ends_checking_without_showing_offline`. Review Focus 2.
+5. **A single network failure ends Checking.** §4.1 defines "unavailable" as "that fetch ended without a usable document (§10)". The Offline overlay (C-R7) needs 2 network failures at least 10 s apart. The plan ends Checking on the first concluded fetch of any kind (network failure included) and still shows Offline only after the second failure. Without this, a launch with no connection would sit on the busy screen for at least 10 s. Task 10, `a_first_network_failure_ends_checking_without_showing_offline`. Review Focus 2. **Confirmed by the lead 2026-10-07.**
 6. **Any HTTP answer clears Offline.** §10 says Offline "clears on the next success" and also that "offline means network-level only; an HTTP status means document unavailable". The plan treats any completed HTTP exchange (2xx, 401, 429, 4xx, 5xx) as proof that the network works: it clears the Offline overlay and resets the network-failure count. Only a 2xx resets the failure count used for the 10 s retry. Task 6, `an_http_answer_clears_offline_and_only_a_2xx_resets_the_retry`.
 7. **A trial with no end date has no notice.** §7.5's trial line needs `account.trial.ends_at`. When neither that date nor server `copy` is present the plan shows no notice (the plan button stays "Manage plan"), because the read-only rule "never invent a date" (OP-3) applies here too. Task 4, `a_trial_without_an_end_date_or_server_copy_has_no_notice`.
 8. **"Read-only." alone has no link.** For an unknown `account.state` whose upload denial is not a plan reason, §7.5 gives the line "Read-only." and no link. The plan gives that notice (`read_only_other`) no link, and the Settings plan button then stays as it is. Task 4, `an_unknown_state_denied_for_another_reason_says_read_only_alone_with_no_link`; Task 18.
 9. **The cache row is not account data.** Spec A's `ACCOUNT_TABLES` rows count as account data (`has_account_data`), and R10's first-start check reads that count. The cache row is written after a sign-in, before the first engine start, so listing it there would change R10's binding decision on every first sign-in. The plan adds a third list, `ACCOUNT_BOUND_TABLES`: bound to one account, holding no user content, emptied by every reset and purge, never counted. Task 7, `the_cache_row_is_never_account_data`.
 10. **Tooltips live in Rust.** §7 says all strings live in `src/accountViewCopy.ts`, but the three tooltips (C-I2) are set by Rust on the tray and no frontend runs while the app sits in the menu bar. They are pinned in `src-tauri/src/tray_presentation.rs` by a Rust test, and the TS copy test pins the same three strings by reading that file (Task 21, the cross-language pins).
 11. **"Quit Beebeeb" needs a command.** No command quits the app today (only the native menu's `DesktopMenuAction::Quit`). The plan adds `quit_app` (`app.exit(0)`). Task 11.
-12. **C-W7 needs Settings opened on its Account tab.** C-W3 and C-W4 open "the Settings window" for C-R4 with the key in the Keychain. The Unlock button is on the Account tab, and `show_macos_settings_window` opens whatever tab the window last showed. The plan opens it on `?tab=account` (the query `settingsTabFromSearch` reads). Task 13, `the_keychain_unlock_opens_settings_on_the_account_tab`. Review Focus 5.
+12. **C-W7 needs Settings opened on its Account tab.** C-W3 and C-W4 open "the Settings window" for C-R4 with the key in the Keychain. The Unlock button is on the Account tab, and `show_macos_settings_window` opens whatever tab the window last showed. The plan opens it on `?tab=account` (the query `settingsTabFromSearch` reads). Task 13, `the_keychain_unlock_opens_settings_on_the_account_tab`. Review Focus 5. **Confirmed by the lead 2026-10-07.**
 13. **The account window cannot unlock from the Keychain by itself.** If the account window is already open when the state becomes C-R4 with the key in the Keychain (C-W6: it re-renders), there is no approved screen for the Keychain unlock inside it. The plan hands over: the window asks Rust to open Settings on the Account tab and hides itself. No new copy. Task 17.
 14. **`start_browser_login` returns `LoginOutcome`.** C-S1 makes the browser command return the same shape as `desktop_login`. Windows' first-run screen consumed `Result<(), String>` and the `done` event; it now routes on the returned outcome through `settledFrom` like macOS and Linux. Task 12, Task 16.
 15. **The session generation is spec A Task 12's.** C-D5 binds every fetch to a session generation "provided by spec A Task 12; spec C adds it only if absent". Task 12's rulings (item 11) require "one small, documented API (e.g. `session_generation()` plus a check)". Task 12 is not written yet, so the exact name is unknown today. This plan consumes `crate::session_generation() -> u64`. Task 0 records the name Task 12 actually merged and the executor substitutes it everywhere this plan says `session_generation`. If Task 0 finds no generation API at all, Task 0 stops and the lead decides between adding it (C-D5's fallback) and waiting.
 16. **Carry-over T11-M5 changes the switch warning's copy.** Making the pending-changes count `null` on an unreadable `state.db` (instead of 0) needs a sentence that does not claim a number. It is new copy, so Task 1 draws it and the lead approves it with the mocks. Proposed: "This Mac is signed in to another Beebeeb account. Beebeeb couldn’t count the changes on this Mac that haven’t uploaded yet. Switching signs that account out of this Mac and removes any that are left." Tasks 12 and 16 implement it only if Task 0 finds M5 still open at HEAD.
 17. **The 15-minute re-check starts before the browser opens.** §7.4 says the click "starts the 15-minute re-check (C-D4) whether or not the browser opened". The button calls `account_view_plan_opened` first and opens the link second, so a failed open still polls and still shows the address with "Copy link". Task 17, `the_plan_poll_starts_before_the_browser_opens`.
-18. **The variant B icon files are in a scratch directory.** They live under `/private/tmp/claude-501/…/scratchpad/tray-icon/B/`, which the OS may clear before this plan runs. Their SHA-256 sums are recorded in Task 1. If the files are gone or differ, Task 1 stops; it never redraws them.
+18. **The variant B icon files live in the workspace repo.** They are committed at `$WS/design/desktop-first-run/tray-icon/` (workspace commit `39494ebcf`): `tray-template-disconnected.png`, `tray-template-disconnected@2x.png` and `tray-template-disconnected.svg`, with the generator scripts and fitted glyph parameters in `source/`. Their SHA-256 sums are recorded in Task 1 and were checked against these copies on 2026-10-07 (3 of 3 match). If a file is missing or differs, Task 1 stops; it never redraws them.
 
 ## Global Constraints
 
@@ -382,7 +382,8 @@ Paste into the task Notes under "Baseline (origin/main <sha>)": the head, the cl
 **Design lane.** The implementer draws; **the lead approves before Tasks 2–21 are dispatched.** No product code.
 
 **Files:**
-- Create (workspace, lead commits): `$WS/design/desktop-first-run/macos-account-window.html`, `$WS/design/desktop-first-run/settings-notices.html`, `$WS/design/desktop-first-run/windows.html`, `$WS/design/desktop-first-run/menu-bar-icon.html`, `$WS/design/desktop-first-run/tray-icon/tray-template-disconnected.png` (22×22), `$WS/design/desktop-first-run/tray-icon/tray-template-disconnected.svg`, `$WS/design/desktop-first-run/tray-icon/make-ico.py`, `$WS/design/desktop-first-run/README.md`
+- Create (workspace, lead commits): `$WS/design/desktop-first-run/macos-account-window.html`, `$WS/design/desktop-first-run/settings-notices.html`, `$WS/design/desktop-first-run/windows.html`, `$WS/design/desktop-first-run/menu-bar-icon.html`, `$WS/design/desktop-first-run/tray-icon/source/make-ico.py`, `$WS/design/desktop-first-run/README.md`
+- Read only (workspace, already committed in `39494ebcf`): `$WS/design/desktop-first-run/tray-icon/tray-template-disconnected.png` (22×22), `tray-template-disconnected@2x.png` (44×44), `tray-template-disconnected.svg`, `source/` (the generator scripts and fitted glyph parameters)
 - Create (desktop, Lane R branch): `src-tauri/icons/tray-template-disconnected@2x.png`, `src-tauri/icons/tray-disconnected.ico`
 - Evidence: `$EVID/t1-*.png`, `$EVID/t1-assets.log`
 
@@ -390,9 +391,9 @@ Paste into the task Notes under "Baseline (origin/main <sha>)": the head, the cl
 - Consumes: today's `src-tauri/icons/tray-template@2x.png` (sha256 `739f5556…95d4`), `src-tauri/icons/icon.ico` (6 PNG frames: 16, 32, 48, 64, 128, 256), `src-tauri/icons/icon.png`; the variant B files.
 - Produces: the approved screens every UI task builds against, and the two icon files Task 14 embeds by these exact names.
 
-- [ ] **Step 1: Copy the variant B files, byte-checked**
+- [ ] **Step 1: Copy the variant B template into the desktop repo, byte-checked**
 
-The approved files (C4b, "ye B") and their SHA-256 sums, recorded 2026-10-07:
+The approved files (C4b, "ye B") are committed in the workspace repo at `$WS/design/desktop-first-run/tray-icon/` (commit `39494ebcf`). Their SHA-256 sums, recorded 2026-10-07 and checked against those copies:
 
 | File | SHA-256 |
 |---|---|
@@ -401,19 +402,19 @@ The approved files (C4b, "ye B") and their SHA-256 sums, recorded 2026-10-07:
 | `tray-template-disconnected.svg` | `b815b59638f2d5531af4b58c2bac734f9bcbb28c97537b718534565c937c6877` |
 
 ```bash
-SRC=/private/tmp/claude-501/-Users-guuslangelaar-Development-Beebeeb-beebeeb-io/9b58ba5e-efca-4f80-b508-6a908f99c4d3/scratchpad/tray-icon/B
-WTR=~/code/bb-worktrees/desktop-1747-r; DES=$WS/design/desktop-first-run
+WTR=~/code/bb-worktrees/desktop-1747-r; DES=$WS/design/desktop-first-run; SRC=$DES/tray-icon
+git -C $WS log --oneline -1 -- design/desktop-first-run/tray-icon > $EVID/t1-source-commit.txt; cat $EVID/t1-source-commit.txt
 shasum -a 256 $SRC/tray-template-disconnected@2x.png $SRC/tray-template-disconnected.png $SRC/tray-template-disconnected.svg > $EVID/t1-source-sums.txt 2>&1; echo "rc=$?"; cat $EVID/t1-source-sums.txt
 ```
 
-If `rc≠0` or any sum differs from the table: **stop** (Spec issue 18). Report BLOCKED; never redraw the icon. Otherwise:
+If `rc≠0` or any sum differs from the table: **stop** (Spec issue 18). Report BLOCKED; never redraw the icon. Otherwise copy only the 44×44 template into the desktop repo (the 22×22 file, the SVG and `source/` stay in the workspace as reference, C-I3):
 
 ```bash
-mkdir -p $DES/tray-icon
 cp $SRC/tray-template-disconnected@2x.png $WTR/src-tauri/icons/tray-template-disconnected@2x.png
-cp $SRC/tray-template-disconnected.png $SRC/tray-template-disconnected.svg $DES/tray-icon/
-shasum -a 256 $WTR/src-tauri/icons/tray-template-disconnected@2x.png $DES/tray-icon/* >> $EVID/t1-assets.log
+shasum -a 256 $WTR/src-tauri/icons/tray-template-disconnected@2x.png > $EVID/t1-assets.log; cat $EVID/t1-assets.log
 ```
+
+Expected: the copy's sum equals the table's `@2x` row.
 
 - [ ] **Step 2: Check the template against today's b**
 
@@ -442,7 +443,7 @@ Expected: `rc=0`, `non-black opaque pixels: 0; outside the band: N pixels, 0 dif
 
 - [ ] **Step 3: Draw the colour crossed `.ico` (C-I4)**
 
-Create `$DES/tray-icon/make-ico.py`:
+Create `$DES/tray-icon/source/make-ico.py` (beside the template's generator scripts; it uses the same geometry, read from `tray-template-disconnected.svg`: the line `(5.8, 38.2)`→`(38.2, 5.8)`, stroke 5.2, knockout 9.2, on a 44-unit grid where the b is 33.4 tall):
 
 ```python
 #!/usr/bin/env python3
@@ -511,7 +512,7 @@ if __name__ == "__main__":
 ```
 
 ```bash
-python3 $DES/tray-icon/make-ico.py $WTR/src-tauri/icons/icon.ico $WTR/src-tauri/icons/tray-disconnected.ico > $EVID/t1-ico.log 2>&1; echo "rc=$?"; cat $EVID/t1-ico.log
+python3 $DES/tray-icon/source/make-ico.py $WTR/src-tauri/icons/icon.ico $WTR/src-tauri/icons/tray-disconnected.ico > $EVID/t1-ico.log 2>&1; echo "rc=$?"; cat $EVID/t1-ico.log
 python3 - $WTR/src-tauri/icons/icon.ico $WTR/src-tauri/icons/tray-disconnected.ico >> $EVID/t1-ico.log 2>&1 <<'EOF'
 import sys
 from PIL import Image
@@ -9550,7 +9551,7 @@ runu() { BB_API_BASE=http://localhost:3001 HOME="$SCRATCH" "$APPU/Contents/MacOS
   (Quit it with the app's own "Quit Beebeeb", or `kill $(cat $EVID/1747-run-u.pid)`; never by name.) Its lifecycle log is `$SCRATCH/Library/Logs/Beebeeb/lifecycle.log`.
 - **Build S (signed, sandboxed)** for the Finder rungs and the login-launch rung: spec A's Task 21 steps 3 and 4 exactly (signing identity, both provisioning profiles, the installed app moved aside, `launchctl setenv BB_API_BASE http://localhost:3001`, `mark`/`collect`), including its precondition: Guus's installed app reports nothing waiting to upload (screenshot), and it is restored at the end.
 
-Amend the 1747 Verification line in place for the Finder rungs (strike "and `HOME=<scratch>` for every login", write "`HOME=<scratch>` for every login on the unsandboxed bundle; the Finder rungs on the signed, sandboxed build in its own container, with spec A Task 21's precondition", sign and date it) before running them.
+The lead accepted this two-build split on 2026-10-07 and amends 1747's Verification line in the workspace (strike "and `HOME=<scratch>` for every login", write "`HOME=<scratch>` for every login on the unsandboxed bundle; the Finder rungs on the signed, sandboxed build in its own container, with spec A Task 21's precondition", signed and dated). Before the Finder rungs, check that the amended line is in 1747's task file.
 
 Start the local stack with plan-less accounts landing in `needs_plan`: `cd $WS && BB_ENTRY_ALLOWANCE_BYTES=0 make dev-native` (API :3001, web :5173), then `curl -sf localhost:3001/health`. Accounts: create them in the local web app (`http://localhost:5173/signup`; signup is web-only) with `@beebeeb.io` addresses, one with 2FA turned on in its web settings. Record them (never passwords) in `$EVID/1747-notes.md`.
 
@@ -9645,8 +9646,8 @@ For the whole-branch reviewer and the lead, after Task 24.
 
 - **Lane T rebase carry-over (spec A rulings).** Both are on surfaces this plan touches, so both are in the plan: T11-M5 (the switch warning's count is `null`, never `0`, on an unreadable `state.db`) is Task 12 steps 6–8 and Task 16 step 8, run only if Task 0 found it still open on `main`; T11f1-c2 (the retryable `SIGN_IN_ACCOUNT_UNKNOWN` sentence renders) holds on both paths: the password path already shows `result.reason`, and Task 16's `browserResult` passes the browser path's `Err` sentence through unchanged (`an error is the sentence Rust wrote, the account-unknown one included`). If Task 0 found M5 already fixed by spec A's rebase, confirm its frontend half renders `null` with words the lead approved, and note it here.
 - **Spec A items marked "final review must triage"** that this plan does not change: `[T11-sec-reinstall]` (a same-account reinstall of the stored key without a server check when user ids match) and `[T11-M8]` (revoking the replaced, still-live token on a same-account swap). Spec C's browser path reaches the same `settle_sign_in`, so a ruling on either applies to both sign-in paths.
-- **Spec issues found 1–18** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirms or rejects each before Lane R merges.
-- **The device rungs' isolation** (Task 23 step 1) amends 1747's Verification line for the Finder rungs; the amendment rides the evidence commit.
+- **Spec issues found 1–18** above: each names its task and test. Issues 3 (the gate follows the account), 5 (one failure ends Checking) and 12 (Settings on the Account tab) change behaviour relative to the spec's literal wording; the lead confirmed all three on 2026-10-07.
+- **The device rungs' isolation** (Task 23 step 1): the two-build split was accepted by the lead on 2026-10-07, who amends 1747's Verification line in the workspace.
 - **Not in this plan:** the server's account-stage `fallback` links and the `needs_plan.desktop` fixture (workspace task 1844), and macOS autostart in the sandboxed build (workspace task 1845).
 
 ---
