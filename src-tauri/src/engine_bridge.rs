@@ -11510,6 +11510,7 @@ mod tests {
                 bridge,
                 cancel_rx,
                 Some(ready_tx),
+                crate::ipc_socket::WriteContentsPolicy::AnyPath,
             ));
             tokio::time::timeout(Duration::from_secs(5), ready_rx)
                 .await
@@ -11742,6 +11743,7 @@ mod tests {
                 bridge,
                 cancel_rx,
                 Some(ready_tx),
+                crate::ipc_socket::WriteContentsPolicy::AnyPath,
             ));
 
             let ready = tokio::time::timeout(Duration::from_secs(3), ready_rx)

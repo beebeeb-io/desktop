@@ -160,6 +160,13 @@ const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 #[cfg(target_os = "macos")]
 const MACOS_HYDRATE_SWEEP_EVERY_N_TICKS: u64 = 2;
 
+/// Upload-staging purge cadence: every 10 ticks (5 minutes at the 30 s
+/// tick). The age bound it applies is an hour
+/// (`crate::ipc_socket::UPLOAD_STAGING_MAX_AGE`), so a faster cadence would
+/// buy nothing. The counter starts at 1 because startup already purged.
+#[cfg(target_os = "macos")]
+const MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS: u64 = 10;
+
 /// API base URL the engine talks to.
 ///
 /// Returns the value of the `BB_API_BASE` environment variable when it is set
@@ -1084,6 +1091,12 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     // is a no-op on non-macOS (called unconditionally, like its other two call
     // sites in `lib.rs`, so this file doesn't need its own cfg gate).
     crate::purge_macos_hydrate_cache("daemon-startup");
+    // Write contents the File Provider extension hands over arrive in the App
+    // Group upload-staging directory. Harden it and purge copies orphaned by a
+    // crash. Age-bound, not "everything": the extension may be staging a copy
+    // right now (see `ipc_socket::UPLOAD_STAGING_MAX_AGE`).
+    #[cfg(target_os = "macos")]
+    crate::ipc_socket::macos_prepare_upload_staging();
 
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
@@ -1180,6 +1193,8 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     // for why this exists.
     #[cfg(target_os = "macos")]
     let mut hydrate_sweep_tick_count: u64 = 0;
+    #[cfg(target_os = "macos")]
+    let mut upload_staging_sweep_tick_count: u64 = 1;
 
     loop {
         tokio::select! {
@@ -1218,6 +1233,16 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                         }
                     }
                     hydrate_sweep_tick_count = hydrate_sweep_tick_count.wrapping_add(1);
+                }
+                // Orphaned upload-staging copies: same age bound as at
+                // startup, so a copy left by a crash of either process is gone
+                // within about an hour, not at the next unlock.
+                #[cfg(target_os = "macos")]
+                {
+                    if upload_staging_sweep_tick_count.is_multiple_of(MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS) {
+                        crate::ipc_socket::macos_sweep_upload_staging();
+                    }
+                    upload_staging_sweep_tick_count = upload_staging_sweep_tick_count.wrapping_add(1);
                 }
 
                 // Skip all sync work while the user has paused sync.

@@ -458,6 +458,15 @@ pub(crate) fn macos_validate_hydrate_item_identifier(identifier: &str) -> Result
 /// hydration, not just the first.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    macos_ensure_private_staging_dir(dir)
+}
+
+/// Create (if needed) and harden an App Group staging directory: owner-only
+/// `0o700` and excluded from backups. Shared by the hydrate-cache and the
+/// upload-staging directory ([`macos_upload_staging_dir`]); both only ever
+/// hold short-lived plaintext.
+#[cfg(target_os = "macos")]
+fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
@@ -468,7 +477,7 @@ pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::
     // alone.
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     if let Err(e) = macos_exclude_from_backups(dir) {
-        tracing::warn!(error = %e, dir = %dir.display(), "could not exclude macOS hydrate-cache dir from backups");
+        tracing::warn!(error = %e, dir = %dir.display(), "could not exclude a macOS staging dir from backups");
     }
     Ok(())
 }
@@ -624,6 +633,337 @@ pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
     Ok(removed)
 }
 
+// ── Upload staging: write contents handed over by the File Provider extension ──
+//
+// The system gives the extension's `createItem` / `modifyItem` a contents URL
+// that only the extension's sandbox can read. The daemon is a different
+// sandboxed process and cannot open it, so every Finder file create used to
+// fail with "Upload source is not a file". The extension now copies the
+// contents into this App Group directory first and sends that copy's path
+// (`UploadStaging` in `BeebeebFileProvider/UploadStaging.swift`). The daemon
+// accepts write contents from this directory only, copies them into its own
+// staging (`StagedPayload::copy`), and deletes the handed-over copy once the
+// request is answered.
+
+/// Subdirectory of the App Group container that holds write contents handed
+/// over by the extension. Mirrors `UploadStaging.directoryName` on the Swift
+/// side; keep both in sync.
+#[cfg(target_os = "macos")]
+const MACOS_UPLOAD_STAGING_DIRNAME: &str = "upload-staging";
+
+#[cfg(target_os = "macos")]
+fn macos_upload_staging_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir
+        .join("Library")
+        .join("Group Containers")
+        .join(MACOS_APP_GROUP_ID)
+        .join(MACOS_UPLOAD_STAGING_DIRNAME)
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_upload_staging_dir() -> std::path::PathBuf {
+    macos_upload_staging_dir_in(&macos_real_home_dir())
+}
+
+/// How old a handed-over copy must be before the purge removes it. Each copy
+/// is deleted by both sides as soon as its request is answered, so anything
+/// left here was orphaned by a crash. The bound must exceed the longest a
+/// request can legitimately be in flight: the extension's write timeout is
+/// 600 s (`IPCFraming.stagedCopyTimeoutSeconds`). An hour is six times that.
+///
+/// Age-bound rather than "purge everything at startup": the extension runs
+/// independently of the daemon and can stage a copy at any moment, including
+/// while the daemon is starting, so the daemon cannot know that nothing is in
+/// flight. The extension stamps each copy's mtime when it stages it.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Where `QueueFinderCreate` / `QueueFinderModify` may take file contents from.
+#[derive(Debug, Clone)]
+pub(crate) enum WriteContentsPolicy {
+    /// Any path the daemon can read, left in place. Linux (the daemon is not
+    /// sandboxed and no client sends writes over this socket) and tests that
+    /// predate the staging directory.
+    #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
+    AnyPath,
+    /// Only a regular file directly inside this directory, deleted by the
+    /// daemon once the request is answered. macOS (and the socket tests on
+    /// every platform).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    StagingDir(std::path::PathBuf),
+}
+
+impl WriteContentsPolicy {
+    pub(crate) fn platform_default() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::StagingDir(macos_upload_staging_dir())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::AnyPath
+        }
+    }
+}
+
+/// Why a write's `contents_path` was refused. Logged and returned by
+/// [`ContentsRefusal::category`] only: never the path itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContentsRefusal {
+    /// Empty, relative, or containing a NUL byte.
+    MalformedPath,
+    /// Contains a `..` or `.` segment.
+    Traversal,
+    /// The staging directory is missing, is a symlink, or cannot be resolved.
+    StagingUnavailable,
+    /// Resolves outside the staging directory, or below a subdirectory of it.
+    OutsideStaging,
+    /// Nothing at the path.
+    Missing,
+    /// The path is a symbolic link.
+    Symlink,
+    /// Not a regular file (a directory, FIFO, socket, ...).
+    NotAFile,
+    /// The entry could not be inspected.
+    Unreadable,
+}
+
+impl ContentsRefusal {
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::MalformedPath => "malformed_path",
+            Self::Traversal => "traversal",
+            Self::StagingUnavailable => "staging_unavailable",
+            Self::OutsideStaging => "outside_staging",
+            Self::Missing => "missing",
+            Self::Symlink => "symlink",
+            Self::NotAFile => "not_a_file",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// Accept `candidate` only if it names a regular file (not a symlink)
+/// directly inside `staging_dir`. Returns the path rebuilt from the
+/// canonical staging directory and the leaf name, which is what the daemon
+/// then reads and deletes: a deletion can therefore never reach outside the
+/// staging directory, whatever the request said.
+pub(crate) fn validate_staged_contents_path(
+    staging_dir: &std::path::Path,
+    candidate: &str,
+) -> Result<std::path::PathBuf, ContentsRefusal> {
+    let path = std::path::Path::new(candidate);
+    if candidate.is_empty() || candidate.contains('\0') || !path.is_absolute() {
+        return Err(ContentsRefusal::MalformedPath);
+    }
+    // Checked on the raw text: `Path::components` silently drops interior
+    // `.` segments, and the extension never sends either.
+    if candidate.split('/').any(|segment| segment == ".." || segment == ".") {
+        return Err(ContentsRefusal::Traversal);
+    }
+    // The configured directory itself must be a real directory: if it were
+    // replaced by a symlink, canonicalizing would follow it and make another
+    // folder's files acceptable, and the daemon deletes what it accepts.
+    match std::fs::symlink_metadata(staging_dir) {
+        Ok(meta) if meta.is_dir() => {}
+        _ => return Err(ContentsRefusal::StagingUnavailable),
+    }
+    let staging = std::fs::canonicalize(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
+    let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
+        return Err(ContentsRefusal::OutsideStaging);
+    };
+    // Directly inside only: the parent must resolve to the staging dir itself.
+    match std::fs::canonicalize(parent) {
+        Ok(parent) if parent == staging => {}
+        _ => return Err(ContentsRefusal::OutsideStaging),
+    }
+    let resolved = staging.join(leaf);
+    // `symlink_metadata` does not follow a final symlink.
+    match std::fs::symlink_metadata(&resolved) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ContentsRefusal::Missing),
+        Err(_) => Err(ContentsRefusal::Unreadable),
+        Ok(meta) if meta.file_type().is_symlink() => Err(ContentsRefusal::Symlink),
+        Ok(meta) if !meta.is_file() => Err(ContentsRefusal::NotAFile),
+        Ok(_) => Ok(resolved),
+    }
+}
+
+/// A handed-over contents file that passed [`validate_staged_contents_path`].
+/// Dropping it deletes the file: by then the daemon holds its own copy
+/// (`StagedPayload::copy`), or the request failed and the extension's retry
+/// stages a fresh one. `remove_file` unlinks a symlink itself, never its
+/// target.
+pub(crate) struct StagedContents {
+    path: std::path::PathBuf,
+}
+
+impl StagedContents {
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for StagedContents {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            // The extension deletes its copy after the reply too; either side may be first.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                error_kind = ?e.kind(),
+                "could not delete a handed-over upload copy; the age-bound purge will"
+            ),
+        }
+    }
+}
+
+/// Apply `policy` to one write request's `contents_path`. `Ok` carries the
+/// path to hand the engine and, under [`WriteContentsPolicy::StagingDir`],
+/// the guard that deletes the handed-over copy when dropped. `Err` is the
+/// refusal, already logged; [`contents_refusal_response`] is its reply.
+fn admit_write_contents(
+    policy: &WriteContentsPolicy,
+    op: &'static str,
+    contents_path: Option<String>,
+) -> Result<(Option<String>, Option<StagedContents>), ContentsRefusal> {
+    let (WriteContentsPolicy::StagingDir(staging_dir), Some(candidate)) = (policy, contents_path.as_deref()) else {
+        return Ok((contents_path, None));
+    };
+    match validate_staged_contents_path(staging_dir, candidate) {
+        Ok(path) => {
+            let staged = StagedContents { path };
+            Ok((Some(staged.path_string()), Some(staged)))
+        }
+        Err(refusal) => {
+            log_refused_write(op, refusal.category());
+            Err(refusal)
+        }
+    }
+}
+
+/// The reply for a refused `contents_path`: the category, never the path.
+fn contents_refusal_response(refusal: ContentsRefusal) -> IpcResponse {
+    IpcResponse::Error {
+        message: format!("Upload contents refused ({})", refusal.category()),
+    }
+}
+
+/// Remove upload-staging entries whose own mtime (not followed through a
+/// symlink) is at least `max_age` before `now`. A missing directory is not an
+/// error. `now` / `max_age` are parameters so this is testable without a
+/// clock.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn purge_stale_upload_staging(
+    dir: &std::path::Path,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // A future mtime (clock change) counts as fresh; a later sweep gets it.
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if !stale {
+            continue;
+        }
+        // `remove_file` unlinks a symlink itself; `remove_dir_all` does not
+        // follow symlinks inside the tree.
+        let result = if meta.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(error_kind = ?e.kind(), "upload-staging purge: could not remove an entry"),
+        }
+    }
+    Ok(removed)
+}
+
+/// Daemon startup: create and harden the upload-staging directory, then purge
+/// copies orphaned by a crash (see [`UPLOAD_STAGING_MAX_AGE`]).
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_prepare_upload_staging_dir(
+    dir: &std::path::Path,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> std::io::Result<usize> {
+    macos_ensure_private_staging_dir(dir)?;
+    purge_stale_upload_staging(dir, max_age, now)
+}
+
+/// Runner startup: prepare the real directory and purge it. Best-effort.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_prepare_upload_staging() {
+    let dir = macos_upload_staging_dir();
+    let result = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now());
+    log_upload_staging_purge("daemon-startup", result);
+}
+
+/// Runner tick: purge the real directory. Best-effort.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_sweep_upload_staging() {
+    let dir = macos_upload_staging_dir();
+    let result = purge_stale_upload_staging(&dir, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now());
+    log_upload_staging_purge("periodic", result);
+}
+
+#[cfg(target_os = "macos")]
+fn log_upload_staging_purge(context: &'static str, result: std::io::Result<usize>) {
+    match result {
+        Ok(removed) if removed > 0 => {
+            tracing::info!(removed, context, "purged orphaned upload-staging copies");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error_kind = ?e.kind(), context, "upload-staging purge failed (best-effort)");
+        }
+    }
+}
+
+/// Log one refused Finder write: the operation and a fixed reason category,
+/// never a file name, path or contents.
+fn log_refused_write(op: &'static str, reason: &'static str) {
+    tracing::warn!(op, reason, "Finder write refused");
+}
+
+/// Fixed category for an engine error on the write path, for
+/// [`log_refused_write`]. The error's text can carry user data (names, paths),
+/// so it is classified, never logged.
+fn write_refusal_category(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<std::io::Error>().is_some() {
+        return "io";
+    }
+    if error.downcast_ref::<rusqlite::Error>().is_some() {
+        return "database";
+    }
+    let text = error.to_string();
+    if text.contains("engine is stopping") {
+        "engine_stopping"
+    } else if text.contains("Upload source is not a file") {
+        "contents_not_a_file"
+    } else if text.contains("read-only") {
+        "write_policy"
+    } else if text.contains("did not include") {
+        "malformed_request"
+    } else {
+        "other"
+    }
+}
+
 /// Task 1524 follow-up: resolve the real user home directory from the OS
 /// password database (`getpwuid_r(getuid())` → `pw_dir`), never from `$HOME`.
 ///
@@ -762,23 +1102,28 @@ pub async fn serve_ipc(
 /// caller is responsible for logging/surfacing the error (`runner.rs` logs
 /// it and records it for `wait_for_file_provider_ipc_ready` to report
 /// verbatim instead of just timing out).
+///
+/// Write contents follow [`WriteContentsPolicy::platform_default`]: on macOS
+/// only the App Group upload-staging directory is accepted.
 pub async fn serve_ipc_at(
     path: std::path::PathBuf,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     cancel: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
-    serve_ipc_at_with_ready(path, db, bridge, cancel, None).await
+    serve_ipc_at_with_ready(path, db, bridge, cancel, None, WriteContentsPolicy::platform_default()).await
 }
 
 /// Readiness means the listener is bound, hardened and published. On startup
 /// failure the sender is dropped and the server returns the original error.
+/// `contents` decides where write requests may take file contents from.
 pub(crate) async fn serve_ipc_at_with_ready(
     path: std::path::PathBuf,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     mut cancel: oneshot::Receiver<()>,
     ready: Option<oneshot::Sender<()>>,
+    contents: WriteContentsPolicy,
 ) -> std::io::Result<()> {
     let listener = bind_ipc_listener(&path)?;
     if let Some(ready) = ready {
@@ -800,7 +1145,8 @@ pub(crate) async fn serve_ipc_at_with_ready(
                     let db = db.clone();
                     let bridge = bridge.clone();
                     let write_dedup = write_dedup.clone();
-                    connections.push(tokio::spawn(handle_connection(stream, db, bridge, write_dedup)));
+                    let contents = contents.clone();
+                    connections.push(tokio::spawn(handle_connection(stream, db, bridge, write_dedup, contents)));
                 }
                 Err(e) => tracing::warn!("IPC accept error: {e}"),
             }
@@ -886,6 +1232,7 @@ async fn handle_connection(
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     write_dedup: std::sync::Arc<WriteDedup<IpcResponse>>,
+    contents_policy: WriteContentsPolicy,
 ) {
     // Authenticate the peer BEFORE reading or dispatching anything. The daemon
     // holds vault keys in memory and `hydrate_file` is a decrypt oracle, so a
@@ -972,47 +1319,53 @@ async fn handle_connection(
                 content_type,
                 request_id,
             } => {
-                if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
-                    // Answer and keep serving the connection (this used to
-                    // `return`, silently dropping the connection).
-                    if write_frame(
-                        &mut write_half,
-                        &IpcResponse::Error {
+                match admit_write_contents(&contents_policy, "create", contents_path) {
+                    Err(refusal) => contents_refusal_response(refusal),
+                    Ok((_, staged)) if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) => {
+                        // Refused: the copy it handed over is deleted now.
+                        drop(staged);
+                        log_refused_write("create", "read_only_namespace");
+                        // Answer and keep serving the connection (this used to
+                        // `return`, silently dropping the connection).
+                        IpcResponse::Error {
                             message: "Shared with me is read-only at the namespace root".into(),
-                        },
-                    )
-                    .await
-                    .is_err()
-                    {
-                        break;
+                        }
                     }
-                    continue;
+                    Ok((contents_path, staged)) => {
+                        let target = crate::engine_bridge::FinderWriteTarget {
+                            file_id: None,
+                            parent_id: normalize_parent_id(parent_id),
+                            filename,
+                            // OS-extension IPC supplies the leaf name only; keep the
+                            // leaf-as-path fallback (queue_finder_create defaults
+                            // rel_path → filename). The macOS/Linux extensions thread
+                            // their own nesting via parent_id, not a relative path.
+                            rel_path: None,
+                            kind: parse_write_kind(&kind),
+                            contents_path,
+                            content_type,
+                            base_version_identifier: None,
+                        };
+                        let fingerprint = format!(
+                            "create|{}|{}|{}",
+                            target.parent_id.as_deref().unwrap_or(""),
+                            target.filename,
+                            parse_write_kind_name(&target.kind)
+                        );
+                        let (work_db, work_bridge) = (db.clone(), bridge.clone());
+                        // `staged` rides in the work closure: it is dropped (the
+                        // handed-over copy deleted) once the engine has its own
+                        // copy or refused, or unrun when a repeat is answered
+                        // from the first attempt's result.
+                        dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
+                            let response =
+                                write_outcome_response("create", &work_db, work_bridge.queue_finder_create(target));
+                            drop(staged);
+                            response
+                        })
+                        .await
+                    }
                 }
-                let target = crate::engine_bridge::FinderWriteTarget {
-                    file_id: None,
-                    parent_id: normalize_parent_id(parent_id),
-                    filename,
-                    // OS-extension IPC supplies the leaf name only; keep the
-                    // leaf-as-path fallback (queue_finder_create defaults
-                    // rel_path → filename). The macOS/Linux extensions thread
-                    // their own nesting via parent_id, not a relative path.
-                    rel_path: None,
-                    kind: parse_write_kind(&kind),
-                    contents_path,
-                    content_type,
-                    base_version_identifier: None,
-                };
-                let fingerprint = format!(
-                    "create|{}|{}|{}",
-                    target.parent_id.as_deref().unwrap_or(""),
-                    target.filename,
-                    parse_write_kind_name(&target.kind)
-                );
-                let (work_db, work_bridge) = (db.clone(), bridge.clone());
-                dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
-                    write_outcome_response(&work_db, work_bridge.queue_finder_create(target))
-                })
-                .await
             }
             IpcRequest::QueueFinderModify {
                 file_id,
@@ -1023,30 +1376,37 @@ async fn handle_connection(
                 content_type,
                 base_version_identifier,
                 request_id,
-            } => {
-                let target = crate::engine_bridge::FinderWriteTarget {
-                    file_id: Some(file_id),
-                    parent_id: normalize_parent_id(parent_id),
-                    filename,
-                    // Modify is metadata/version only; no new-file path key.
-                    rel_path: None,
-                    kind: parse_write_kind(&kind),
-                    contents_path,
-                    content_type,
-                    base_version_identifier,
-                };
-                let fingerprint = format!(
-                    "modify|{}|{}|{}",
-                    target.file_id.as_deref().unwrap_or(""),
-                    target.filename,
-                    parse_write_kind_name(&target.kind)
-                );
-                let (work_db, work_bridge) = (db.clone(), bridge.clone());
-                dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
-                    write_outcome_response(&work_db, work_bridge.queue_finder_modify(target))
-                })
-                .await
-            }
+            } => match admit_write_contents(&contents_policy, "modify", contents_path) {
+                Err(refusal) => contents_refusal_response(refusal),
+                Ok((contents_path, staged)) => {
+                    let target = crate::engine_bridge::FinderWriteTarget {
+                        file_id: Some(file_id),
+                        parent_id: normalize_parent_id(parent_id),
+                        filename,
+                        // Modify is metadata/version only; no new-file path key.
+                        rel_path: None,
+                        kind: parse_write_kind(&kind),
+                        contents_path,
+                        content_type,
+                        base_version_identifier,
+                    };
+                    let fingerprint = format!(
+                        "modify|{}|{}|{}",
+                        target.file_id.as_deref().unwrap_or(""),
+                        target.filename,
+                        parse_write_kind_name(&target.kind)
+                    );
+                    let (work_db, work_bridge) = (db.clone(), bridge.clone());
+                    // See the create arm for when `staged` is dropped.
+                    dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
+                        let response =
+                            write_outcome_response("modify", &work_db, work_bridge.queue_finder_modify(target));
+                        drop(staged);
+                        response
+                    })
+                    .await
+                }
+            },
             IpcRequest::QueueFinderDelete {
                 file_id,
                 base_version_identifier,
@@ -1058,7 +1418,11 @@ async fn handle_connection(
                 // create. The row stays in place until the server trash
                 // converges, so the row alone cannot say "deleted" (task 1684).
                 forget_dedup_for_item(&write_dedup, &file_id);
-                write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier))
+                write_outcome_response(
+                    "delete",
+                    &db,
+                    bridge.queue_finder_delete(&file_id, base_version_identifier),
+                )
             }
             // Task 1698: the `SetRecursivePin` IPC RPC is RETIRED — it had no
             // caller (audit G13): the File Provider extension never sent it
@@ -1440,6 +1804,7 @@ async fn dedup_write(
         return work();
     };
     if key.is_empty() || key.len() > MAX_KEY_BYTES || key.chars().any(|c| c.is_control()) {
+        log_refused_write("write", "invalid_request_id");
         return IpcResponse::Error {
             message: format!("request_id must be 1 to {MAX_KEY_BYTES} printable bytes"),
         };
@@ -1472,6 +1837,7 @@ fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {
 }
 
 fn write_outcome_response(
+    op: &'static str,
     db: &crate::state_db::StateDb,
     result: anyhow::Result<crate::engine_bridge::FinderWriteOutcome>,
 ) -> IpcResponse {
@@ -1494,7 +1860,13 @@ fn write_outcome_response(
             ignored,
             message,
         },
-        Err(e) => IpcResponse::Error { message: e.to_string() },
+        Err(e) => {
+            // The extension turns this reply into a definitive Finder error,
+            // so it must leave a trace in the daemon log (it used to leave
+            // none). The category only: the error text can name the file.
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::Error { message: e.to_string() }
+        }
     }
 }
 
@@ -2850,6 +3222,7 @@ mod tests {
             bridge,
             cancel_rx,
             Some(ready_tx),
+            WriteContentsPolicy::AnyPath,
         )
         .await;
         assert!(result.is_err(), "startup must fail for a nonexistent parent");
@@ -3303,5 +3676,460 @@ mod tests {
             "the change feed must present a Trashing item under the trash container"
         );
         assert_eq!(payload.identifier, "1697-item");
+    }
+
+    // ── Upload staging: contents validation, cleanup, purge ──────────────
+    //
+    // Pure functions over injected temp dirs: never the real App Group
+    // container. Not macOS-gated, so they also run on the Linux CI job.
+
+    /// A staging dir that is a CHILD of a temp dir, so a file can sit right
+    /// next to it (outside it).
+    fn upload_staging_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempdir().unwrap();
+        let staging = root.path().join("upload-staging");
+        std::fs::create_dir(&staging).unwrap();
+        (root, staging)
+    }
+
+    fn write_file(path: &std::path::Path, bytes: &[u8]) -> String {
+        std::fs::write(path, bytes).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn staged_contents_directly_inside_the_staging_dir_are_accepted_and_left_intact() {
+        let (_root, staging) = upload_staging_fixture();
+        let candidate = write_file(&staging.join("6f1c0d1e-copy"), b"contents");
+        let accepted = validate_staged_contents_path(&staging, &candidate).expect("a staged regular file is accepted");
+        assert_eq!(
+            accepted,
+            std::fs::canonicalize(&staging).unwrap().join("6f1c0d1e-copy"),
+            "the accepted path is rebuilt from the canonical staging dir"
+        );
+        assert_eq!(
+            std::fs::read(&candidate).unwrap(),
+            b"contents",
+            "validation must not touch the file"
+        );
+    }
+
+    #[test]
+    fn staged_contents_outside_the_staging_dir_are_refused() {
+        let (root, staging) = upload_staging_fixture();
+        let outside = write_file(&root.path().join("outside.txt"), b"x");
+        assert_eq!(
+            validate_staged_contents_path(&staging, &outside),
+            Err(ContentsRefusal::OutsideStaging)
+        );
+        // A subdirectory of the staging dir is outside it too: the extension
+        // only ever writes directly into it.
+        std::fs::create_dir(staging.join("sub")).unwrap();
+        let nested = write_file(&staging.join("sub").join("copy"), b"x");
+        assert_eq!(
+            validate_staged_contents_path(&staging, &nested),
+            Err(ContentsRefusal::OutsideStaging)
+        );
+        // A parent directory that does not exist is outside too.
+        let ghost = root.path().join("ghost").join("copy").to_string_lossy().into_owned();
+        assert_eq!(
+            validate_staged_contents_path(&staging, &ghost),
+            Err(ContentsRefusal::OutsideStaging)
+        );
+        assert!(
+            std::path::Path::new(&outside).exists(),
+            "a refused path is never deleted"
+        );
+    }
+
+    #[test]
+    fn staged_contents_with_dot_segments_are_refused_even_when_they_resolve_inside() {
+        let (root, staging) = upload_staging_fixture();
+        write_file(&root.path().join("outside.txt"), b"x");
+        write_file(&staging.join("copy"), b"x");
+        let escape = format!("{}/../outside.txt", staging.display());
+        let loops_back = format!("{}/../upload-staging/copy", staging.display());
+        let dot = format!("{}/./copy", staging.display());
+        for candidate in [escape, loops_back, dot] {
+            assert_eq!(
+                validate_staged_contents_path(&staging, &candidate),
+                Err(ContentsRefusal::Traversal),
+                "{candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_contents_that_are_a_symlink_are_refused_and_the_target_is_untouched() {
+        let (root, staging) = upload_staging_fixture();
+        let target = root.path().join("target.txt");
+        write_file(&target, b"target");
+        let link = staging.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            validate_staged_contents_path(&staging, &link.to_string_lossy()),
+            Err(ContentsRefusal::Symlink)
+        );
+        // A symlink to a file INSIDE the staging dir is refused as well.
+        write_file(&staging.join("real"), b"x");
+        let inner = staging.join("inner-link");
+        std::os::unix::fs::symlink(staging.join("real"), &inner).unwrap();
+        assert_eq!(
+            validate_staged_contents_path(&staging, &inner.to_string_lossy()),
+            Err(ContentsRefusal::Symlink)
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"target");
+    }
+
+    #[test]
+    fn staged_contents_that_are_missing_or_not_a_file_or_malformed_are_refused() {
+        let (_root, staging) = upload_staging_fixture();
+        let missing = staging.join("never-staged").to_string_lossy().into_owned();
+        assert_eq!(
+            validate_staged_contents_path(&staging, &missing),
+            Err(ContentsRefusal::Missing)
+        );
+        std::fs::create_dir(staging.join("a-dir")).unwrap();
+        let dir = staging.join("a-dir").to_string_lossy().into_owned();
+        assert_eq!(
+            validate_staged_contents_path(&staging, &dir),
+            Err(ContentsRefusal::NotAFile)
+        );
+        for malformed in ["", "relative/copy", "copy", "/tmp/with\0nul"] {
+            assert_eq!(
+                validate_staged_contents_path(&staging, malformed),
+                Err(ContentsRefusal::MalformedPath),
+                "{malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_contents_are_refused_when_the_staging_dir_is_missing_or_a_symlink() {
+        let (root, staging) = upload_staging_fixture();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let candidate = write_file(&elsewhere.join("copy"), b"x");
+        // The configured staging dir replaced by a symlink to another folder:
+        // its files must NOT become acceptable (the daemon deletes what it accepts).
+        std::fs::remove_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        let through_link = staging.join("copy").to_string_lossy().into_owned();
+        assert_eq!(
+            validate_staged_contents_path(&staging, &through_link),
+            Err(ContentsRefusal::StagingUnavailable)
+        );
+        assert_eq!(
+            validate_staged_contents_path(&staging, &candidate),
+            Err(ContentsRefusal::StagingUnavailable)
+        );
+        let gone = root.path().join("gone");
+        assert_eq!(
+            validate_staged_contents_path(&gone, &gone.join("copy").to_string_lossy()),
+            Err(ContentsRefusal::StagingUnavailable)
+        );
+    }
+
+    #[test]
+    fn contents_refusal_categories_are_fixed_and_distinct() {
+        let all = [
+            ContentsRefusal::MalformedPath,
+            ContentsRefusal::Traversal,
+            ContentsRefusal::StagingUnavailable,
+            ContentsRefusal::OutsideStaging,
+            ContentsRefusal::Missing,
+            ContentsRefusal::Symlink,
+            ContentsRefusal::NotAFile,
+            ContentsRefusal::Unreadable,
+        ];
+        let categories: std::collections::HashSet<&str> = all.iter().map(|r| r.category()).collect();
+        assert_eq!(categories.len(), all.len(), "every refusal has its own category");
+        assert!(
+            categories
+                .iter()
+                .all(|c| c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+        );
+    }
+
+    #[test]
+    fn dropping_admitted_staged_contents_deletes_exactly_that_copy() {
+        let (_root, staging) = upload_staging_fixture();
+        let keep = write_file(&staging.join("other-request"), b"other");
+        let candidate = write_file(&staging.join("this-request"), b"mine");
+        let policy = WriteContentsPolicy::StagingDir(staging.clone());
+        let (path, guard) = match admit_write_contents(&policy, "create", Some(candidate.clone())) {
+            Ok(admitted) => admitted,
+            Err(refusal) => panic!("a staged copy must be admitted, got {refusal:?}"),
+        };
+        let path = path.expect("the engine gets a contents path");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"mine",
+            "the engine reads the handed-over copy"
+        );
+        drop(guard);
+        assert!(
+            !std::path::Path::new(&candidate).exists(),
+            "the copy is deleted once the request is answered"
+        );
+        assert_eq!(
+            std::fs::read(&keep).unwrap(),
+            b"other",
+            "another request's copy is untouched"
+        );
+    }
+
+    #[test]
+    fn any_path_policy_passes_contents_through_and_deletes_nothing() {
+        let dir = tempdir().unwrap();
+        let candidate = write_file(&dir.path().join("a.txt"), b"x");
+        let (path, guard) = match admit_write_contents(&WriteContentsPolicy::AnyPath, "create", Some(candidate.clone()))
+        {
+            Ok(admitted) => admitted,
+            Err(refusal) => panic!("AnyPath refuses nothing, got {refusal:?}"),
+        };
+        assert_eq!(path.as_deref(), Some(candidate.as_str()));
+        assert!(guard.is_none());
+        assert!(std::path::Path::new(&candidate).exists());
+    }
+
+    #[test]
+    fn a_refused_staged_contents_path_is_an_error_reply_with_the_category() {
+        let (root, staging) = upload_staging_fixture();
+        let outside = write_file(&root.path().join("outside.txt"), b"x");
+        let policy = WriteContentsPolicy::StagingDir(staging);
+        let refusal = match admit_write_contents(&policy, "modify", Some(outside.clone())) {
+            Err(refusal) => refusal,
+            Ok((path, _)) => panic!("expected a refusal, got {path:?}"),
+        };
+        assert_eq!(refusal, ContentsRefusal::OutsideStaging);
+        match contents_refusal_response(refusal) {
+            IpcResponse::Error { message } => {
+                assert!(message.contains("outside_staging"), "got {message}");
+                assert!(
+                    !message.contains("outside.txt"),
+                    "the reply must not echo the path: {message}"
+                );
+            }
+            other => panic!("expected an Error reply, got {other:?}"),
+        }
+        assert!(std::path::Path::new(&outside).exists());
+    }
+
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_only_entries_older_than_the_bound() {
+        let (root, staging) = upload_staging_fixture();
+        let now = std::time::SystemTime::now();
+        let hour = std::time::Duration::from_secs(60 * 60);
+        let stale = staging.join("stale");
+        write_file(&stale, b"orphan");
+        set_mtime(&stale, now - 2 * hour);
+        let fresh = staging.join("fresh");
+        write_file(&fresh, b"in flight");
+        set_mtime(&fresh, now - std::time::Duration::from_secs(5 * 60));
+        let stale_dir = staging.join("stale-dir");
+        std::fs::create_dir(&stale_dir).unwrap();
+        write_file(&stale_dir.join("inside"), b"x");
+        set_mtime(&stale_dir.join("inside"), now - 2 * hour);
+        // A directory's mtime cannot be set through `File`; pass a later `now`
+        // in the second sweep instead.
+        let outside = root.path().join("outside.txt");
+        write_file(&outside, b"never purged");
+        set_mtime(&outside, now - 10 * hour);
+
+        let removed = purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, now).unwrap();
+        assert_eq!(removed, 1, "only the stale file is older than the bound");
+        assert!(!stale.exists());
+        assert!(fresh.exists(), "a copy younger than the bound may still be in flight");
+        assert!(stale_dir.exists());
+
+        let later = now + 3 * hour;
+        let removed = purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later).unwrap();
+        assert_eq!(
+            removed, 2,
+            "the fresh file and the directory are stale three hours later"
+        );
+        assert!(!fresh.exists() && !stale_dir.exists());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"never purged",
+            "the purge never leaves the dir"
+        );
+        assert!(staging.exists(), "the staging dir itself remains");
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_a_stale_symlink_without_touching_its_target() {
+        let (root, staging) = upload_staging_fixture();
+        let target = root.path().join("target.txt");
+        write_file(&target, b"target");
+        std::os::unix::fs::symlink(&target, staging.join("link")).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later).unwrap(),
+            1
+        );
+        assert!(
+            std::fs::symlink_metadata(staging.join("link")).is_err(),
+            "the link itself is removed"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"target", "its target is not");
+    }
+
+    #[test]
+    fn upload_staging_purge_of_a_missing_dir_is_a_no_op() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("upload-staging");
+        assert_eq!(
+            purge_stale_upload_staging(&missing, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn write_refusal_categories_classify_without_the_error_text() {
+        let io: anyhow::Error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/Users/x/secret.txt").into();
+        assert_eq!(write_refusal_category(&io), "io");
+        let stopping = anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write");
+        assert_eq!(write_refusal_category(&stopping), "engine_stopping");
+        let not_a_file = anyhow::anyhow!("Upload source is not a file");
+        assert_eq!(write_refusal_category(&not_a_file), "contents_not_a_file");
+        let policy = anyhow::anyhow!("read-only shared folder cannot accept new Finder items");
+        assert_eq!(write_refusal_category(&policy), "write_policy");
+        let db: anyhow::Error = rusqlite::Error::QueryReturnedNoRows.into();
+        assert_eq!(write_refusal_category(&db), "database");
+        let other = anyhow::anyhow!("something else about notes.txt");
+        assert_eq!(write_refusal_category(&other), "other");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_upload_staging_dir_is_inside_the_group_container() {
+        let home = std::path::Path::new("/Users/someone");
+        assert_eq!(
+            macos_upload_staging_dir_in(home),
+            std::path::PathBuf::from(
+                "/Users/someone/Library/Group Containers/R8352WDJJR.io.beebeeb.app.fileprovider/upload-staging"
+            )
+        );
+        assert_ne!(
+            macos_upload_staging_dir_in(home),
+            macos_hydrate_cache_dir_in(home),
+            "upload staging and hydrate staging are different directories"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prepare_upload_staging_dir_hardens_it_and_purges_stale_copies() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempdir().unwrap();
+        let dir = parent.path().join("upload-staging");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stale = dir.join("stale");
+        write_file(&stale, b"orphan");
+        let now = std::time::SystemTime::now();
+        set_mtime(&stale, now - 2 * UPLOAD_STAGING_MAX_AGE);
+        let removed = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, now).unwrap();
+        assert_eq!(removed, 1);
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "upload-staging must be owner-only, got {mode:o}");
+        // Created when missing, too.
+        let fresh = parent.path().join("fresh-staging");
+        assert_eq!(
+            macos_prepare_upload_staging_dir(&fresh, UPLOAD_STAGING_MAX_AGE, now).unwrap(),
+            0
+        );
+        assert!(fresh.is_dir());
+    }
+
+    /// Everything `tracing` emits on this thread while `body` runs, as text.
+    fn capture_logs(body: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn every_refused_write_is_logged_once_with_its_category_and_never_the_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let (root, staging) = upload_staging_fixture();
+        let outside = write_file(&root.path().join("secret-report.txt"), b"x");
+        let logs = capture_logs(|| {
+            let reply = write_outcome_response(
+                "create",
+                &db,
+                Err(anyhow::anyhow!(
+                    "Upload source is not a file: /Users/someone/secret-report.txt"
+                )),
+            );
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+            let reply = write_outcome_response(
+                "modify",
+                &db,
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "secret-report.txt").into()),
+            );
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+            // Not a refusal: must not be logged as one.
+            let reply = write_outcome_response(
+                "create",
+                &db,
+                Ok(crate::engine_bridge::FinderWriteOutcome::Ignored {
+                    message: "ignored".into(),
+                }),
+            );
+            assert!(matches!(reply, IpcResponse::WriteQueued { .. }));
+            let policy = WriteContentsPolicy::StagingDir(staging.clone());
+            assert!(admit_write_contents(&policy, "create", Some(outside.clone())).is_err());
+        });
+        let refusals: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder write refused"))
+            .collect();
+        assert_eq!(refusals.len(), 3, "one warning per refused write, got:\n{logs}");
+        assert!(refusals.iter().all(|line| line.contains("WARN")), "{logs}");
+        assert!(
+            refusals[0].contains("create") && refusals[0].contains("contents_not_a_file"),
+            "{logs}"
+        );
+        assert!(
+            refusals[1].contains("modify") && refusals[1].contains("\"io\""),
+            "{logs}"
+        );
+        assert!(refusals[2].contains("outside_staging"), "{logs}");
+        assert!(
+            !logs.contains("secret-report"),
+            "no file name or path may reach the log:\n{logs}"
+        );
+        assert!(!logs.contains("/Users/"), "no path may reach the log:\n{logs}");
     }
 }
