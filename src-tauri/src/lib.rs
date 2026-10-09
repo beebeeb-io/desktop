@@ -14462,20 +14462,31 @@ mod tests {
         assert!(matches!(result, Ok(None)));
     }
 
-    /// Lead ruling 13 (Task 12): a stat that fails is not "no database yet". The state dir here is a FILE, so the stat
-    /// of `<file>/state.db` fails with "not a directory": that is an error the caller must fail closed on.
+    /// Lead ruling 13 (Task 12): a stat that fails is not "no database yet": that is an error the caller must fail
+    /// closed on. Two stats that fail: on every platform, a path with a NUL byte, which no file system can look up;
+    /// on macOS and Linux, a state dir that is a FILE, so the stat of `<file>/state.db` fails with "not a directory".
+    /// Windows reports that second path as not found (no database can exist under a file), so it is not a failed stat
+    /// there.
     #[test]
     fn state_db_from_state_dir_reads_a_failed_stat_as_unreadable_never_as_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let not_a_directory = dir.path().join("state-dir-is-a-file");
-        std::fs::write(&not_a_directory, b"not a directory").unwrap();
-        let stat = not_a_directory.join(crate::state_paths::STATE_DB_FILENAME).try_exists();
-        assert!(stat.is_err(), "the premise: the stat itself fails ({stat:?})");
+        #[cfg_attr(target_os = "windows", allow(unused_mut))]
+        let mut state_dirs = vec![dir.path().join("state\0dir")];
+        #[cfg(not(target_os = "windows"))]
+        {
+            let not_a_directory = dir.path().join("state-dir-is-a-file");
+            std::fs::write(&not_a_directory, b"not a directory").unwrap();
+            state_dirs.push(not_a_directory);
+        }
+        for state_dir in state_dirs {
+            let stat = state_dir.join(crate::state_paths::STATE_DB_FILENAME).try_exists();
+            assert!(stat.is_err(), "the premise: the stat itself fails ({stat:?})");
 
-        let result = state_db_from_state_dir(&not_a_directory);
+            let result = state_db_from_state_dir(&state_dir);
 
-        let error = result.err().expect("a failed stat is an error, never Ok(None)");
-        assert!(error.starts_with("read state.db: "), "{error}");
+            let error = result.err().expect("a failed stat is an error, never Ok(None)");
+            assert!(error.starts_with("read state.db: "), "{error}");
+        }
     }
 
     // ── Task 1538 Codex P1 (PR #49, state_db.rs:1785 thread): Windows
@@ -24228,23 +24239,31 @@ mod account_binding_tests {
     }
 
     /// Fix round 1, item 1 (review I1, P3-A): the session is renamed to the server's spelling only after the
-    /// owner record was completed. When that fails (here the state dir is a file, so `state.db` cannot be read), nothing
-    /// is renamed: the session, the Keychain email and the cache stay as they were, and the next engine start still
-    /// knows the account's own data (its queued change is kept, nothing is reset).
+    /// owner record was completed. When that fails (here the state dir holds a `state.db` that is not a database, so it
+    /// cannot be read, on every platform), nothing is renamed: the session, the Keychain email and the cache stay as
+    /// they were, and the next engine start still knows the account's own data (its queued change is kept, nothing is
+    /// reset).
     #[test]
     fn a_failed_owner_backfill_renames_nothing_and_the_next_start_keeps_the_data() {
         let (fx, local, server) = a_legacy_spelling();
         let keychain_before = keychain_account_email(fx.acct.id.as_str());
         let unreadable = tempfile::tempdir().unwrap();
-        let not_a_dir = unreadable.path().join("state-dir-is-a-file");
-        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        std::fs::write(
+            unreadable.path().join(crate::state_paths::STATE_DB_FILENAME),
+            b"this is not a database, and it is long enough to be read as one: 0123456789",
+        )
+        .unwrap();
+        assert!(
+            state_db_from_state_dir(unreadable.path()).is_err(),
+            "the premise: state.db cannot be read"
+        );
         let named = name_session_after_profile(
             &SessionWrite::for_test(),
             &fx.state,
             &fx.acct,
             "tok-r10",
             &server,
-            Some(&not_a_dir),
+            Some(unreadable.path()),
         );
         assert!(!named, "a failed backfill names nothing");
         assert_eq!(
