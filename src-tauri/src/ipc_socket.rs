@@ -480,6 +480,16 @@ fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()
 /// put in the directory's place can never redirect them to another folder.
 #[cfg(target_os = "macos")]
 fn macos_open_private_staging_dir(dir: &std::path::Path) -> Result<StagingDir, StagingDirRefusal> {
+    macos_open_private_staging_dir_with(dir, macos_exclude_from_backups)
+}
+
+/// [`macos_open_private_staging_dir`] with the backup exclusion as a
+/// parameter, so a test can make it fail.
+#[cfg(target_os = "macos")]
+fn macos_open_private_staging_dir_with(
+    dir: &std::path::Path,
+    exclude_from_backups: impl FnOnce(&StagingDir) -> std::io::Result<()>,
+) -> Result<StagingDir, StagingDirRefusal> {
     use std::os::unix::fs::DirBuilderExt;
 
     // `recursive` returns Ok when `dir` already exists, including as a
@@ -497,8 +507,9 @@ fn macos_open_private_staging_dir(dir: &std::path::Path) -> Result<StagingDir, S
     staging
         .restrict_to_owner()
         .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
-    if let Err(e) = macos_exclude_from_backups(&staging) {
-        tracing::warn!(error = %e, dir = %dir.display(), "could not exclude a macOS staging dir from backups");
+    if let Err(e) = exclude_from_backups(&staging) {
+        // No path: it holds the home directory, and so the account name.
+        tracing::warn!(error_kind = ?e.kind(), "could not exclude a macOS staging dir from backups");
     }
     Ok(staging)
 }
@@ -697,7 +708,8 @@ pub fn macos_upload_staging_dir() -> std::path::PathBuf {
 /// Age-bound rather than "purge everything at startup": the extension runs
 /// independently of the daemon and can stage a copy at any moment, including
 /// while the daemon is starting, so the daemon cannot know that nothing is in
-/// flight. The extension stamps each copy's mtime when it stages it.
+/// flight. Age is measured from each copy's ctime, which the kernel sets
+/// when the copy is made and no process can set back.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
@@ -814,10 +826,15 @@ impl StagingDir {
     }
 
     /// `lstat` of one entry: a symlink is described, never followed.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     fn stat_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
         use std::os::fd::AsRawFd;
         fstatat_nofollow(self.fd.as_raw_fd(), name)
+    }
+
+    /// Unlink one non-directory entry (a symlink itself, never its target).
+    fn unlink_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        unlink_at(self.fd.as_raw_fd(), name, 0)
     }
 
     /// Remove one entry: a file or a symlink is unlinked (a symlink itself,
@@ -854,14 +871,12 @@ fn fstat_fd(fd: std::os::fd::RawFd) -> std::io::Result<libc::stat> {
     Ok(unsafe { stat.assume_init() })
 }
 
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn entry_cstring(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(name.as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name contains a NUL byte"))
 }
 
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn fstatat_nofollow(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
     let c_name = entry_cstring(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -874,7 +889,6 @@ fn fstatat_nofollow(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr) -> std::
     Ok(unsafe { stat.assume_init() })
 }
 
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn unlink_at(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr, flags: libc::c_int) -> std::io::Result<()> {
     let c_name = entry_cstring(name)?;
     // SAFETY: `c_name` is NUL-terminated and lives for the call; the
@@ -1122,9 +1136,14 @@ pub(crate) fn open_staged_contents(
     let label = std::fs::canonicalize(staging_dir)
         .map_err(|_| ContentsRefusal::StagingUnavailable)?
         .join(leaf);
+    #[allow(clippy::unnecessary_cast)]
+    let identity = (stat.st_dev as u64, stat.st_ino as u64);
     Ok(OpenedContents {
         path: label,
         file: std::fs::File::from(fd),
+        dir,
+        leaf: leaf.to_os_string(),
+        identity,
     })
 }
 
@@ -1135,6 +1154,12 @@ pub(crate) struct OpenedContents {
     path: std::path::PathBuf,
     /// The opened file: what the engine reads.
     file: std::fs::File,
+    /// The staging directory it was opened in, and its name there: the
+    /// deletion goes through these, never through a path.
+    dir: StagingDir,
+    leaf: std::ffi::OsString,
+    /// Device and inode of the opened file.
+    identity: (u64, u64),
 }
 
 /// The checks on an opened handed-over file: a regular file with exactly one
@@ -1158,7 +1183,13 @@ fn check_staged_contents_stat(stat: &libc::stat, owner: libc::uid_t) -> Result<(
 /// [`StagedContents::file`], never by path. Dropping it deletes the file: by
 /// then the daemon holds its own copy (`StagedPayload::copy_from_file`), or
 /// the request failed and the extension's retry stages a fresh one.
-/// `remove_file` unlinks a symlink itself, never its target.
+///
+/// The deletion is `unlinkat` on the held staging-directory descriptor, and
+/// only while the name still refers to the file that was handed over (same
+/// device and inode, checked with `fstatat` without following a link).
+/// Renaming the staging directory away and putting a symlink in its place,
+/// or putting another file under the copy's name, therefore deletes
+/// nothing else; a name left behind is the age-bound purge's.
 pub(crate) struct StagedContents {
     contents: OpenedContents,
 }
@@ -1176,7 +1207,17 @@ impl StagedContents {
 
 impl Drop for StagedContents {
     fn drop(&mut self) {
-        match std::fs::remove_file(&self.contents.path) {
+        let contents = &self.contents;
+        let result = match contents.dir.stat_entry(&contents.leaf) {
+            #[allow(clippy::unnecessary_cast)]
+            Ok(stat) if (stat.st_dev as u64, stat.st_ino as u64) == contents.identity => {
+                contents.dir.unlink_entry(&contents.leaf)
+            }
+            // The name now refers to something else: not ours to delete.
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        };
+        match result {
             Ok(()) => {}
             // The extension deletes its copy after the reply too; either side may be first.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1219,8 +1260,8 @@ fn contents_refusal_response(refusal: ContentsRefusal) -> IpcResponse {
     }
 }
 
-/// Remove upload-staging entries whose own mtime is at least `max_age` before
-/// `now`. A missing directory is not an error. `now` / `max_age` are
+/// Remove upload-staging entries that have existed for at least `max_age`
+/// before `now`, by their ctime (see the loop). A missing directory is not an error. `now` / `max_age` are
 /// parameters so this is testable without a clock.
 ///
 /// The directory is opened once ([`StagingDir::open`]) and refused unless it
@@ -1256,9 +1297,12 @@ fn purge_stale_upload_staging_in(
         let Ok(stat) = staging.stat_entry(&name) else {
             continue;
         };
-        // A future mtime (clock change) counts as fresh; a later sweep gets it.
-        let stale = stat_time(stat.st_mtime, stat.st_mtime_nsec)
-            .and_then(|modified| now.duration_since(modified).ok())
+        // Aged by the status-change time (ctime), never the mtime: the
+        // kernel sets ctime when the copy is made (an APFS clone keeps the
+        // source's mtime), and no process can set it back. A future ctime
+        // (clock change) counts as fresh; a later sweep gets it.
+        let stale = stat_time(stat.st_ctime, stat.st_ctime_nsec)
+            .and_then(|changed| now.duration_since(changed).ok())
             .is_some_and(|age| age >= max_age);
         if !stale {
             continue;
@@ -4394,39 +4438,35 @@ mod tests {
     }
 
     #[test]
-    fn upload_staging_purge_removes_only_entries_older_than_the_bound() {
+    fn upload_staging_purge_removes_entries_older_than_the_bound_and_never_leaves_the_dir() {
+        // Age comes from each entry's ctime, which a test cannot set back:
+        // entries are made now and the sweeps pass a `now` of their own.
         let (root, staging) = upload_staging_fixture();
         let now = std::time::SystemTime::now();
         let hour = std::time::Duration::from_secs(60 * 60);
-        let stale = staging.join("stale");
-        write_file(&stale, b"orphan");
-        set_mtime(&stale, now - 2 * hour);
-        let fresh = staging.join("fresh");
-        write_file(&fresh, b"in flight");
-        set_mtime(&fresh, now - std::time::Duration::from_secs(5 * 60));
-        let stale_dir = staging.join("stale-dir");
-        std::fs::create_dir(&stale_dir).unwrap();
-        write_file(&stale_dir.join("inside"), b"x");
-        set_mtime(&stale_dir.join("inside"), now - 2 * hour);
-        // A directory's mtime cannot be set through `File`; pass a later `now`
-        // in the second sweep instead.
+        let file = staging.join("orphan");
+        write_file(&file, b"orphan");
+        let tree = staging.join("stale-dir");
+        std::fs::create_dir(&tree).unwrap();
+        write_file(&tree.join("inside"), b"x");
         let outside = root.path().join("outside.txt");
         write_file(&outside, b"never purged");
         set_mtime(&outside, now - 10 * hour);
 
-        let removed = purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, now).unwrap();
-        assert_eq!(removed, 1, "only the stale file is older than the bound");
-        assert!(!stale.exists());
-        assert!(fresh.exists(), "a copy younger than the bound may still be in flight");
-        assert!(stale_dir.exists());
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, now),
+            Ok(0),
+            "nothing has existed for an hour yet"
+        );
+        assert!(file.exists() && tree.exists());
 
         let later = now + 3 * hour;
-        let removed = purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later).unwrap();
         assert_eq!(
-            removed, 2,
-            "the fresh file and the directory are stale three hours later"
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later),
+            Ok(2),
+            "the file and the directory are stale three hours later"
         );
-        assert!(!fresh.exists() && !stale_dir.exists());
+        assert!(!file.exists() && !tree.exists());
         assert_eq!(
             std::fs::read(&outside).unwrap(),
             b"never purged",
@@ -4575,6 +4615,110 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_copy_that_kept_an_old_mtime_is_not_purged() {
+        // `copyItem` keeps the source's mtime, and anyone who can write the
+        // directory can set an mtime back. Neither may make a copy that was
+        // just made look orphaned.
+        let (_root, staging) = upload_staging_fixture();
+        let now = std::time::SystemTime::now();
+        let copy = staging.join("just-staged");
+        write_file(&copy, b"in flight");
+        set_mtime(&copy, now - 10 * UPLOAD_STAGING_MAX_AGE);
+        assert_eq!(purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, now), Ok(0));
+        assert!(copy.exists(), "a copy made just now is in flight, whatever its mtime says");
+    }
+
+    #[test]
+    fn a_copy_is_purged_once_it_has_existed_for_the_bound() {
+        let (_root, staging) = upload_staging_fixture();
+        let made = std::time::SystemTime::now();
+        let copy = staging.join("orphan");
+        write_file(&copy, b"orphan");
+        let minute = std::time::Duration::from_secs(60);
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, made + UPLOAD_STAGING_MAX_AGE - minute),
+            Ok(0),
+            "younger than the bound: kept"
+        );
+        assert!(copy.exists());
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, made + UPLOAD_STAGING_MAX_AGE + minute),
+            Ok(1),
+            "older than the bound: purged"
+        );
+        assert!(!copy.exists());
+    }
+
+    #[test]
+    fn dropping_the_guard_after_the_staging_dir_was_swapped_for_a_symlink_deletes_nothing_outside() {
+        let (root, staging) = upload_staging_fixture();
+        let candidate = write_file(&staging.join("handed-over"), b"mine");
+        let policy = WriteContentsPolicy::StagingDir(staging.clone());
+        let Ok((_, guard)) = admit_write_contents(&policy, "create", Some(candidate)) else {
+            panic!("a staged copy must be admitted");
+        };
+        // After admission, upload-staging is renamed away and a symlink to a
+        // folder holding a file of the same name is put in its place.
+        let moved = root.path().join("moved-staging");
+        std::fs::rename(&staging, &moved).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        write_file(&elsewhere.join("handed-over"), b"not ours to delete");
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        drop(guard);
+        assert_eq!(
+            std::fs::read(elsewhere.join("handed-over")).unwrap(),
+            b"not ours to delete",
+            "the deletion must not follow a symlink put in the staging dir's place"
+        );
+        assert!(
+            !moved.join("handed-over").exists(),
+            "the handed-over copy itself is deleted, through the directory that was checked"
+        );
+    }
+
+    #[test]
+    fn dropping_the_guard_leaves_a_different_file_that_took_the_copys_name() {
+        let (_root, staging) = upload_staging_fixture();
+        let candidate = write_file(&staging.join("handed-over"), b"mine");
+        let policy = WriteContentsPolicy::StagingDir(staging.clone());
+        let Ok((_, guard)) = admit_write_contents(&policy, "create", Some(candidate.clone())) else {
+            panic!("a staged copy must be admitted");
+        };
+        std::fs::rename(&candidate, staging.join("moved-away")).unwrap();
+        write_file(&staging.join("handed-over"), b"another file");
+        drop(guard);
+        assert_eq!(
+            std::fs::read(staging.join("handed-over")).unwrap(),
+            b"another file",
+            "only the file that was handed over is deleted"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_backup_exclusion_is_logged_without_the_path() {
+        let parent = tempdir().unwrap();
+        let dir = parent.path().join("upload-staging");
+        let logs = capture_logs(|| {
+            let result = macos_open_private_staging_dir_with(&dir, |_| {
+                Err(std::io::Error::from_raw_os_error(libc::EPERM))
+            });
+            assert!(result.is_ok(), "a failed exclusion is best-effort");
+        });
+        let warns: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("could not exclude a macOS staging dir from backups"))
+            .collect();
+        assert_eq!(warns.len(), 1, "one warning, got:\n{logs}");
+        let parent_text = parent.path().to_string_lossy();
+        assert!(
+            !logs.contains(parent_text.as_ref()) && !logs.contains("upload-staging"),
+            "the warning must not carry the path:\n{logs}"
+        );
+    }
+
+    #[test]
     fn a_refused_upload_staging_purge_is_logged_by_category_without_the_path() {
         let (root, staging, elsewhere) = symlinked_staging_fixture();
         let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
@@ -4659,8 +4803,8 @@ mod tests {
         let stale = dir.join("stale");
         write_file(&stale, b"orphan");
         let now = std::time::SystemTime::now();
-        set_mtime(&stale, now - 2 * UPLOAD_STAGING_MAX_AGE);
-        let removed = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, now).unwrap();
+        let later = now + 2 * UPLOAD_STAGING_MAX_AGE;
+        let removed = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, later).unwrap();
         assert_eq!(removed, 1);
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "upload-staging must be owner-only, got {mode:o}");

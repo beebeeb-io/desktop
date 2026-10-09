@@ -54,9 +54,10 @@ enum UploadStaging {
     ///
     /// `copyItem` clones on APFS, so a large file costs neither time nor space
     /// until one side changes. The copy is then made owner-only and its
-    /// modification time set to now: the app's purge measures age from that
-    /// time, and a copy that kept the source's (possibly years-old) mtime would
-    /// look orphaned at once.
+    /// modification time set to now, so it does not carry the source's date.
+    /// The app's purge never reads that time: it ages a copy by its ctime,
+    /// which the kernel sets when the copy is made and no process can set
+    /// back (`purge_stale_upload_staging` in `src-tauri/src/ipc_socket.rs`).
     ///
     /// Only a regular file is copied. A package (a folder that macOS shows as
     /// one file, such as an `.rtfd` document) reaches the extension as a
