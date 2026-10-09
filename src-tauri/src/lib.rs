@@ -1666,52 +1666,14 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
         // and hand the next account's engine a false sense of a clean slate.
         //
         // Bug A2: a refused attempt consumes the engine handle, leaving the
-        // slot empty — without the `engine_stop_unconfirmed` flag below, a
-        // RETRY would see an idle slot, skip this gate entirely, and purge
+        // slot empty — without the `engine_stop_unconfirmed` flag (checked
+        // in `stop_engine_for_sign_out`), a RETRY would see an idle slot,
+        // skip this gate entirely, and purge
         // while the old engine may still be running. The flag (per-account,
         // in-memory) keeps the gate closed until the process restarts, which
         // is exactly what the error message tells the user to do.
         let mut engine_slot = acct.engine.lock().await;
-        if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
-            drop(engine_slot);
-            tracing::error!(
-                "sign-out refused: a previous attempt could not confirm the sync engine \
-                 stopped; restart Beebeeb before signing in with a different account"
-            );
-            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
-        }
-        if let Some(prev) = engine_slot.take() {
-            match prev.abort().await {
-                runner::AbortOutcome::Stopped => {
-                    tracing::info!("engine aborted on logout");
-                }
-                runner::AbortOutcome::RevokeFailed { stage, source } => {
-                    // Bug A misattribution fix: the engine task itself IS
-                    // confirmed stopped here — what failed is the Windows
-                    // Cloud Files callback revocation. Say so, instead of
-                    // blaming the sync engine.
-                    tracing::error!(
-                        stage,
-                        %source,
-                        "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
-                    );
-                    return Err(format!(
-                        "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
-                         Please try signing out again; if this keeps happening, restart Beebeeb \
-                         before signing in with a different account. ({source})"
-                    ));
-                }
-                runner::AbortOutcome::TaskUnconfirmed => {
-                    acct.engine_stop_unconfirmed
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        "sign-out refused: could not confirm the sync engine stopped; \
-                         refusing to purge local state or clear credentials while it may still be running"
-                    );
-                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
-                }
-            }
-        }
+        stop_engine_for_sign_out(&acct, &mut engine_slot, upload_staging_dir_for_session_purge().as_deref()).await?;
 
         #[cfg(not(target_os = "windows"))]
         drop(engine_slot);
@@ -1910,6 +1872,67 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
     Ok(SignOutOutcome::Completed)
 }
 
+/// Sign-out's engine stop: the gate in front of every purge sign-out runs.
+/// Refuses (Bug A / A2) unless the engine task is CONFIRMED terminated, or no
+/// engine is running and no earlier attempt left an unconfirmed one behind.
+/// See the comments at the call site in `clear_session_impl`.
+///
+/// Then upload staging: every handed-over copy is removed. Safe exactly here:
+/// the IPC listener runs inside the engine's task, so once the stop is
+/// confirmed no request can still be served, and a request that arrives
+/// later reaches no daemon, fails transiently, and the extension stages a
+/// fresh copy for the system's retry. The caller holds the engine slot, so no
+/// new engine can start in between.
+async fn stop_engine_for_sign_out(
+    acct: &crate::account::AccountRuntime,
+    engine_slot: &mut Option<runner::EngineRunner>,
+    upload_staging: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
+        tracing::error!(
+            "sign-out refused: a previous attempt could not confirm the sync engine \
+             stopped; restart Beebeeb before signing in with a different account"
+        );
+        return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+    }
+    if let Some(prev) = engine_slot.take() {
+        match prev.abort().await {
+            runner::AbortOutcome::Stopped => {
+                tracing::info!("engine aborted on logout");
+            }
+            runner::AbortOutcome::RevokeFailed { stage, source } => {
+                // Bug A misattribution fix: the engine task itself IS
+                // confirmed stopped here — what failed is the Windows
+                // Cloud Files callback revocation. Say so, instead of
+                // blaming the sync engine.
+                tracing::error!(
+                    stage,
+                    %source,
+                    "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
+                );
+                return Err(format!(
+                    "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
+                     Please try signing out again; if this keeps happening, restart Beebeeb \
+                     before signing in with a different account. ({source})"
+                ));
+            }
+            runner::AbortOutcome::TaskUnconfirmed => {
+                acct.engine_stop_unconfirmed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    "sign-out refused: could not confirm the sync engine stopped; \
+                     refusing to purge local state or clear credentials while it may still be running"
+                );
+                return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+            }
+        }
+    }
+    // Every unconfirmed or failed stop returned above: no engine, and so no
+    // IPC listener, is left.
+    purge_upload_staging_after_engine_stop("sign-out", true, upload_staging);
+    Ok(())
+}
+
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
 /// an error while work, plaintext cleanup or root unregistration is incomplete;
 /// the UI must retain the account and display that error for recovery/retry.
@@ -1995,6 +2018,88 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     }
 }
 
+/// Lock's engine stop, then the upload-staging purge it allows.
+///
+/// Task 1538 Codex P1: lock, like sign-out, clears the in-memory
+/// session/master key right after this — an unconfirmed stop means the old
+/// engine could still be alive and using it. No general local-file purge is
+/// gated on this (lock keeps the account's Keychain session AND the regular
+/// local file cache, so re-unlocking stays fast — there's nothing
+/// cross-account to protect here), but it's still worth a loud warning rather
+/// than a silent "we waited 3s and moved on". Windows refuses the lock.
+///
+/// Upload staging is emptied only when no engine can still be running: none
+/// was, or its stop is confirmed. The IPC listener runs inside the engine's
+/// task; one that might still be serving could take a request whose copy the
+/// purge just removed and refuse it as `missing`, a definitive failure for the
+/// user's file. On an unconfirmed stop the lock still goes ahead and the
+/// copies are left for the age-bound purge. The caller holds the engine slot,
+/// so no new engine can start in between.
+async fn stop_engine_for_lock(
+    engine_slot: &mut Option<runner::EngineRunner>,
+    upload_staging: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let engine_stopped = match engine_slot.take() {
+        None => true,
+        Some(prev) => {
+            if prev.abort().await.is_stopped() {
+                tracing::info!("engine aborted on vault lock");
+                true
+            } else {
+                #[cfg(target_os = "windows")]
+                return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
+                #[cfg(not(target_os = "windows"))]
+                {
+                    tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
+                    false
+                }
+            }
+        }
+    };
+    purge_upload_staging_after_engine_stop("lock", engine_stopped, upload_staging);
+    Ok(())
+}
+
+/// The App Group upload-staging directory that sign-out and Lock empty.
+/// `None` off macOS, and `None` under `cargo test`: tests never touch the real
+/// App Group container (they hand the functions above a temp dir instead).
+fn upload_staging_dir_for_session_purge() -> Option<std::path::PathBuf> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    return Some(crate::ipc_socket::macos_upload_staging_dir());
+    #[cfg(not(all(target_os = "macos", not(test))))]
+    None
+}
+
+/// Empty upload staging at sign-out or Lock, but only after a confirmed
+/// engine stop (`engine_stopped`); otherwise leave it, logged, for the
+/// age-bound purge. Best-effort: a failure is logged, never surfaced.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn purge_upload_staging_after_engine_stop(
+    context: &'static str,
+    engine_stopped: bool,
+    upload_staging: Option<&std::path::Path>,
+) {
+    let Some(dir) = upload_staging else {
+        return;
+    };
+    if !engine_stopped {
+        tracing::warn!(
+            context,
+            "engine stop unconfirmed: upload-staging copies are left for the age-bound purge"
+        );
+        return;
+    }
+    crate::ipc_socket::purge_all_upload_staging_at(dir, context);
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", test))))]
+fn purge_upload_staging_after_engine_stop(
+    _context: &'static str,
+    _engine_stopped: bool,
+    _upload_staging: Option<&std::path::Path>,
+) {
+}
+
 /// Lock clears all runtime key material and stops the sync daemon, but keeps
 /// the Keychain session so the user can unlock again without re-entering their
 /// recovery phrase.
@@ -2006,24 +2111,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     close_session_commands().await?;
     let mut engine_slot = acct.engine.lock().await;
-    if let Some(prev) = engine_slot.take() {
-        // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
-        // session/master key right after this — an unconfirmed stop means
-        // the old engine could still be alive and using it. No general
-        // local-file purge is gated on this (lock keeps the account's
-        // Keychain session AND the regular local file cache, so re-unlocking
-        // stays fast — there's nothing cross-account to protect here), but
-        // it's still worth a loud warning rather than a silent "we waited 3s
-        // and moved on".
-        if !prev.abort().await.is_stopped() {
-            #[cfg(target_os = "windows")]
-            return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
-            #[cfg(not(target_os = "windows"))]
-            tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
-        } else {
-            tracing::info!("engine aborted on vault lock");
-        }
-    }
+    stop_engine_for_lock(&mut engine_slot, upload_staging_dir_for_session_purge().as_deref()).await?;
     #[cfg(not(target_os = "windows"))]
     drop(engine_slot);
     // Task 1670 round 2: UNLIKE the general local-file cache above, the macOS
@@ -12490,6 +12578,7 @@ mod popover_wiring_tests {
 #[cfg(test)]
 mod signout_teardown_tests {
     use super::{AppState, clear_session_impl, set_auth_email, set_auth_present};
+    use super::{stop_engine_for_lock, stop_engine_for_sign_out, upload_staging_dir_for_session_purge};
     use crate::account::{AccountId, synthesize_single_account};
     use crate::runner::EngineRunner;
     use std::sync::Arc;
@@ -12499,6 +12588,136 @@ mod signout_teardown_tests {
     fn test_account(state: &AppState, id: &str) -> Arc<crate::account::AccountRuntime> {
         synthesize_single_account(state, AccountId(id.to_string()));
         state.active_account().expect("synthesized account resolves")
+    }
+
+    // ── Upload staging at sign-out and Lock ─────────────────────────────────
+    // A throwaway staging dir in every test: never the real App Group
+    // container (`upload_staging_dir_for_session_purge` is None under test).
+
+    /// A staging dir holding a handed-over copy and a stray tree, next to a
+    /// file the purge must never reach.
+    fn staging_with_copies() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("upload-staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("copy"), b"plaintext").unwrap();
+        std::fs::create_dir(staging.join("stray-tree")).unwrap();
+        std::fs::write(staging.join("stray-tree").join("inside"), b"plaintext").unwrap();
+        std::fs::write(root.path().join("outside.txt"), b"never purged").unwrap();
+        (root, staging)
+    }
+
+    fn staging_entries(staging: &std::path::Path) -> usize {
+        std::fs::read_dir(staging).unwrap().count()
+    }
+
+    fn assert_outside_untouched(root: &tempfile::TempDir) {
+        assert_eq!(std::fs::read(root.path().join("outside.txt")).unwrap(), b"never purged");
+    }
+
+    /// An engine whose task already finished: its stop is confirmed at once.
+    fn finished_engine() -> EngineRunner {
+        EngineRunner::for_test_with_task(tokio::spawn(async {}))
+    }
+
+    /// An engine whose task has no await point, so even the forced abort
+    /// cannot confirm it stopped (3 s graceful + 2 s forced). It ends by
+    /// itself after 7 s, so it cannot leak a spinning thread.
+    fn unstoppable_engine() -> EngineRunner {
+        let deadline = std::time::Instant::now() + Duration::from_secs(7);
+        EngineRunner::for_test_with_task(tokio::task::spawn_blocking(move || {
+            while std::time::Instant::now() < deadline {
+                std::hint::black_box(());
+            }
+        }))
+    }
+
+    #[test]
+    fn the_session_purge_never_targets_the_real_app_group_directory_under_test() {
+        assert_eq!(upload_staging_dir_for_session_purge(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sign_out_after_a_confirmed_engine_stop_empties_upload_staging() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-staging-confirmed");
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(finished_engine());
+        stop_engine_for_sign_out(&acct, &mut slot, Some(&staging))
+            .await
+            .expect("a confirmed stop lets sign-out continue");
+        assert!(slot.is_none(), "the engine is consumed");
+        assert_eq!(staging_entries(&staging), 0, "sign-out removes every handed-over copy");
+        assert!(staging.is_dir(), "the directory itself stays");
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sign_out_with_an_unconfirmed_engine_stop_purges_no_upload_staging() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-staging-unconfirmed");
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(unstoppable_engine());
+        let error = stop_engine_for_sign_out(&acct, &mut slot, Some(&staging))
+            .await
+            .expect_err("an unconfirmed stop refuses sign-out");
+        assert!(error.contains("Could not stop the sync engine"), "got: {error}");
+        assert_eq!(
+            staging_entries(&staging),
+            2,
+            "nothing is purged while the engine may still be serving requests"
+        );
+        // The retry finds an empty slot; the unconfirmed-stop flag still refuses it.
+        let mut empty = None;
+        stop_engine_for_sign_out(&acct, &mut empty, Some(&staging))
+            .await
+            .expect_err("the retry is refused too");
+        assert_eq!(staging_entries(&staging), 2, "and still purges nothing");
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lock_after_a_confirmed_engine_stop_empties_upload_staging() {
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(finished_engine());
+        stop_engine_for_lock(&mut slot, Some(&staging))
+            .await
+            .expect("the lock continues");
+        assert!(slot.is_none());
+        assert_eq!(staging_entries(&staging), 0, "Lock removes every handed-over copy");
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lock_with_no_engine_running_empties_upload_staging() {
+        // No engine, so no IPC listener: nothing can still be using a copy.
+        let (root, staging) = staging_with_copies();
+        let mut slot = None;
+        stop_engine_for_lock(&mut slot, Some(&staging))
+            .await
+            .expect("the lock continues");
+        assert_eq!(staging_entries(&staging), 0);
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_with_an_unconfirmed_engine_stop_does_not_purge_upload_staging() {
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(unstoppable_engine());
+        stop_engine_for_lock(&mut slot, Some(&staging))
+            .await
+            .expect("off Windows the lock goes ahead on an unconfirmed stop");
+        assert_eq!(
+            staging_entries(&staging),
+            2,
+            "an IPC listener that may still be serving could be handed a copy the purge just removed"
+        );
+        assert_outside_untouched(&root);
     }
 
     /// Bug B: sign-out while already signed out (no auth flag, no in-memory

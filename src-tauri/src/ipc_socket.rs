@@ -1274,20 +1274,42 @@ pub(crate) fn purge_stale_upload_staging(
     max_age: std::time::Duration,
     now: std::time::SystemTime,
 ) -> Result<usize, StagingDirRefusal> {
+    purge_upload_staging(dir, UploadStagingPurge::OlderThan { max_age, now })
+}
+
+/// Which upload-staging entries a purge removes.
+#[derive(Debug, Clone, Copy)]
+#[cfg(any(target_os = "macos", test))]
+pub(crate) enum UploadStagingPurge {
+    /// Entries that have existed for at least `max_age` before `now`: daemon
+    /// startup and the periodic sweep, while the extension may be staging.
+    OlderThan {
+        max_age: std::time::Duration,
+        now: std::time::SystemTime,
+    },
+    /// Every entry: sign-out and Lock, once no IPC listener can still be
+    /// serving (the engine is gone, or its stop is confirmed). A request
+    /// that then reaches no daemon fails transiently and the extension
+    /// stages a fresh copy for the system's retry.
+    Everything,
+}
+
+/// [`purge_stale_upload_staging`] with the scope as a parameter.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn purge_upload_staging(
+    dir: &std::path::Path,
+    scope: UploadStagingPurge,
+) -> Result<usize, StagingDirRefusal> {
     match StagingDir::open(dir) {
-        Ok(staging) => purge_stale_upload_staging_in(&staging, max_age, now),
+        Ok(staging) => purge_upload_staging_in(&staging, scope),
         Err(StagingDirRefusal::Missing) => Ok(0),
         Err(refusal) => Err(refusal),
     }
 }
 
-/// [`purge_stale_upload_staging`] on a directory already held open.
+/// [`purge_upload_staging`] on a directory already held open.
 #[cfg(any(target_os = "macos", test))]
-fn purge_stale_upload_staging_in(
-    staging: &StagingDir,
-    max_age: std::time::Duration,
-    now: std::time::SystemTime,
-) -> Result<usize, StagingDirRefusal> {
+fn purge_upload_staging_in(staging: &StagingDir, scope: UploadStagingPurge) -> Result<usize, StagingDirRefusal> {
     let names = staging
         .entry_names()
         .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
@@ -1297,13 +1319,16 @@ fn purge_stale_upload_staging_in(
         let Ok(stat) = staging.stat_entry(&name) else {
             continue;
         };
-        // Aged by the status-change time (ctime), never the mtime: the
-        // kernel sets ctime when the copy is made (an APFS clone keeps the
-        // source's mtime), and no process can set it back. A future ctime
-        // (clock change) counts as fresh; a later sweep gets it.
-        let stale = stat_time(stat.st_ctime, stat.st_ctime_nsec)
-            .and_then(|changed| now.duration_since(changed).ok())
-            .is_some_and(|age| age >= max_age);
+        let stale = match scope {
+            UploadStagingPurge::Everything => true,
+            // Aged by the status-change time (ctime), never the mtime: the
+            // kernel sets ctime when the copy is made (an APFS clone keeps
+            // the source's mtime), and no process can set it back. A future
+            // ctime (clock change) counts as fresh; a later sweep gets it.
+            UploadStagingPurge::OlderThan { max_age, now } => stat_time(stat.st_ctime, stat.st_ctime_nsec)
+                .and_then(|changed| now.duration_since(changed).ok())
+                .is_some_and(|age| age >= max_age),
+        };
         if !stale {
             continue;
         }
@@ -1324,7 +1349,7 @@ pub(crate) fn macos_prepare_upload_staging_dir(
     now: std::time::SystemTime,
 ) -> Result<usize, StagingDirRefusal> {
     let staging = macos_open_private_staging_dir(dir)?;
-    purge_stale_upload_staging_in(&staging, max_age, now)
+    purge_upload_staging_in(&staging, UploadStagingPurge::OlderThan { max_age, now })
 }
 
 /// Runner startup: prepare the real directory and purge it. Best-effort.
@@ -1349,12 +1374,20 @@ fn sweep_upload_staging_at(dir: &std::path::Path, context: &'static str, now: st
     log_upload_staging_purge(context, result);
 }
 
+/// Sign-out and Lock: remove every entry of `dir`, logged. The caller
+/// guarantees that no IPC listener can still be serving (see
+/// [`UploadStagingPurge::Everything`]).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn purge_all_upload_staging_at(dir: &std::path::Path, context: &'static str) {
+    log_upload_staging_purge(context, purge_upload_staging(dir, UploadStagingPurge::Everything));
+}
+
 /// Log a purge: a count, or the refusal's fixed category. Never a path.
 #[cfg(any(target_os = "macos", test))]
 fn log_upload_staging_purge(context: &'static str, result: Result<usize, StagingDirRefusal>) {
     match result {
         Ok(removed) if removed > 0 => {
-            tracing::info!(removed, context, "purged orphaned upload-staging copies");
+            tracing::info!(removed, context, "purged upload-staging copies");
         }
         Ok(_) => {}
         Err(refusal) => {
