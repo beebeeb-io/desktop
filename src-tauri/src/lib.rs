@@ -3542,8 +3542,9 @@ struct MacosIntegrationResetResult {
     pending_operations_preserved: i64,
     sync_root_preserved: Option<String>,
     /// An engine stop on this account is unconfirmed after Repair's own stop (this one, or an earlier one): its task
-    /// may still run with the keys, so sync starts again only after Beebeeb is quit and reopened (spec §5.6). The
-    /// surfaces render one fixed sentence for it; `warnings` keeps its text for Windows and Linux.
+    /// may still run with the keys, so sync starts again only after Beebeeb is quit and reopened (spec §5.6). On macOS
+    /// the surfaces render one fixed sentence for it, and `warnings` does not also carry the engine-stop text. On
+    /// Windows and Linux `warnings` carries that text, as their surfaces show it.
     engine_stop_unconfirmed: bool,
     warnings: Vec<String>,
 }
@@ -5401,7 +5402,9 @@ async fn stop_engine_in_slot(acct: &account::AccountRuntime, engine: EngineRunne
     outcome
 }
 
-/// Repair's warning when its engine stop is unconfirmed (the same advice as Lock's error).
+/// Repair's warning when its engine stop is unconfirmed (the same advice as Lock's error). Windows and Linux only: a
+/// Mac's surfaces render `engine_stop_unconfirmed`'s fixed sentence instead.
+#[cfg(not(target_os = "macos"))]
 const REPAIR_ENGINE_UNCONFIRMED_WARNING: &str =
     "The sync engine did not confirm it stopped. Restart Beebeeb before syncing again.";
 
@@ -5414,8 +5417,9 @@ struct RepairEngineStop {
     engine_stop_unconfirmed: bool,
 }
 
-/// Repair's engine stop (spec §5.3 (6)): stops the engine, and says so in `warnings` when the stop cannot
-/// be confirmed. On a Mac the reconciler then runs its follow-up check, which starts an engine again
+/// Repair's engine stop (spec §5.3 (6)): stops the engine and, on Windows and Linux, says so in `warnings` when the
+/// stop cannot be confirmed (a Mac's surfaces render the reported flag's fixed sentence instead, so its `warnings`
+/// do not repeat it). On a Mac the reconciler then runs its follow-up check, which starts an engine again
 /// with the keys still in memory; the flag the helper sets is what makes that start refuse instead of
 /// running a second engine beside one that may still run. Reports that flag as it is AFTER this stop, so it
 /// covers this stop and an earlier one (a Lock, a Sign-out or a check) that left the slot empty: Repair
@@ -5435,6 +5439,7 @@ async fn stop_engine_for_repair(
             tracing::info!("engine aborted for macOS integration reset");
         } else {
             tracing::warn!("engine did not confirm termination before macOS integration reset");
+            #[cfg(not(target_os = "macos"))]
             if !outcome.task_confirmed() {
                 warnings.push(REPAIR_ENGINE_UNCONFIRMED_WARNING.to_string());
             }
@@ -19516,7 +19521,8 @@ mod finder_setup_wiring_tests {
 
     /// FA-I3 (spec §5.6): Repair reports an unconfirmed engine stop as a field, read from the account AFTER its own
     /// stop, so it covers an earlier unconfirmed stop that left the slot empty as well as its own. A clean stop is
-    /// `false`. The warning string stays.
+    /// `false`. On Linux (and Windows) the warning string stays; a Mac's surfaces render the field's fixed sentence, so
+    /// there `warnings` does not repeat it.
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn repairs_engine_stop_reports_an_unconfirmed_stop_whoever_made_it() {
@@ -19569,10 +19575,16 @@ mod finder_setup_wiring_tests {
                     .engine_stop_unconfirmed,
                 "its own unconfirmed stop"
             );
+            #[cfg(not(target_os = "macos"))]
             assert_eq!(
                 warnings,
                 vec![super::REPAIR_ENGINE_UNCONFIRMED_WARNING.to_string()],
                 "the warning stays"
+            );
+            #[cfg(target_os = "macos")]
+            assert!(
+                warnings.is_empty(),
+                "a Mac renders the field's sentence; the warnings do not repeat it: {warnings:?}"
             );
         });
     }
@@ -20495,7 +20507,9 @@ mod finder_lock_and_sign_out_tests {
 
     /// Fix round 1 (item A): Repair stops the engine, and the reconciler's follow-up check then starts one
     /// again with the keys still in memory. When Repair's stop cannot be confirmed, the gate must close, or
-    /// that check starts a SECOND engine beside the one that may still run.
+    /// that check starts a SECOND engine beside the one that may still run. A Repair whose only issue is that stop
+    /// reports `engine_stop_unconfirmed: true` with no warnings: the Mac's surfaces render the field's fixed
+    /// sentence (quit and reopen Beebeeb), so a warning would only add a second message about the same thing.
     #[test]
     fn a_repair_whose_engine_stop_cannot_be_confirmed_closes_the_gate_and_says_to_restart() {
         let mut fx = Fixture::new("finder-repair-unconfirmed");
@@ -20516,14 +20530,17 @@ mod finder_lock_and_sign_out_tests {
             );
 
             let mut warnings = Vec::new();
-            stop_engine_for_repair(&fx.acct, &mut warnings, || Ok(false)).await;
+            let stop = stop_engine_for_repair(&fx.acct, &mut warnings, || Ok(false)).await;
 
             assert!(
                 fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
                 "Repair's unconfirmed stop closes the gate"
             );
-            assert_eq!(warnings, vec![REPAIR_ENGINE_UNCONFIRMED_WARNING.to_string()]);
-            assert!(REPAIR_ENGINE_UNCONFIRMED_WARNING.contains("Restart Beebeeb"));
+            assert!(stop.engine_stop_unconfirmed, "and Repair reports it as the field");
+            assert!(
+                warnings.is_empty(),
+                "the field's sentence is the one message; the warnings do not repeat it: {warnings:?}"
+            );
             assert!(
                 fx.acct.engine.lock().await.is_none(),
                 "the slot is empty: the flag is all that stands between the follow-up check and a second engine"
