@@ -55,7 +55,7 @@ import {
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
 import { useFinderSetup } from '../../finderSetup'
-import { FINDER_SETUP_TITLE, FINDER_STATUS_PILL } from '../../finderSetupCopy'
+import { FINDER_SETUP_TITLE, finderStatusPill } from '../../finderSetupCopy'
 import { setDesktopThemePreference } from '../theme'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
 
@@ -1012,10 +1012,10 @@ function MacFinderIntegrationPanel() {
   const finder = useFinderSetup()
   const presentation = finder.presentation
   const alert = presentation.kind === 'notice' && presentation.tone === 'alert'
-  const detail =
-    presentation.kind === 'notice'
-      ? FINDER_STATUS_PILL[finder.load.status === 'loaded' ? finder.load.view.setup : 'missing']
-      : presentation.line || 'Checking...'
+  // A notice's card line is the notice's own pill label (keyed on the presentation, FT-I2); every
+  // other state says its line. A loaded Missing says its one resting sentence (FA-I2), and before the
+  // first answer the line is empty: no ad-hoc "Checking" string (M6).
+  const detail = presentation.kind === 'notice' ? (finderStatusPill(finder.load)?.label ?? '') : presentation.line
   return (
     <SettingsSectionShell>
       <PageHeader title="Finder integration" subtitle={`Beebeeb appears in Finder as a sync folder. Files are encrypted on this Mac before they leave. ${regionLabel}.`} />

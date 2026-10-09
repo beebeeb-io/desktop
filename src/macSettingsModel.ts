@@ -14,6 +14,7 @@ import type { FinderFailureReason, FinderSetupView } from './finderSetup'
 import {
   FINDER_ADDING_LINE,
   FINDER_READY_LINE,
+  FINDER_RESTING_LINE,
   FINDER_UNAVAILABLE_LINE,
   finderRepairWarningNote,
   finderSetupPresentation,
@@ -91,25 +92,36 @@ export type FinderRow =
   | { kind: 'loading' }
   | { kind: 'unavailable' }
   | { kind: 'adding' }
+  /** A loaded `Missing` (FA-I2): its one sentence, no button, no activity. */
+  | { kind: 'resting' }
   | { kind: 'added' }
   | { kind: 'notice'; tone: 'alert' | 'status'; reason: FinderFailureReason; sentence: string; action: FinderSetupAction; actionLabel: string }
 
 /**
  * One row, one reconciler state (spec 2026-10-06). `loadFailed` is a LOAD failure (the state could
- * not be read at all); a failed setup is part of the state and is shown once, under the row. The
- * instant before the first check reads as Adding: there is no "missing" row with an add button (R5).
- * The sentence and the action of a notice come from `finderSetupCopy` (one sentence, one action per
- * reason); the raw error never reaches this row.
+ * not be read at all); a failed setup is part of the state and is shown once, under the row. A loaded
+ * `Missing` is a resting state (after a sign-out, a Lock, or with no keys on this Mac; spec §5.2 as
+ * amended, lead ruling FA-I2): a quiet row with one sentence and no button, never "Adding", and there
+ * is no "missing" row with an add button (R5). The sentence and the action of a notice come from
+ * `finderSetupCopy` (one sentence, one action per reason); the raw error never reaches this row.
  */
 export function finderRow(view: FinderSetupView | null, loadFailed = false): FinderRow {
   if (view === null) return loadFailed ? { kind: 'unavailable' } : { kind: 'loading' }
   const presentation = finderSetupPresentation(view)
-  if (presentation.kind === 'ready') return { kind: 'added' }
-  if (presentation.kind === 'notice') {
-    const { tone, reason, sentence, action, actionLabel } = presentation
-    return { kind: 'notice', tone, reason, sentence, action, actionLabel }
+  switch (presentation.kind) {
+    case 'ready':
+      return { kind: 'added' }
+    case 'adding':
+      return { kind: 'adding' }
+    case 'notice': {
+      const { tone, reason, sentence, action, actionLabel } = presentation
+      return { kind: 'notice', tone, reason, sentence, action, actionLabel }
+    }
+    case 'resting':
+      return { kind: 'resting' }
+    default:
+      return { kind: 'loading' }
   }
-  return { kind: 'adding' }
 }
 
 /** The hint under "Beebeeb in Finder". A notice row says its sentence in the Note, not here. */
@@ -119,6 +131,8 @@ export function finderHint(row: FinderRow): string {
       return FINDER_READY_LINE
     case 'adding':
       return FINDER_ADDING_LINE
+    case 'resting':
+      return FINDER_RESTING_LINE
     case 'unavailable':
       return FINDER_UNAVAILABLE_LINE
     default:

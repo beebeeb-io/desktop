@@ -54,17 +54,15 @@ function finderSetupState(installState: FinderInstallState | null) {
 
 /**
  * macOS (spec 2026-10-06): the reconciler's state, in this page's label/className/detail shape. A
- * state that could not be read is its own pill and line, never "Adding" (lead ruling 7a).
+ * state that could not be read is its own pill and line, never "Adding" (lead ruling 7a). A loaded
+ * `Missing` has no pill (`label: null`) and its line is the one resting sentence (FA-I2); before the
+ * first answer the line is empty, so no ad-hoc "Checking" string is shown (M6).
  */
-function macFinderSetupState(load: FinderSetupLoad) {
+function macFinderSetupState(load: FinderSetupLoad): { label: string | null; className: string; detail: string } {
   const pill = finderStatusPill(load)
-  const className = pill.tone === 'idle' ? '' : pill.tone
+  const className = !pill || pill.tone === 'idle' ? '' : pill.tone
   const presentation = finderSetupLoadPresentation(load)
-  if (presentation.kind === 'notice') return { label: pill.label, className, detail: presentation.sentence }
-  if (presentation.kind === 'ready' || presentation.kind === 'adding' || presentation.kind === 'unavailable') {
-    return { label: pill.label, className, detail: presentation.line }
-  }
-  return { label: pill.label, className, detail: 'Checking Finder setup.' }
+  return { label: pill?.label ?? null, className, detail: presentation.kind === 'notice' ? presentation.sentence : presentation.line }
 }
 
 export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) => void }) {
@@ -254,10 +252,12 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
             <div>
               <div className="row-title">Finder location</div>
               <div className="row-detail">
-                <span className="status-pill" style={{ marginRight: 8 }}>
-                  <span className={`dot ${finderSetup.className}`} />
-                  {finderSetup.label}
-                </span>
+                {finderSetup.label !== null && (
+                  <span className="status-pill" style={{ marginRight: 8 }}>
+                    <span className={`dot ${finderSetup.className}`} />
+                    {finderSetup.label}
+                  </span>
+                )}
                 <span className={isMacos || finderSetup.label === 'Setup blocked' ? undefined : 'mono'}>
                   {finderNotice ?? finderSetup.detail}
                 </span>

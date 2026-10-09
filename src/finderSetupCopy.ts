@@ -4,13 +4,23 @@
  * reason; "Try again" only inside a failure. Pinned by tests/finderSetupCopy.test.ts, which also
  * holds the design artefact to the same strings.
  */
-import type { FinderFailureReason, FinderSetupLoad, FinderSetupState, FinderSetupView } from './finderSetup'
+import type { FinderFailureReason, FinderSetupLoad, FinderSetupView } from './finderSetup'
 
 export type FinderSetupAction = 'try_again' | 'open_system_settings' | 'show_in_finder' | 'copy_details'
 
 export const FINDER_SETUP_TITLE = 'Beebeeb in Finder'
 export const FINDER_ADDING_LINE = 'Adding Beebeeb to Finder…'
 export const FINDER_READY_LINE = 'Your vault appears under Locations in Finder.'
+
+/**
+ * A loaded `Missing` (spec §5.2 as amended; lead ruling FA-I2, which corrects FT-I2's copy): no check
+ * owns Finder right now, and Beebeeb may or may not still be registered. It rests there after a
+ * sign-out, after a Lock that interrupts a check, and while the keys are not on this Mac. So it is a
+ * quiet row: no pill, no activity, no claim about presence, and where a slot must show text, this one
+ * sentence. It is also what "Try again" answers while the reconciler is held (`FINDER_SETUP_HELD` in
+ * src-tauri/src/lib.rs, the same text). The wording is for Guus to confirm on #114.
+ */
+export const FINDER_RESTING_LINE = 'Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.'
 
 /**
  * The onboarding step rail's entry for the Finder step, on macOS only (lead ruling on Task 15):
@@ -95,13 +105,18 @@ export const FINDER_ACTION_FAILED: Readonly<Record<FinderSetupAction, string>> =
   copy_details: 'Beebeeb couldn’t copy the details.',
 }
 
-/** The short pill on the compact Status page (spec B deletes that page). */
-export const FINDER_STATUS_PILL: Readonly<Record<FinderSetupState, string>> = {
+/**
+ * The short pill on the compact Status and SyncFolder pages (spec B deletes them), keyed on what the
+ * surface PRESENTS, not on the raw state (lead ruling FT-I2): a notice says its own label whatever
+ * state it came from (a `missing` that carries `not_in_applications` is "Setup blocked", never
+ * "Checking"), and a loaded `Missing` has no pill at all (FA-I2).
+ */
+export type FinderStatusPillKey = 'ready' | 'adding' | 'blocked' | 'turned_off'
+export const FINDER_STATUS_PILL: Readonly<Record<FinderStatusPillKey, string>> = {
   ready: 'Installed',
   adding: 'Adding',
-  failed: 'Setup blocked',
-  user_disabled: 'Turned off',
-  missing: 'Checking',
+  blocked: 'Setup blocked',
+  turned_off: 'Turned off',
 }
 
 /** The pill when there is no view yet, and when the state cannot be read (never "Adding", ruling 7a). */
@@ -109,7 +124,10 @@ export const FINDER_STATUS_PILL_LOADING = 'Loading'
 export const FINDER_STATUS_PILL_UNAVAILABLE = 'Unknown'
 
 export type FinderSetupPresentation =
+  /** No view yet: nothing true to say. */
   | { kind: 'quiet'; line: '' }
+  /** A loaded `Missing` (FA-I2): one sentence that claims no activity and nothing about presence. */
+  | { kind: 'resting'; line: string }
   | { kind: 'adding'; line: string }
   | { kind: 'ready'; line: string }
   | {
@@ -126,14 +144,17 @@ export type FinderSetupPresentation =
    */
   | { kind: 'unavailable'; line: string; actionLabel: string }
 
-/** One state, one presentation. `quiet` = the instant before the first check (or no view yet). */
+/**
+ * One state, one presentation. `quiet` = no view yet. A loaded `Missing` without a reason is
+ * `resting` (FA-I2); with a reason (D7: running from the disk image) it is that reason's notice.
+ */
 export function finderSetupPresentation(view: FinderSetupView | null): FinderSetupPresentation {
   if (!view) return { kind: 'quiet', line: '' }
   if (view.setup === 'ready') return { kind: 'ready', line: FINDER_READY_LINE }
   if (view.setup === 'adding') return { kind: 'adding', line: FINDER_ADDING_LINE }
   const reason: FinderFailureReason | null =
     view.setup === 'user_disabled' ? 'user_disabled' : view.setup === 'failed' ? (view.reason ?? 'unknown') : view.reason
-  if (!reason) return { kind: 'quiet', line: '' }
+  if (!reason) return { kind: 'resting', line: FINDER_RESTING_LINE }
   const copy = FINDER_REASON_COPY[reason]
   return {
     kind: 'notice',
@@ -155,12 +176,23 @@ export function finderSetupLoadPresentation(load: FinderSetupLoad): FinderSetupP
 
 /**
  * The compact pages' pill (SyncFolder, Status) for whatever the hook has: its label and the tone
- * the page paints its dot with. One place, so the two pages cannot drift.
+ * the page paints its dot with, or `null` for a loaded `Missing`, which has no pill (FA-I2). Keyed on
+ * the presentation (FT-I2). One place, so the two pages cannot drift.
  */
-export function finderStatusPill(load: FinderSetupLoad): { label: string; tone: 'ok' | 'warn' | 'error' | 'idle' } {
+export function finderStatusPill(load: FinderSetupLoad): { label: string; tone: 'ok' | 'warn' | 'error' | 'idle' } | null {
   if (load.status === 'unavailable') return { label: FINDER_STATUS_PILL_UNAVAILABLE, tone: 'warn' }
   if (load.status === 'loading') return { label: FINDER_STATUS_PILL_LOADING, tone: 'idle' }
   const presentation = finderSetupPresentation(load.view)
-  const tone = presentation.kind === 'ready' ? 'ok' : presentation.kind === 'notice' && presentation.tone === 'alert' ? 'error' : 'warn'
-  return { label: FINDER_STATUS_PILL[load.view.setup], tone }
+  switch (presentation.kind) {
+    case 'ready':
+      return { label: FINDER_STATUS_PILL.ready, tone: 'ok' }
+    case 'adding':
+      return { label: FINDER_STATUS_PILL.adding, tone: 'warn' }
+    case 'notice':
+      return presentation.tone === 'alert'
+        ? { label: FINDER_STATUS_PILL.blocked, tone: 'error' }
+        : { label: FINDER_STATUS_PILL.turned_off, tone: 'warn' }
+    default:
+      return null
+  }
 }

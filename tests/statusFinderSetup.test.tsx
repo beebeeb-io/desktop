@@ -94,6 +94,33 @@ describe('Status page, Finder row, on macOS', () => {
     expect(textOf(m.tree())).toContain('Setup blocked')
   })
 
+  // FA-I2: a loaded Missing is a quiet row. The Status line is a slot that must show text, so it
+  // shows the one sentence; there is no Finder pill, and nothing says "Checking".
+  test('a loaded Missing: no Finder pill, the one sentence, no "Checking" and no activity', async () => {
+    const { m } = openStatus({ platform: 'macos', finder: finderView({ setup: 'missing' }) })
+    await settle(m)
+    const text = textOf(m.tree())
+    expect(text).toContain(copy.FINDER_RESTING_LINE)
+    expect(text).not.toMatch(/Checking|Adding/)
+    // The only pill left is the page's own sync-health pill.
+    expect(m.elements().filter((el) => el.props.className === 'status-pill')).toHaveLength(1)
+  })
+
+  test('a Missing that carries a reason (D7) is that notice, with the notice\'s pill, never "Checking"', async () => {
+    const { m } = openStatus({ platform: 'macos', finder: finderView({ setup: 'missing', reason: 'not_in_applications', launch_location: 'disk_image' }) })
+    await settle(m)
+    const text = textOf(m.tree())
+    expect(text).toContain(copy.FINDER_REASON_COPY.not_in_applications.sentence)
+    expect(text).toContain('Setup blocked')
+    expect(text).not.toContain('Checking')
+  })
+
+  test('before the first answer the Finder line claims nothing, and no ad-hoc "Checking" string is shown', async () => {
+    const { m } = openStatus({ platform: 'macos', finder: new Promise(() => {}) })
+    await settle(m)
+    expect(textOf(m.tree())).not.toContain('Checking')
+  })
+
   test('a state that cannot be read says so, and is never "Adding" (lead ruling 7a)', async () => {
     const { m } = openStatus({ platform: 'macos', finder: new Error('no reconciler') })
     await settle(m)

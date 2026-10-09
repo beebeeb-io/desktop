@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'bun:test'
 import type { VaultItem } from '../src/desktopApi'
 import type { FinderSetupView } from '../src/finderSetup'
-import { FINDER_REASON_COPY, FINDER_REPAIR_PARTIAL } from '../src/finderSetupCopy'
+import { FINDER_REASON_COPY, FINDER_REPAIR_PARTIAL, FINDER_RESTING_LINE } from '../src/finderSetupCopy'
 import { DESKTOP_NOTIFICATION_PREF_META } from '../src/windows/notificationPreferenceMeta'
 import {
   accountInitial,
@@ -92,7 +92,10 @@ describe('Beebeeb in Finder (spec 2026-10-06)', () => {
     expect(finderRow(null, true)).toEqual({ kind: 'unavailable' })
     expect(finderRow(v({ setup: 'ready' }))).toEqual({ kind: 'added' })
     expect(finderRow(v({ setup: 'adding' }))).toEqual({ kind: 'adding' })
-    expect(finderRow(v({ setup: 'missing' }))).toEqual({ kind: 'adding' })
+    // FA-I2: a loaded Missing is a resting state (after a sign-out, a Lock, or with no keys here),
+    // so it is a quiet row with its one sentence and no button, never "Adding".
+    expect(finderRow(v({ setup: 'missing' }))).toEqual({ kind: 'resting' })
+    expect(finderHint(finderRow(v({ setup: 'missing' })))).toBe(FINDER_RESTING_LINE)
     expect(finderRow(v({ setup: 'failed', reason: 'folder_taken' }))).toEqual({
       kind: 'notice', tone: 'alert', reason: 'folder_taken',
       sentence: FINDER_REASON_COPY.folder_taken.sentence, action: 'copy_details', actionLabel: 'Copy details',

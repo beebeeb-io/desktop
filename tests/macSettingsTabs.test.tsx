@@ -614,6 +614,16 @@ describe('Sync tab', () => {
     expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
+  // FA-I2: a loaded Missing rests (after a sign-out, a Lock, or with no keys on this Mac). The row
+  // claims no activity and nothing about presence: one sentence, no button, no error.
+  test('a loaded Missing is a quiet row: the one sentence, no button, no "Adding…", no error', async () => {
+    const { m } = await openSync({ finder: finderView({ setup: 'missing' }) })
+    expect(visibleText(m)).toContain(finderSetupCopy.FINDER_RESTING_LINE)
+    expect(visibleText(m)).not.toMatch(/Adding|Checking/)
+    expect(buttons(m).filter((b) => ['Adding…', 'Try again', 'Repair…'].includes(b))).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
   test('the instant before the first answer says nothing and offers nothing (it is not "Adding" either)', async () => {
     const { backend } = syncBackend()
     const m = open('SyncTab', { ...backend, finder_setup_state: () => new Promise(() => {}) }, { props: { settings: ready() } })

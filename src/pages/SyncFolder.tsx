@@ -240,10 +240,13 @@ export default function SyncFolder() {
               : 'Install Beebeeb as the Finder drive. On macOS the visible location is managed by File Provider; local sync state stays private.'}
           </p>
         </div>
-        <span className="status-pill">
-          <span className={`dot ${macPill ? (macPill.tone === 'idle' ? '' : macPill.tone) : installed ? 'ok' : 'warn'}`} />
-          {macPill ? macPill.label : installed ? 'Installed' : 'Needs install'}
-        </span>
+        {/* A loaded Missing on a Mac has no pill (FA-I2): it claims nothing about presence. */}
+        {(!isMacos || macPill) && (
+          <span className="status-pill">
+            <span className={`dot ${macPill ? (macPill.tone === 'idle' ? '' : macPill.tone) : installed ? 'ok' : 'warn'}`} />
+            {macPill ? macPill.label : installed ? 'Installed' : 'Needs install'}
+          </span>
+        )}
       </div>
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
@@ -285,7 +288,8 @@ export default function SyncFolder() {
           </div>
         </div>
       )}
-      {macPresentation?.kind === 'adding' && (
+      {/* Adding, and a loaded Missing (FA-I2: its one resting sentence, no action), are neutral lines. */}
+      {(macPresentation?.kind === 'adding' || macPresentation?.kind === 'resting') && (
         <div className="notice" role="status" style={{ marginBottom: 14 }}>
           {macPresentation.line}
         </div>

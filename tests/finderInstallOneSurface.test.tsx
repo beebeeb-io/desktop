@@ -284,6 +284,21 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     expect(bus.registered).toBe(1)
   })
 
+  // FA-I2: a loaded Missing is a quiet row: no pill, no activity, the one sentence as a neutral line.
+  test('a loaded Missing: no pill, the one sentence as a neutral line, no button, no error', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'missing' }) })
+    expect(m.elements().filter((el) => el.props.className === 'status-pill')).toEqual([])
+    expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toEqual([finderSetupCopy.FINDER_RESTING_LINE])
+    expect(textOf(m.tree())).not.toMatch(/Adding|Checking/)
+    expect(btns(m).filter((b) => ['Try again', 'Open in Finder'].includes(b))).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a Missing that carries a reason (D7) has the notice\'s pill, never "Checking"', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'missing', reason: 'not_in_applications', launch_location: 'disk_image' }) })
+    expect(m.elements().filter((el) => el.props.className === 'status-pill').map((el) => textOf(el.props.children).trim())).toEqual(['Setup blocked'])
+  })
+
   test('adding is a neutral status line, not an error, with no action', async () => {
     const { m } = await openMac()
     expect(visibleErrorSurfaces(m)).toEqual([])
@@ -577,6 +592,27 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
       await settle(m)
       expect(count(m, 'finder_setup_state')).toBe(2)
       expect(count(m, 'finder_setup_retry')).toBe(0)
+    })
+
+    // FA-I2: a loaded Missing is a quiet row: its one sentence, no chip, no button, no activity.
+    test('a loaded Missing: the one sentence, no chip, no button, never "Checking"', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'missing' }))
+      expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_RESTING_LINE)
+      expect(textOf(m.tree())).not.toMatch(/Checking|Adding/)
+      expect(chips(m)).toEqual([])
+      expect(btns(m)).toEqual([])
+      expect(visibleErrorSurfaces(m)).toEqual([])
+    })
+
+    test('a Missing with a reason (D7): the card says the notice\'s label, never "Checking"', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'missing', reason: 'not_in_applications', launch_location: 'disk_image' }))
+      expect(textOf(m.tree())).toContain('Setup blocked')
+      expect(textOf(m.tree())).not.toContain('Checking')
+    })
+
+    test('before the first answer: no ad-hoc "Checking..." line', async () => {
+      const { m } = await openMacPanel(new Promise(() => {}) as unknown)
+      expect(textOf(m.tree())).not.toContain('Checking')
     })
 
     test('no state offers Install or Enable, and no install-era command is called', async () => {

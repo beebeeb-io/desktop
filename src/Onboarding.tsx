@@ -632,8 +632,9 @@ function MacFinderStep({ onDone }: { onDone: () => void }) {
           </div>
         </div>
       ) : presentation.kind === 'adding' || presentation.kind === 'ready' ? (
-        // Only what the reconciler said. Before its first answer, and while it says Missing, there
-        // is nothing true to show yet, so nothing is shown (never "Adding" on a guess).
+        // Only what the reconciler said. Before its first answer, and while it rests in Missing (the
+        // keys are about to arrive in this flow), nothing is shown: never "Adding" on a guess, and the
+        // resting sentence of the other surfaces would be wrong here, where the person is signing in.
         <div className="panel" style={{ marginTop: 16, background: 'var(--paper-2)' }}>
           <div className="mono" style={{ fontSize: 13 }}>
             {presentation.line}

@@ -15,6 +15,7 @@ import {
   FINDER_REPAIR_PARTIAL,
   FINDER_READY_LINE,
   FINDER_REASON_COPY,
+  FINDER_RESTING_LINE,
   FINDER_SETUP_TITLE,
   FINDER_SHOW_FILE_FAILED,
   FINDER_STATUS_PILL,
@@ -80,7 +81,7 @@ describe('finderSetupCopy (spec §6.2)', () => {
 
   test('the states that are not failures', () => {
     expect(finderSetupPresentation(null)).toEqual({ kind: 'quiet', line: '' })
-    expect(finderSetupPresentation(view({ setup: 'missing' }))).toEqual({ kind: 'quiet', line: '' })
+    expect(finderSetupPresentation(view({ setup: 'missing' }))).toEqual({ kind: 'resting', line: FINDER_RESTING_LINE })
     expect(finderSetupPresentation(view({ setup: 'adding' }))).toEqual({ kind: 'adding', line: FINDER_ADDING_LINE })
     expect(finderSetupPresentation(view({ setup: 'ready' }))).toEqual({ kind: 'ready', line: FINDER_READY_LINE })
     expect(finderSetupPresentation(view({ setup: 'failed' }))).toMatchObject({ kind: 'notice', reason: 'unknown' })
@@ -104,6 +105,7 @@ describe('finderSetupCopy (spec §6.2)', () => {
     const all = [
       FINDER_ADDING_LINE,
       FINDER_READY_LINE,
+      FINDER_RESTING_LINE,
       FINDER_SETUP_TITLE,
       FINDER_UNAVAILABLE_LINE,
       FINDER_OPEN_FAILED,
@@ -141,6 +143,36 @@ describe('finderSetupCopy (spec §6.2)', () => {
       expect(html).toContain(`<span class="board-tag">${reason}</span><p>${FINDER_REASON_COPY[reason].sentence}</p>`)
       expect(html).toContain(`<span class="board-btn">${FINDER_ACTION_LABEL[FINDER_REASON_COPY[reason].action]}</span>`)
     }
+  })
+})
+
+/**
+ * Lead ruling FA-I2 (it corrects FT-I2's copy), spec §5.2 as amended: a loaded `Missing` means "no
+ * check owns Finder right now; Beebeeb may or may not still be registered". It rests there after a
+ * sign-out, after a Lock that interrupts a check, and while the keys are not on this Mac. So it is a
+ * quiet row: no pill, no activity, no claim about presence, and one sentence where a slot needs text.
+ */
+describe('a loaded Missing is a quiet row (FA-I2)', () => {
+  test('its one sentence, with the house apostrophe', () => {
+    expect(FINDER_RESTING_LINE).toBe('Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.')
+    expect(FINDER_RESTING_LINE.match(/[.!?]/g)).toHaveLength(1)
+  })
+
+  test('it claims no activity and nothing about presence', () => {
+    expect(FINDER_RESTING_LINE).not.toMatch(/Adding|Checking|…|isn’t in Finder|is in Finder|not in Finder|appears/i)
+  })
+
+  test('a loaded Missing presents as resting; before any answer it is still quiet (nothing to say yet)', () => {
+    expect(finderSetupLoadPresentation({ status: 'loaded', view: view({ setup: 'missing' }) })).toEqual({ kind: 'resting', line: FINDER_RESTING_LINE })
+    expect(finderSetupLoadPresentation({ status: 'loading' })).toEqual({ kind: 'quiet', line: '' })
+  })
+
+  test('a Missing with a reason is still that reason\'s notice (D7), not the quiet row', () => {
+    expect(finderSetupPresentation(view({ setup: 'missing', reason: 'not_in_applications' }))).toMatchObject({ kind: 'notice', reason: 'not_in_applications' })
+  })
+
+  test('it has no pill', () => {
+    expect(finderStatusPill({ status: 'loaded', view: view({ setup: 'missing' }) })).toBeNull()
   })
 })
 
@@ -283,7 +315,24 @@ describe('the status pill of the compact pages', () => {
     expect(pill(view({ setup: 'adding' }))).toEqual({ label: 'Adding', tone: 'warn' })
     expect(pill(view({ setup: 'failed', reason: 'timeout' }))).toEqual({ label: 'Setup blocked', tone: 'error' })
     expect(pill(view({ setup: 'user_disabled', reason: 'user_disabled' }))).toEqual({ label: 'Turned off', tone: 'warn' })
-    expect(pill(view({ setup: 'missing' }))).toEqual({ label: 'Checking', tone: 'warn' })
+    expect(pill(view({ setup: 'missing' }))).toBeNull()
+  })
+
+  // FA-I2 / FT-I2: the pill is keyed on what the surface PRESENTS, not on the raw state, so a
+  // `missing` that carries a reason (D7: running from the disk image) is a notice with a notice's
+  // label, never "Checking" next to a red dot.
+  test('a notice carries its own label whatever state it came from; no pill ever says "Checking"', () => {
+    const pill = (v: FinderSetupView) => finderStatusPill({ status: 'loaded', view: v })
+    expect(pill(view({ setup: 'missing', reason: 'not_in_applications', launch_location: 'disk_image' }))).toEqual({ label: 'Setup blocked', tone: 'error' })
+    const labels = [
+      ...Object.values(FINDER_STATUS_PILL),
+      FINDER_STATUS_PILL_LOADING,
+      FINDER_STATUS_PILL_UNAVAILABLE,
+      ...(['ready', 'missing', 'adding', 'failed', 'user_disabled'] as const).flatMap((setup) =>
+        [null, ...FINDER_FAILURE_REASONS].map((reason) => pill(view({ setup, reason }))?.label ?? null),
+      ),
+    ]
+    expect(labels.filter((label) => label !== null && /Checking/.test(label))).toEqual([])
   })
 
   test('an unreadable state is not "Adding"', () => {
