@@ -24774,19 +24774,32 @@ mod account_binding_tests {
 
     /// R3: the exceptions are exact. A sign-out whose Finder removal was CONFIRMED leaves the domain gone, so the
     /// next account's first start owes nothing (no wait on every sign-in after a sign-out); one whose removal was
-    /// not confirmed owes it.
+    /// not confirmed owes it. Off a Mac there is no Finder domain and no removal to confirm: a start after any
+    /// sign-out owes nothing.
     #[test]
     fn a_start_after_a_confirmed_sign_out_owes_nothing_and_after_an_unconfirmed_one_it_does() {
         for (owe_after_sign_out, expect_debt) in [(false, false), (true, true)] {
             let local = local_data_of(Some(alice()));
-            // The sign-out purge, as `clear_session_impl` runs it, with its removal confirmed or not.
+            // The sign-out purge, as `clear_session_impl` runs it, with its removal confirmed or not. Off a Mac it
+            // passes `owe_removal = false` whatever happened (pinned by
+            // `a_failed_sign_out_purge_stops_the_sign_out_on_macos_and_linux`).
             #[cfg(not(target_os = "windows"))]
             assert_eq!(
-                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe_after_sign_out),
+                purge_local_data_for_sign_out(
+                    Ok(local.dir.path().to_path_buf()),
+                    None,
+                    cfg!(target_os = "macos") && owe_after_sign_out
+                ),
                 Ok(())
             );
+            // Windows signs out through `windows_cf::signout::purge`, which refuses while a change is queued (so the
+            // queue is emptied first, as a finished sync leaves it) and ends in `finish_windows_signout`: every row
+            // cleared, no Finder debt recorded.
             #[cfg(target_os = "windows")]
-            local.data.db.clear_account_data(owe_after_sign_out).unwrap();
+            {
+                local.data.db.purge_all_local_state().unwrap();
+                local.data.db.finish_windows_signout().unwrap();
+            }
             let fx = AuthorizeFixture::with_session(&bob());
             let slot = fx.acct.engine.try_lock().unwrap();
             let result = authorize_engine_start(
@@ -25037,6 +25050,12 @@ mod account_binding_tests {
         assert!(
             clear.contains("let owe_removal = finder_cleanup.is_err();"),
             "a removal the reconciler could not confirm is owed before any engine starts:\n{clear}"
+        );
+        assert!(
+            crate::source_pin::squeeze(clear).contains(&crate::source_pin::squeeze(
+                "#[cfg(not(target_os = \"macos\"))] let owe_removal = false;"
+            )),
+            "off a Mac there is no Finder domain, so a sign-out owes no removal:\n{clear}"
         );
     }
 
