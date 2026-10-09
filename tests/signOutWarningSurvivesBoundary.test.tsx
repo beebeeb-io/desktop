@@ -118,6 +118,7 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
     },
   }
   dom.window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
+  return handlers
 }
 
 /** Mount `window` under the same providers, in the same order, as main.tsx. */
@@ -180,6 +181,9 @@ const SLOW = 15_000
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const hasTabs = (container: MiniElement) => elements(container).some((el) => el.getAttribute('role') === 'tab')
 const hasPage = (container: MiniElement) => elements(container).some((el) => el.tagName === 'SECTION' && el.className === 'page')
+const selectedTabs = (container: MiniElement) =>
+  elements(container).filter((el) => el.getAttribute('role') === 'tab' && el.getAttribute('aria-selected') === 'true').map((el) => el.textContent.trim())
+const headings = (container: MiniElement) => elements(container).filter((el) => el.tagName === 'H1').map((el) => el.textContent.trim())
 
 /**
  * The engine slot as `clear_session_impl` holds it on a Mac: from the engine stop until just before it moves the
@@ -392,5 +396,143 @@ describe('a status read held back behind the sign-out and answered before it (ou
     expect(byText(container, 'h1', 'Account & security')).toBeDefined()
     expect(container.textContent).not.toContain('Account changed')
     expect(container.textContent).not.toContain('Couldn’t sign out')
+  }, SLOW)
+})
+
+/**
+ * Whenever a sign-out's sentence becomes held, the window shows the surface that says it: the Settings window its
+ * Account tab, the compact window its Account page. Both windows start here on their default surface (General,
+ * Status), so after the remount only following the held sentence can bring them back to Account.
+ */
+describe('the window follows the held sentence, in either order of the two answers (outside React.act)', () => {
+  /** The first `popover_snapshot` sent after the sign-out (Settings reading the account after its action) waits for `release`. */
+  function gateTheReadAfterSignOut(native: Native, handlers: Record<string, (args: any) => unknown>) {
+    const answer = handlers.popover_snapshot
+    const gate = { waiting: false, used: false, release: () => {} }
+    handlers.popover_snapshot = async (args: unknown) => {
+      if (native.calls.includes('clear_session') && !gate.used) {
+        gate.used = true
+        gate.waiting = true
+        await new Promise<void>((resolve) => { gate.release = resolve })
+        gate.waiting = false
+      }
+      return answer(args)
+    }
+    return gate
+  }
+
+  /** Settings on its General tab, then on Account with the sign-out confirm open. */
+  async function openSettingsOnGeneral(native: Native, extra: Record<string, (args: any) => unknown> = {}) {
+    const handlers = installBackend(native, extra)
+    const { default: MacSettings } = await import('../src/MacSettings')
+    const container = await mountWindow('?window=settings-v2&platform=macos', <MacSettings />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasTabs(container))
+    expect(selectedTabs(container)).toEqual(['General'])
+    await press(container, 'button', 'Account')
+    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
+    await press(container, 'button', 'Sign out…')
+    return { container, handlers }
+  }
+
+  /** The compact window on its Status page, then on Account. */
+  async function openCompactOnStatus(native: Native, extra: Record<string, (args: any) => unknown>) {
+    installBackend(native, extra)
+    const { default: App } = await import('../src/App')
+    const container = await mountWindow('?platform=macos', <App />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasPage(container))
+    expect(headings(container)).not.toContain('Account & security')
+    await React.act(async () => {
+      click(container, elements(container).find((el) => el.tagName === 'BUTTON' && el.textContent.includes('Account & security'))!)
+    })
+    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
+    return container
+  }
+
+  const nothingSaysItFailed = (container: MiniElement) => {
+    expect(container.textContent).not.toContain('Account changed')
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }
+
+  test('Settings: the sentence is held as soon as the sign-out answers, before the tab reads the account again', async () => {
+    const native: Native = { loggedIn: true, revision: 60, calls: [] }
+    const { container, handlers } = await openSettingsOnGeneral(native)
+    const gate = gateTheReadAfterSignOut(native, handlers)
+    await press(container, 'button', 'Sign out')
+    await waitFor('the read of the account after the sign-out', () => gate.waiting)
+    expect(heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    await React.act(async () => { gate.release() })
+  }, SLOW)
+
+  test('Settings, the status read first: the window ends on the Account tab with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 70, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    const { container } = await openSettingsOnGeneral(native, slot.handlers)
+    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasTabs)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(selectedTabs(container)).toEqual(['Account'])
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+
+  test('Settings, the sign-out’s answer first and its read of the account answered after the remount: the window ends on the Account tab with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 80, calls: [] }
+    const slot = heldBehindSignOut(native, 'answer-first')
+    const { container, handlers } = await openSettingsOnGeneral(native, slot.handlers)
+    const gate = gateTheReadAfterSignOut(native, handlers)
+    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+
+    ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = false
+    click(container, byText(container, 'button', 'Sign out'))
+    await plainWait('the remounted window, while the read of the account after the sign-out is unanswered', () =>
+      gate.waiting &&
+      slot.probe.revisionAtAnswer !== null &&
+      accountSessionRevision() === native.revision &&
+      !container.contains(shownBefore) &&
+      hasTabs(container) &&
+      !container.textContent.includes('Checking device support…'))
+    gate.release()
+    await plainWait('the settled window', () => !gate.waiting && !container.textContent.includes('Loading…'))
+    await sleep(300)
+
+    // The order really was answer-first: the sign-out answered before this window observed its revision.
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision - 2)
+    expect(selectedTabs(container)).toEqual(['Account'])
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+
+  test('the compact window, the status read first: it ends on the Account page with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 90, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    const container = await openCompactOnStatus(native, slot.handlers)
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasPage)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(headings(container)).toContain('Account & security')
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+
+  test('the compact window, the sign-out’s answer first: it ends on the Account page with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 100, calls: [] }
+    const slot = heldBehindSignOut(native, 'answer-first')
+    const container = await openCompactOnStatus(native, slot.handlers)
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasPage)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision - 2)
+    expect(headings(container)).toContain('Account & security')
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
   }, SLOW)
 })

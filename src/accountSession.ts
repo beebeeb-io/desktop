@@ -16,8 +16,10 @@ export function observeAccountSession(next: number): void {
 // A sign-out that happened but could not confirm a step (FB-24 row 12) leaves Rust's sentence here, per
 // WebView and outside AccountSessionBoundary on purpose: the sign-out moves the revision above, the boundary
 // then remounts every account view, and a sentence held in component state would be gone within a second.
-// While a sentence is held, the window remounts on the account surface that shows it. The sentence is
-// cleared by the next account action on that surface, or by the next sign-in; never by the remount.
+// While a sentence is held, the window remounts on the account surface that shows it, and a window that is
+// already mounted when a sentence becomes held switches to that surface (the remount and the sign-out's answer
+// arrive in either order). The sentence is cleared by the next account action on that surface, or by the next
+// sign-in; never by the remount.
 let signOutWarning: { sentence: string; signedOutAt: number | null } | null = null
 const signOutWarningListeners = new Set<() => void>()
 function emitSignOutWarning() {

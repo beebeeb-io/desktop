@@ -317,10 +317,15 @@ function AccountTab() {
     if (result.ok) setActionNote((result.value as SessionActionOutcome).warning?.sentence ?? null)
   }
 
+  // The sentence is held the moment the sign-out answers, before the tab reads the account again: the session
+  // boundary can remount this window at any point after the sign-out, and the remount must find it held.
   const signOut = async () => {
     setConfirmSignOut(false)
-    const result = await run('clear_session', () => clearSession(), 'Couldn’t sign out')
-    if (result.ok) holdSignOutWarning((result.value as SessionActionOutcome).warning?.sentence ?? null)
+    await run('clear_session', async () => {
+      const result = await clearSession()
+      if (result.ok) holdSignOutWarning(result.value.warning?.sentence ?? null)
+      return result
+    }, 'Couldn’t sign out')
   }
 
   const shownNote = actionNote ?? signOutNote
@@ -924,6 +929,15 @@ export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }
   const settings = useSettingsConfig()
   // A remount after a sign-out that left a sentence opens on the Account tab, where it is shown (accountSession.ts).
   const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? (heldSignOutWarning() !== null ? 'account' : settingsTabFromLocation()))
+  // And a sentence that becomes held after this window mounted brings it to the Account tab too: the boundary's
+  // remount and the sign-out's answer arrive in either order.
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
+  const seenSignOutNote = useRef(signOutNote)
+  useEffect(() => {
+    if (signOutNote === seenSignOutNote.current) return
+    seenSignOutNote.current = signOutNote
+    if (signOutNote !== null) setTab('account')
+  }, [signOutNote])
 
   // Slice 6: this window is the surface the native "Check for updates…" menu item opens on
   // macOS, so it drains the pending request itself and answers inline in the About tab's row
