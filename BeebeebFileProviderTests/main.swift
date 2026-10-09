@@ -1724,5 +1724,36 @@ check("upload-staging-S5: discard deletes the copy and tolerates one the app alr
     }
 }
 
+check("upload-staging-S6: a package or any other non-regular item is refused before anything is copied, definitively") {
+    try withScratchContainer { container in
+        // A package (a folder macOS shows as one file) arrives as a directory URL.
+        let package = container.appendingPathComponent("Holiday notes.rtfd", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try Data("text".utf8).write(to: package.appendingPathComponent("TXT.rtf"))
+        let target = container.appendingPathComponent("target.txt")
+        try Data("t".utf8).write(to: target)
+        let link = container.appendingPathComponent("Holiday link.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        for source in [package, link] {
+            do {
+                _ = try UploadStaging.stage(contentsOf: source, in: container)
+                throw TestFailure(description: "staging \(source.lastPathComponent) must be refused")
+            } catch let error as BeebeebIPCError {
+                guard case .daemonRejected = error else {
+                    throw TestFailure(description: "expected daemonRejected, got \(error)")
+                }
+                let ns = error as NSError
+                try expect(ns.code == NSFileProviderError.cannotSynchronize.rawValue,
+                           "a non-regular item must be definitive cannotSynchronize (-2005), got \(ns.code)")
+                try expect(!error.isTransient, "retrying cannot turn a package into a file")
+                try expect(!ns.localizedDescription.contains("Holiday"),
+                           "the error text must not carry the file name: \(ns.localizedDescription)")
+            }
+        }
+        try expect(stagingEntries(container).isEmpty,
+                   "nothing may be copied into upload-staging: \(stagingEntries(container))")
+    }
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

@@ -10,7 +10,7 @@ import Foundation
 /// copy's path.
 ///
 /// The app accepts contents from this directory only, takes its own copy, and
-/// deletes this one when it answers (`validate_staged_contents_path` and
+/// deletes this one when it answers (`open_staged_contents` and
 /// `StagedContents` in `src-tauri/src/ipc_socket.rs`). The extension deletes it
 /// after the reply as well, and the app purges anything a crash left behind
 /// after an hour (`UPLOAD_STAGING_MAX_AGE`).
@@ -58,10 +58,28 @@ enum UploadStaging {
     /// time, and a copy that kept the source's (possibly years-old) mtime would
     /// look orphaned at once.
     ///
-    /// Every failure is `uploadStagingFailed`, a TRANSIENT error, so the system
-    /// retries the write instead of giving up on the file, and nothing is left
-    /// behind.
+    /// Only a regular file is copied. A package (a folder that macOS shows as
+    /// one file, such as an `.rtfd` document) reaches the extension as a
+    /// directory, and a symlink is not contents either. Neither is copied:
+    /// the app accepts regular files only, and a copied tree with mode 0600
+    /// could not be deleted by either side. They are refused with a
+    /// DEFINITIVE `daemonRejected` (`cannotSynchronize`), the same answer the
+    /// app gives for such an item, because retrying cannot make it a file.
+    ///
+    /// Every other failure is `uploadStagingFailed`, a TRANSIENT error, so the
+    /// system retries the write instead of giving up on the file, and nothing
+    /// is left behind.
     static func stage(contentsOf source: URL, in groupContainer: URL) throws -> URL {
+        // `attributesOfItem` describes a symlink itself, never its target.
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        } catch {
+            throw BeebeebIPCError.uploadStagingFailed(reason(error))
+        }
+        guard (attributes[.type] as? FileAttributeType) == .typeRegular else {
+            throw BeebeebIPCError.daemonRejected(notARegularFileMessage)
+        }
         let destination: URL
         do {
             destination = newFileURL(in: try directory(in: groupContainer))
@@ -81,6 +99,11 @@ enum UploadStaging {
         }
         return destination
     }
+
+    /// What the person sees for a package or another non-regular item. It
+    /// names no file.
+    static let notARegularFileMessage =
+        "Beebeeb can only upload regular files, and this item is a package or another special item. It was not uploaded."
 
     /// Delete a copy once the app has answered, or could not be reached. The
     /// app deletes it too; whichever runs second finds nothing.

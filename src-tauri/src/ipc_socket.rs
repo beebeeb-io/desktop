@@ -952,6 +952,13 @@ fn remove_tree_at(parent_fd: std::os::fd::RawFd, name: &std::ffi::OsStr, depth: 
     }
     // SAFETY: `raw` is a descriptor we just opened and own.
     let dir = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    // A directory without its search bit (an older extension set a copied
+    // package to 0600) lets nothing inside it be inspected or unlinked. We
+    // own it, so give it back to ourselves first.
+    // SAFETY: the descriptor is open for the call.
+    if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     for child in list_dir_fd(dir.as_raw_fd())? {
         let stat = fstatat_nofollow(dir.as_raw_fd(), &child)?;
         if is_dir_mode(stat.st_mode) {
@@ -4543,6 +4550,28 @@ mod tests {
             "a link inside the tree is unlinked, never followed"
         );
         assert!(staging.is_dir(), "the staging dir itself remains");
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_a_stale_tree_whose_directory_lost_its_search_bit() {
+        // An older extension copied a package as a directory and then set it
+        // to 0600: no search bit, so its children could not be unlinked and
+        // the tree stayed forever. The purge must still remove it.
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, staging) = upload_staging_fixture();
+        let tree = staging.join("package-copy");
+        std::fs::create_dir_all(tree.join("Contents")).unwrap();
+        write_file(&tree.join("TXT.rtf"), b"plaintext");
+        write_file(&tree.join("Contents").join("image.png"), b"plaintext");
+        std::fs::set_permissions(tree.join("Contents"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        let removed = purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later);
+        // Leave nothing undeletable behind for the temp dir's own cleanup.
+        let _ = std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(tree.join("Contents"), std::fs::Permissions::from_mode(0o700));
+        assert_eq!(removed, Ok(1), "a 0600 tree must still be purged");
+        assert!(std::fs::symlink_metadata(&tree).is_err(), "the whole tree is gone");
     }
 
     #[test]
