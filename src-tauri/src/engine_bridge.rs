@@ -1581,6 +1581,13 @@ impl EngineBridge {
                 .as_deref()
                 .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
             let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+            // Decided from the row BEFORE this write changes it.
+            let current_row = self.db.get_file(&file_id)?;
+            let current_contract = self.db.get_file_contract_state(&file_id)?;
+            let base_version = modify_base_version(
+                target.base_version_identifier.as_deref(),
+                current_row.as_ref().zip(current_contract.as_ref()),
+            );
             self.db.set_status(&file_id, FileStatus::Uploading)?;
             let mut payload = serde_json::json!({
                 "operation": "upload_version",
@@ -1598,7 +1605,7 @@ impl EngineBridge {
                 Some(target.filename),
                 payload,
                 Some(staged_path),
-                parse_base_version_number(target.base_version_identifier.as_deref()),
+                base_version,
                 item_contract
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
@@ -4502,6 +4509,49 @@ pub(crate) fn item_content_version(current_version: i64, content_hash: Option<&s
 /// content version, so it leads with the server version too.
 pub(crate) fn item_version_identifier(current_version: i64, modified_at: i64, size_bytes: i64) -> String {
     format!("{current_version}:{modified_at}:{size_bytes}")
+}
+
+/// The server version a Finder content modify is based on, from the content
+/// version the system held when the user saved.
+///
+/// Builds before the server-version-led format told the system identifiers
+/// led by `max(current_version, remote_updated_at)`: a wall-clock second once
+/// the row had been re-stamped. The system keeps such an identifier for an
+/// item until it reads the item again, and sends it as the base of the next
+/// write (also when it re-sends a write that failed earlier). Parsed as is,
+/// that base is a timestamp the server refuses as stale.
+///
+/// Rule: an identifier that is EXACTLY what the old formula gives for the row
+/// as it is now ([`legacy_item_identifiers`]: the old content version, with
+/// the row's hash when it has one, or the old full identifier) describes the
+/// row's current content, so it is based on `current_version`. Every other
+/// identifier is parsed as before: its first segment is the base, and a base
+/// the server does not hold is refused as stale. An old identifier for older
+/// content never equals the row's current one: content changes move
+/// `current_version`, and every re-stamp moves `remote_updated_at`.
+fn modify_base_version(
+    version_identifier: Option<&str>,
+    current: Option<(&FileEntry, &FileContractState)>,
+) -> Option<i64> {
+    if let (Some(identifier), Some((entry, contract))) = (version_identifier, current)
+        && legacy_item_identifiers(entry, contract)
+            .iter()
+            .any(|legacy| legacy == identifier)
+    {
+        return Some(contract.current_version).filter(|version| *version > 0);
+    }
+    parse_base_version_number(version_identifier)
+}
+
+/// The identifiers a build before the server-version-led format reported for
+/// this row: the content version and the full version identifier, both led by
+/// `max(current_version, remote_updated_at)`. Used only to recognise them.
+fn legacy_item_identifiers(entry: &FileEntry, contract: &FileContractState) -> [String; 2] {
+    let leading = contract.current_version.max(entry.remote_updated_at);
+    [
+        item_content_version(leading, entry.content_hash.as_deref()),
+        item_version_identifier(leading, entry.modified_at, entry.size_bytes),
+    ]
 }
 
 pub(crate) fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
@@ -12478,6 +12528,17 @@ mod tests {
             }
         }
 
+        /// Put `file_id` on the server at `versions` versions (empty
+        /// content), as if it had been uploaded before the test.
+        fn seed_file(&self, file_id: &str, versions: usize) {
+            self.state.lock().unwrap().files.insert(
+                file_id.to_string(),
+                MockServerFile {
+                    versions: vec![Vec::new(); versions],
+                },
+            );
+        }
+
         fn finish(self) -> VersionedServerState {
             self.stop.store(true, Ordering::SeqCst);
             self.handle.join().unwrap();
@@ -12726,5 +12787,152 @@ mod tests {
             FileStatus::Local,
             "the edit must not leave the file read-only"
         );
+    }
+
+    // ── Identifiers the system still holds from before the version fix ────
+
+    /// A row as an earlier build left it after its own upload and the op
+    /// echo: server version 2, wall-clock stamps at 1_791_550_370. That
+    /// build told the system `1791550370` (and `1791550370:1791550370:18`).
+    fn seed_legacy_row(bridge: &EngineBridge, file_id: &str, content_hash: Option<&str>) {
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: "d2-fixture.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 18,
+                modified_at: 1_791_550_370,
+                content_hash: content_hash.map(str::to_string),
+                remote_updated_at: 1_791_550_370,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.current_version = 2;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    /// Queue a content modify of `file_id` with `identifier` as its base and
+    /// return the queued op's `base_version`.
+    fn queued_modify_base(bridge: &EngineBridge, dir: &Path, file_id: &str, identifier: &str) -> Option<i64> {
+        let contents = dir.join(format!("edit-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&contents, b"edited bytes").unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(
+                Some(file_id),
+                "d2-fixture.txt",
+                &contents,
+                Some(identifier.to_string()),
+            ))
+            .unwrap();
+        let queued = bridge.db.list_due_operations(i64::MAX).unwrap();
+        let op = queued
+            .iter()
+            .rev()
+            .find(|op| op.file_id.as_deref() == Some(file_id))
+            .expect("the modify was queued");
+        let base = op.base_version;
+        bridge.db.remove_operation(&op.op_id).unwrap();
+        bridge.db.set_status(file_id, FileStatus::Local).unwrap();
+        base
+    }
+
+    #[test]
+    fn a_legacy_identifier_of_the_current_content_is_based_on_the_server_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_legacy_row(&bridge, "legacy-1", None);
+        assert_eq!(
+            queued_modify_base(&bridge, dir.path(), "legacy-1", "1791550370"),
+            Some(2),
+            "the old content version of the row as it is now"
+        );
+        assert_eq!(
+            queued_modify_base(&bridge, dir.path(), "legacy-1", "1791550370:1791550370:18"),
+            Some(2),
+            "the old full version identifier of the row as it is now"
+        );
+
+        seed_legacy_row(&bridge, "legacy-hash", Some("abc123"));
+        assert_eq!(
+            queued_modify_base(&bridge, dir.path(), "legacy-hash", "1791550370:abc123"),
+            Some(2),
+            "the old content version with the row's content hash"
+        );
+    }
+
+    #[test]
+    fn a_legacy_identifier_of_older_content_stays_a_stale_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_legacy_row(&bridge, "legacy-2", Some("abc123"));
+        for older in [
+            // Stamped before the latest re-stamp of the row.
+            "1791550250",
+            "1791550250:abc123",
+            "1791550250:1791550250:18",
+            // The right stamp, other content.
+            "1791550370:def456",
+            "1791550370:1791550370:17",
+        ] {
+            assert_eq!(
+                queued_modify_base(&bridge, dir.path(), "legacy-2", older),
+                parse_base_version_number(Some(older)),
+                "{older} does not describe the row's current content and is parsed as before"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_identifier_of_older_content_is_refused_by_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let server = VersionedServerMock::start();
+        server.seed_file("legacy-3", 2);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [22u8; 32]);
+        seed_legacy_row(&bridge, "legacy-3", None);
+        let contents = dir.path().join("edit.txt");
+        std::fs::write(&contents, b"edited bytes").unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(
+                Some("legacy-3"),
+                "d2-fixture.txt",
+                &contents,
+                Some("1791550250".into()),
+            ))
+            .unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert!(!state.inits.is_empty(), "the upload was attempted");
+        assert!(
+            state.inits.iter().all(|(_, status)| *status == 409),
+            "an identifier of older content is a stale base: {:?}",
+            state.init_summary()
+        );
+        assert_eq!(state.files["legacy-3"].versions.len(), 2, "no version was added");
+    }
+
+    #[test]
+    fn a_current_format_identifier_is_parsed_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_legacy_row(&bridge, "current-1", Some("abc123"));
+        for (identifier, base) in [
+            ("2", Some(2)),
+            ("2:abc123", Some(2)),
+            ("2:1791550370:18", Some(2)),
+            ("1", Some(1)),
+            ("1:abc123", Some(1)),
+            ("0", None),
+        ] {
+            assert_eq!(
+                queued_modify_base(&bridge, dir.path(), "current-1", identifier),
+                base,
+                "{identifier}"
+            );
+        }
     }
 }
