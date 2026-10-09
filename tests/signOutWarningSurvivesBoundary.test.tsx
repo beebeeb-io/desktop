@@ -18,7 +18,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import type { ReactElement } from 'react'
-import { accountSessionRevision, heldSignOutWarning } from '../src/accountSession'
+import { accountSessionRevision, clearSignOutWarning, heldSignOutWarning } from '../src/accountSession'
 import { allElements, click, installMiniDom, type MiniDomInstall, type MiniElement } from './fixtures/miniDom'
 import { rustStr } from './fixtures/rustConstants'
 
@@ -42,6 +42,8 @@ afterEach(async () => {
   for (const root of roots) await React.act(async () => root.unmount())
   roots = []
   delete dom.window.__TAURI_INTERNALS__
+  // A sign-out's sentence lives in a module store (it outlives the session boundary): one test's is not the next one's.
+  clearSignOutWarning()
 })
 afterAll(() => dom.restore())
 
@@ -123,6 +125,8 @@ async function mountWindow(search: string, window: ReactElement) {
   const { default: AccountSessionBoundary } = await import('../src/AccountSessionBoundary')
   const { ToastProvider } = await import('../src/windows/ui')
   const { CapabilityProvider } = await import('../src/capabilities')
+  // Each window opens as in a fresh WebView: no sentence held from an earlier test.
+  expect(heldSignOutWarning()).toBeNull()
   dom.window.location.search = search
   const container = dom.document.createElement('div')
   dom.document.body.appendChild(container)
@@ -266,6 +270,7 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
     expect(main).toMatch(/<StrictMode>\s*\{which === 'onboarding'/)
   })
 
+  // This test and the next cover one order: the sign-out answers before a status read carries its revision. The other order is tested outside React.act below.
   test('Settings › Account: the sentence is still on screen after the boundary remounts the window', async () => {
     const native: Native = { loggedIn: true, revision: 10, calls: [] }
     installBackend(native)
