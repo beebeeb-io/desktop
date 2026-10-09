@@ -607,7 +607,7 @@ mod tests {
     use super::*;
     use crate::finder_setup::core::{DomainState, Observation, SessionFacts};
     use crate::finder_setup::error::{COCOA_DOMAIN, FILE_PROVIDER_DOMAIN, POSIX_DOMAIN};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// What an NSError message can look like: it names a person's folder and a file.
@@ -701,6 +701,8 @@ mod tests {
         stop: Result<(), FpError>,
         /// Whether a Beebeeb window is on screen (`Ports::window_visible`).
         visible: Arc<AtomicBool>,
+        /// How many times the driver asked `window_visible`: once per poll wake-up.
+        visible_asked: Arc<AtomicUsize>,
         /// Runs inside `AddDomain`, before it returns: an event that arrives mid-operation.
         during_add: Option<Box<dyn FnMut() + Send>>,
         /// This operation panics (inside its future) instead of answering.
@@ -725,6 +727,7 @@ mod tests {
                 kept: KeptFolder::default(),
                 stop: Ok(()),
                 visible: Arc::new(AtomicBool::new(false)),
+                visible_asked: Arc::new(AtomicUsize::new(0)),
                 during_add: None,
                 panic_on: None,
                 wrecked: false,
@@ -810,6 +813,7 @@ mod tests {
             self.record.lock().unwrap().kept_folders.push(kept);
         }
         fn window_visible(&self) -> bool {
+            self.visible_asked.fetch_add(1, Ordering::SeqCst);
             self.visible.load(Ordering::SeqCst)
         }
     }
@@ -1722,15 +1726,16 @@ mod tests {
             );
         }
 
-        // Back on: the UserDisabled poll runs exactly one check, which only confirms.
+        // Back on, as a window gains focus and stays on screen: the UserDisabled poll runs exactly one check, which
+        // only confirms.
         turned_off(false);
+        visible.store(true, Ordering::SeqCst);
         handle.app_activated();
         settle(&handle, |v| v.setup == FinderSetup::Ready).await;
 
-        // Off again, with a window on screen: the timer reads by itself, no activation needed.
+        // Off again, with that window still on screen: the timer reads by itself, no activation needed.
         let reads_before = ops(&record).iter().filter(|op| **op == Op::ReadDomain).count();
         turned_off(true);
-        visible.store(true, Ordering::SeqCst);
         settle(&handle, |v| v.setup == FinderSetup::UserDisabled).await;
         assert!(
             ops(&record).iter().filter(|op| **op == Op::ReadDomain).count() > reads_before,
@@ -1743,6 +1748,76 @@ mod tests {
         );
         assert!(!ops(&record).contains(&Op::AddDomain), "no flip adds");
         assert!(!ops(&record).contains(&Op::StopEngine));
+    }
+
+    /// F7 follow-up (review minor 2): while `Ready` with no Beebeeb window on screen the reconciler stops waking up.
+    /// Every wake-up asks `window_visible` (a main-thread query in the app), so the count of those questions is the
+    /// count of wake-ups. A window gaining focus resumes the poll: one read at once, and the next tick reads.
+    #[tokio::test]
+    async fn a_ready_driver_with_no_window_visible_stops_waking_until_a_window_gains_focus() {
+        let clock = FakeClock::new();
+        let (ports, record) = FakePorts::new(&clock, DomainState::Enabled);
+        let (read, visible, asked) = (ports.read.clone(), ports.visible.clone(), ports.visible_asked.clone());
+        let (handle, task) = start(
+            ports,
+            clock.clone(),
+            LaunchLocation::Applications,
+            None,
+            RetryPolicy::default(),
+        );
+        tokio::spawn(task);
+        handle.trigger(Trigger::Launch).unwrap();
+        settle(&handle, |v| v.setup == FinderSetup::Ready).await;
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "one wake-up 3 s after Ready found no window, and set no new timer"
+        );
+        let slept_at = clock.secs();
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "still no wake-up");
+        assert_eq!(clock.secs(), slept_at, "no timer was waited on");
+        assert!(!ops(&record).contains(&Op::ReadDomain), "and nothing was read");
+
+        // A window gains focus and stays on screen: one read at once, then the timer is back and its next tick reads.
+        visible.store(true, Ordering::SeqCst);
+        handle.app_activated();
+        for _ in 0..10_000 {
+            if ops(&record).iter().filter(|op| **op == Op::ReadDomain).count() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let reads: Vec<u64> = record
+            .lock()
+            .unwrap()
+            .ops
+            .iter()
+            .filter(|(_, op)| *op == Op::ReadDomain)
+            .map(|(at, _)| *at)
+            .take(2)
+            .collect();
+        assert_eq!(
+            reads,
+            vec![slept_at, slept_at + 3],
+            "the activation's read at once, then the next tick's 3 s later"
+        );
+        assert!(asked.load(Ordering::SeqCst) > 1, "the timer woke again");
+
+        // F7 is kept: turned off while that window is on screen is noticed by the timer alone.
+        *read.lock().unwrap() = DomainState::Disabled;
+        settle(&handle, |v| v.setup == FinderSetup::UserDisabled).await;
+        assert_eq!(
+            ops(&record).iter().filter(|op| **op == Op::Observe).count(),
+            1,
+            "no check ran"
+        );
+        assert!(!ops(&record).contains(&Op::AddDomain));
     }
 
     #[test]

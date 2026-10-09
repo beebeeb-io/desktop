@@ -257,6 +257,8 @@ impl CoreState {
 /// §7: the read-only `userEnabled` poll (every `user_disabled_poll` while a window is visible, plus once when the app
 /// becomes active) runs while `UserDisabled`, to notice it turned back on, and while `Ready`, to notice it turned off
 /// in System Settings while Beebeeb runs. Never while held. Only between checks: the caller checks the phase.
+/// While `Ready`, the usual resting state, its timer also stops once a tick finds no window on screen, so the app is
+/// not woken every 3 s with every window hidden; the app becoming active reads once and sets it again (`on_tick`).
 fn polls(s: &CoreState) -> bool {
     !s.held && matches!(s.setup, FinderSetup::UserDisabled | FinderSetup::Ready)
 }
@@ -279,6 +281,10 @@ pub fn step(mut state: CoreState, input: Input, now: Instant, policy: &RetryPoli
         Input::AppActivated => {
             if state.phase == Phase::Idle && polls(&state) {
                 state.poll_pending = true;
+                // A `Ready` poll whose timer stopped while no window was on screen starts again here.
+                if state.poll_due.is_none() {
+                    state.poll_due = Some(now + policy.user_disabled_poll);
+                }
             }
         }
         Input::Done(result) => {
@@ -320,7 +326,8 @@ pub fn next_op(state: &mut CoreState, now: Instant, policy: &RetryPolicy) -> Nex
                 Op::ReadDomain
             } else if polls(state) {
                 // While held there is no poll, so no timer either: a `WakeAt` in the past that
-                // `on_tick` ignores would spin the driver.
+                // `on_tick` ignores would spin the driver. A `Ready` poll with no window on screen has
+                // no timer either (`on_tick`): only an event (the app becoming active, a trigger) wakes it.
                 return state.poll_due.map_or(Next::Idle, Next::WakeAt);
             } else {
                 return Next::Idle;
@@ -407,9 +414,16 @@ fn on_tick(s: &mut CoreState, window_visible: bool, now: Instant, policy: &Retry
         return;
     }
     if s.poll_due.is_some_and(|due| now >= due) {
-        s.poll_due = Some(now + policy.user_disabled_poll);
         if window_visible {
+            s.poll_due = Some(now + policy.user_disabled_poll);
             s.poll_pending = true;
+        } else if s.setup == FinderSetup::Ready {
+            // No Beebeeb window on screen: no read, and no next wake-up either. `Ready` is where the app rests, so a
+            // timer here would wake it every 3 s for as long as it runs. A window becoming visible gains focus (every
+            // `show()` is followed by `set_focus()`), and `AppActivated` reads once and sets the timer again.
+            s.poll_due = None;
+        } else {
+            s.poll_due = Some(now + policy.user_disabled_poll);
         }
     }
 }
@@ -1613,20 +1627,16 @@ mod tests {
         let three = Duration::from_secs(3);
         let ready_at = sim.now;
         assert_eq!(sim.next(), Next::WakeAt(ready_at + three), "Ready keeps a poll timer");
+        // A window is on screen. With none the timer stops (the test
+        // `a_ready_core_with_no_window_visible_sets_no_timer_and_a_focus_resumes_the_poll`).
         sim.now = ready_at + three;
-        sim.feed(Input::Tick { window_visible: false });
-        assert_eq!(
-            sim.next(),
-            Next::WakeAt(ready_at + three * 2),
-            "no read while no window is visible"
-        );
-        sim.now = ready_at + three * 2;
         sim.feed(Input::Tick { window_visible: true });
         assert_eq!(sim.next(), Next::Run(Op::ReadDomain));
         sim.feed(Input::Done(OpResult::Domain(Ok(Enabled))));
         assert_eq!(sim.s.setup, Ready, "still on: nothing changes");
+        assert_eq!(sim.next(), Next::WakeAt(ready_at + three * 2), "and reads again in 3 s");
         // The person turns Beebeeb off in System Settings; the visible window's timer reads it.
-        sim.now = ready_at + three * 3;
+        sim.now = ready_at + three * 2;
         sim.feed(Input::Tick { window_visible: true });
         assert_eq!(sim.next(), Next::Run(Op::ReadDomain));
         sim.fx.clear();
@@ -1683,6 +1693,60 @@ mod tests {
         assert_eq!(sim.s.setup, UserDisabled);
         assert_eq!(sim.count(Op::AddDomain), 0);
         assert_eq!(sim.count(Op::Observe), 1, "no check ran");
+    }
+
+    /// F7 follow-up (review minor 2): `Ready` is the usual resting state, so its poll must not wake the app every 3 s
+    /// while no Beebeeb window is on screen. A tick that finds none sets no new timer; a window gaining focus (the app
+    /// becoming active) reads once and arms the timer again, and the next tick reads. The bound F7 needs is kept: a
+    /// window on screen is read every 3 s, and an activation reads once.
+    #[test]
+    fn a_ready_core_with_no_window_visible_sets_no_timer_and_a_focus_resumes_the_poll() {
+        let mut sim = Sim::new(Applications);
+        sim.trigger(Trigger::Launch);
+        sim.run(&World::ok(SIGNED_IN, Enabled));
+        assert_eq!(sim.s.setup, Ready);
+        let three = Duration::from_secs(3);
+        let ready_at = sim.now;
+        assert_eq!(
+            sim.next(),
+            Next::WakeAt(ready_at + three),
+            "Ready lands with the timer set: a window may be on screen"
+        );
+        sim.now = ready_at + three;
+        sim.feed(Input::Tick { window_visible: false });
+        assert_eq!(sim.next(), Next::Idle, "no window on screen: no timer, so no wake-up");
+        sim.now += Duration::from_secs(3600);
+        assert_eq!(sim.next(), Next::Idle, "an hour later, still none");
+        assert!(sim.s.is_settled());
+
+        // A window gains focus: one read at once, and the timer is set again.
+        sim.feed(Input::AppActivated);
+        assert_eq!(
+            sim.next(),
+            Next::Run(Op::ReadDomain),
+            "once when the app becomes active"
+        );
+        sim.feed(Input::Done(OpResult::Domain(Ok(Enabled))));
+        let activated_at = sim.now;
+        assert_eq!(
+            sim.next(),
+            Next::WakeAt(activated_at + three),
+            "the focus set the timer again"
+        );
+        // The next tick, with the window on screen, reads, and F7 still holds: turned off is noticed.
+        sim.now = activated_at + three;
+        sim.feed(Input::Tick { window_visible: true });
+        assert_eq!(sim.next(), Next::Run(Op::ReadDomain), "the next tick reads");
+        sim.feed(Input::Done(OpResult::Domain(Ok(Disabled))));
+        assert_eq!(
+            (sim.s.setup, sim.s.reason),
+            (UserDisabled, Some(FinderFailureReason::UserDisabled))
+        );
+        assert_eq!(
+            sim.next(),
+            Next::WakeAt(sim.now + three),
+            "no check runs: what comes next is the UserDisabled poll's timer"
+        );
     }
 
     /// While `Ready` the poll acts only on "turned off": a read that fails, or finds the domain not registered, is no
