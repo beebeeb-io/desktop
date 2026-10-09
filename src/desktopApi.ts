@@ -424,11 +424,22 @@ export function conflictContentPreview(fileId: string): Promise<CommandResult<Co
   return command<ConflictContentPreview>('conflict_content_preview', { fileId })
 }
 
+/**
+ * Commands whose answer stands even when this WebView observed a new session revision while they ran.
+ * `sync_status` is what observes it. `clear_session` (a sign-out, and the account switch's sign-out with
+ * `forgetEmail`) and `lock_vault` end the session themselves: the revision moves because of them (always for a
+ * sign-out; for a Lock, when no Keychain session is left), and their answer is `{warning}`, with no account data
+ * in it. On a Mac a status read sent during the sign-out waits behind the engine slot and is released already
+ * carrying the new revision; when it is observed first, "Account changed" would report a sign-out that happened
+ * as one that failed. Every other command keeps the guard.
+ */
+const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set(['sync_status', 'clear_session', 'lock_vault'])
+
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
   const revision = accountSessionRevision()
   try {
     const value = await invoke<T>(name, args)
-    if (name !== 'sync_status' && revision !== accountSessionRevision()) {
+    if (!ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES.has(name) && revision !== accountSessionRevision()) {
       return { ok: false, reason: 'Account changed. Please try again.', unsupported: false }
     }
     return { ok: true, value }

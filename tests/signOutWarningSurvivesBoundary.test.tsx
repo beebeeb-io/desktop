@@ -18,6 +18,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import type { ReactElement } from 'react'
+import { accountSessionRevision, heldSignOutWarning } from '../src/accountSession'
 import { allElements, click, installMiniDom, type MiniDomInstall, type MiniElement } from './fixtures/miniDom'
 import { rustStr } from './fixtures/rustConstants'
 
@@ -36,6 +37,8 @@ beforeAll(async () => {
   client = await import('react-dom/client')
 })
 afterEach(async () => {
+  // A test that ran its sign-out outside React.act hands React back to act() for the unmount.
+  ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
   for (const root of roots) await React.act(async () => root.unmount())
   roots = []
   delete dom.window.__TAURI_INTERNALS__
@@ -48,6 +51,20 @@ interface Native {
   revision: number
   calls: string[]
 }
+
+/** What `sync_status` answers for an account that is (or is not) signed in at `revision`. */
+const statusAnswer = (loggedIn: boolean, revision: number) => ({
+  logged_in: loggedIn,
+  session_revision: revision,
+  vault_unlocked: loggedIn,
+  engine: loggedIn ? 'running' : 'stopped',
+  sync_root: null,
+  syncing: 0,
+  cloud_only: 0,
+  conflicts: 0,
+  auth_expired: false,
+  engine_refusal: null,
+})
 
 /** The commands both windows send, answered from `native`; anything else is an IPC error, as an unknown command is. */
 function installBackend(native: Native, extra: Record<string, (args: any) => unknown> = {}) {
@@ -67,18 +84,7 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
     activity: [],
   })
   const handlers: Record<string, (args: any) => unknown> = {
-    sync_status: () => ({
-      logged_in: native.loggedIn,
-      session_revision: native.revision,
-      vault_unlocked: native.loggedIn,
-      engine: native.loggedIn ? 'running' : 'stopped',
-      sync_root: null,
-      syncing: 0,
-      cloud_only: 0,
-      conflicts: 0,
-      auth_expired: false,
-      engine_refusal: null,
-    }),
+    sync_status: () => statusAnswer(native.loggedIn, native.revision),
     desktop_capabilities: () => capabilities,
     'plugin:event|listen': () => callbackId,
     'plugin:event|unlisten': () => null,
@@ -167,6 +173,91 @@ async function waitForSettled(container: MiniElement, shown: (container: MiniEle
 /** Each test waits for at least one real status poll (one second); bun's default five seconds is too tight. */
 const SLOW = 15_000
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const hasTabs = (container: MiniElement) => elements(container).some((el) => el.getAttribute('role') === 'tab')
+const hasPage = (container: MiniElement) => elements(container).some((el) => el.tagName === 'SECTION' && el.className === 'page')
+
+/**
+ * The engine slot as `clear_session_impl` holds it on a Mac: from the engine stop until just before it moves the
+ * revision. `sync_status` reads `logged_in`, then waits for that slot, then reads the revision, so a status read
+ * sent while the slot is held is held back and answers "signed in" at the NEW revision.
+ *
+ * This `clear_session` holds the slot until a status read has been held back behind it (the boundary polls every
+ * second), moves the revision twice, releases the slot and answers Ok with the warning. `order` is which of the
+ * two answers this WebView sees first:
+ * - `poll-first`: the held-back read's (the boundary observes it and remounts), then, one macrotask later, the sign-out's;
+ * - `answer-first`: the sign-out's, then the held-back read's.
+ * `probe` records how many reads were held back, and the revision this WebView had observed when the sign-out answered.
+ */
+function heldBehindSignOut(native: Native, order: 'poll-first' | 'answer-first') {
+  const heldBack: Array<() => void> = []
+  let slotTaken = false
+  const probe = { heldBack: 0, revisionAtAnswer: null as number | null }
+  const handlers = {
+    sync_status: async () => {
+      const loggedIn = native.loggedIn
+      if (slotTaken) await new Promise<void>((resolve) => heldBack.push(resolve))
+      return statusAnswer(loggedIn, native.revision)
+    },
+    clear_session: async () => {
+      slotTaken = true
+      const deadline = Date.now() + 4000
+      while (heldBack.length === 0 && Date.now() < deadline) await sleep(10)
+      probe.heldBack = heldBack.length
+      native.loggedIn = false
+      native.revision += 2
+      slotTaken = false
+      const release = heldBack.splice(0)
+      if (order === 'poll-first') {
+        for (const resolve of release) resolve()
+        await sleep(1)
+      } else {
+        setTimeout(() => { for (const resolve of release) resolve() }, 0)
+      }
+      probe.revisionAtAnswer = accountSessionRevision()
+      return { warning: SIGN_OUT_WARNING }
+    },
+  }
+  return { handlers, probe }
+}
+
+/** Wait with real timers and no act() scope. */
+async function plainWait(what: string, done: () => boolean, ms = 6000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    await sleep(20)
+    if (done()) return
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+  }
+}
+
+/**
+ * Confirm the sign-out with `confirm` outside React.act, as a WebView runs it: every answer commits when it
+ * arrives, so the order of the answers is the order the window sees. Then wait until the sign-out has answered,
+ * the boundary has observed its revision and remounted the window (`before` is detached), and the window has
+ * settled. A sentence held after that still gets a moment to reach the screen, so a missing one is an assertion
+ * failure, not a timeout.
+ */
+async function signOutOutsideAct(
+  container: MiniElement,
+  confirm: MiniElement,
+  before: MiniElement,
+  native: Native,
+  probe: { revisionAtAnswer: number | null },
+  shown: (container: MiniElement) => boolean,
+) {
+  ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = false
+  click(container, confirm)
+  await plainWait('the sign-out, the remount and the settled window', () =>
+    probe.revisionAtAnswer !== null &&
+    accountSessionRevision() === native.revision &&
+    !container.contains(before) &&
+    shown(container) &&
+    !container.textContent.includes('Checking device support…') &&
+    !container.textContent.includes('Loading…'))
+  await sleep(300)
+}
+
 describe('a sign-out with an unconfirmed Finder removal, through AccountSessionBoundary', () => {
   test('main.tsx mounts both windows under the boundary in the order these tests use', () => {
     const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
@@ -250,5 +341,51 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
     expect(container.textContent).not.toContain(SIGN_OUT_WARNING.sentence)
     const selected = elements(container).filter((el) => el.getAttribute('role') === 'tab' && el.getAttribute('aria-selected') === 'true')
     expect(selected.map((el) => el.textContent.trim())).toEqual(['General'])
+  }, SLOW)
+})
+
+describe('a status read held back behind the sign-out and answered before it (outside React.act)', () => {
+  test('Settings › Account: the sign-out still stands, its sentence is held and on screen, and nothing says "Account changed"', async () => {
+    const native: Native = { loggedIn: true, revision: 40, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    installBackend(native, slot.handlers)
+    const { default: MacSettings } = await import('../src/MacSettings')
+    // Opened on the Account tab by its URL, so the remount comes back to it in either order: this test is about the
+    // sign-out's answer alone.
+    const container = await mountWindow('?window=settings-v2&platform=macos&tab=account', <MacSettings />)
+    await waitFor('the account', () => accountSessionRevision() === native.revision && container.textContent.includes('sam@example.eu'))
+    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+    await press(container, 'button', 'Sign out…')
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasTabs)
+
+    // The order really was poll-first: a status read was held back, and its revision was observed before the sign-out answered.
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    expect(container.textContent).not.toContain('Account changed')
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }, SLOW)
+
+  test('the compact window’s Account page: the sign-out still stands, its sentence is held and on screen, and nothing says "Account changed"', async () => {
+    const native: Native = { loggedIn: true, revision: 50, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    installBackend(native, slot.handlers)
+    const { default: App } = await import('../src/App')
+    // Opened on the Account page by its URL, for the same reason.
+    const container = await mountWindow('?platform=macos&nav=account', <App />)
+    await waitFor('the account', () => accountSessionRevision() === native.revision && container.textContent.includes('sam@example.eu'))
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasPage)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    expect(byText(container, 'h1', 'Account & security')).toBeDefined()
+    expect(container.textContent).not.toContain('Account changed')
+    expect(container.textContent).not.toContain('Couldn’t sign out')
   }, SLOW)
 })

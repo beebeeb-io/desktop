@@ -10,7 +10,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { clearSession, lockVault, parseSessionActionOutcome, SESSION_ACTION_WARNING_CODES } from '../src/desktopApi'
+import { accountSessionRevision } from '../src/accountSession'
+import { clearSession, command, loadSyncStatus, lockVault, parseSessionActionOutcome, SESSION_ACTION_WARNING_CODES } from '../src/desktopApi'
 import { rustSource, rustStr } from './fixtures/rustConstants'
 
 const SENTENCE = {
@@ -113,6 +114,74 @@ describe('clearSession and lockVault', () => {
     backend({ clear_session: () => ({ warning: { code: 'something_new', sentence: 'a path /Users/sam' } }) })
     expect(await clearSession()).toEqual({ ok: true, value: { warning: null } })
     expect(traced).toEqual([['clear_session', 'outcome_unreadable']])
+  })
+})
+
+/**
+ * `command()` answers "Account changed" when this WebView observed a new session revision while a command ran.
+ * A sign-out moves that revision itself, and on a Mac a status read it held back behind the engine slot is
+ * released already carrying the new revision. When that read is observed before the sign-out's own answer, the
+ * sign-out still happened: its answer stands. Every other command still says "Account changed".
+ */
+describe('the answer of a command that ends the session itself stands when the revision moved while it ran', () => {
+  const previous = (globalThis as any).window
+  afterEach(() => { (globalThis as any).window = previous })
+
+  /** `name` ends the session; before it answers, this WebView observes a status read that carries the new revision. */
+  async function revisionMovesWhileRunning(name: string, answer: unknown, start: number) {
+    const native = { loggedIn: true, revision: start }
+    const seen = { atAnswer: null as number | null }
+    ;(globalThis as any).window = {
+      __TAURI_INTERNALS__: {
+        invoke: async (called: string) => {
+          if (called === 'sync_status') return { logged_in: native.loggedIn, session_revision: native.revision }
+          if (called !== name) throw new Error(`unscripted ${called}`)
+          native.loggedIn = false
+          native.revision += 2
+          await loadSyncStatus()
+          seen.atAnswer = accountSessionRevision()
+          return answer
+        },
+      },
+    }
+    await loadSyncStatus()
+    expect(accountSessionRevision()).toBe(start)
+    return { native, seen }
+  }
+
+  test('a sign-out: Ok with its warning', async () => {
+    const warning = { code: 'finder_removal_unconfirmed', sentence: SENTENCE.finder_removal_unconfirmed }
+    const { native, seen } = await revisionMovesWhileRunning('clear_session', { warning }, 700)
+    const result = await clearSession()
+    expect(seen.atAnswer).toBe(native.revision)
+    expect(result).toEqual({ ok: true, value: { warning } })
+  })
+
+  test('the account switch’s sign-out (forgetEmail): Ok with its warning', async () => {
+    const warning = { code: 'finder_removal_unconfirmed', sentence: SENTENCE.finder_removal_unconfirmed }
+    const { native, seen } = await revisionMovesWhileRunning('clear_session', { warning }, 710)
+    const result = await clearSession({ forgetEmail: true })
+    expect(seen.atAnswer).toBe(native.revision)
+    expect(result).toEqual({ ok: true, value: { warning } })
+  })
+
+  test('a Lock that left no Keychain session (Rust moves the revision then): Ok with its warning', async () => {
+    const warning = { code: 'engine_stop_unconfirmed', sentence: SENTENCE.engine_stop_unconfirmed }
+    const { native, seen } = await revisionMovesWhileRunning('lock_vault', { warning }, 720)
+    const result = await lockVault()
+    expect(seen.atAnswer).toBe(native.revision)
+    expect(result).toEqual({ ok: true, value: { warning } })
+  })
+
+  test('any other command still says "Account changed"', async () => {
+    let start = 730
+    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_login']) {
+      const { native, seen } = await revisionMovesWhileRunning(name, 'sam@example.eu', start)
+      const result = await command<unknown>(name)
+      expect(seen.atAnswer).toBe(native.revision)
+      expect({ name, result }).toEqual({ name, result: { ok: false, reason: 'Account changed. Please try again.', unsupported: false } })
+      start += 10
+    }
   })
 })
 
