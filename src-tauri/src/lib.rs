@@ -6542,9 +6542,15 @@ fn finder_setup_show_app(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+/// `async`, with the read on the blocking pool: it waits up to 3 s for the bridge gate, which a plain
+/// `#[tauri::command]` fn would do on the main thread (see [`on_the_blocking_pool`]).
 #[tauri::command]
-fn finder_domain_user_enabled() -> Result<Option<bool>, String> {
-    file_provider_domain_user_enabled()
+async fn finder_domain_user_enabled() -> Result<Option<bool>, String> {
+    on_the_blocking_pool(
+        "Could not check whether Beebeeb is turned on in System Settings.",
+        file_provider_domain_user_enabled,
+    )
+    .await
 }
 
 /// x-apple.systempreferences URL for the "Login Items & Extensions" pane (System
@@ -7125,17 +7131,45 @@ mod open_folder_tests {
     }
 }
 
+/// Runs `call` on tokio's blocking pool and awaits its answer. For work that blocks, such as the File Provider reads
+/// that wait up to 3 s (`BRIDGE_GATE_WAIT`) for the bridge gate: a plain `#[tauri::command]` fn and a native-menu
+/// action run on the main thread, where that wait would freeze every window, and inline in an async command it would
+/// hold a runtime worker. A call that panicked answers `failed`: the panic's text can carry an OS message, so it goes
+/// to the log only (lead ruling T1-4).
+async fn on_the_blocking_pool<T: Send + 'static>(
+    failed: &'static str,
+    call: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(call).await.unwrap_or_else(|error| {
+        tracing::warn!(%error, failed, "a blocking task stopped before it answered");
+        Err(failed.to_string())
+    })
+}
+
+/// What "Open in Finder" answers when its work stopped before it answered (see [`on_the_blocking_pool`]).
+const OPEN_FOLDER_FAILED: &str = "Could not open the Beebeeb folder.";
+
 // Native menu actions have no frontend status: resolve the configured root here.
 fn open_current_finder_location() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let path = None;
     #[cfg(not(target_os = "macos"))]
     let path = Some(get_sync_root()?.ok_or_else(|| "Not configured on this PC yet".to_string())?);
-    open_finder_location(path)
+    open_finder_location_blocking(path)
 }
 
+/// "Open in Finder" (Explorer, or the file manager). `async`, with the work on the blocking pool: on macOS it reads
+/// the Finder location through the bridge gate, which waits up to 3 s for a call in flight, and a plain
+/// `#[tauri::command]` fn would make that wait on the main thread.
 #[tauri::command]
-fn open_finder_location(path: Option<String>) -> Result<(), String> {
+async fn open_finder_location(path: Option<String>) -> Result<(), String> {
+    on_the_blocking_pool(OPEN_FOLDER_FAILED, move || open_finder_location_blocking(path)).await
+}
+
+/// The blocking body of [`open_finder_location`]. Its other callers: the menu's "Open in Finder" (spawned onto the
+/// blocking pool), the upload action (inside a task), and the new-folder action's fallback when the new folder cannot
+/// be revealed (on the main thread from the menu; on macOS only when the folder it just made cannot be resolved).
+fn open_finder_location_blocking(path: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let _ = path;
@@ -9028,7 +9062,7 @@ fn upload_files_to_sync_root_impl(app: &tauri::AppHandle) -> Result<usize, Strin
 
     if copied > 0 {
         let _ = app.emit("menu:files-added", serde_json::json!({ "count": copied }));
-        let _ = open_finder_location(Some(sync_root.to_string_lossy().into_owned()));
+        let _ = open_finder_location_blocking(Some(sync_root.to_string_lossy().into_owned()));
     }
 
     Ok(copied)
@@ -9044,7 +9078,7 @@ fn create_folder_in_sync_root_impl(app: &tauri::AppHandle) -> Result<PathBuf, St
     );
     if let Err(error) = app.opener().reveal_item_in_dir(&path) {
         tracing::warn!(%error, path = %path.display(), "could not reveal new folder; opening sync root instead");
-        let _ = open_finder_location(Some(sync_root.to_string_lossy().into_owned()));
+        let _ = open_finder_location_blocking(Some(sync_root.to_string_lossy().into_owned()));
     }
     Ok(path)
 }
@@ -13506,7 +13540,13 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             });
         }
         DesktopMenuAction::Quit => app.exit(0),
-        DesktopMenuAction::OpenFolder => log_menu_result(spec.id, open_current_finder_location()),
+        DesktopMenuAction::OpenFolder => {
+            // Off the main thread: on macOS the read waits up to 3 s for the bridge gate.
+            spawn_menu_task(
+                spec.id,
+                on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location),
+            );
+        }
         DesktopMenuAction::UploadFiles => {
             let app = app.clone();
             spawn_menu_task(spec.id, async move { upload_files_to_sync_root_impl(&app).map(|_| ()) });
@@ -17287,6 +17327,87 @@ mod finder_setup_command_tests {
             "a second await could be cut off after the spawn:\n{ensure}"
         );
         assert!(ensure.contains("engine.lock().await"), "{ensure}");
+    }
+
+    // ---- F7 follow-up 2: the bounded wait for the bridge gate never runs on the main thread ----
+
+    /// "Open in Finder" and the onboarding card's `finder_domain_user_enabled` read the domain through the bridge
+    /// gate, which waits up to `BRIDGE_GATE_WAIT` (3 s) for a call in flight. Tauri runs a plain
+    /// `#[tauri::command]` fn on the main thread, and the native menu ran "Open in Finder" inline there, so that
+    /// wait froze every window. Both commands are `async` and hand their work to the blocking pool, and the menu
+    /// action is spawned the same way. A source pin, like `bundle_commands_run_off_the_main_thread`: the thread a
+    /// command runs on is not observable in a unit test.
+    #[test]
+    fn the_finder_reads_a_person_waits_on_never_wait_on_the_main_thread() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        for (command, work) in [
+            ("open_finder_location", "move || open_finder_location_blocking(path)"),
+            ("finder_domain_user_enabled", "file_provider_domain_user_enabled"),
+        ] {
+            assert_eq!(
+                production.matches(&format!("fn {command}(")).count(),
+                1,
+                "{command} has one definition on every platform"
+            );
+            assert!(
+                production.contains(&format!("#[tauri::command]\nasync fn {command}(")),
+                "{command} is an async command: a plain #[tauri::command] fn runs on the main thread"
+            );
+            let body = body_between(&production, &format!("async fn {command}("), "\n}\n");
+            let squeezed = squeeze(body);
+            let pool = squeezed.find("on_the_blocking_pool(").unwrap_or_else(|| {
+                panic!("{command} runs its work on the blocking pool, not inline on a runtime worker:\n{body}")
+            });
+            assert!(
+                squeezed[pool..].contains(&squeeze(&format!(",{work}).await"))),
+                "{command} hands exactly its blocking work to the pool:\n{body}"
+            );
+        }
+
+        let open_folder = body_between(
+            &production,
+            "DesktopMenuAction::OpenFolder =>",
+            "DesktopMenuAction::UploadFiles",
+        );
+        assert!(
+            !open_folder.contains("log_menu_result("),
+            "the menu's \"Open in Finder\" does not run inline on the main thread:\n{open_folder}"
+        );
+        assert!(
+            squeeze(open_folder).contains(&squeeze("spawn_menu_task(spec.id, on_the_blocking_pool("))
+                && open_folder.contains("open_current_finder_location"),
+            "the menu's \"Open in Finder\" is spawned onto the blocking pool:\n{open_folder}"
+        );
+        assert_eq!(
+            production.matches("open_current_finder_location").count(),
+            2,
+            "its definition and the spawned menu action, and no inline caller"
+        );
+    }
+
+    /// The helper the two commands and the menu action use: the work runs on a blocking-pool thread, never the
+    /// caller's, and its answer comes back unchanged. A call that panics answers the caller's fixed sentence; the
+    /// panic's own text (which can carry an OS message) goes to the log only (lead ruling T1-4).
+    #[tokio::test]
+    async fn a_blocking_call_runs_on_the_blocking_pool_and_a_panic_answers_a_fixed_sentence() {
+        let caller = std::thread::current().id();
+        let ran_on = on_the_blocking_pool("unused", || Ok(std::thread::current().id()))
+            .await
+            .expect("the call answers");
+        assert_ne!(ran_on, caller, "the work does not run on the caller's thread");
+
+        assert_eq!(
+            on_the_blocking_pool("unused", || Err::<(), _>("the call's own error".to_string())).await,
+            Err("the call's own error".to_string()),
+            "the call's error comes back unchanged"
+        );
+
+        let panicked = on_the_blocking_pool("Could not do the thing.", || -> Result<(), String> {
+            panic!("an OS message that must not reach a person")
+        })
+        .await;
+        assert_eq!(panicked, Err("Could not do the thing.".to_string()));
     }
 
     // ---- helpers ----

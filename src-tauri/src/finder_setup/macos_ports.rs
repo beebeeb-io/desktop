@@ -104,10 +104,10 @@ impl BridgeGate {
 
     /// Like [`BridgeGate::run_sync`], but a busy gate is waited for, at most `wait`, before it answers `OP_TIMEOUT`:
     /// [`BridgeGate::run_waiting`]'s wait, for a caller that cannot await. The call runs on the caller's thread, as
-    /// with `run_sync`, and the caller's thread is blocked for the wait. The callers are synchronous: plain Tauri
-    /// commands and native-menu actions, which run on the main thread, and the upload menu action inside a task, so
-    /// neither `block_on` nor a tokio timer is available. The wait is therefore made here, parked on the semaphore's
-    /// own FIFO queue.
+    /// with `run_sync`, and the caller's thread is blocked for the wait. The callers are synchronous: the work of two
+    /// async commands and of the menu's "Open in Finder", each handed to the blocking pool so that no wait runs on the
+    /// main thread (lib.rs `on_the_blocking_pool`), and the upload menu action inside a task, so neither `block_on`
+    /// nor a tokio timer is available. The wait is therefore made here, parked on the semaphore's own FIFO queue.
     pub(crate) fn run_sync_waiting<T>(
         &self,
         wait: std::time::Duration,
@@ -976,8 +976,8 @@ mod tests {
 
     /// F7 follow-up (review minor 1): the synchronous wait. A call that meets the gate held by a call in flight
     /// (the `Ready` poll's read) waits for it and runs; held for longer than the wait, it fails with the same
-    /// busy error as before, runs nothing, and leaves the queue. Its callers are synchronous: a plain Tauri command
-    /// (on the main thread) and a menu action inside a task, so the last part waits from inside a runtime.
+    /// busy error as before, runs nothing, and leaves the queue. Its callers are synchronous: a command's work on the
+    /// blocking pool and a menu action inside a task, so the last part waits from inside a runtime.
     #[test]
     fn a_synchronous_call_waits_for_a_gate_held_less_than_the_bound_and_fails_busy_after_it() {
         use std::sync::mpsc;
