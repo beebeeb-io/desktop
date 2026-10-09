@@ -390,11 +390,49 @@ describe('Account tab', () => {
   const backend = (over: Record<string, (a: any) => unknown> = {}, snap = snapshot()) => ({
     popover_snapshot: () => snap,
     account_subscription: () => subscription,
-    lock_vault: () => undefined,
+    lock_vault: () => ({ warning: null }),
     unlock_vault: () => undefined,
-    clear_session: () => undefined,
+    clear_session: () => ({ warning: null }),
     'plugin:opener|open_url': () => undefined,
     ...over,
+  })
+
+  // FB-24 / rows 12 and 13 (M4): a Lock or a sign-out that HAPPENED but could not confirm a step is Ok
+  // with a warning. Its sentence is a neutral status line, never under "Couldn’t …", and the tab reads
+  // the account again after any result.
+  const LOCK_WARNING = { code: 'finder_lock_unconfirmed', sentence: 'The vault is locked, but Beebeeb could not confirm that its Finder setup stopped. Restart Beebeeb to be sure.' }
+  const SIGN_OUT_WARNING = { code: 'finder_removal_unconfirmed', sentence: 'You are signed out, but Beebeeb could not confirm that it was removed from Finder. If it still shows there, restart Beebeeb and sign out again.' }
+
+  test('a Lock that happened with a warning: the vault reads locked, and the sentence is a neutral line, not an error', async () => {
+    let unlocked = true
+    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false; return { warning: LOCK_WARNING } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
+    await settle(m)
+    await press(m, 'Lock now')
+    await settle(m)
+    expect(visibleText(m)).toContain('Vault is locked')
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(LOCK_WARNING.sentence)
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a failed Lock is still followed by a fresh read of the account (M4)', async () => {
+    const m = open('AccountTab', backend({ lock_vault: () => { throw new Error('busy') } }))
+    await settle(m)
+    await press(m, 'Lock now')
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot')).toHaveLength(2)
+  })
+
+  test('a sign-out that happened with a warning: signed out, and the sentence is a neutral line, not "Couldn’t sign out"', async () => {
+    let signedIn = true
+    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false; return { warning: SIGN_OUT_WARNING } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn } }) }))
+    await settle(m)
+    await press(m, 'Sign out…')
+    await press(m, 'Sign out')
+    await settle(m)
+    expect(visibleText(m)).toContain('You’re signed out')
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(SIGN_OUT_WARNING.sentence)
+    expect(m.toasts).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
   test('shows who is signed in, the plan, one storage figure on the Mac\'s number format, and the vault', async () => {
@@ -428,7 +466,7 @@ describe('Account tab', () => {
 
   test('Lock now locks through lock_vault, reads the account again and shows the locked vault', async () => {
     let unlocked = true
-    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
+    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
     await settle(m)
     await press(m, 'Lock now')
     expect(m.calls.filter((c) => c.name === 'lock_vault')).toHaveLength(1)
@@ -469,7 +507,7 @@ describe('Account tab', () => {
 
   test('after signing out the tab reads the account again and says you are signed out', async () => {
     let signedIn = true
-    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn, vault_unlocked: signedIn, email: signedIn ? 'sam@example.eu' : null }, storage: null }) }))
+    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn, vault_unlocked: signedIn, email: signedIn ? 'sam@example.eu' : null }, storage: null }) }))
     await settle(m)
     await press(m, 'Sign out…')
     await press(m, 'Sign out')
@@ -1383,9 +1421,9 @@ describe('Confirmation dialogs: danger and Enter', () => {
   const accountBackend = () => ({
     popover_snapshot: () => snapshot(),
     account_subscription: () => subscription,
-    lock_vault: () => undefined,
+    lock_vault: () => ({ warning: null }),
     unlock_vault: () => undefined,
-    clear_session: () => undefined,
+    clear_session: () => ({ warning: null }),
   })
   const repairBackend = (over: Record<string, (a: any) => unknown> = {}) => ({
     finder_setup_state: () => finder.installed,

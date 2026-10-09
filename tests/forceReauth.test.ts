@@ -23,12 +23,32 @@ import { forceReauth, type ForceReauthApi } from '../src/desktopApi'
 function fakeApi(overrides: Partial<ForceReauthApi> = {}): ForceReauthApi {
   return {
     platform: async () => ({ ok: true, value: 'windows' }),
-    clearSession: async () => ({ ok: true, value: undefined }),
+    clearSession: async () => ({ ok: true, value: { warning: null } }),
     openOnboardingWindow: async () => ({ ok: true, value: undefined }),
     openReauthWindow: async () => ({ ok: true, value: undefined }),
     ...overrides,
   }
 }
+
+// FB-24: the clear can be Ok with a warning (it happened, but a step was not confirmed). forceReauth
+// carries it back to its two callers, which show it neutrally; it is no reason to stop.
+describe('forceReauth and a sign-out warning (FB-24)', () => {
+  test('a clear that happened with a warning still opens onboarding, and the warning comes back', async () => {
+    const warning = { code: 'finder_removal_unconfirmed' as const, sentence: 'You are signed out, but…' }
+    const calls: string[] = []
+    const result = await forceReauth(fakeApi({
+      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: { warning } } },
+      openOnboardingWindow: async () => { calls.push('open_onboarding_window'); return { ok: true, value: undefined } },
+    }))
+    expect(calls).toEqual(['clear_session', 'open_onboarding_window'])
+    expect(result).toEqual({ ok: true, value: { warning } })
+  })
+
+  test('on macOS nothing is cleared, so there is no warning', async () => {
+    const result = await forceReauth(fakeApi({ platform: async () => ({ ok: true, value: 'macos' }) }))
+    expect(result).toEqual({ ok: true, value: { warning: null } })
+  })
+})
 
 describe('forceReauth', () => {
   test('clears the session BEFORE opening onboarding, in that order', async () => {
@@ -36,7 +56,7 @@ describe('forceReauth', () => {
     const api = fakeApi({
       clearSession: async () => {
         calls.push('clear_session')
-        return { ok: true, value: undefined }
+        return { ok: true, value: { warning: null } }
       },
       openOnboardingWindow: async () => {
         calls.push('open_onboarding_window')
@@ -78,7 +98,7 @@ describe('forceReauth on macOS (R8: re-sign-in in place)', () => {
     const calls: string[] = []
     const api = fakeApi({
       platform: async () => ({ ok: true, value: 'macos' }),
-      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: undefined } },
+      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: { warning: null } } },
       openOnboardingWindow: async () => { calls.push('open_onboarding_window'); return { ok: true, value: undefined } },
       openReauthWindow: async () => { calls.push('open_reauth_window'); return { ok: true, value: undefined } },
     })
@@ -90,7 +110,7 @@ describe('forceReauth on macOS (R8: re-sign-in in place)', () => {
     const calls: string[] = []
     const api = fakeApi({
       platform: async () => ({ ok: false, reason: 'ipc down', unsupported: false }),
-      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: undefined } },
+      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: { warning: null } } },
     })
     expect((await forceReauth(api)).ok).toBe(false)
     expect(calls).toEqual([])
@@ -100,7 +120,7 @@ describe('forceReauth on macOS (R8: re-sign-in in place)', () => {
     const calls: string[] = []
     const api = fakeApi({
       platform: async () => ({ ok: true, value: 'macos' }),
-      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: undefined } },
+      clearSession: async () => { calls.push('clear_session'); return { ok: true, value: { warning: null } } },
       openOnboardingWindow: async () => { calls.push('open_onboarding_window'); return { ok: true, value: undefined } },
       openReauthWindow: async () => ({ ok: false, reason: 'window failed', unsupported: false }),
     })
@@ -113,7 +133,7 @@ describe('forceReauth on macOS (R8: re-sign-in in place)', () => {
       const calls: string[] = []
       const api = fakeApi({
         platform: async () => ({ ok: true, value: platform }),
-        clearSession: async () => { calls.push('clear_session'); return { ok: true, value: undefined } },
+        clearSession: async () => { calls.push('clear_session'); return { ok: true, value: { warning: null } } },
         openOnboardingWindow: async () => { calls.push('open_onboarding_window'); return { ok: true, value: undefined } },
         openReauthWindow: async () => { calls.push('open_reauth_window'); return { ok: true, value: undefined } },
       })

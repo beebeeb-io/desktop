@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type Keyboard
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import OnboardingErrorBoundary from './OnboardingErrorBoundary'
 import {
+  clearSession,
   command,
   commandUnavailableLabel,
   lastSignedInEmail,
@@ -423,7 +424,8 @@ function SignInStep({ onDone, initialEmail }: { onDone: (settled: SignInSettled,
  * The sign-out also forgets the previous account's address (`forgetEmail`, FB-I2; spec §5.6: "The
  * switch leaves no vault key and no account email behind"). An `Err` means the sign-out did not
  * happen (including `SIGN_OUT_EMAIL_NOT_FORGOTTEN`): its sentence is shown verbatim as a toast and
- * the step stays; it never continues to sign-in on an `Err`.
+ * the step stays; it never continues to sign-in on an `Err`. Any `Ok` continues, and an `Ok` with a
+ * warning (FB-24) shows the warning's sentence as a neutral note.
  *
  * Drawn in design/hifi/macos-settings-dialogs.html §4 (onboarding-window variant): no close, the
  * confirm is the filled destructive button, and focus is on Cancel when the step opens, so a stray
@@ -438,12 +440,15 @@ function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingCh
   }, [])
   const switchAccount = async () => {
     setBusy(true)
-    const result = await command<unknown>('clear_session', { forgetEmail: true })
+    const result = await clearSession({ forgetEmail: true })
     setBusy(false)
     if (!result.ok) {
       showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason })
       return
     }
+    // FB-24: the sign-out happened. A step it could not confirm is said neutrally (never under
+    // "Couldn’t sign out"), and the note stays until dismissed: this step unmounts as sign-in opens.
+    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
     onSwitched()
   }
   return (

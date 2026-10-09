@@ -4,10 +4,12 @@ import { useToast } from '../windows/ui'
 import {
   accountSubscription,
   BILLING_URL,
+  clearSession,
   command,
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
+  lockVault,
   openUrl,
   type Subscription,
   type SyncStatus,
@@ -41,6 +43,9 @@ export default function Account() {
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanState>({ phase: 'loading' })
+  // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, as a
+  // neutral line (never under "Couldn’t …"), until the next Lock or sign-out.
+  const [actionNote, setActionNote] = useState<string | null>(null)
 
   // Poll sync_status so the component reflects auto-unlock state that
   // occurs on startup — the vault may unlock a few seconds after mount.
@@ -109,11 +114,23 @@ export default function Account() {
     return true
   }
 
+  // An Err means it did not happen (one error toast); an Ok may carry a warning (FB-24), shown as the
+  // neutral line. The status is read again after ANY result (M4).
   const lock = async () => {
-    if (await runAction('lock_vault')) {
-      const next = await loadSyncStatus()
-      setStatus(next)
+    setBusy('lock_vault')
+    setActionNote(null)
+    const result = await lockVault()
+    setBusy(null)
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'That didn’t work',
+        message: result.unsupported ? commandUnavailableLabel('lock_vault') : result.reason,
+      })
+    } else {
+      setActionNote(result.value.warning?.sentence ?? null)
     }
+    setStatus(await loadSyncStatus())
   }
 
   const unlock = async () => {
@@ -125,7 +142,8 @@ export default function Account() {
 
   const signOut = async () => {
     setBusy('clear_session')
-    const result = await command<void>('clear_session')
+    setActionNote(null)
+    const result = await clearSession()
     setBusy(null)
     if (!result.ok) {
       showToast({
@@ -133,8 +151,10 @@ export default function Account() {
         title: 'Couldn’t sign out',
         message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason,
       })
+      setStatus(await loadSyncStatus())
       return
     }
+    setActionNote(result.value.warning?.sentence ?? null)
     setEmail(null)
     setStatus({ logged_in: false, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 })
   }
@@ -191,6 +211,12 @@ export default function Account() {
           {unlocked ? 'Unlocked' : loggedIn ? 'Locked or paused' : 'Signed out'}
         </span>
       </div>
+
+      {actionNote && (
+        <div className="notice" role="status" style={{ marginBottom: 14 }}>
+          {actionNote}
+        </div>
+      )}
 
 
       <div className="grid two">

@@ -1045,14 +1045,63 @@ export function desktopLogin2fa(code: string): Promise<CommandResult<DesktopLogi
 }
 
 /**
+ * What `clear_session` and `lock_vault` answer when the action HAPPENED (Lane R, lead ruling FB-24):
+ * `warning` is always present, null when every step was confirmed, else the one step that could not be
+ * (a closed code and Rust's fixed sentence). An `Err` from either command still means "it did not
+ * happen". Codes mirror `ActionWarning::code()` in lib.rs.
+ */
+export const SESSION_ACTION_WARNING_CODES = ['finder_removal_unconfirmed', 'finder_lock_unconfirmed', 'engine_stop_unconfirmed'] as const
+export type SessionActionWarningCode = (typeof SESSION_ACTION_WARNING_CODES)[number]
+export interface SessionActionWarning {
+  code: SessionActionWarningCode
+  /** Shown verbatim, as a neutral status line: never under a "Couldn’t …" title. */
+  sentence: string
+}
+export interface SessionActionOutcome {
+  warning: SessionActionWarning | null
+}
+
+/** Strict: `{warning: null}` or `{warning: {code, sentence}}` with a known code and a non-blank sentence, else `null`. */
+export function parseSessionActionOutcome(value: unknown): SessionActionOutcome | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('warning' in value)) return null
+  const { warning } = value as { warning: unknown }
+  if (warning === null) return { warning: null }
+  if (typeof warning !== 'object' || Array.isArray(warning) || warning === undefined) return null
+  const { code, sentence } = warning as Record<string, unknown>
+  if (typeof code !== 'string' || !(SESSION_ACTION_WARNING_CODES as readonly string[]).includes(code)) return null
+  if (typeof sentence !== 'string' || sentence.trim().length === 0) return null
+  return { warning: { code: code as SessionActionWarningCode, sentence } }
+}
+
+/**
+ * The action happened (`Ok`), so an outcome that cannot be read is still `Ok` with no warning: reporting
+ * "it did not happen" would be false. A trace with the command and a fixed reason code is left for
+ * diagnostics, never the payload (it is Rust's text, but a contract break is not something to echo).
+ */
+async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record<string, unknown>): Promise<CommandResult<SessionActionOutcome>> {
+  const result = await command<unknown>(name, args)
+  if (!result.ok) return result
+  const outcome = parseSessionActionOutcome(result.value)
+  if (outcome) return { ok: true, value: outcome }
+  console.warn(name, 'outcome_unreadable')
+  return { ok: true, value: { warning: null } }
+}
+
+/**
  * Disconnect this device from the account: clears the local session token and
  * wipes any cached credentials from the keychain. The files in the sync root
  * stay on disk; the vault stays intact in the cloud. After this call the root
  * `sync_status` poll will return `logged_in: false` and the SignedOutGate will
- * take over.
+ * take over. `forgetEmail` is the account switch (FB-I2): the previous account's
+ * address is forgotten too, or the sign-out stops (`Err`).
  */
-export function clearSession(): Promise<CommandResult<void>> {
-  return command<void>('clear_session')
+export function clearSession(options: { forgetEmail?: boolean } = {}): Promise<CommandResult<SessionActionOutcome>> {
+  return sessionAction('clear_session', options.forgetEmail ? { forgetEmail: true } : undefined)
+}
+
+/** Lock the vault. `Ok` means it is locked; its `warning` says which step could not be confirmed. */
+export function lockVault(): Promise<CommandResult<SessionActionOutcome>> {
+  return sessionAction('lock_vault')
 }
 
 export interface ForceReauthApi {
@@ -1082,13 +1131,19 @@ const defaultForceReauthApi: ForceReauthApi = {
  * the platform branch, the ordering and the short-circuit-on-failure decision are unit-testable
  * without a Tauri runtime; mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
  */
-export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<void>> {
+export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<SessionActionOutcome>> {
   const platform = await api.platform()
   if (!platform.ok) return platform
-  if (platform.value === 'macos') return api.openReauthWindow()
+  if (platform.value === 'macos') {
+    const opened = await api.openReauthWindow()
+    return opened.ok ? { ok: true, value: { warning: null } } : opened
+  }
   const cleared = await api.clearSession()
   if (!cleared.ok) return cleared
-  return api.openOnboardingWindow()
+  // A clear that happened with a warning (FB-24) is no reason to stop: onboarding opens, and the
+  // warning goes back to the caller, which shows it neutrally.
+  const opened = await api.openOnboardingWindow()
+  return opened.ok ? { ok: true, value: { warning: cleared.value.warning } } : opened
 }
 
 // ── Selective sync (wave-2) ──────────────────────────────────────────────────

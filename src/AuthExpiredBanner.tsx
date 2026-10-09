@@ -46,18 +46,22 @@ export default function AuthExpiredBanner({ authExpired }: { authExpired: boolea
         label: 'Sign in again',
         onClick: () => {
           void forceReauth().then((result) => {
-            if (!result.ok) {
-              // Surface the failure — the old handler ignored the result, so
-              // a failed clearSession (e.g. "Could not stop the sync
-              // engine…") left the user stuck with no feedback. The
-              // persistent banner itself stays up either way.
-              showToast({
-                id: AUTH_EXPIRED_REAUTH_ERROR_TOAST_ID,
-                variant: 'error',
-                title: "Couldn't start sign-in again",
-                message: result.reason,
-              })
+            if (result.ok) {
+              // FB-24: the expired session was cleared, but a step could not be confirmed. Said
+              // neutrally, never as "Couldn't …".
+              if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
+              return
             }
+            // Surface the failure — the old handler ignored the result, so
+            // a sign-out that did not happen (e.g. "Could not stop the sync
+            // engine…") left the user stuck with no feedback. The
+            // persistent banner itself stays up either way.
+            showToast({
+              id: AUTH_EXPIRED_REAUTH_ERROR_TOAST_ID,
+              variant: 'error',
+              title: "Couldn't start sign-in again",
+              message: result.reason,
+            })
           })
         },
       },

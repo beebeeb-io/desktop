@@ -25,12 +25,16 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Ke
 import {
   accountSubscription,
   BILLING_URL,
+  clearSession,
   command,
   commandUnavailableLabel,
+  lockVault,
   openUrl,
   popoverSnapshot,
   type DesktopConfig,
+  type CommandResult,
   type MacosIntegrationResetResult,
+  type SessionActionOutcome,
   type Subscription,
   type VaultItem,
 } from './desktopApi'
@@ -252,6 +256,9 @@ function AccountTab() {
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
   const [busy, setBusy] = useState<AccountBusy>(null)
   const [confirmSignOut, setConfirmSignOut] = useState(false)
+  // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, shown
+  // as a neutral line (never under "Couldn’t …"), until the next action.
+  const [actionNote, setActionNote] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     const result = await popoverSnapshot(1)
@@ -281,9 +288,13 @@ function AccountTab() {
     }
   }, [signedIn, unlocked])
 
-  const run = async (name: 'lock_vault' | 'unlock_vault' | 'clear_session', failTitle: string) => {
+  // One action at a time. An Err means it did not happen: one error toast. An Ok of a Lock or a
+  // sign-out may carry a warning (FB-24): its sentence becomes the neutral note. The account is read
+  // again after ANY result (M4), so the tab never keeps showing a state the action changed.
+  const run = async (name: NonNullable<AccountBusy>, send: () => Promise<CommandResult<unknown>>, failTitle: string) => {
     setBusy(name)
-    const result = await command<void>(name)
+    setActionNote(null)
+    const result = await send()
     setBusy(null)
     if (!result.ok) {
       showToast({
@@ -291,16 +302,27 @@ function AccountTab() {
         title: failTitle,
         message: result.unsupported ? commandUnavailableLabel(name) : result.reason,
       })
-      return false
     }
     await refresh()
-    return true
+    return result
+  }
+
+  const lock = async () => {
+    const result = await run('lock_vault', lockVault, 'Couldn’t lock the vault')
+    if (result.ok) setActionNote((result.value as SessionActionOutcome).warning?.sentence ?? null)
   }
 
   const signOut = async () => {
     setConfirmSignOut(false)
-    await run('clear_session', 'Couldn’t sign out')
+    const result = await run('clear_session', () => clearSession(), 'Couldn’t sign out')
+    if (result.ok) setActionNote((result.value as SessionActionOutcome).warning?.sentence ?? null)
   }
+
+  const note = actionNote ? (
+    <SettingsGroup>
+      <Note kind="status">{actionNote}</Note>
+    </SettingsGroup>
+  ) : null
 
   if (load.status === 'loading') return <div className="ms-loading" role="status">Loading…</div>
   if (load.status === 'failed' || account === null) {
@@ -318,9 +340,12 @@ function AccountTab() {
 
   if (!account.logged_in) {
     return (
-      <SettingsGroup>
-        <SettingRow name="signed-out" tall label="You’re signed out" hint="Sign in from the Beebeeb menu to start syncing." />
-      </SettingsGroup>
+      <>
+        {note}
+        <SettingsGroup>
+          <SettingRow name="signed-out" tall label="You’re signed out" hint="Sign in from the Beebeeb menu to start syncing." />
+        </SettingsGroup>
+      </>
     )
   }
 
@@ -330,6 +355,7 @@ function AccountTab() {
 
   return (
     <>
+      {note}
       <SettingsGroup>
         <div className="ms-account">
           <div className="ms-avatar" aria-hidden="true">
@@ -378,7 +404,7 @@ function AccountTab() {
             }
             hint="Locking stops sync until you enter your password again."
             control={
-              <Btn disabled={busy === 'lock_vault'} onClick={() => void run('lock_vault', 'Couldn’t lock the vault')}>
+              <Btn disabled={busy === 'lock_vault'} onClick={() => void lock()}>
                 {busy === 'lock_vault' ? 'Locking…' : 'Lock now'}
               </Btn>
             }
@@ -397,7 +423,7 @@ function AccountTab() {
             }
             hint="Sync is paused until you unlock it."
             control={
-              <Btn primary disabled={busy === 'unlock_vault'} onClick={() => void run('unlock_vault', 'Couldn’t unlock the vault')}>
+              <Btn primary disabled={busy === 'unlock_vault'} onClick={() => void run('unlock_vault', () => command<void>('unlock_vault'), 'Couldn’t unlock the vault')}>
                 {busy === 'unlock_vault' ? 'Unlocking…' : 'Unlock'}
               </Btn>
             }

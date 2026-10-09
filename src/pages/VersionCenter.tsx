@@ -145,7 +145,10 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
         title: 'Couldn’t open sign-in',
         message: result.unsupported ? commandUnavailableLabel('open_onboarding_window') : result.reason,
       })
+      return
     }
+    // FB-24: the expired session was cleared, but a step could not be confirmed: said neutrally.
+    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
   }
 
   const restoreVersion = async (version: FileVersionEntry) => {

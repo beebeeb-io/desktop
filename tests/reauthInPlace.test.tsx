@@ -332,10 +332,11 @@ describe('AccountSwitchStep', () => {
     return { focused, pressEnter }
   }
 
-  function openSwitch(pendingChanges: number, clear: () => unknown = () => undefined) {
+  function openSwitch(pendingChanges: number, clear: () => unknown = () => ({ warning: null })) {
     const events: string[] = []
     const m = mount('Onboarding.tsx', 'AccountSwitchStep', {
       backend: { clear_session: clear },
+      // A sign-out answers `{warning}` (FB-24); a fixture that answers nothing is the old shape.
       props: { pendingChanges, onSwitched: () => events.push('switched'), onCancel: () => events.push('cancelled') },
       bindings: { ...desktopApi, ...switchCopy, Card },
     })
@@ -409,6 +410,17 @@ describe('AccountSwitchStep', () => {
     expect(clearCalls(m).map((c) => c.args)).toEqual([{ forgetEmail: true }])
   })
 
+  // FB-24: a sign-out that happened but could not confirm Finder's removal is Ok with a warning. The
+  // switch continues to sign-in on any Ok, and the warning is a neutral note, never "Couldn’t sign out".
+  test('a sign-out that happened with a warning continues to sign-in, and says the warning neutrally', async () => {
+    const sentence = rustStr('lib.rs', 'FINDER_SIGN_OUT_UNCONFIRMED_WARNING')
+    const { m, events } = openSwitch(2, () => ({ warning: { code: 'finder_removal_unconfirmed', sentence } }))
+    await m.flush()
+    await m.click('Sign out and switch')
+    expect(events).toEqual(['switched'])
+    expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([{ variant: 'info', title: undefined, message: sentence }])
+  })
+
   test('an address that could not be forgotten stops the switch: the Rust sentence verbatim, and the step stays', async () => {
     const sentence = rustStr('lib.rs', 'SIGN_OUT_EMAIL_NOT_FORGOTTEN')
     const { m, events } = openSwitch(2, () => { throw sentence })
@@ -423,7 +435,7 @@ describe('AccountSwitchStep', () => {
   test('while the sign-out runs, neither button can be pressed again', async () => {
     let release: () => void = () => undefined
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const { m, events } = openSwitch(3, () => gate)
+    const { m, events } = openSwitch(3, () => gate.then(() => ({ warning: null })))
     await m.flush()
     await m.clickNoWait('Sign out and switch')
     const buttons = m.elements().filter((el) => el.type === 'button')
