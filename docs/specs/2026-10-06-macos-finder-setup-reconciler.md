@@ -227,6 +227,7 @@ Rules:
 - **Not retryable** (`folder_taken`, `signing`, `not_in_applications`): `Failed` straight away.
 - **After `Failed`**, nothing retries automatically until the next launch, keys arriving, or "Try again". Bringing the app to the front does not retry.
 - **`UserDisabled` poll:** a read-only `userEnabled` check every 3 s, only while a Beebeeb window is visible, plus once when the app becomes active. It never calls add. The flip to true triggers exactly one check.
+  While `Ready` and not held, the same read-only check runs on the same bound, and a read of `false` moves `Ready` to `UserDisabled` without a check, an add or an engine stop, so Beebeeb turned off in System Settings while it runs is noticed without a relaunch. — lead, 2026-10-09 (device run F7)
 - **The schedule and the clock live in one place** (the reconciler's policy struct) and are injected in tests.
 
 ## 8. Lifecycle log

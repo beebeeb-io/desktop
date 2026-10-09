@@ -216,7 +216,7 @@ pub struct CoreState {
     check_again: bool,
     /// Set by sign-out and lock; only `Launch` or `KeysArrived` clears it. While held no check
     /// starts, so nothing re-adds the domain or starts the engine in the gap between the
-    /// reconciler finishing and the caller clearing the session. The UserDisabled poll is off
+    /// reconciler finishing and the caller clearing the session. The poll (see [`polls`]) is off
     /// while held.
     held: bool,
     poll_due: Option<Instant>,
@@ -248,10 +248,17 @@ impl CoreState {
         self.held
     }
 
-    /// Nothing runs and nothing is scheduled except, possibly, the UserDisabled poll.
+    /// Nothing runs and nothing is scheduled except, possibly, the poll.
     pub fn is_settled(&self) -> bool {
         self.phase == Phase::Idle && !self.awaiting && !self.poll_pending
     }
+}
+
+/// §7: the read-only `userEnabled` poll (every `user_disabled_poll` while a window is visible, plus once when the app
+/// becomes active) runs while `UserDisabled`, to notice it turned back on, and while `Ready`, to notice it turned off
+/// in System Settings while Beebeeb runs. Never while held. Only between checks: the caller checks the phase.
+fn polls(s: &CoreState) -> bool {
+    !s.held && matches!(s.setup, FinderSetup::UserDisabled | FinderSetup::Ready)
 }
 
 /// From a disk image or a translocated copy the reason is known before any check (§6.2:
@@ -270,7 +277,7 @@ pub fn step(mut state: CoreState, input: Input, now: Instant, policy: &RetryPoli
         Input::Trigger(trigger) => on_trigger(&mut state, trigger, now, &mut fx),
         Input::Tick { window_visible } => on_tick(&mut state, window_visible, now, policy),
         Input::AppActivated => {
-            if state.phase == Phase::Idle && state.setup == FinderSetup::UserDisabled && !state.held {
+            if state.phase == Phase::Idle && polls(&state) {
                 state.poll_pending = true;
             }
         }
@@ -311,7 +318,7 @@ pub fn next_op(state: &mut CoreState, now: Instant, policy: &RetryPolicy) -> Nex
             if state.poll_pending {
                 state.poll_pending = false;
                 Op::ReadDomain
-            } else if state.setup == FinderSetup::UserDisabled && !state.held {
+            } else if polls(state) {
                 // While held there is no poll, so no timer either: a `WakeAt` in the past that
                 // `on_tick` ignores would spin the driver.
                 return state.poll_due.map_or(Next::Idle, Next::WakeAt);
@@ -396,7 +403,7 @@ fn on_trigger(s: &mut CoreState, trigger: Trigger, now: Instant, fx: &mut Vec<Ef
 fn on_tick(s: &mut CoreState, window_visible: bool, now: Instant, policy: &RetryPolicy) {
     // Backoff expiry needs nothing here: `next_op` compares `now` with the deadline.
     // Held (sign-out or lock): no poll until keys arrive, or it would log a flip it cannot act on.
-    if s.held || s.phase != Phase::Idle || s.setup != FinderSetup::UserDisabled {
+    if s.phase != Phase::Idle || !polls(s) {
         return;
     }
     if s.poll_due.is_some_and(|due| now >= due) {
@@ -426,15 +433,31 @@ fn start_check(s: &mut CoreState, now: Instant) {
 
 fn on_done(s: &mut CoreState, result: OpResult, now: Instant, policy: &RetryPolicy, fx: &mut Vec<Effect>) {
     match (s.phase, result) {
-        (Phase::Idle, OpResult::Domain(read)) => {
+        (Phase::Idle, OpResult::Domain(read)) => match (s.setup, read) {
             // The UserDisabled poll. It never adds; a flip to enabled runs exactly one check.
-            if s.setup == FinderSetup::UserDisabled && read == Ok(DomainState::Enabled) {
+            (FinderSetup::UserDisabled, Ok(DomainState::Enabled)) => {
                 fx.push(Effect::TriggerReceived(Trigger::UserEnabledFlipped));
                 if !s.held {
                     start_check(s, now);
                 }
             }
-        }
+            // The Ready poll: turned off in System Settings while Beebeeb runs. Not a check, so it adds nothing and
+            // stops nothing: the running engine belongs to the signed-in session, and the flip back on runs the one
+            // check that confirms the domain and reuses that engine. Any other answer (still on, not listed, a failed
+            // read) is no evidence of anything; a missing domain is re-added by the next launch (§5.5).
+            (FinderSetup::Ready, Ok(DomainState::Disabled)) if !s.held => {
+                s.last_error = None;
+                set_state(
+                    s,
+                    FinderSetup::UserDisabled,
+                    Some(FinderFailureReason::UserDisabled),
+                    None,
+                    fx,
+                );
+                s.poll_due = Some(now + policy.user_disabled_poll);
+            }
+            _ => {}
+        },
         (Phase::Removing { requested, then_check }, OpResult::Removed(result, _)) => {
             let error = result.as_ref().err().cloned();
             let removed = error.is_none();
@@ -506,7 +529,7 @@ fn on_check_result(
         // never evidence of anything (the 1524 rule `decide_install_step` used to pin).
         (Step::ReadAfterAdd, OpResult::Domain(_)) => s.phase = Phase::Running(Step::Wait(Wait::AfterAdd)),
         (Step::Wait(_), OpResult::Stable(Ok(()))) => s.phase = Phase::Running(Step::Finish),
-        (Step::Finish, OpResult::Finished(Ok(()))) => land_ready(s, now, fx),
+        (Step::Finish, OpResult::Finished(Ok(()))) => land_ready(s, now, policy, fx),
         (Step::StopEngine(landing), OpResult::EngineStopped(stopped)) => {
             match stopped {
                 Ok(()) => s.check_started_engine = false,
@@ -657,11 +680,12 @@ fn land_terminal(s: &mut CoreState, landing: Landing, now: Instant, policy: &Ret
     finish_check(s, now);
 }
 
-fn land_ready(s: &mut CoreState, now: Instant, fx: &mut Vec<Effect>) {
+fn land_ready(s: &mut CoreState, now: Instant, policy: &RetryPolicy, fx: &mut Vec<Effect>) {
     s.last_error = None;
     s.check_started_engine = false; // the engine now belongs to the signed-in session
     fx.push(Effect::PersistFailure(None));
     set_state(s, FinderSetup::Ready, None, None, fx);
+    s.poll_due = Some(now + policy.user_disabled_poll);
     finish_check(s, now);
 }
 
@@ -1574,6 +1598,134 @@ mod tests {
             0,
             "the poll never adds; a registered, enabled domain is only confirmed (§5.5 step 3)"
         );
+    }
+
+    /// Turned off in System Settings while Beebeeb runs: while `Ready` the same read-only poll runs on the same bound
+    /// as the UserDisabled one (§7: every 3 s while a window is visible, plus once when the app becomes active), and a
+    /// read that says "turned off" lands `UserDisabled` by itself: no trigger, no check, no add, no engine stop.
+    #[test]
+    fn a_ready_domain_turned_off_while_running_lands_user_disabled_from_the_poll_alone() {
+        let mut sim = Sim::new(Applications);
+        sim.trigger(Trigger::Launch);
+        sim.run(&World::ok(SIGNED_IN, Enabled));
+        assert_eq!(sim.s.setup, Ready);
+        let ops_before = sim.kinds();
+        let three = Duration::from_secs(3);
+        let ready_at = sim.now;
+        assert_eq!(sim.next(), Next::WakeAt(ready_at + three), "Ready keeps a poll timer");
+        sim.now = ready_at + three;
+        sim.feed(Input::Tick { window_visible: false });
+        assert_eq!(
+            sim.next(),
+            Next::WakeAt(ready_at + three * 2),
+            "no read while no window is visible"
+        );
+        sim.now = ready_at + three * 2;
+        sim.feed(Input::Tick { window_visible: true });
+        assert_eq!(sim.next(), Next::Run(Op::ReadDomain));
+        sim.feed(Input::Done(OpResult::Domain(Ok(Enabled))));
+        assert_eq!(sim.s.setup, Ready, "still on: nothing changes");
+        // The person turns Beebeeb off in System Settings; the visible window's timer reads it.
+        sim.now = ready_at + three * 3;
+        sim.feed(Input::Tick { window_visible: true });
+        assert_eq!(sim.next(), Next::Run(Op::ReadDomain));
+        sim.fx.clear();
+        sim.feed(Input::Done(OpResult::Domain(Ok(Disabled))));
+        assert_eq!(
+            (sim.s.setup, sim.s.reason, sim.s.last_error.clone()),
+            (UserDisabled, Some(FinderFailureReason::UserDisabled), None)
+        );
+        assert!(
+            sim.fx.iter().any(|e| matches!(
+                e,
+                Effect::Transition(t) if t.from == Ready && t.to == UserDisabled
+                    && t.reason == Some(FinderFailureReason::UserDisabled)
+            )),
+            "one lifecycle line: {:?}",
+            sim.fx
+        );
+        assert!(sim.fx.contains(&Effect::Publish), "surfaces refresh");
+        assert!(
+            !sim.fx.iter().any(|e| matches!(e, Effect::TriggerReceived(_))),
+            "the poll alone noticed it: {:?}",
+            sim.fx
+        );
+        assert_eq!(sim.kinds(), ops_before, "no check, no add, no engine stop");
+        assert!(sim.s.is_settled());
+        // From here it is the UserDisabled poll: turning it back on runs exactly one check, which only confirms.
+        assert_eq!(sim.next(), Next::WakeAt(sim.now + three));
+        sim.now += three;
+        sim.feed(Input::Tick { window_visible: true });
+        assert_eq!(sim.next(), Next::Run(Op::ReadDomain));
+        sim.feed(Input::Done(OpResult::Domain(Ok(Enabled))));
+        assert!(sim.fx.contains(&Effect::TriggerReceived(Trigger::UserEnabledFlipped)));
+        sim.run(&World::ok(SIGNED_IN, Enabled));
+        assert_eq!(sim.s.setup, Ready);
+        assert_eq!(sim.count(Op::Observe), 2, "the launch check, then the flip's one check");
+        assert_eq!(sim.count(Op::AddDomain), 0, "neither the flip off nor the flip on adds");
+        assert_eq!(sim.count(Op::StopEngine), 0);
+    }
+
+    /// The same, noticed when the app becomes active (§7's "plus once when the app becomes active").
+    #[test]
+    fn a_ready_domain_turned_off_while_running_is_read_once_when_the_app_becomes_active() {
+        let mut sim = Sim::new(Applications);
+        sim.trigger(Trigger::Launch);
+        sim.run(&World::ok(SIGNED_IN, Enabled));
+        assert_eq!(sim.s.setup, Ready);
+        sim.feed(Input::AppActivated);
+        assert_eq!(
+            sim.next(),
+            Next::Run(Op::ReadDomain),
+            "once when the app becomes active"
+        );
+        sim.feed(Input::Done(OpResult::Domain(Ok(Disabled))));
+        assert_eq!(sim.s.setup, UserDisabled);
+        assert_eq!(sim.count(Op::AddDomain), 0);
+        assert_eq!(sim.count(Op::Observe), 1, "no check ran");
+    }
+
+    /// While `Ready` the poll acts only on "turned off": a read that fails, or finds the domain not registered, is no
+    /// evidence of anything and changes nothing (a missing domain is the next launch's to re-add, §5.5).
+    #[test]
+    fn the_ready_poll_ignores_every_answer_but_turned_off() {
+        for read in [
+            Ok(Enabled),
+            Ok(NotRegistered),
+            Err(FpError::app(app_code::OP_TIMEOUT, "ReadDomain did not answer")),
+        ] {
+            let mut sim = Sim::new(Applications);
+            sim.trigger(Trigger::Launch);
+            sim.run(&World::ok(SIGNED_IN, Enabled));
+            sim.fx.clear();
+            sim.feed(Input::AppActivated);
+            assert_eq!(sim.next(), Next::Run(Op::ReadDomain));
+            sim.feed(Input::Done(OpResult::Domain(read.clone())));
+            assert_eq!((sim.s.setup, sim.s.reason), (Ready, None), "{read:?}");
+            assert!(sim.fx.is_empty(), "{read:?}: {:?}", sim.fx);
+            assert!(sim.s.is_settled(), "{read:?}");
+        }
+    }
+
+    /// A Lock leaves `Ready` in place (it never changes what macOS says) and holds: no read, no timer, until keys
+    /// arrive again.
+    #[test]
+    fn a_held_ready_core_does_not_poll() {
+        let mut sim = Sim::new(Applications);
+        sim.trigger(Trigger::Launch);
+        sim.run(&World::ok(SIGNED_IN, Enabled));
+        sim.feed(Input::AppActivated); // a read is pending
+        sim.trigger(Trigger::Lock);
+        assert_eq!(sim.s.setup, Ready);
+        assert_eq!(
+            sim.next(),
+            Next::Idle,
+            "the pending read is dropped and no timer is left behind"
+        );
+        sim.now += Duration::from_secs(30);
+        sim.feed(Input::Tick { window_visible: true });
+        sim.feed(Input::AppActivated);
+        assert_eq!(sim.next(), Next::Idle);
     }
 
     #[test]

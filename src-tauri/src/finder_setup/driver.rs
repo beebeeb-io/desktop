@@ -691,6 +691,8 @@ mod tests {
         record: Arc<Mutex<Record>>,
         /// What `Observe` reads. A test flips it to play the person turning the extension on.
         domain: Arc<Mutex<DomainState>>,
+        /// What `ReadDomain` (the read after an add, and the poll) answers.
+        read: Arc<Mutex<DomainState>>,
         add: Result<(), FpError>,
         remove: Result<(), FpError>,
         /// Task 1882: what the removal kept (with its answer, `remove`).
@@ -717,6 +719,7 @@ mod tests {
                 clock: clock.clone(),
                 record: record.clone(),
                 domain: Arc::new(Mutex::new(domain)),
+                read: Arc::new(Mutex::new(DomainState::Enabled)),
                 add: Ok(()),
                 remove: Ok(()),
                 kept: KeptFolder::default(),
@@ -764,7 +767,7 @@ mod tests {
                     }
                     OpResult::Added(self.add.clone())
                 }
-                Op::ReadDomain => OpResult::Domain(Ok(DomainState::Enabled)),
+                Op::ReadDomain => OpResult::Domain(Ok(*self.read.lock().unwrap())),
                 Op::WaitStable(_) => OpResult::Stable(Ok(())),
                 Op::FinishReady => OpResult::Finished(Ok(())),
                 Op::StopEngine => OpResult::EngineStopped(self.stop.clone()),
@@ -1640,6 +1643,106 @@ mod tests {
             "the visible window polled"
         );
         assert!(!ops(&record).contains(&Op::AddDomain));
+    }
+
+    /// Turned off in System Settings while Beebeeb runs: the running driver notices it without a relaunch and without
+    /// any trigger, on the UserDisabled poll's own bound (§7): once when the app becomes active, and by the timer while
+    /// a window is visible. It never adds, and it does not stop the session's engine.
+    #[tokio::test]
+    async fn a_domain_turned_off_while_ready_is_noticed_by_the_poll_without_a_relaunch() {
+        let clock = FakeClock::new();
+        let (ports, record) = FakePorts::new(&clock, DomainState::Enabled);
+        let (domain, read, visible) = (ports.domain.clone(), ports.read.clone(), ports.visible.clone());
+        let (handle, task) = start(
+            ports,
+            clock.clone(),
+            LaunchLocation::Applications,
+            None,
+            RetryPolicy::default(),
+        );
+        tokio::spawn(task);
+        handle.trigger(Trigger::Launch).unwrap();
+        settle(&handle, |v| v.setup == FinderSetup::Ready).await;
+        let turned_off = |off: bool| {
+            let state = if off {
+                DomainState::Disabled
+            } else {
+                DomainState::Enabled
+            };
+            *domain.lock().unwrap() = state;
+            *read.lock().unwrap() = state;
+        };
+
+        // Off, with no window on screen and no activation: nothing reads.
+        turned_off(true);
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(handle.view().setup, FinderSetup::Ready);
+        assert!(!ops(&record).contains(&Op::ReadDomain), "no window, no poll");
+
+        // The app becomes active: one read, and the state follows macOS.
+        handle.app_activated();
+        settle(&handle, |v| v.setup == FinderSetup::UserDisabled).await;
+        assert_eq!(handle.view().reason, Some(FinderFailureReason::UserDisabled));
+        assert_eq!(
+            ops(&record),
+            vec![
+                Op::Observe,
+                Op::StartEngine,
+                Op::WaitStable(Duration::from_secs(2)),
+                Op::FinishReady,
+                Op::ReadDomain
+            ],
+            "one read and nothing else: no check, no add, no engine stop"
+        );
+        {
+            let record = record.lock().unwrap();
+            assert_eq!(
+                record
+                    .log
+                    .iter()
+                    .filter(|e| matches!(e, LifecycleEvent::Trigger(_)))
+                    .collect::<Vec<_>>(),
+                vec![&LifecycleEvent::Trigger(Trigger::Launch)],
+                "no trigger noticed it, the poll did"
+            );
+            assert!(record.log.iter().any(|e| matches!(
+                e,
+                LifecycleEvent::Transition {
+                    from: FinderSetup::Ready,
+                    to: FinderSetup::UserDisabled,
+                    ..
+                }
+            )));
+            assert_eq!(
+                record.published.last().map(|v| v.setup),
+                Some(FinderSetup::UserDisabled),
+                "surfaces are told"
+            );
+        }
+
+        // Back on: the UserDisabled poll runs exactly one check, which only confirms.
+        turned_off(false);
+        handle.app_activated();
+        settle(&handle, |v| v.setup == FinderSetup::Ready).await;
+
+        // Off again, with a window on screen: the timer reads by itself, no activation needed.
+        let reads_before = ops(&record).iter().filter(|op| **op == Op::ReadDomain).count();
+        turned_off(true);
+        visible.store(true, Ordering::SeqCst);
+        settle(&handle, |v| v.setup == FinderSetup::UserDisabled).await;
+        assert!(
+            ops(&record).iter().filter(|op| **op == Op::ReadDomain).count() > reads_before,
+            "the visible window's timer read it"
+        );
+        assert_eq!(
+            ops(&record).iter().filter(|op| **op == Op::Observe).count(),
+            2,
+            "the launch check and the one check after the flip back on"
+        );
+        assert!(!ops(&record).contains(&Op::AddDomain), "no flip adds");
+        assert!(!ops(&record).contains(&Op::StopEngine));
     }
 
     #[test]

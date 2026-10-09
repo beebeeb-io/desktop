@@ -89,7 +89,8 @@ pub struct RetryPolicy {
     pub stabilize_after_add: Duration,
     /// How long an existing registration gets to confirm it is stable (§5.5 step 3).
     pub confirm_existing: Duration,
-    /// The read-only `userEnabled` poll while Beebeeb is turned off in System Settings.
+    /// The read-only `userEnabled` poll while Beebeeb is turned off in System Settings, and while `Ready` (to notice
+    /// it being turned off while Beebeeb runs).
     pub user_disabled_poll: Duration,
 }
 
