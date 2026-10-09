@@ -438,6 +438,19 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     expect(textOf(clean.tree())).not.toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
   })
 
+  test('a Reset whose engine stop is unconfirmed says to quit and reopen (row 11)', async () => {
+    const backend = {
+      ...macBackend({ view: finderView({ setup: 'ready' }) }),
+      reset_macos_integration: () => ({ pending_operations_preserved: 0, removed_cache_files: 0, skipped_cache_files: 0, warnings: [], engine_stop_unconfirmed: true }),
+    }
+    const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
+    await settle(m)
+    await m.click('Reset Finder integration…')
+    await m.click('Reset Finder integration')
+    expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED)
+    expect(textOf(m.tree())).not.toContain('Finder integration was reset.')
+  })
+
   test('Reset reads the reconciler again, never finder_location_state', async () => {
     const { m } = await openMac({ view: finderView({ setup: 'ready' }) })
     await m.click('Reset Finder integration…')

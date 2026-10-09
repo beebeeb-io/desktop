@@ -11,6 +11,7 @@ import {
   FINDER_ACTION_LABEL,
   FINDER_ADDING_LINE,
   FINDER_OPEN_FAILED,
+  FINDER_REPAIR_ENGINE_UNCONFIRMED,
   FINDER_REPAIR_FAILED,
   FINDER_REPAIR_PARTIAL,
   FINDER_READY_LINE,
@@ -302,6 +303,35 @@ describe('a repair that succeeds with warnings says one sentence (task 17b, fix 
     expect(finderRepairWarningNote({ warnings: [] })).toBeNull()
     expect(finderRepairWarningNote({ warnings: ['', '   '] })).toBeNull()
     for (const leak of LEAKS) expect(finderRepairWarningNote({ warnings: LEAKS })).not.toContain(leak)
+  })
+})
+
+/**
+ * Must-render row 11, lead ruling FT-I3 (it corrects T17b-warnings, it does not overturn it): when
+ * Repair's engine stop (or an earlier one) is unconfirmed, sync starts again only after Beebeeb is
+ * quit and reopened. Lane R flags it as `engine_stop_unconfirmed` on the repair result; a Mac shows
+ * one fixed sentence for it, AHEAD of the partial-cleanup sentence. No string matching on `warnings`.
+ */
+describe('a repair whose engine stop is unconfirmed says to quit and reopen (row 11)', () => {
+  test('the one sentence, with the house apostrophes, the same words as the refusal Rust records', () => {
+    expect(FINDER_REPAIR_ENGINE_UNCONFIRMED).toBe('Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.')
+    expect(FINDER_REPAIR_ENGINE_UNCONFIRMED).toBe(rustStr('account_binding.rs', 'ENGINE_STOP_UNCONFIRMED'))
+  })
+
+  test('the flag alone: the sentence', () => {
+    expect(finderRepairWarningNote({ warnings: [], engine_stop_unconfirmed: true })).toBe(FINDER_REPAIR_ENGINE_UNCONFIRMED)
+  })
+
+  test('the flag and warnings: the sentence first, then the partial-cleanup sentence', () => {
+    expect(finderRepairWarningNote({ warnings: ['io.beebeeb.bridge 3'], engine_stop_unconfirmed: true })).toBe(
+      `${FINDER_REPAIR_ENGINE_UNCONFIRMED} ${FINDER_REPAIR_PARTIAL}`,
+    )
+  })
+
+  test('no flag: the warnings decide alone, and the warning text is never read for the engine', () => {
+    const engineWarning = rustStr('lib.rs', 'REPAIR_ENGINE_UNCONFIRMED_WARNING')
+    expect(finderRepairWarningNote({ warnings: [engineWarning], engine_stop_unconfirmed: false })).toBe(FINDER_REPAIR_PARTIAL)
+    expect(finderRepairWarningNote({ warnings: [], engine_stop_unconfirmed: false })).toBeNull()
   })
 })
 

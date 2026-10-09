@@ -1003,6 +1003,16 @@ describe('Sync tab', () => {
     expect(m.toasts).toEqual([])
   })
 
+  test('a repair whose engine stop is unconfirmed says to quit and reopen, ahead of the partial-cleanup sentence (row 11)', async () => {
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: ['The sync engine did not confirm it stopped. Restart Beebeeb before syncing again.'], engine_stop_unconfirmed: true }) })
+    await press(m, 'Repair…')
+    await pressFinder(m, 'Repair')
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(
+      `${finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED} ${finderSetupCopy.FINDER_REPAIR_PARTIAL}`,
+    )
+    expect(visibleText(m)).not.toContain('The sync engine did not confirm')
+  })
+
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
     const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
     await press(m, 'Repair…')

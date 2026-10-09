@@ -59,18 +59,31 @@ export const FINDER_REPAIR_FAILED = 'Beebeeb couldn’t repair its Finder locati
 export const FINDER_REPAIR_PARTIAL = 'Beebeeb repaired its Finder location, but couldn’t remove everything it left behind.'
 
 /**
+ * A repair whose engine stop (or an earlier one) is unconfirmed (must-render row 11, lead ruling FT-I3):
+ * sync starts again only after Beebeeb is quit and reopened. Shown from the result's structured
+ * `engine_stop_unconfirmed` flag, never from the warning text, and ahead of `FINDER_REPAIR_PARTIAL`.
+ * The same words as the `engine_stop_unconfirmed` refusal Rust records (account_binding.rs).
+ */
+export const FINDER_REPAIR_ENGINE_UNCONFIRMED = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+
+/**
  * A failed "show this file in Finder" (`open_in_finder`: the Shared roots page, quick search) on a
  * Mac. Same reason as `FINDER_OPEN_FAILED`: the error is never shown, this sentence is.
  */
 export const FINDER_SHOW_FILE_FAILED = 'Beebeeb couldn’t show that file in Finder.'
 
 /**
- * The one sentence a repair result's warnings turn into on a Mac, or `null` when there is nothing to
- * say. It takes the whole result so that no caller reads `.warnings` itself, and it never returns any
- * of the warning text.
+ * What a repair result's warnings turn into on a Mac, or `null` when there is nothing to say. It takes
+ * the whole result so that no caller reads `.warnings` itself, and it never returns any of the warning
+ * text. An unconfirmed engine stop (the structured `engine_stop_unconfirmed` flag, row 11) comes first,
+ * as its own fixed sentence; any non-blank warning then adds the partial-cleanup sentence.
  */
-export function finderRepairWarningNote(result: { warnings: readonly string[] }): string | null {
-  return result.warnings.some((warning) => warning.trim().length > 0) ? FINDER_REPAIR_PARTIAL : null
+export function finderRepairWarningNote(result: { warnings: readonly string[]; engine_stop_unconfirmed?: boolean }): string | null {
+  const sentences = [
+    result.engine_stop_unconfirmed === true ? FINDER_REPAIR_ENGINE_UNCONFIRMED : null,
+    result.warnings.some((warning) => warning.trim().length > 0) ? FINDER_REPAIR_PARTIAL : null,
+  ].filter((sentence): sentence is string => sentence !== null)
+  return sentences.length > 0 ? sentences.join(' ') : null
 }
 
 export const FINDER_REASON_COPY: Readonly<Record<FinderFailureReason, { sentence: string; action: FinderSetupAction }>> = {

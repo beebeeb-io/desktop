@@ -158,6 +158,15 @@ describe('Beebeeb in Finder (spec 2026-10-06)', () => {
 
   // Task 17b, fix round 1: Rust puts a bridge code and a cache path in `warnings` (lib.rs:3326, 3265).
   // A Mac never shows them: any warning turns the line into one fixed sentence.
+  test('after a repair whose engine stop is unconfirmed: quit and reopen comes first (row 11)', () => {
+    expect(repairNote({ pending_operations_preserved: 2, warnings: [], engine_stop_unconfirmed: true })).toBe(
+      'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.',
+    )
+    expect(repairNote({ pending_operations_preserved: 0, warnings: ['x'], engine_stop_unconfirmed: true })).toBe(
+      `Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again. ${FINDER_REPAIR_PARTIAL}`,
+    )
+  })
+
   test('after a repair with warnings: the one fixed sentence, and none of the warning text', () => {
     const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
     expect(repairNote({ pending_operations_preserved: 0, warnings: leaks })).toBe(FINDER_REPAIR_PARTIAL)

@@ -263,6 +263,12 @@ export interface MacosIntegrationResetResult {
   skipped_cache_files: number
   pending_operations_preserved: number
   sync_root_preserved?: string | null
+  /**
+   * An engine stop on this account is unconfirmed after Repair's own stop (this one or an earlier one):
+   * sync starts again only after Beebeeb is quit and reopened (Lane R, FA-I3). Surfaces render one
+   * fixed sentence for it (`FINDER_REPAIR_ENGINE_UNCONFIRMED`), never the warning text.
+   */
+  engine_stop_unconfirmed: boolean
   warnings: string[]
 }
 

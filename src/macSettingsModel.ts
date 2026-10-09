@@ -159,7 +159,7 @@ export const REPAIR_BODY =
  * `warnings` hold a bridge error code and a cache-file path (task 17b, fix round 1), so they are never
  * shown: any warning makes this one fixed sentence instead of the count.
  */
-export function repairNote(result: { pending_operations_preserved: number; warnings: string[] }): string | null {
+export function repairNote(result: { pending_operations_preserved: number; warnings: string[]; engine_stop_unconfirmed?: boolean }): string | null {
   const warned = finderRepairWarningNote(result)
   if (warned) return warned
   const kept = result.pending_operations_preserved
