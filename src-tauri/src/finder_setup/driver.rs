@@ -95,7 +95,10 @@ pub struct FinderSetupHandle {
     held: Arc<AtomicBool>,
 }
 
-const NOT_RUNNING: &str = "the Finder reconciler is not running (it starts again when Beebeeb is reopened)";
+/// What a person is told when the reconciler is not running: it was never started, or it stopped on a panic. The one
+/// source for this sentence: the handle's calls return it, and so do the app's removal and lock when there is no
+/// reconciler at all.
+pub const NOT_RUNNING: &str = "Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.";
 
 impl FinderSetupHandle {
     /// `Err` when the reconciler is not running (it stopped on a panic, see `start`): a caller
@@ -609,6 +612,11 @@ mod tests {
 
     /// What an NSError message can look like: it names a person's folder and a file.
     const PATH_MESSAGE: &str = "The file \u{201c}/Users/sam/Secret Folder/tax.pdf\u{201d} could not be added.";
+
+    /// The sentence a person sees when the reconciler is not running, pinned as text: changing the copy changes
+    /// these tests too.
+    const NOT_RUNNING_SENTENCE: &str =
+        "Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.";
 
     fn assert_no_leak(what: &str, text: &str) {
         for leaked in ["/Users/sam", "Secret Folder", "tax.pdf", "could not be added"] {
@@ -1656,20 +1664,17 @@ mod tests {
         let view = FinderSetupView::initial(LaunchLocation::Applications);
         let (handle, rx) = FinderSetupHandle::for_test(view.clone());
         drop(rx);
-        assert!(
+        assert_eq!(
             handle
                 .remove(Trigger::SignOut, Duration::from_secs(1))
                 .await
                 .unwrap_err()
-                .message
-                .contains("not running")
+                .message,
+            NOT_RUNNING_SENTENCE
         );
-        assert!(
-            handle
-                .lock(Duration::from_secs(1))
-                .await
-                .unwrap_err()
-                .contains("not running")
+        assert_eq!(
+            handle.lock(Duration::from_secs(1)).await.unwrap_err(),
+            NOT_RUNNING_SENTENCE
         );
 
         let (handle, _rx) = FinderSetupHandle::for_test(view.clone());
@@ -1857,21 +1862,18 @@ mod tests {
         assert!(copy_details_text(&view, "0.8.12", "26.0", &[]).contains("Error: io.beebeeb.app 5"));
 
         // It does not come back, and nothing hangs or pretends.
-        assert!(handle.trigger(Trigger::TryAgain).unwrap_err().contains("not running"));
-        assert!(
+        assert_eq!(handle.trigger(Trigger::TryAgain).unwrap_err(), NOT_RUNNING_SENTENCE);
+        assert_eq!(
             handle
                 .remove(Trigger::SignOut, Duration::from_secs(5))
                 .await
                 .unwrap_err()
-                .message
-                .contains("not running")
+                .message,
+            NOT_RUNNING_SENTENCE
         );
-        assert!(
-            handle
-                .lock(Duration::from_secs(5))
-                .await
-                .unwrap_err()
-                .contains("not running")
+        assert_eq!(
+            handle.lock(Duration::from_secs(5)).await.unwrap_err(),
+            NOT_RUNNING_SENTENCE
         );
         assert_eq!(handle.view(), view, "the view stays the final one");
 

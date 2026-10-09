@@ -5312,9 +5312,6 @@ fn finder_wait(production: std::time::Duration) -> std::time::Duration {
     production
 }
 
-#[cfg(target_os = "macos")]
-const FINDER_NOT_RUNNING: &str = "Finder setup is not running.";
-
 /// Shown when Lock could not confirm the reconciler stopped (it did not acknowledge in time, or it has
 /// stopped). The keys are already cleared and the engine stopped; the sentence says only what is
 /// unconfirmed. No OS text, no path (lead ruling T1-4). A warning on a Lock that happened (FB-24).
@@ -5974,7 +5971,7 @@ async fn finder_remove_for(
 ) -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
     match state.finder_setup.get() {
         Some(handle) => handle.remove(trigger, finder_wait(FINDER_REMOVE_TIMEOUT)).await,
-        None => Err(FINDER_NOT_RUNNING.to_string().into()),
+        None => Err(finder_setup::driver::NOT_RUNNING.to_string().into()),
     }
 }
 
@@ -5984,7 +5981,7 @@ async fn finder_remove_for(
 async fn finder_lock_for(state: &AppState) -> Result<(), String> {
     match state.finder_setup.get() {
         Some(handle) => handle.lock(finder_wait(FINDER_LOCK_TIMEOUT)).await,
-        None => Err(FINDER_NOT_RUNNING.to_string()),
+        None => Err(finder_setup::driver::NOT_RUNNING.to_string()),
     }
 }
 
@@ -16876,7 +16873,10 @@ mod finder_setup_command_tests {
         drop(rx);
         let _ = state.finder_setup.set(handle);
         let error = finder_setup_retry_impl(&state).unwrap_err();
-        assert!(error.contains("not running"), "{error}");
+        assert_eq!(
+            error,
+            "Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again."
+        );
         assert!(
             !error.contains('/') && !error.contains("NS"),
             "no path and no OS text: {error}"
@@ -19973,6 +19973,35 @@ mod finder_lock_and_sign_out_tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    /// With no reconciler at all, a sign-out's or a Repair's removal and a Lock's hold fail with the sentence a person
+    /// sees for a reconciler that is not running, the same one the handle gives when its reconciler has stopped.
+    #[test]
+    fn with_no_reconciler_a_removal_and_a_lock_say_finder_setup_is_not_running() {
+        let not_running =
+            Err("Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.".to_string());
+        let state = AppState::default();
+        runtime().block_on(async {
+            for trigger in [
+                finder_setup::core::Trigger::SignOut,
+                finder_setup::core::Trigger::Repair,
+            ] {
+                // (Task 1882: the removal's answer also carries what macOS kept; with no reconciler, nothing.)
+                let removal = finder_remove_for(&state, trigger).await;
+                assert_eq!(
+                    removal.as_ref().err().map(|failure| failure.kept.clone()),
+                    Some(finder_removal::KeptFolder::default()),
+                    "{trigger:?}"
+                );
+                assert_eq!(
+                    removal.map(|_| ()).map_err(|failure| failure.message),
+                    not_running,
+                    "{trigger:?}"
+                );
+            }
+            assert_eq!(finder_lock_for(&state).await, not_running);
+        });
     }
 
     // ---- Lock ----
