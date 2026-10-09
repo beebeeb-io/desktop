@@ -1575,7 +1575,13 @@ impl EngineBridge {
         if let Some(contents_path) = target.contents_path.as_deref() {
             let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
             let staged_path = staged.path().to_string();
-            let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
+            let staged_metadata = std::fs::metadata(&staged_path).ok();
+            let size_bytes = staged_metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+            let staged_modified_at = staged_metadata
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or_else(now_secs);
             let mime = target
                 .content_type
                 .as_deref()
@@ -1588,7 +1594,11 @@ impl EngineBridge {
                 target.base_version_identifier.as_deref(),
                 current_row.as_ref().zip(current_contract.as_ref()),
             );
-            self.db.set_status(&file_id, FileStatus::Uploading)?;
+            // The system keeps the bytes it handed over and is not asked to
+            // fetch them back, so the item in the reply must describe them:
+            // the row takes the staged copy's size and modification time. The
+            // content version is untouched until the upload lands.
+            self.db.record_local_write(&file_id, size_bytes, staged_modified_at)?;
             let mut payload = serde_json::json!({
                 "operation": "upload_version",
                 "name_encrypted": name_encrypted,
@@ -12814,9 +12824,17 @@ mod tests {
         bridge.db.set_file_contract_state(&contract).unwrap();
     }
 
-    /// Queue a content modify of `file_id` with `identifier` as its base and
-    /// return the queued op's `base_version`.
-    fn queued_modify_base(bridge: &EngineBridge, dir: &Path, file_id: &str, identifier: &str) -> Option<i64> {
+    /// Seed `file_id` as [`seed_legacy_row`] does, queue a content modify of
+    /// it with `identifier` as its base, and return the queued op's
+    /// `base_version`. Re-seeded per call: a queued write updates the row.
+    fn queued_modify_base(
+        bridge: &EngineBridge,
+        dir: &Path,
+        file_id: &str,
+        content_hash: Option<&str>,
+        identifier: &str,
+    ) -> Option<i64> {
+        seed_legacy_row(bridge, file_id, content_hash);
         let contents = dir.join(format!("edit-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&contents, b"edited bytes").unwrap();
         bridge
@@ -12843,21 +12861,19 @@ mod tests {
     fn a_legacy_identifier_of_the_current_content_is_based_on_the_server_version() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_legacy_row(&bridge, "legacy-1", None);
         assert_eq!(
-            queued_modify_base(&bridge, dir.path(), "legacy-1", "1791550370"),
+            queued_modify_base(&bridge, dir.path(), "legacy-1", None, "1791550370"),
             Some(2),
             "the old content version of the row as it is now"
         );
         assert_eq!(
-            queued_modify_base(&bridge, dir.path(), "legacy-1", "1791550370:1791550370:18"),
+            queued_modify_base(&bridge, dir.path(), "legacy-1", None, "1791550370:1791550370:18"),
             Some(2),
             "the old full version identifier of the row as it is now"
         );
 
-        seed_legacy_row(&bridge, "legacy-hash", Some("abc123"));
         assert_eq!(
-            queued_modify_base(&bridge, dir.path(), "legacy-hash", "1791550370:abc123"),
+            queued_modify_base(&bridge, dir.path(), "legacy-hash", Some("abc123"), "1791550370:abc123"),
             Some(2),
             "the old content version with the row's content hash"
         );
@@ -12867,7 +12883,6 @@ mod tests {
     fn a_legacy_identifier_of_older_content_stays_a_stale_base() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_legacy_row(&bridge, "legacy-2", Some("abc123"));
         for older in [
             // Stamped before the latest re-stamp of the row.
             "1791550250",
@@ -12878,7 +12893,7 @@ mod tests {
             "1791550370:1791550370:17",
         ] {
             assert_eq!(
-                queued_modify_base(&bridge, dir.path(), "legacy-2", older),
+                queued_modify_base(&bridge, dir.path(), "legacy-2", Some("abc123"), older),
                 parse_base_version_number(Some(older)),
                 "{older} does not describe the row's current content and is parsed as before"
             );
@@ -12919,7 +12934,6 @@ mod tests {
     fn a_current_format_identifier_is_parsed_as_before() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_legacy_row(&bridge, "current-1", Some("abc123"));
         for (identifier, base) in [
             ("2", Some(2)),
             ("2:abc123", Some(2)),
@@ -12929,7 +12943,7 @@ mod tests {
             ("0", None),
         ] {
             assert_eq!(
-                queued_modify_base(&bridge, dir.path(), "current-1", identifier),
+                queued_modify_base(&bridge, dir.path(), "current-1", Some("abc123"), identifier),
                 base,
                 "{identifier}"
             );

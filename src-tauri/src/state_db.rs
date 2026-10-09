@@ -1977,6 +1977,32 @@ impl StateDb {
         Ok(())
     }
 
+    /// A local content write was queued: the row is `Uploading` and describes
+    /// the bytes the write holds (`size_bytes`, `modified_at`). Path, content
+    /// hash and the remote stamp are left alone, so the content version does
+    /// not move until the upload lands. A missing row is left missing.
+    pub fn record_local_write(&self, file_id: &str, size_bytes: i64, modified_at: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let old: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT status, size_bytes, modified_at FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((status, old_size, old_modified_at)) = old else {
+            return Ok(());
+        };
+        conn.execute(
+            "UPDATE files SET status = ?1, size_bytes = ?2, modified_at = ?3 WHERE file_id = ?4",
+            params![FileStatus::Uploading.as_str(), size_bytes, modified_at, file_id],
+        )?;
+        if status != FileStatus::Uploading.as_str() || old_size != size_bytes || old_modified_at != modified_at {
+            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
+        }
+        Ok(())
+    }
+
     /// Clear transient transfer states left behind by a previous process.
     ///
     /// `Uploading` and `Downloading` mean "the current engine is actively moving

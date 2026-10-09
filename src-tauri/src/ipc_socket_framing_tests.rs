@@ -849,6 +849,64 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
     assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 1);
 }
 
+#[test]
+fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
+    // The system keeps the bytes it handed over and does not fetch them back,
+    // so the item in the reply must describe THOSE bytes, not the row's
+    // previous content (28 bytes here; the edit is 40).
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: "edited-item".into(),
+            path: "t.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 28,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state("edited-item").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("t.txt");
+    std::fs::write(&path, b"twenty-eight bytes of text.\nmore-bytes12").unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let reply = fx
+        .rt
+        .block_on(send_one(&fx, modify_request("edited-item", "t.txt", &path, None)));
+    let item = &reply["WriteQueued"]["item"];
+    let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
+    assert_eq!(ops.len(), 1, "{reply}");
+    let staged = std::fs::metadata(ops[0].payload_path.as_deref().unwrap())
+        .unwrap()
+        .len() as i64;
+    assert_eq!(staged, 40);
+    assert_eq!(
+        item["size_bytes"],
+        serde_json::json!(staged),
+        "the reply must describe the staged bytes: {reply}"
+    );
+    assert!(
+        item["modified_at"].as_i64().unwrap() >= before,
+        "the reply's modification time is the write's, not the previous content's: {reply}"
+    );
+    assert_eq!(item["status"], "uploading", "{reply}");
+    assert_eq!(
+        item["content_version"], "1",
+        "the server version only moves when the upload lands: {reply}"
+    );
+    let row = fx.db.get_file("edited-item").unwrap().unwrap();
+    assert_eq!(row.size_bytes, 40, "the row records the staged size too");
+}
+
 // ---------------------------------------------------------------------------
 // Task 1697: ListChanges — the daemon-side change log the replica's
 // enumerator pages through, over the real socket.
