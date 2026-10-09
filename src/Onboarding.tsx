@@ -16,7 +16,7 @@ import {
 } from './desktopApi'
 import { useCapabilities } from './capabilities'
 import { submitPassword, submitTotpCode, type SignInSettled } from './onboardingSignIn'
-import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, accountSwitchBody } from './accountSwitchCopy'
+import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, KEY_REPLACED_RECOVERY_COPY, accountSwitchBody } from './accountSwitchCopy'
 import { classifyFinderInstallResult } from './finderInstallCard'
 import { loadFinderSetup, useFinderSetup } from './finderSetup'
 import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE, FINDER_SETUP_TITLE } from './finderSetupCopy'
@@ -47,6 +47,9 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   // A's address (the prefill), and B's password is not tried against A's email.
   const [switchEmail, setSwitchEmail] = useState<string | undefined>(undefined)
   const [signInEmail, setSignInEmail] = useState<string | undefined>(undefined)
+  // FB-I1: the same account signed in again, but its kept vault key was no longer the account's and
+  // was removed. The recovery step says why it is asking.
+  const [keyReplaced, setKeyReplaced] = useState(false)
   // `null` until `desktop_platform` has answered, so the Finder step never flashes the wrong
   // variant. A platform that cannot be read stays resolvable through the capability snapshot
   // (below); only when both are unknown does it become 'unknown', which takes the Windows/Linux
@@ -121,6 +124,7 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
       void closeWindow()
       return
     }
+    setKeyReplaced(settled.kind === 'reauthenticated' && settled.keyReplaced)
     setStep('unlock')
   }
 
@@ -161,7 +165,7 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
             onCancel={() => (mode === 'reauth' ? void closeWindow() : setStep('signin'))}
           />
         )}
-        {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} />}
+        {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} keyReplaced={keyReplaced} />}
         {step === 'finder' &&
           platform !== null &&
           (platform === 'macos' ? (
@@ -465,7 +469,7 @@ function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingCh
   )
 }
 
-function UnlockStep({ onDone }: { onDone: () => void }) {
+function UnlockStep({ onDone, keyReplaced = false }: { onDone: () => void; keyReplaced?: boolean }) {
   const [recoveryWords, setRecoveryWords] = useState<string[]>(() =>
     Array.from({ length: RECOVERY_WORD_COUNT }, () => ''),
   )
@@ -534,7 +538,7 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   return (
     <Card
       title="Set up this Mac"
-      copy="This Mac does not have your encryption keys yet. Restore them to continue."
+      copy={keyReplaced ? KEY_REPLACED_RECOVERY_COPY : 'This Mac does not have your encryption keys yet. Restore them to continue.'}
     >
       {result && !result.ok && (
         <div className="notice">

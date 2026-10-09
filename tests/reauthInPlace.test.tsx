@@ -106,7 +106,7 @@ describe('reauth mode', () => {
   test('the same account with its keys here closes the window and never signs out', async () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: true })
+    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
     await v.m.flush()
     expect(v.closed).toEqual(['close'])
     expect(v.m.calls.map((c) => c.name)).not.toContain('clear_session')
@@ -115,7 +115,7 @@ describe('reauth mode', () => {
   test('the same account: a close the window ACL refuses falls back to the DOM close (awaited, never unhandled)', async () => {
     const v = openView('reauth', { closeRefused: true })
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: true })
+    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
     await v.m.flush()
     expect(v.closed).toEqual(['dom-close'])
   })
@@ -123,9 +123,21 @@ describe('reauth mode', () => {
   test('the same account without keys on this Mac goes on to the recovery phrase', async () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: false })
+    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: false })
     await v.m.flush()
     expect(v.has('UnlockStep')).toBe(true)
+    expect(v.find('UnlockStep')!.props.keyReplaced).toBe(false)
+    expect(v.closed).toEqual([])
+    expect(clearCalls(v.m)).toHaveLength(0)
+  })
+
+  // FB-I1: the kept key was no longer the account's; it was removed, so the recovery step says why.
+  test('a replaced key goes to the recovery phrase, which is told why', async () => {
+    const v = openView('reauth')
+    await v.m.flush(); await v.m.flush()
+    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: true })
+    await v.m.flush()
+    expect(v.find('UnlockStep')!.props.keyReplaced).toBe(true)
     expect(v.closed).toEqual([])
     expect(clearCalls(v.m)).toHaveLength(0)
   })
@@ -247,17 +259,17 @@ describe('SignInStep reports what the sign-in became', () => {
 
   test('a same-account password sign-in hands its outcome to onDone', async () => {
     const { m, done } = openSignIn({
-      desktop_login: () => ({ requires_2fa: false, reauthenticated: true, vault_unlocked: true, account_mismatch: null }),
+      desktop_login: () => ({ requires_2fa: false, reauthenticated: true, vault_unlocked: true, key_replaced: false, account_mismatch: null }),
     })
     await m.flush()
     await submitPassword(m)
-    expect(done).toEqual([{ kind: 'reauthenticated', vaultUnlocked: true }])
+    expect(done).toEqual([{ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false }])
     expect(clearCalls(m)).toHaveLength(0)
   })
 
   test('another account hands over the mismatch and its count; nothing is cleared', async () => {
     const { m, done } = openSignIn({
-      desktop_login: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, account_mismatch: { pending_changes: 4 } }),
+      desktop_login: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: { pending_changes: 4 } }),
     })
     await m.flush()
     await submitPassword(m)
@@ -274,6 +286,15 @@ describe('SignInStep reports what the sign-in became', () => {
     expect(emails).toEqual(['user@beebeeb.io'])
   })
 
+  test('SIGN_IN_KEY_NOT_REMOVED is shown on the form verbatim, and the sign-in does not complete', async () => {
+    const sentence = rustStr('lib.rs', 'SIGN_IN_KEY_NOT_REMOVED')
+    const { m, done } = openSignIn({ desktop_login: () => { throw sentence } })
+    await m.flush()
+    await submitPassword(m)
+    expect(done).toEqual([])
+    expect(m.elements().filter((el) => el.props.className === 'notice').map((el) => textOf(el.props.children))).toEqual([sentence])
+  })
+
   test('an initial address beats the prefill of the last signed-in account', async () => {
     const { m } = openSignIn({ last_signed_in_email: () => 'a@beebeeb.io' }, { initialEmail: 'b@beebeeb.io' })
     await m.flush(); await m.flush()
@@ -288,8 +309,8 @@ describe('SignInStep reports what the sign-in became', () => {
 
   test('a 2FA account learns its outcome from the code step, not the password step', async () => {
     const { m, done } = openSignIn({
-      desktop_login: () => ({ requires_2fa: true, reauthenticated: false, vault_unlocked: false, account_mismatch: null }),
-      desktop_login_2fa: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, account_mismatch: { pending_changes: 2 } }),
+      desktop_login: () => ({ requires_2fa: true, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }),
+      desktop_login_2fa: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: { pending_changes: 2 } }),
     })
     await m.flush()
     await submitPassword(m)
@@ -301,7 +322,7 @@ describe('SignInStep reports what the sign-in became', () => {
 
   test('a result it cannot read is an error on the form: onDone is never called', async () => {
     const { m, done } = openSignIn({
-      desktop_login: () => ({ requires_2fa: false, reauthenticated: true, vault_unlocked: true, account_mismatch: { pending_changes: 2 } }),
+      desktop_login: () => ({ requires_2fa: false, reauthenticated: true, vault_unlocked: true, key_replaced: false, account_mismatch: { pending_changes: 2 } }),
     })
     await m.flush()
     await submitPassword(m)
@@ -463,6 +484,32 @@ describe('AccountSwitchStep', () => {
     expect(classesOf('Sign out and switch')).toEqual(expect.arrayContaining(['button', 'danger', 'filled']))
     expect(classesOf('Sign out and switch')).not.toContain('amber')
     expect(classesOf('Cancel')).toEqual(['button'])
+  })
+})
+
+// FB-I1: the recovery step after a replaced key opens with why it is asked for.
+describe('UnlockStep after a replaced key', () => {
+  function openUnlock(keyReplaced: boolean) {
+    const m = mount('Onboarding.tsx', 'UnlockStep', {
+      backend: {},
+      props: { onDone: () => {}, keyReplaced },
+      bindings: { ...desktopApi, ...switchCopy, Card, RECOVERY_WORD_COUNT: 12, requestAnimationFrame: () => 0 },
+    })
+    mounted.push(m)
+    return m
+  }
+
+  test('it opens with the sentence that says the key was changed on another device', async () => {
+    const m = openUnlock(true)
+    await m.flush()
+    expect(m.tree().props.copy).toBe('This account’s vault key was changed on another device. Enter your current recovery phrase to unlock.')
+    expect(m.tree().props.copy).toBe(switchCopy.KEY_REPLACED_RECOVERY_COPY)
+  })
+
+  test('otherwise it keeps its own words', async () => {
+    const m = openUnlock(false)
+    await m.flush()
+    expect(m.tree().props.copy).toBe('This Mac does not have your encryption keys yet. Restore them to continue.')
   })
 })
 

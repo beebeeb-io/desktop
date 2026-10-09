@@ -39,7 +39,11 @@ export const defaultSignInApi: SignInApi = { desktopLogin, desktopLogin2fa }
 /** What a completed sign-in became (R8). */
 export type SignInSettled =
   | { kind: 'fresh' }
-  | { kind: 'reauthenticated'; vaultUnlocked: boolean }
+  /**
+   * The account on this Mac signed in again in place. `keyReplaced` (FB-I1): the kept vault key was no
+   * longer the account's, so it was removed and the recovery phrase follows; that step says why.
+   */
+  | { kind: 'reauthenticated'; vaultUnlocked: boolean; keyReplaced: boolean }
   | { kind: 'account_mismatch'; pendingChanges: number }
 
 /** `settledFrom`'s answer: a `SignInSettled`, or `unreadable` for a shape it cannot classify. */
@@ -64,21 +68,29 @@ const isFlag = (x: unknown) => x === undefined || x === null || typeof x === 'bo
  *    the same account at the same time is a contradiction.
  *  - `reauthenticated: true` keeps the account; the keys are claimed to be here only when
  *    `vault_unlocked` says `true`, so a missing field sends the person to the recovery phrase.
+ *  - `key_replaced` (FB-I1) is required and boolean. It is true only for a same-account re-sign-in
+ *    whose kept key was removed, so with `vault_unlocked: true`, an account switch, or a plain
+ *    sign-in it is a contradiction.
  */
 export function settledFrom(value: DesktopLoginResult | null | undefined): SignInOutcome {
   const unreadable: SignInOutcome = { kind: 'unreadable' }
   if (value === null || value === undefined) return { kind: 'fresh' }
   const raw: unknown = value
   if (typeof raw !== 'object' || Array.isArray(raw)) return unreadable
-  const { reauthenticated, vault_unlocked, account_mismatch } = raw as Record<string, unknown>
+  const { reauthenticated, vault_unlocked, account_mismatch, key_replaced } = raw as Record<string, unknown>
+  if (typeof key_replaced !== 'boolean') return unreadable
   if (!isFlag(reauthenticated) || !isFlag(vault_unlocked)) return unreadable
   if (account_mismatch !== undefined && account_mismatch !== null) {
-    if (reauthenticated === true) return unreadable
+    if (reauthenticated === true || key_replaced) return unreadable
     const pending = typeof account_mismatch === 'object' ? (account_mismatch as Record<string, unknown>).pending_changes : undefined
     if (typeof pending !== 'number' || !Number.isSafeInteger(pending) || pending < 0) return unreadable
     return { kind: 'account_mismatch', pendingChanges: pending }
   }
-  if (reauthenticated === true) return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true }
+  if (reauthenticated === true) {
+    if (key_replaced && vault_unlocked === true) return unreadable
+    return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true, keyReplaced: key_replaced }
+  }
+  if (key_replaced) return unreadable
   return { kind: 'fresh' }
 }
 

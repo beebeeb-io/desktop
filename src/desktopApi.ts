@@ -1009,6 +1009,12 @@ export interface DesktopLoginResult {
   reauthenticated?: boolean
   /** With `reauthenticated`: the keys are here, so no recovery phrase is needed. */
   vault_unlocked?: boolean
+  /**
+   * With `reauthenticated` (FB-I1): the kept vault key was no longer the account's (the key was changed
+   * on another device), so it was removed and the recovery phrase follows. Always sent; `settledFrom`
+   * requires it.
+   */
+  key_replaced?: boolean
   /** Another account signed in; nothing changed on this Mac. */
   account_mismatch?: { pending_changes: number } | null
 }
