@@ -1402,6 +1402,19 @@ impl EngineBridge {
     }
 
     pub fn queue_finder_create(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_finder_create_from(target, None)
+    }
+
+    /// [`Self::queue_finder_create`], reading a file's contents from
+    /// `contents` when given: a file the caller already opened and checked
+    /// (the macOS handed-over copy, see `ipc_socket::open_staged_contents`).
+    /// `target.contents_path` is then only the journal's label for it, and is
+    /// never opened.
+    pub fn queue_finder_create_from(
+        &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+    ) -> anyhow::Result<FinderWriteOutcome> {
         // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
         // enqueue once this engine has been asked to stop. Both the Windows
         // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
@@ -1481,11 +1494,7 @@ impl EngineBridge {
                     .contents_path
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("Finder create file callback did not include contents"))?;
-                let staged = crate::staged_payload::StagedPayload::copy(
-                    self.db.clone(),
-                    Path::new(contents_path),
-                    default_finder_staging_root(),
-                )?;
+                let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
                 let staged_path = staged.path().to_string();
                 let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
                 let mime = target
@@ -1537,6 +1546,16 @@ impl EngineBridge {
     }
 
     pub fn queue_finder_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_finder_modify_from(target, None)
+    }
+
+    /// [`Self::queue_finder_modify`], reading new contents from `contents`
+    /// when given; see [`Self::queue_finder_create_from`].
+    pub fn queue_finder_modify_from(
+        &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+    ) -> anyhow::Result<FinderWriteOutcome> {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
             anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
@@ -1554,11 +1573,7 @@ impl EngineBridge {
         let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
 
         if let Some(contents_path) = target.contents_path.as_deref() {
-            let staged = crate::staged_payload::StagedPayload::copy(
-                self.db.clone(),
-                Path::new(contents_path),
-                default_finder_staging_root(),
-            )?;
+            let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
             let staged_path = staged.path().to_string();
             let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
             let mime = target
@@ -4420,6 +4435,21 @@ fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
+/// The daemon's own copy of a Finder write's contents: from the opened file
+/// when the caller holds one (only `source` is journaled then, as a label),
+/// else from `source` by path.
+fn stage_finder_contents(
+    db: &Arc<StateDb>,
+    source: &Path,
+    opened: Option<&std::fs::File>,
+) -> anyhow::Result<crate::staged_payload::StagedPayload> {
+    match opened {
+        Some(file) => {
+            crate::staged_payload::StagedPayload::copy_from_file(db.clone(), file, source, default_finder_staging_root())
+        }
+        None => crate::staged_payload::StagedPayload::copy(db.clone(), source, default_finder_staging_root()),
+    }
+}
 
 fn default_finder_staging_root() -> PathBuf {
     let primary = dirs::cache_dir()

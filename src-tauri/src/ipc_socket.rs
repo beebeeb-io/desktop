@@ -743,6 +743,9 @@ impl StagingDirRefusal {
 /// them to another folder.
 pub(crate) struct StagingDir {
     fd: std::os::fd::OwnedFd,
+    /// Device and inode of the opened directory, to recognise it by.
+    dev: u64,
+    ino: u64,
 }
 
 impl StagingDir {
@@ -783,7 +786,13 @@ impl StagingDir {
         if !is_dir_mode(stat.st_mode) || stat.st_uid != owner {
             return Err(StagingDirRefusal::NotPrivate);
         }
-        Ok(Self { fd })
+        // `as u64` matches `MetadataExt::dev()` / `ino()` on every unix.
+        #[allow(clippy::unnecessary_cast)]
+        Ok(Self {
+            fd,
+            dev: stat.st_dev as u64,
+            ino: stat.st_ino as u64,
+        })
     }
 
     /// Force the directory to owner-only `0o700`, through the descriptor.
@@ -1009,6 +1018,11 @@ pub(crate) enum ContentsRefusal {
     Symlink,
     /// Not a regular file (a directory, FIFO, socket, ...).
     NotAFile,
+    /// A regular file with more than one link: a hard link to a file
+    /// elsewhere, not a copy the extension made.
+    HardLinked,
+    /// A regular file owned by another user.
+    ForeignOwner,
     /// The entry could not be inspected.
     Unreadable,
 }
@@ -1023,20 +1037,32 @@ impl ContentsRefusal {
             Self::Missing => "missing",
             Self::Symlink => "symlink",
             Self::NotAFile => "not_a_file",
+            Self::HardLinked => "hard_linked",
+            Self::ForeignOwner => "foreign_owner",
             Self::Unreadable => "unreadable",
         }
     }
 }
 
-/// Accept `candidate` only if it names a regular file (not a symlink)
-/// directly inside `staging_dir`. Returns the path rebuilt from the
-/// canonical staging directory and the leaf name, which is what the daemon
-/// then reads and deletes: a deletion can therefore never reach outside the
-/// staging directory, whatever the request said.
-pub(crate) fn validate_staged_contents_path(
+/// Open `candidate` only if it names a regular file directly inside
+/// `staging_dir`, and hold it open.
+///
+/// The staging directory is opened first ([`StagingDir::open`]: never
+/// through a symlink, owned by this user). The candidate's parent must be
+/// that same directory (device and inode), and the leaf is then opened
+/// RELATIVE to the held descriptor with `O_NOFOLLOW | O_NONBLOCK`: a symlink
+/// is refused at the open itself and a FIFO cannot block it. Every check that
+/// decides acceptance runs on the opened descriptor
+/// ([`check_staged_contents_stat`]), and the daemon reads the contents from
+/// that descriptor only. Swapping the entry after this returns therefore
+/// changes nothing the daemon reads.
+pub(crate) fn open_staged_contents(
     staging_dir: &std::path::Path,
     candidate: &str,
-) -> Result<std::path::PathBuf, ContentsRefusal> {
+) -> Result<OpenedContents, ContentsRefusal> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+
     let path = std::path::Path::new(candidate);
     if candidate.is_empty() || candidate.contains('\0') || !path.is_absolute() {
         return Err(ContentsRefusal::MalformedPath);
@@ -1047,48 +1073,103 @@ pub(crate) fn validate_staged_contents_path(
         return Err(ContentsRefusal::Traversal);
     }
     // The configured directory itself must be a real directory owned by this
-    // user: if it were replaced by a symlink, canonicalizing would follow it
-    // and make another folder's files acceptable, and the daemon deletes what
-    // it accepts.
-    StagingDir::open(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
-    let staging = std::fs::canonicalize(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
+    // user: if it were replaced by a symlink, another folder's files would
+    // become acceptable, and the daemon deletes what it accepts.
+    let dir = StagingDir::open(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
     let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
         return Err(ContentsRefusal::OutsideStaging);
     };
-    // Directly inside only: the parent must resolve to the staging dir itself.
-    match std::fs::canonicalize(parent) {
-        Ok(parent) if parent == staging => {}
+    // Directly inside only: the parent must be the held directory itself.
+    match std::fs::metadata(parent) {
+        Ok(meta) if meta.dev() == dir.dev && meta.ino() == dir.ino => {}
         _ => return Err(ContentsRefusal::OutsideStaging),
     }
-    let resolved = staging.join(leaf);
-    // `symlink_metadata` does not follow a final symlink.
-    match std::fs::symlink_metadata(&resolved) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ContentsRefusal::Missing),
-        Err(_) => Err(ContentsRefusal::Unreadable),
-        Ok(meta) if meta.file_type().is_symlink() => Err(ContentsRefusal::Symlink),
-        Ok(meta) if !meta.is_file() => Err(ContentsRefusal::NotAFile),
-        Ok(_) => Ok(resolved),
+    let c_leaf = entry_cstring(leaf).map_err(|_| ContentsRefusal::MalformedPath)?;
+    // SAFETY: `c_leaf` is NUL-terminated and lives for the call; the
+    // directory descriptor is open.
+    let raw = unsafe {
+        libc::openat(
+            dir.fd.as_raw_fd(),
+            c_leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOENT) => ContentsRefusal::Missing,
+            // O_NOFOLLOW on a symlink.
+            Some(libc::ELOOP) => ContentsRefusal::Symlink,
+            // A socket cannot be opened.
+            Some(libc::ENXIO) | Some(libc::EOPNOTSUPP) => ContentsRefusal::NotAFile,
+            _ => ContentsRefusal::Unreadable,
+        });
     }
+    // SAFETY: `raw` is a descriptor we just opened and own.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    let stat = fstat_fd(fd.as_raw_fd()).map_err(|_| ContentsRefusal::Unreadable)?;
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    check_staged_contents_stat(&stat, unsafe { libc::geteuid() })?;
+    // A label for the engine's journal, rebuilt from the canonical staging
+    // dir: the daemon never reads through it.
+    let label = std::fs::canonicalize(staging_dir)
+        .map_err(|_| ContentsRefusal::StagingUnavailable)?
+        .join(leaf);
+    Ok(OpenedContents {
+        path: label,
+        file: std::fs::File::from(fd),
+    })
 }
 
-/// A handed-over contents file that passed [`validate_staged_contents_path`].
-/// Dropping it deletes the file: by then the daemon holds its own copy
-/// (`StagedPayload::copy`), or the request failed and the extension's retry
-/// stages a fresh one. `remove_file` unlinks a symlink itself, never its
-/// target.
-pub(crate) struct StagedContents {
+/// A handed-over contents file accepted by [`open_staged_contents`], held
+/// open. Opening it changes nothing on disk.
+pub(crate) struct OpenedContents {
+    /// A label for the engine's journal; the daemon never reads through it.
     path: std::path::PathBuf,
+    /// The opened file: what the engine reads.
+    file: std::fs::File,
+}
+
+/// The checks on an opened handed-over file: a regular file with exactly one
+/// link (the extension's copy is always a fresh file with one), owned by
+/// `owner`. A hard link to another file, a FIFO, a device or a directory is
+/// refused. Split out so the checks are testable on a constructed `stat`.
+fn check_staged_contents_stat(stat: &libc::stat, owner: libc::uid_t) -> Result<(), ContentsRefusal> {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(ContentsRefusal::NotAFile);
+    }
+    if stat.st_nlink != 1 {
+        return Err(ContentsRefusal::HardLinked);
+    }
+    if stat.st_uid != owner {
+        return Err(ContentsRefusal::ForeignOwner);
+    }
+    Ok(())
+}
+
+/// An admitted handed-over contents file. The engine copies from
+/// [`StagedContents::file`], never by path. Dropping it deletes the file: by
+/// then the daemon holds its own copy (`StagedPayload::copy_from_file`), or
+/// the request failed and the extension's retry stages a fresh one.
+/// `remove_file` unlinks a symlink itself, never its target.
+pub(crate) struct StagedContents {
+    contents: OpenedContents,
 }
 
 impl StagedContents {
     fn path_string(&self) -> String {
-        self.path.to_string_lossy().into_owned()
+        self.contents.path.to_string_lossy().into_owned()
+    }
+
+    /// The opened file: what the engine reads.
+    pub(crate) fn file(&self) -> &std::fs::File {
+        &self.contents.file
     }
 }
 
 impl Drop for StagedContents {
     fn drop(&mut self) {
-        match std::fs::remove_file(&self.path) {
+        match std::fs::remove_file(&self.contents.path) {
             Ok(()) => {}
             // The extension deletes its copy after the reply too; either side may be first.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1112,9 +1193,9 @@ fn admit_write_contents(
     let (WriteContentsPolicy::StagingDir(staging_dir), Some(candidate)) = (policy, contents_path.as_deref()) else {
         return Ok((contents_path, None));
     };
-    match validate_staged_contents_path(staging_dir, candidate) {
-        Ok(path) => {
-            let staged = StagedContents { path };
+    match open_staged_contents(staging_dir, candidate) {
+        Ok(contents) => {
+            let staged = StagedContents { contents };
             Ok((Some(staged.path_string()), Some(staged)))
         }
         Err(refusal) => {
@@ -1659,8 +1740,13 @@ async fn handle_connection(
                         // copy or refused, or unrun when a repeat is answered
                         // from the first attempt's result.
                         dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
-                            let response =
-                                write_outcome_response("create", &work_db, work_bridge.queue_finder_create(target));
+                            // The engine reads the opened file, never the path.
+                            let opened = staged.as_ref().map(StagedContents::file);
+                            let response = write_outcome_response(
+                                "create",
+                                &work_db,
+                                work_bridge.queue_finder_create_from(target, opened),
+                            );
                             drop(staged);
                             response
                         })
@@ -1700,8 +1786,12 @@ async fn handle_connection(
                     let (work_db, work_bridge) = (db.clone(), bridge.clone());
                     // See the create arm for when `staged` is dropped.
                     dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
-                        let response =
-                            write_outcome_response("modify", &work_db, work_bridge.queue_finder_modify(target));
+                        let opened = staged.as_ref().map(StagedContents::file);
+                        let response = write_outcome_response(
+                            "modify",
+                            &work_db,
+                            work_bridge.queue_finder_modify_from(target, opened),
+                        );
                         drop(staged);
                         response
                     })
@@ -3994,6 +4084,11 @@ mod tests {
         (root, staging)
     }
 
+    /// What [`open_staged_contents`] accepted (its journal label) or refused.
+    fn validate(staging: &std::path::Path, candidate: &str) -> Result<std::path::PathBuf, ContentsRefusal> {
+        open_staged_contents(staging, candidate).map(|contents| contents.path)
+    }
+
     fn write_file(path: &std::path::Path, bytes: &[u8]) -> String {
         std::fs::write(path, bytes).unwrap();
         path.to_string_lossy().into_owned()
@@ -4003,7 +4098,7 @@ mod tests {
     fn staged_contents_directly_inside_the_staging_dir_are_accepted_and_left_intact() {
         let (_root, staging) = upload_staging_fixture();
         let candidate = write_file(&staging.join("6f1c0d1e-copy"), b"contents");
-        let accepted = validate_staged_contents_path(&staging, &candidate).expect("a staged regular file is accepted");
+        let accepted = validate(&staging, &candidate).expect("a staged regular file is accepted");
         assert_eq!(
             accepted,
             std::fs::canonicalize(&staging).unwrap().join("6f1c0d1e-copy"),
@@ -4021,7 +4116,7 @@ mod tests {
         let (root, staging) = upload_staging_fixture();
         let outside = write_file(&root.path().join("outside.txt"), b"x");
         assert_eq!(
-            validate_staged_contents_path(&staging, &outside),
+            validate(&staging, &outside),
             Err(ContentsRefusal::OutsideStaging)
         );
         // A subdirectory of the staging dir is outside it too: the extension
@@ -4029,13 +4124,13 @@ mod tests {
         std::fs::create_dir(staging.join("sub")).unwrap();
         let nested = write_file(&staging.join("sub").join("copy"), b"x");
         assert_eq!(
-            validate_staged_contents_path(&staging, &nested),
+            validate(&staging, &nested),
             Err(ContentsRefusal::OutsideStaging)
         );
         // A parent directory that does not exist is outside too.
         let ghost = root.path().join("ghost").join("copy").to_string_lossy().into_owned();
         assert_eq!(
-            validate_staged_contents_path(&staging, &ghost),
+            validate(&staging, &ghost),
             Err(ContentsRefusal::OutsideStaging)
         );
         assert!(
@@ -4054,7 +4149,7 @@ mod tests {
         let dot = format!("{}/./copy", staging.display());
         for candidate in [escape, loops_back, dot] {
             assert_eq!(
-                validate_staged_contents_path(&staging, &candidate),
+                validate(&staging, &candidate),
                 Err(ContentsRefusal::Traversal),
                 "{candidate}"
             );
@@ -4069,7 +4164,7 @@ mod tests {
         let link = staging.join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert_eq!(
-            validate_staged_contents_path(&staging, &link.to_string_lossy()),
+            validate(&staging, &link.to_string_lossy()),
             Err(ContentsRefusal::Symlink)
         );
         // A symlink to a file INSIDE the staging dir is refused as well.
@@ -4077,7 +4172,7 @@ mod tests {
         let inner = staging.join("inner-link");
         std::os::unix::fs::symlink(staging.join("real"), &inner).unwrap();
         assert_eq!(
-            validate_staged_contents_path(&staging, &inner.to_string_lossy()),
+            validate(&staging, &inner.to_string_lossy()),
             Err(ContentsRefusal::Symlink)
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"target");
@@ -4088,18 +4183,18 @@ mod tests {
         let (_root, staging) = upload_staging_fixture();
         let missing = staging.join("never-staged").to_string_lossy().into_owned();
         assert_eq!(
-            validate_staged_contents_path(&staging, &missing),
+            validate(&staging, &missing),
             Err(ContentsRefusal::Missing)
         );
         std::fs::create_dir(staging.join("a-dir")).unwrap();
         let dir = staging.join("a-dir").to_string_lossy().into_owned();
         assert_eq!(
-            validate_staged_contents_path(&staging, &dir),
+            validate(&staging, &dir),
             Err(ContentsRefusal::NotAFile)
         );
         for malformed in ["", "relative/copy", "copy", "/tmp/with\0nul"] {
             assert_eq!(
-                validate_staged_contents_path(&staging, malformed),
+                validate(&staging, malformed),
                 Err(ContentsRefusal::MalformedPath),
                 "{malformed:?}"
             );
@@ -4118,18 +4213,80 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
         let through_link = staging.join("copy").to_string_lossy().into_owned();
         assert_eq!(
-            validate_staged_contents_path(&staging, &through_link),
+            validate(&staging, &through_link),
             Err(ContentsRefusal::StagingUnavailable)
         );
         assert_eq!(
-            validate_staged_contents_path(&staging, &candidate),
+            validate(&staging, &candidate),
             Err(ContentsRefusal::StagingUnavailable)
         );
         let gone = root.path().join("gone");
         assert_eq!(
-            validate_staged_contents_path(&gone, &gone.join("copy").to_string_lossy()),
+            validate(&gone, &gone.join("copy").to_string_lossy()),
             Err(ContentsRefusal::StagingUnavailable)
         );
+    }
+
+    #[test]
+    fn a_hard_link_in_the_staging_dir_is_refused() {
+        // A hard link names the same file as an entry elsewhere: reading it
+        // would read a file the extension never copied.
+        let (root, staging) = upload_staging_fixture();
+        let elsewhere = root.path().join("private.db");
+        write_file(&elsewhere, b"private");
+        let link = staging.join("hard-link");
+        std::fs::hard_link(&elsewhere, &link).unwrap();
+        assert_eq!(
+            validate(&staging, &link.to_string_lossy()),
+            Err(ContentsRefusal::HardLinked)
+        );
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"private");
+    }
+
+    #[test]
+    fn the_checks_on_the_opened_file_refuse_anything_but_a_single_link_regular_file_of_ours() {
+        // SAFETY: `stat` is plain old data; all-zero is a valid value.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: no preconditions.
+        let me = unsafe { libc::geteuid() };
+        stat.st_mode = libc::S_IFREG | 0o600;
+        stat.st_nlink = 1;
+        stat.st_uid = me;
+        assert_eq!(check_staged_contents_stat(&stat, me), Ok(()));
+        stat.st_nlink = 2;
+        assert_eq!(check_staged_contents_stat(&stat, me), Err(ContentsRefusal::HardLinked));
+        stat.st_nlink = 1;
+        stat.st_uid = me.wrapping_add(1);
+        assert_eq!(check_staged_contents_stat(&stat, me), Err(ContentsRefusal::ForeignOwner));
+        stat.st_uid = me;
+        for kind in [libc::S_IFIFO, libc::S_IFDIR, libc::S_IFCHR, libc::S_IFSOCK, libc::S_IFLNK] {
+            stat.st_mode = kind | 0o600;
+            assert_eq!(
+                check_staged_contents_stat(&stat, me),
+                Err(ContentsRefusal::NotAFile),
+                "mode {kind:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fifo_in_the_staging_dir_is_refused_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let (_root, staging) = upload_staging_fixture();
+        let fifo = staging.join("fifo");
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let candidate = fifo.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            let _ = tx.send(validate(&staging, &candidate));
+        });
+        // A blocking open would wait here for a writer that never comes.
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("opening a FIFO must not block");
+        assert_eq!(result, Err(ContentsRefusal::NotAFile));
     }
 
     #[test]
@@ -4142,6 +4299,8 @@ mod tests {
             ContentsRefusal::Missing,
             ContentsRefusal::Symlink,
             ContentsRefusal::NotAFile,
+            ContentsRefusal::HardLinked,
+            ContentsRefusal::ForeignOwner,
             ContentsRefusal::Unreadable,
         ];
         let categories: std::collections::HashSet<&str> = all.iter().map(|r| r.category()).collect();

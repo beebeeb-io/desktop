@@ -1508,3 +1508,38 @@ fn a_create_still_in_flight_when_the_socket_stops_keeps_its_copy_until_the_engin
         "once the engine has its own copy the handed-over one is deleted"
     );
 }
+
+#[test]
+fn a_staged_copy_swapped_for_a_symlink_after_validation_uploads_what_was_handed_over() {
+    // The daemon validates the handed-over copy, then the engine reads it,
+    // later and on another thread. Whatever happens to the entry in between
+    // (here: renamed away and replaced by a symlink to a file the requester
+    // never handed over), the engine must read the file that was validated.
+    let fx = IpcFixture::start_staged(|_| {});
+    let copy = staged_copy(&fx, b"handed over");
+    let secret = fx.staging_parent().join("not-handed-over.txt");
+    std::fs::write(&secret, b"never handed over").unwrap();
+    let (release, holder) = hold_database(&fx);
+    let reply = fx.rt.block_on(async {
+        let mut client = fx.connect().await;
+        client
+            .write_all(&create_request("swapped.txt", &copy.to_string_lossy(), Some("key-swapped")))
+            .await
+            .unwrap();
+        // Blocking on purpose (see `send_overlapping`): the request is
+        // validated, and its work then waits behind the held database.
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::rename(&copy, fx.staging_dir().join("moved-away")).unwrap();
+        std::os::unix::fs::symlink(&secret, &copy).unwrap();
+        release.send(()).unwrap();
+        parse(&read_line(&mut client).await)
+    });
+    holder.join().unwrap();
+    assert_write_queued(&reply);
+    assert_uploads_from_own_copy(&fx, b"handed over");
+    assert_eq!(
+        std::fs::read(&secret).unwrap(),
+        b"never handed over",
+        "the symlink's target is never touched"
+    );
+}
