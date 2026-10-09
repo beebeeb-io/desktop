@@ -10,6 +10,7 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
+import * as accountSession from '../src/accountSession'
 import * as desktopApi from '../src/desktopApi'
 import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCheck } from '../src/windows/manualUpdateCheck'
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
@@ -33,6 +34,7 @@ const ConfigLoadFailed = loadComponent('MacSettings.tsx', 'ConfigLoadFailed', { 
 const withPinned = loadComponent('MacSettings.tsx', 'withPinned', {})
 
 const baseBindings = {
+  ...accountSession,
   ...desktopApi,
   ...diagnosticsCopy,
   ...model,
@@ -47,7 +49,11 @@ const baseBindings = {
 }
 
 const mounted: Mounted[] = []
-afterEach(() => { while (mounted.length) mounted.pop()!.close() })
+afterEach(() => {
+  while (mounted.length) mounted.pop()!.close()
+  // A sign-out's sentence lives in a module store (it outlives the session boundary): one test's is not the next one's.
+  accountSession.clearSignOutWarning()
+})
 
 /**
  * A scripted stand-in for `subscribeFinderSetup` (the real one needs a Tauri event bus): the

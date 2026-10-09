@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { accountSessionRevision, observeAccountSession, subscribeAccountSession } from './accountSession'
+import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
 
 export type CommandResult<T> =
@@ -454,7 +454,11 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
-  if (result.ok && result.value.session_revision !== undefined) observeAccountSession(result.value.session_revision)
+  if (result.ok && result.value.session_revision !== undefined) {
+    // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
+    observeSignOutWarning(result.value.logged_in === true, result.value.session_revision)
+    observeAccountSession(result.value.session_revision)
+  }
   return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
 }
 

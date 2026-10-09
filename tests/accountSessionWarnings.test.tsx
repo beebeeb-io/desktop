@@ -10,6 +10,7 @@
  * The real component declarations run with the component harness against a scripted backend.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
+import * as accountSession from '../src/accountSession'
 import * as desktopApi from '../src/desktopApi'
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
 import * as planPresentation from '../src/planPresentation'
@@ -17,7 +18,11 @@ import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/co
 import { rustStr } from './fixtures/rustConstants'
 
 const mounted: Mounted[] = []
-afterEach(() => { while (mounted.length) mounted.pop()!.close() })
+afterEach(() => {
+  while (mounted.length) mounted.pop()!.close()
+  // A sign-out's sentence lives in a module store (it outlives the session boundary): one test's is not the next one's.
+  accountSession.clearSignOutWarning()
+})
 
 const ENGINE_WARNING = { code: 'engine_stop_unconfirmed', sentence: rustStr('lib.rs', 'LOCK_ENGINE_UNCONFIRMED_WARNING') }
 const SIGN_OUT_WARNING = { code: 'finder_removal_unconfirmed', sentence: rustStr('lib.rs', 'FINDER_SIGN_OUT_UNCONFIRMED_WARNING') }
@@ -34,7 +39,7 @@ function openAccountPage(over: (st: Status) => Record<string, (a: any) => unknow
       account_subscription: () => { throw new Error('not in this test') },
       ...over(st),
     },
-    bindings: { ...desktopApi, ...diagnosticsCopy, ...planPresentation, WEB_APP_URL: 'https://app.beebeeb.io', useRegionLabel: () => 'Stored in the EU' },
+    bindings: { ...accountSession, ...desktopApi, ...diagnosticsCopy, ...planPresentation, WEB_APP_URL: 'https://app.beebeeb.io', useRegionLabel: () => 'Stored in the EU' },
   })
   mounted.push(m)
   const settle = async () => { for (let i = 0; i < 4; i++) await m.flush() }
@@ -75,6 +80,21 @@ describe('Account page (Linux lock surface): a Lock or sign-out that happened wi
     expect(page.notes()).toContain(SIGN_OUT_WARNING.sentence)
     expect(page.m.toasts).toEqual([])
     expect(textOf(page.m.tree())).toContain('Signed out')
+  })
+
+  test('the sign-out sentence is held outside the page (it survives the session remount) and the next action clears it', async () => {
+    const page = openAccountPage((st) => ({
+      clear_session: () => { st.loggedIn = false; return { warning: SIGN_OUT_WARNING } },
+      unlock_vault: () => { throw new Error('Not signed in') },
+    }))
+    await page.settle()
+    await page.m.click('Sign out')
+    await page.settle()
+    expect(accountSession.heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    await page.m.click('Unlock')
+    await page.settle()
+    expect(accountSession.heldSignOutWarning()).toBeNull()
+    expect(page.notes()).not.toContain(SIGN_OUT_WARNING.sentence)
   })
 })
 

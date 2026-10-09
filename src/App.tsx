@@ -2,6 +2,7 @@ import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabil
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, loadSyncStatus, type DesktopPlatform, type SyncStatus } from './desktopApi'
+import { heldSignOutWarning } from './accountSession'
 import Status from './pages/Status'
 import SyncFolder from './pages/SyncFolder'
 import SelectiveSync from './pages/SelectiveSync'
@@ -29,7 +30,8 @@ function initialPage(): Page {
 
 export default function App() {
   const caps = useCapabilities()
-  const [page, setPage] = useState<Page>(() => initialPage())
+  // A remount after a sign-out that left a sentence opens on the Account page, where it is shown (accountSession.ts).
+  const [page, setPage] = useState<Page>(() => (heldSignOutWarning() !== null ? 'account' : initialPage()))
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [version, setVersion] = useState<string | null>(null)
   const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)

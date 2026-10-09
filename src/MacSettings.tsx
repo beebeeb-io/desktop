@@ -39,6 +39,7 @@ import {
   type VaultItem,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
+import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import { useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
@@ -258,8 +259,10 @@ function AccountTab() {
   const [busy, setBusy] = useState<AccountBusy>(null)
   const [confirmSignOut, setConfirmSignOut] = useState(false)
   // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, shown
-  // as a neutral line (never under "Couldn’t …"), until the next action.
+  // as a neutral line (never under "Couldn’t …"), until the next action. A sign-out's sentence is held
+  // outside the session boundary, because the sign-out remounts this tab (accountSession.ts).
   const [actionNote, setActionNote] = useState<string | null>(null)
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
 
   const refresh = useCallback(async () => {
     const result = await popoverSnapshot(1)
@@ -295,6 +298,7 @@ function AccountTab() {
   const run = async (name: NonNullable<AccountBusy>, send: () => Promise<CommandResult<unknown>>, failTitle: string) => {
     setBusy(name)
     setActionNote(null)
+    clearSignOutWarning()
     const result = await send()
     setBusy(null)
     if (!result.ok) {
@@ -316,26 +320,38 @@ function AccountTab() {
   const signOut = async () => {
     setConfirmSignOut(false)
     const result = await run('clear_session', () => clearSession(), 'Couldn’t sign out')
-    if (result.ok) setActionNote((result.value as SessionActionOutcome).warning?.sentence ?? null)
+    if (result.ok) holdSignOutWarning((result.value as SessionActionOutcome).warning?.sentence ?? null)
   }
 
-  const note = actionNote ? (
+  const shownNote = actionNote ?? signOutNote
+  const note = shownNote ? (
     <SettingsGroup>
-      <Note kind="status">{actionNote}</Note>
+      <Note kind="status">{shownNote}</Note>
     </SettingsGroup>
   ) : null
 
-  if (load.status === 'loading') return <div className="ms-loading" role="status">Loading…</div>
+  // The note stays up while the tab loads: a sign-out's remount loads this tab again from scratch.
+  if (load.status === 'loading') {
+    return (
+      <>
+        {note}
+        <div className="ms-loading" role="status">Loading…</div>
+      </>
+    )
+  }
   if (load.status === 'failed' || account === null) {
     return (
-      <SettingsGroup>
-        <Note
-          kind="alert"
-          surface="account-load"
-          title="Couldn’t load your account"
-          actions={<Btn onClick={() => void refresh()}>Try again</Btn>}
-        />
-      </SettingsGroup>
+      <>
+        {note}
+        <SettingsGroup>
+          <Note
+            kind="alert"
+            surface="account-load"
+            title="Couldn’t load your account"
+            actions={<Btn onClick={() => void refresh()}>Try again</Btn>}
+          />
+        </SettingsGroup>
+      </>
     )
   }
 
@@ -906,7 +922,8 @@ function AboutTab() {
 
 export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }) {
   const settings = useSettingsConfig()
-  const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? settingsTabFromLocation())
+  // A remount after a sign-out that left a sentence opens on the Account tab, where it is shown (accountSession.ts).
+  const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? (heldSignOutWarning() !== null ? 'account' : settingsTabFromLocation()))
 
   // Slice 6: this window is the surface the native "Check for updates…" menu item opens on
   // macOS, so it drains the pending request itself and answers inline in the About tab's row
