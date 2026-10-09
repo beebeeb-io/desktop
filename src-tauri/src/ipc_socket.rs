@@ -5004,6 +5004,13 @@ mod tests {
         }
         let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While
+        // only ONE dispatcher is alive, tracing-core takes that interest from
+        // the registering thread's own default (`has_just_one`), so a
+        // callsite first hit by another test thread, which has no subscriber,
+        // is cached as "never" and this capture misses its events. A second
+        // live dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
             .with_ansi(false)
