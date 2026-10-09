@@ -19325,6 +19325,72 @@ mod finder_setup_wiring_tests {
         }
     }
 
+    /// F7 follow-up 2 (f7b concern 4): in `Ready` the user-enabled poll sets no timer while no window is visible, and
+    /// `Focused(true)` resumes it (`becoming_active_and_updates_reach_the_reconciler_and_the_log`). That holds only if
+    /// a window that becomes visible is also focused, so every `show()` of an app window is followed, in the same
+    /// block, by `set_focus()` on the same window. A `show()` without it would leave that window unpolled until the
+    /// person clicks it. Notifications and message dialogs also call `show`; they are not windows, and they are
+    /// counted here so that a `show()` of a shape the pin does not know is a red test, not a site it cannot see.
+    #[test]
+    fn every_window_shown_is_also_focused_so_the_ready_poll_resumes() {
+        let production = production_source();
+        let lines: Vec<(usize, &str)> = production
+            .split_inclusive('\n')
+            .scan(0, |offset, line| {
+                let at = *offset;
+                *offset += line.len();
+                Some((at, line.trim_end_matches('\n')))
+            })
+            .collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let (mut windows, mut notifications, mut dialogs) = (Vec::new(), 0, 0);
+        for (i, &(at, line)) in lines.iter().enumerate() {
+            let code = line.trim();
+            if code.starts_with("//") || !code.contains(".show(") {
+                continue;
+            }
+            let site = enclosing_fn(&production, at);
+            if code.starts_with(".show(|") {
+                dialogs += 1;
+                continue;
+            }
+            // A notification builder: the method chain this `.show()` ends starts at `app.notification()`.
+            let chain_starts_at_a_notification = lines[..i]
+                .iter()
+                .rev()
+                .map(|&(_, l)| l.trim())
+                .take_while(|l| !(l.is_empty() || l.ends_with(';') || l.ends_with('{') || l.ends_with('}')))
+                .any(|l| l.contains(".notification()"));
+            if code == ".show()" && chain_starts_at_a_notification {
+                notifications += 1;
+                continue;
+            }
+            let window = code
+                .strip_prefix("let _ = ")
+                .and_then(|rest| rest.strip_suffix(".show();"))
+                .unwrap_or_else(|| panic!("{site}: a show() this pin does not know; is it a window? {code}"));
+            let focus = format!("let _ = {window}.set_focus();");
+            let focused = lines[i + 1..]
+                .iter()
+                .map(|&(_, l)| l)
+                .filter(|l| !l.trim().is_empty())
+                .take_while(|l| indent(l) >= indent(line))
+                .any(|l| indent(l) == indent(line) && l.trim() == focus);
+            assert!(
+                focused,
+                "{site}: `{code}` is not followed by `{focus}` in the same block, so the Ready poll would not resume"
+            );
+            windows.push(site);
+        }
+        assert_eq!(
+            windows.len(),
+            12,
+            "the window show() sites f7b counted (2026-10-09): {windows:?}"
+        );
+        assert_eq!(notifications, 3, "the three notification builders");
+        assert_eq!(dialogs, 3, "the three sign-out message dialogs");
+    }
+
     /// Lead ruling T8-t9 (10): the support bundle's lifecycle tail was done in Task 8
     /// (`the_support_bundle_carries_the_lifecycle_tail_without_changing_its_format`), so Task 9 adds
     /// nothing for it. This only pins that it is still one call.
