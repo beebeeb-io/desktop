@@ -433,7 +433,8 @@ mod tests {
         assert!(!text.contains("secret-plan"), "{text}");
         // Nothing wires the file into tracing: no Layer/MakeWriter here, and run()'s tracing
         // init does not mention this module.
-        let module = include_str!("lifecycle_log.rs");
+        // As this file was checked out: a Windows checkout has CRLF line endings.
+        let module = include_str!("lifecycle_log.rs").replace("\r\n", "\n");
         let module = &module[..module.find("#[cfg(test)]\nmod tests").expect("tests module")];
         assert!(
             !module.contains("Layer") && !module.contains("MakeWriter"),
