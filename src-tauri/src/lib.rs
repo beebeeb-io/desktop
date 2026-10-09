@@ -18113,7 +18113,10 @@ mod startup_session_tests {
     }
 
     /// Fix round 1, item 6 (review M5): the `account_profile` command's cache is written only while no session
-    /// transition happened since its fetch began, and the command captures before it fetches.
+    /// transition happened since its fetch began, and the command captures before it fetches. That turn check is
+    /// macOS and Linux only (`check_session_turn`): on Windows a Lock or a Sign-out drains every `session_command!`
+    /// (`close_session_commands`) before it clears the cached profile, so a fetch in flight finishes first (pinned by
+    /// `every_credential_command_has_admission_before_credential_reads` in `tests/windows_session_wiring.rs`).
     #[test]
     fn the_account_profile_cache_is_written_only_in_its_turn() {
         let state = AppState::default();
@@ -18123,19 +18126,22 @@ mod startup_session_tests {
             r#"{"user_id":"u-1","email":"sam@beebeeb.io","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#,
         )
         .unwrap();
-        let turn = acct.session_generation();
-        drop(super::end_sessions_in_flight(
-            &acct,
-            crate::account::SessionTransition::SignOut,
-        ));
-        assert!(
-            !super::cache_profile_in_turn(&acct, &turn, profile.clone()),
-            "a sign-out landed while the fetch ran"
-        );
-        assert!(
-            acct.cached_profile.lock().unwrap().is_none(),
-            "nothing is cached for the old session"
-        );
+        #[cfg(not(target_os = "windows"))]
+        {
+            let turn = acct.session_generation();
+            drop(super::end_sessions_in_flight(
+                &acct,
+                crate::account::SessionTransition::SignOut,
+            ));
+            assert!(
+                !super::cache_profile_in_turn(&acct, &turn, profile.clone()),
+                "a sign-out landed while the fetch ran"
+            );
+            assert!(
+                acct.cached_profile.lock().unwrap().is_none(),
+                "nothing is cached for the old session"
+            );
+        }
         let turn = acct.session_generation();
         assert!(super::cache_profile_in_turn(&acct, &turn, profile.clone()));
         assert_eq!(
