@@ -2095,12 +2095,17 @@ mod tests {
         tokio::spawn(task);
         handle.trigger(Trigger::KeysArrived).unwrap();
         let waited = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
-            settle(&handle, |v| v.setup == FinderSetup::Failed).await
-        })
-        .await;
+        // Awaits the published view itself, not a number of scheduler turns: each attempt ends on a real
+        // 20 ms timer, and a fast machine runs many turns before the first one fires.
+        let mut views = handle.view.clone();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            views.wait_for(|v| v.setup == FinderSetup::Failed),
+        )
+        .await
+        .map(|seen| seen.is_ok());
         assert!(
-            outcome.is_ok(),
+            matches!(outcome, Ok(true)),
             "the reconciler hung on an add that never returned: {:?}",
             handle.view()
         );
