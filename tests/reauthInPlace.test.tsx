@@ -208,6 +208,34 @@ describe('reauth mode', () => {
     expect(v.find('SignInStep')!.props.initialEmail).toBe('b@beebeeb.io')
   })
 
+  // M8: on the switch warning the rail shows sign-in as the active row (the switch is part of signing in).
+  test('the rail marks Sign in active while the switch warning is up', async () => {
+    const stubs = stepStubs()
+    const m = mount('Onboarding.tsx', 'OnboardingView', {
+      backend: {
+        sync_status: () => ({ logged_in: true, vault_unlocked: true, engine: 'running', sync_root: '/x', syncing: 0, cloud_only: 0, conflicts: 0 }),
+        desktop_platform: () => 'macos',
+      },
+      props: { mode: 'reauth' },
+      bindings: {
+        ...desktopApi,
+        getCurrentWindow: () => ({ close: async () => {} }),
+        useCapabilities: () => ({ host_os: 'macos' }),
+        FINDER_RAIL_TITLE,
+        FINDER_RAIL_DETAIL,
+        ...stubs.bindings,
+        STEPS: [{ id: 'signin', title: 'Sign in', detail: '' }, { id: 'unlock', title: 'Set up this Mac', detail: '' }],
+      },
+    })
+    mounted.push(m)
+    await m.flush(); await m.flush()
+    m.elements().find((el) => el.type === stubs.byName.SignInStep)!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1 }, 'b@beebeeb.io')
+    await m.flush()
+    const active = m.elements().filter((el) => String(el.props.className ?? '').split(' ').includes('active')).map((el) => textOf(el.props.children))
+    expect(active).toHaveLength(1)
+    expect(active[0]).toContain('Sign in')
+  })
+
   test('setup mode: Cancel goes back to sign-in rather than closing the window', async () => {
     const v = openView('setup', { signedIn: false })
     await v.m.flush(); await v.m.flush()

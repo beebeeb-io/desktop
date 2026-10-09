@@ -24,7 +24,7 @@ const outcome = (over: Record<string, unknown> = {}) => ({ requires_2fa: false, 
 function fakeApi(overrides: Partial<SignInApi> = {}): SignInApi {
   return {
     desktopLogin: async () => ({ ok: true, value: outcome() }),
-    desktopLogin2fa: async () => ({ ok: true, value: undefined }),
+    desktopLogin2fa: async () => ({ ok: true, value: outcome() }),
     ...overrides,
   }
 }
@@ -69,7 +69,7 @@ describe('onboardingSignIn.submitTotpCode', () => {
       },
       desktopLogin2fa: async (code) => {
         calls.push(`desktop_login_2fa(${code})`)
-        return { ok: true, value: undefined }
+        return { ok: true, value: outcome() }
       },
     }
 
@@ -92,7 +92,7 @@ describe('onboardingSignIn.submitTotpCode', () => {
     const api = fakeApi({
       desktopLogin2fa: async (code) => {
         received = code
-        return { ok: true, value: undefined }
+        return { ok: true, value: outcome() }
       },
     })
     const result = await submitTotpCode('12345678', api)
@@ -122,7 +122,6 @@ describe('onboardingSignIn.submitTotpCode', () => {
 describe('settledFrom (R8)', () => {
   test('maps the outcomes', () => {
     expect(settledFrom(outcome())).toEqual({ kind: 'fresh' })
-    expect(settledFrom(null)).toEqual({ kind: 'fresh' })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: true }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: false }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: false })
     expect(settledFrom(outcome({ account_mismatch: { pending_changes: 3 } }))).toEqual({ kind: 'account_mismatch', pendingChanges: 3 })
@@ -164,9 +163,19 @@ describe('settledFrom (R8)', () => {
     expect(settled).toContainEqual({ kind: 'account_mismatch', pendingChanges: 3 })
   })
 
-  test('the same account is never assumed: without `vault_unlocked` the keys are not claimed to be here', () => {
-    const { vault_unlocked: _omitted, ...withoutIt } = outcome({ reauthenticated: true }) as Record<string, unknown>
-    expect(settledFrom(withoutIt as never)).toEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: false })
+  // M9: Lane R always sends all five fields (lib.rs pins it), so a bundle cannot skew against it any
+  // more. A missing field, or no result at all, is a contract break: unreadable, never a plain sign-in.
+  test('every R8 field is required: a missing one, or no result at all, is unreadable (M9)', () => {
+    for (const field of ['requires_2fa', 'reauthenticated', 'vault_unlocked', 'key_replaced', 'account_mismatch']) {
+      const { [field]: _omitted, ...withoutIt } = outcome() as Record<string, unknown>
+      expect({ field, settled: settledFrom(withoutIt as never) }).toEqual({ field, settled: { kind: 'unreadable' } })
+    }
+    expect(settledFrom(null)).toEqual({ kind: 'unreadable' })
+    expect(settledFrom(undefined)).toEqual({ kind: 'unreadable' })
+    for (const field of ['reauthenticated', 'vault_unlocked']) {
+      expect(settledFrom(outcome({ [field]: null }))).toEqual({ kind: 'unreadable' })
+    }
+    expect(settledFrom(outcome({ requires_2fa: 'false' }))).toEqual({ kind: 'unreadable' })
   })
 
   // Fail closed (lead, Task 18): a result that cannot be classified is never the same account, and

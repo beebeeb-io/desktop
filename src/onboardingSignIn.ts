@@ -55,32 +55,32 @@ export type PasswordStepResult =
 
 export type TotpStepResult = { ok: true; settled: SignInSettled } | { ok: false; message: string }
 
-const isFlag = (x: unknown) => x === undefined || x === null || typeof x === 'boolean'
-
 /**
  * Classify what `desktop_login` / `desktop_login_2fa` returned (R8). Strict by design: this is the
  * line between "your own account signed in again" and everything else, so a value that does not
  * match the contract is `unreadable` (the caller shows an error), never the same account and never
  * an account switch with an invented pending-change count.
  *
- *  - `null`/`undefined` is a plain sign-in: `desktop_login_2fa` returned nothing before R8.
+ *  - Every field Rust's `LoginOutcome` always sends is required (M9): `requires_2fa`,
+ *    `reauthenticated`, `vault_unlocked` and `key_replaced` as booleans, `account_mismatch` present
+ *    (null or an object). A missing one, or no result at all, is a contract break: `unreadable`, never
+ *    a plain sign-in (the bundle ships with that Rust, so it cannot skew against an older build).
  *  - `account_mismatch` wins, and needs a whole, non-negative `pending_changes`. Claiming to be
  *    the same account at the same time is a contradiction.
  *  - `reauthenticated: true` keeps the account; the keys are claimed to be here only when
- *    `vault_unlocked` says `true`, so a missing field sends the person to the recovery phrase.
+ *    `vault_unlocked` says `true`.
  *  - `key_replaced` (FB-I1) is required and boolean. It is true only for a same-account re-sign-in
  *    whose kept key was removed, so with `vault_unlocked: true`, an account switch, or a plain
  *    sign-in it is a contradiction.
  */
 export function settledFrom(value: DesktopLoginResult | null | undefined): SignInOutcome {
   const unreadable: SignInOutcome = { kind: 'unreadable' }
-  if (value === null || value === undefined) return { kind: 'fresh' }
   const raw: unknown = value
-  if (typeof raw !== 'object' || Array.isArray(raw)) return unreadable
-  const { reauthenticated, vault_unlocked, account_mismatch, key_replaced } = raw as Record<string, unknown>
-  if (typeof key_replaced !== 'boolean') return unreadable
-  if (!isFlag(reauthenticated) || !isFlag(vault_unlocked)) return unreadable
-  if (account_mismatch !== undefined && account_mismatch !== null) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return unreadable
+  const { requires_2fa, reauthenticated, vault_unlocked, account_mismatch, key_replaced } = raw as Record<string, unknown>
+  if ([requires_2fa, reauthenticated, vault_unlocked, key_replaced].some((field) => typeof field !== 'boolean')) return unreadable
+  if (!('account_mismatch' in raw) || account_mismatch === undefined) return unreadable
+  if (account_mismatch !== null) {
     if (reauthenticated === true || key_replaced) return unreadable
     const pending = typeof account_mismatch === 'object' ? (account_mismatch as Record<string, unknown>).pending_changes : undefined
     if (typeof pending !== 'number' || !Number.isSafeInteger(pending) || pending < 0) return unreadable
@@ -88,7 +88,7 @@ export function settledFrom(value: DesktopLoginResult | null | undefined): SignI
   }
   if (reauthenticated === true) {
     if (key_replaced && vault_unlocked === true) return unreadable
-    return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true, keyReplaced: key_replaced }
+    return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true, keyReplaced: key_replaced === true }
   }
   if (key_replaced) return unreadable
   return { kind: 'fresh' }

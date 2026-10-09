@@ -138,7 +138,8 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
           </div>
           <div className="steps">
             {rail.map((item, index) => (
-              <div key={item.id} className={`step-row ${step === item.id ? 'active' : ''}`}>
+              // M8: the switch warning is part of signing in, so Sign in stays the active row there.
+              <div key={item.id} className={`step-row ${step === item.id || (step === 'switch' && item.id === 'signin') ? 'active' : ''}`}>
                 <div className="step-number">{index + 1}</div>
                 <div>
                   <div className="row-title">{item.title}</div>

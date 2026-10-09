@@ -18,6 +18,7 @@
  * order above is now the Windows/Linux flow, pinned unchanged below.
  */
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { forceReauth, type ForceReauthApi } from '../src/desktopApi'
 
 function fakeApi(overrides: Partial<ForceReauthApi> = {}): ForceReauthApi {
@@ -90,6 +91,34 @@ describe('forceReauth', () => {
 
     expect(result).toEqual({ ok: false, reason: 'session mutex poisoned', unsupported: false })
     expect(calls).toEqual(['clear_session'])
+  })
+})
+
+// M7: a command this build does not have is named correctly. "Sign in again" can stop at the platform
+// read, the reauth window (macOS), the clear or the onboarding window (Windows/Linux); the callers show
+// the reason as is, so forceReauth names the command that is missing.
+describe('forceReauth names the command a build is missing (M7)', () => {
+  const missing = { ok: false as const, reason: 'Command not found', unsupported: true }
+  test('desktop_platform', async () => {
+    const result = await forceReauth(fakeApi({ platform: async () => missing }))
+    expect(result).toEqual({ ok: false, reason: 'desktop_platform is not wired in this build yet.', unsupported: true })
+  })
+  test('open_reauth_window on macOS', async () => {
+    const result = await forceReauth(fakeApi({ platform: async () => ({ ok: true, value: 'macos' }), openReauthWindow: async () => missing }))
+    expect(result).toEqual({ ok: false, reason: 'open_reauth_window is not wired in this build yet.', unsupported: true })
+  })
+  test('clear_session and open_onboarding_window elsewhere', async () => {
+    expect(await forceReauth(fakeApi({ clearSession: async () => missing }))).toEqual({ ok: false, reason: 'clear_session is not wired in this build yet.', unsupported: true })
+    expect(await forceReauth(fakeApi({ openOnboardingWindow: async () => missing }))).toEqual({ ok: false, reason: 'open_onboarding_window is not wired in this build yet.', unsupported: true })
+  })
+  test('a failure that is not a missing command keeps its own reason', async () => {
+    expect(await forceReauth(fakeApi({ openOnboardingWindow: async () => ({ ok: false, reason: 'window failed', unsupported: false }) }))).toEqual({ ok: false, reason: 'window failed', unsupported: false })
+  })
+  test('the review action shows the reason it gets, and names no command of its own', () => {
+    const text = readFileSync(new URL('../src/pages/VersionCenter.tsx', import.meta.url), 'utf8')
+    const body = text.slice(text.indexOf('const signInAgain = async () => {'), text.indexOf('const restoreVersion'))
+    expect(body).not.toContain('open_onboarding_window')
+    expect(body).toContain('message: result.reason')
   })
 })
 

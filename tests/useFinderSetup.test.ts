@@ -141,6 +141,47 @@ describe('lead ruling 7a: a state that cannot be read is never "Adding"', () => 
     expect(h.stateCalls()).toBe(2)
   })
 
+  // M1 (triage 19): a re-read from a view that IS there keeps it on screen while it asks, so "Repair…"
+  // and the row do not vanish for one round trip after every repair. Only `unavailable` blanks.
+  test('retry from a loaded view keeps that view on screen while it reads', async () => {
+    let answers = 0
+    let gate!: () => void
+    const h = mountHook({
+      finder_setup_state: async () => {
+        answers += 1
+        if (answers === 1) return ready
+        await new Promise<void>((resolve) => { gate = resolve })
+        return failedTimeout
+      },
+    })
+    await h.settle()
+    expect(h.hook().load).toEqual({ status: 'loaded', view: ready })
+    const retrying = h.hook().retry()
+    h.m.render()
+    expect(h.hook().load).toEqual({ status: 'loaded', view: ready })
+    gate()
+    await retrying
+    h.m.render()
+    expect(h.hook().load).toEqual({ status: 'loaded', view: failedTimeout })
+  })
+
+  // M1 (triage 17): two reads in flight; only the newest issued may land.
+  test('a read that answers after a newer read was issued is dropped', async () => {
+    const answers: Array<(v: FinderSetupView) => void> = []
+    const h = mountHook({ finder_setup_state: () => new Promise<FinderSetupView>((resolve) => { answers.push(resolve) }) })
+    await h.settle()
+    expect(answers).toHaveLength(1)
+    const retrying = h.hook().retry()
+    await tick()
+    expect(answers).toHaveLength(2)
+    answers[1](ready)
+    await retrying
+    answers[0](view()) // the first read answers last: it is older, so it is dropped
+    await tick()
+    h.m.render()
+    expect(h.hook().load).toEqual({ status: 'loaded', view: ready })
+  })
+
   test('retry that fails again lands on unavailable again, still with its one action', async () => {
     const h = mountHook({ finder_setup_state: () => { throw new Error('still no') } })
     await h.settle()
@@ -351,6 +392,34 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
     await h.hook().run('copy_details')
     h.m.render()
     expect(h.hook().copied).toBe(false)
+  })
+
+  // 17b-M3: a failed action's reason is not shown, but it leaves a trace for diagnostics: the action and
+  // a reason CODE only (a redacted domain and code, or a fixed word), never free text.
+  test('a failed action leaves a console trace of the action and a reason code, never free text', async () => {
+    const traced: unknown[][] = []
+    const original = console.warn
+    console.warn = (...args: unknown[]) => { traced.push(args) }
+    try {
+      const reasons: Record<string, () => never> = {
+        open_login_items_and_extensions_settings: () => { throw new Error('io.beebeeb.bridge 3') },
+        finder_setup_show_app: () => { throw new Error('could not reveal /Users/sam/Applications/Beebeeb.app') },
+        finder_setup_copy_details: () => { throw new Error('finder_setup_copy_details is not a registered command') },
+      }
+      const h = mountHook(backendWith(reasons))
+      await h.settle()
+      await h.hook().run('open_system_settings')
+      await h.hook().run('show_in_finder')
+      await h.hook().run('copy_details')
+      expect(traced).toEqual([
+        ['open_system_settings', 'io.beebeeb.bridge 3'],
+        ['show_in_finder', 'other'],
+        ['copy_details', 'unsupported'],
+      ])
+      expect(JSON.stringify(traced)).not.toContain('/Users')
+    } finally {
+      console.warn = original
+    }
   })
 
   test('copy_details: the pasteboard refusing is a toast, and the details were still asked for', async () => {

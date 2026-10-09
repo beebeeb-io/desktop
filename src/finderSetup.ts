@@ -318,12 +318,15 @@ export interface FinderSetupController {
  *
  * - It subscribes to `finder-setup-changed`, and reads `finder_setup_state` once the subscription
  *   has landed, so no transition falls between the two. An event that arrives while a read is in
- *   flight wins over that read, because the read may be the older of the two.
+ *   flight wins over that read, because the read may be the older of the two, and of two reads in
+ *   flight only the newest issued may land (M1, triage 17).
  * - It reads `sync_status.engine_refusal` at the same moment and again on every event (a refusal has
  *   no event of its own), and only the newest of those reads counts (must-render row 9).
  * - A state that cannot be read (a rejected command, an unparsable shape) is `unavailable`, never
- *   "Adding" (ruling 7a); `retry` reads again.
- * - A failed action is one error toast: the action's one sentence, no title, never the reason.
+ *   "Adding" (ruling 7a); `retry` reads again. A re-read blanks the row only from `unavailable`; a
+ *   view that is there stays on screen while it is read again (M1, triage 19).
+ * - A failed action is one error toast: the action's one sentence, no title, never the reason. It
+ *   leaves a console trace of the action and a reason CODE only (17b-M3).
  * - It unsubscribes on unmount and ignores anything that finishes afterwards.
  * - `enabled: false` (a surface on a host that is not a Mac) does none of the above.
  */
@@ -336,6 +339,7 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   const [copied, setCopied] = useState(false)
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const eventsSeen = useRef(0)
+  const readsIssued = useRef(0)
   const refusalReads = useRef(0)
   const alive = useRef(false)
 
@@ -349,14 +353,16 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
 
   const read = useCallback(async () => {
     const eventsBefore = eventsSeen.current
+    const issued = ++readsIssued.current
     const result = await loadFinderSetup()
-    if (!alive.current || eventsSeen.current !== eventsBefore) return
+    if (!alive.current || eventsSeen.current !== eventsBefore || issued !== readsIssued.current) return
     setLoad(result.ok ? { status: 'loaded', view: result.value } : { status: 'unavailable' })
   }, [])
 
   const retry = useCallback(async () => {
     if (!enabled) return
-    setLoad({ status: 'loading' })
+    // Blank only what could not be read; a view that is there stays while it is read again.
+    setLoad((current) => (current.status === 'unavailable' ? { status: 'loading' } : current))
     void readRefusal()
     await read()
   }, [read, readRefusal, enabled])
@@ -413,6 +419,10 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
           // redacted bridge code. An `unsupported` failure says the same sentence, because that flag
           // is a substring guess on the reason and must not put a command name in front of a person.
           showToast({ variant: 'error', message: FINDER_ACTION_FAILED[action] })
+          // 17b-M3: the dropped reason leaves a trace for diagnostics, as a CODE only: a redacted
+          // `domain code` pair as it is, `unsupported`, or `other` for any free text (it could hold a path).
+          const said = result.reason.trim()
+          console.warn(action, result.unsupported ? 'unsupported' : /^[A-Za-z][\w.]*\s-?\d+$/.test(said) ? said : 'other')
         }
       }
       return result

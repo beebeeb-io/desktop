@@ -143,7 +143,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       showToast({
         variant: 'error',
         title: 'Couldn’t open sign-in',
-        message: result.unsupported ? commandUnavailableLabel('open_onboarding_window') : result.reason,
+        // forceReauth names the command a build is missing itself (M7): it knows which step failed.
+        message: result.reason,
       })
       return
     }

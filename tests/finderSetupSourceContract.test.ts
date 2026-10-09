@@ -244,21 +244,26 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     const leaks = Object.fromEntries(
       Object.entries(column((group) => only(group.flatMap((site) => site.violations), true))).filter(([, found]) => Object.keys(found).length > 0),
     )
-    expect(leaks).toEqual({ [TRAY]: { reason: 1 }, [OPEN_SETTINGS]: { reason: 1 }, [RETRY]: { reason: 1 } })
+    expect(leaks).toEqual({ [TRAY]: { reason: 1 }, [OPEN_SETTINGS]: { reason: 1 }, [RETRY]: { reason: 2 } })
   })
 
   /**
    * Exemption 3 (must-render row 15, lead ruling on M3 / FA-M4): useFinderSetup.run shows the reason of
    * a failed Try again verbatim, because `finder_setup_retry` can only fail with Rust's fixed sentences,
    * which carry the remedy. This pins both halves: the hook reads the reason for `try_again` alone (and
-   * not for an IPC-level `unsupported` failure), and the Rust command's every `Err` is a constant.
+   * not for an IPC-level `unsupported` failure), and the Rust command's every `Err` is a constant. The
+   * hook's one other read is the 17b-M3 console trace, which keeps a `domain code` pair and turns any
+   * other text into `other`: a console, not a surface.
    */
   test('exemption 3, useFinderSetup.run: only Try again\'s reason, and finder_setup_retry fails only with fixed sentences', () => {
     const run = functionText('finderSetup.ts', 'useFinderSetup').replace(/\/\/.*$/gm, '')
-    expect(run.match(/result\.reason/g)).toHaveLength(1)
+    expect(run.match(/result\.reason/g)).toHaveLength(2)
     const guard = run.indexOf("if (action === 'try_again' && !result.unsupported)")
     expect(guard).toBeGreaterThan(-1)
     expect(run.indexOf('setActionNote(result.reason)')).toBeGreaterThan(guard)
+    const trace = run.indexOf('const said = result.reason.trim()')
+    expect(trace).toBeGreaterThan(run.indexOf('} else {', guard))
+    expect(run.slice(trace)).toMatch(/^const said = result\.reason\.trim\(\)\s*console\.warn\(action, result\.unsupported \? 'unsupported' : \/\^\[A-Za-z\]\[\\w\.\]\*\\s-\?\\d\+\$\/\.test\(said\) \? said : 'other'\)/)
 
     const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
     const body = (text: string, start: string) => text.slice(text.indexOf(start), text.indexOf('\n}\n', text.indexOf(start)))

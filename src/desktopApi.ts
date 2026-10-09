@@ -998,25 +998,25 @@ export function showMainAppWindow(): Promise<CommandResult<void>> {
 // ── 2FA / TOTP login (desktop credential path) ─────────────────────────────
 
 /**
- * Shape returned by `desktop_login` and `desktop_login_2fa`. R8 adds the last three fields (the Rust
- * `LoginOutcome` always sends all four: `false`, `false`, `null` for a plain sign-in). They are
- * optional here because a build from before R8 sends only `requires_2fa` from `desktop_login` and
- * nothing at all from `desktop_login_2fa`; `settledFrom` (onboardingSignIn.ts) reads them strictly.
+ * Shape returned by `desktop_login` and `desktop_login_2fa`. Rust's `LoginOutcome` ALWAYS sends all
+ * five fields (`false`, `false`, `false`, `false`, `null` for a plain sign-in; pinned by
+ * `login_outcome_json_is_the_frontends_contract` in lib.rs), and this bundle ships with that Rust, so
+ * they are required: `settledFrom` (onboardingSignIn.ts) reads a missing one as a contract break
+ * (M9), never as a plain sign-in.
  */
 export interface DesktopLoginResult {
   requires_2fa: boolean
   /** The account on this Mac signed in again in place; nothing was cleared. */
-  reauthenticated?: boolean
+  reauthenticated: boolean
   /** With `reauthenticated`: the keys are here, so no recovery phrase is needed. */
-  vault_unlocked?: boolean
+  vault_unlocked: boolean
   /**
    * With `reauthenticated` (FB-I1): the kept vault key was no longer the account's (the key was changed
-   * on another device), so it was removed and the recovery phrase follows. Always sent; `settledFrom`
-   * requires it.
+   * on another device), so it was removed and the recovery phrase follows.
    */
-  key_replaced?: boolean
+  key_replaced: boolean
   /** Another account signed in; nothing changed on this Mac. */
-  account_mismatch?: { pending_changes: number } | null
+  account_mismatch: { pending_changes: number } | null
 }
 
 /**
@@ -1138,17 +1138,21 @@ const defaultForceReauthApi: ForceReauthApi = {
  * without a Tauri runtime; mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
  */
 export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<SessionActionOutcome>> {
-  const platform = await api.platform()
+  // M7: a command this build does not have is named by the step that needed it; the callers show the
+  // reason as is.
+  const named = <T,>(name: string, result: CommandResult<T>): CommandResult<T> =>
+    !result.ok && result.unsupported ? { ok: false, reason: commandUnavailableLabel(name), unsupported: true } : result
+  const platform = named('desktop_platform', await api.platform())
   if (!platform.ok) return platform
   if (platform.value === 'macos') {
-    const opened = await api.openReauthWindow()
+    const opened = named('open_reauth_window', await api.openReauthWindow())
     return opened.ok ? { ok: true, value: { warning: null } } : opened
   }
-  const cleared = await api.clearSession()
+  const cleared = named('clear_session', await api.clearSession())
   if (!cleared.ok) return cleared
   // A clear that happened with a warning (FB-24) is no reason to stop: onboarding opens, and the
   // warning goes back to the caller, which shows it neutrally.
-  const opened = await api.openOnboardingWindow()
+  const opened = named('open_onboarding_window', await api.openOnboardingWindow())
   return opened.ok ? { ok: true, value: { warning: cleared.value.warning } } : opened
 }
 
