@@ -814,7 +814,9 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
         let first = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
         let id = item_id(&first);
         assert_eq!(first["WriteQueued"]["item"]["status"], "uploading");
-        // Upload finalization: the row becomes Local at a real server version.
+        // Upload finalization: the row becomes Local at a real server version,
+        // stamped with the wall-clock second of the upload, as
+        // `apply_completed_upload` leaves it.
         fx.db
             .upsert_file(&FileEntry {
                 file_id: id.clone(),
@@ -823,17 +825,24 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
                 size_bytes: 20,
                 modified_at: 1_700_000_123,
                 content_hash: None,
-                remote_updated_at: 7,
+                remote_updated_at: 1_700_000_123,
                 parent_id: None,
                 item_kind: ItemKind::File,
             })
             .unwrap();
+        let mut contract = fx.db.get_file_contract_state(&id).unwrap().unwrap();
+        contract.current_version = 7;
+        fx.db.set_file_contract_state(&contract).unwrap();
         let retry = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
         assert_eq!(item_id(&retry), id, "it is still the same item (a true retry)");
         assert_eq!(retry["WriteQueued"]["item"]["status"], "local", "status must be current: {retry}");
         assert_eq!(
             retry["WriteQueued"]["item"]["version_identifier"], "7:1700000123:20",
             "version must be current: {retry}"
+        );
+        assert_eq!(
+            retry["WriteQueued"]["item"]["content_version"], "7",
+            "the write base must be the current server version: {retry}"
         );
         assert_ne!(retry, first);
     });

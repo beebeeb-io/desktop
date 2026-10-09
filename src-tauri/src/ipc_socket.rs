@@ -2520,7 +2520,7 @@ fn is_file_provider_root(container_id: &str) -> bool {
         || container_id.to_ascii_lowercase().contains("root")
 }
 
-fn file_entry_payload_for_db(
+pub(crate) fn file_entry_payload_for_db(
     db: &crate::state_db::StateDb,
     entry: &crate::state_db::FileEntry,
     parent_identifier: &str,
@@ -2586,11 +2586,11 @@ fn file_entry_payload(
     // Task 1697: version split. contentVersion changes only when the content
     // identity changes (server version + content hash when present);
     // metadataVersion tracks mtime/size/parent/name so a rename no longer
-    // forces a content re-download.
-    let content_version = match &entry.content_hash {
-        Some(hash) => format!("{}:{}", contract.current_version.max(entry.remote_updated_at), hash),
-        None => format!("{}", contract.current_version.max(entry.remote_updated_at)),
-    };
+    // forces a content re-download. Both identifiers lead with the server
+    // version and never with `remote_updated_at`: the extension sends the
+    // content version back as the base of its next write.
+    let content_version =
+        crate::engine_bridge::item_content_version(contract.current_version, entry.content_hash.as_deref());
     let metadata_version = format!(
         "{}:{}:{}:{}:{}",
         entry.modified_at,
@@ -2609,11 +2609,10 @@ fn file_entry_payload(
         content_type: contract.content_type.clone(),
         status: file_status_string(&entry.status).to_string(),
         capabilities,
-        version_identifier: Some(format!(
-            "{}:{}:{}",
-            contract.current_version.max(entry.remote_updated_at),
+        version_identifier: Some(crate::engine_bridge::item_version_identifier(
+            contract.current_version,
             entry.modified_at,
-            entry.size_bytes
+            entry.size_bytes,
         )),
         // Dates/child count are stamped by `file_entry_payload_for_db`, where
         // the DB handle is available.
@@ -2649,10 +2648,11 @@ fn file_entry_payload_without_contract(
         capabilities_for_status(&entry.status),
     );
 
-    // Task 1697: version split without a contract — content identity falls
-    // back to the row's remote clock (no hash available), metadata to
-    // mtime/size/parent/name.
-    let content_version = format!("{}", entry.remote_updated_at);
+    // Task 1697: version split without a contract. With no contract there is
+    // no known server version, so both identifiers lead with 0, which the
+    // write path reads as "no base" (`parse_base_version_number` ignores 0).
+    // The row's wall-clock stamp is not a version and is never used as one.
+    let content_version = crate::engine_bridge::item_content_version(0, None);
     let metadata_version = format!(
         "{}:{}:{}:{}:{}",
         entry.modified_at,
@@ -2671,9 +2671,10 @@ fn file_entry_payload_without_contract(
         content_type: None,
         status: status.to_string(),
         capabilities,
-        version_identifier: Some(format!(
-            "{}:{}:{}",
-            entry.remote_updated_at, entry.modified_at, entry.size_bytes
+        version_identifier: Some(crate::engine_bridge::item_version_identifier(
+            0,
+            entry.modified_at,
+            entry.size_bytes,
         )),
         created_at: None,
         modified_at: None,
@@ -3963,6 +3964,94 @@ mod tests {
         assert_ne!(
             before.content_version, before.metadata_version,
             "the two versions are distinct identities"
+        );
+    }
+
+    /// A row as a completed desktop upload leaves it: server version 1, and
+    /// `remote_updated_at` / `modified_at` set to the wall-clock second of
+    /// the upload.
+    fn uploaded_row() -> (FileEntry, crate::state_db::FileContractState) {
+        let entry = FileEntry {
+            file_id: "uploaded-item".into(),
+            path: "/t.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 28,
+            modified_at: 1_791_550_250,
+            content_hash: None,
+            remote_updated_at: 1_791_550_250,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        let contract = crate::state_db::FileContractState {
+            file_id: "uploaded-item".into(),
+            current_version: 1,
+            ..live_contract()
+        };
+        (entry, contract)
+    }
+
+    #[test]
+    fn version_identifiers_lead_with_the_server_version_after_an_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let (entry, contract) = uploaded_row();
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&contract).unwrap();
+
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        assert_eq!(
+            payload.content_version.as_deref(),
+            Some("1"),
+            "the content version (the extension's write base) must be the server version"
+        );
+        assert_eq!(payload.version_identifier.as_deref(), Some("1:1791550250:28"));
+        assert_eq!(
+            crate::engine_bridge::parse_base_version_number(payload.content_version.as_deref()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn an_op_echo_leaves_the_content_version_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let (entry, contract) = uploaded_row();
+        for hash in [None, Some("abc123".to_string())] {
+            let mut entry = entry.clone();
+            entry.content_hash = hash.clone();
+            db.upsert_file(&entry).unwrap();
+            db.set_file_contract_state(&contract).unwrap();
+            let before = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+
+            // The `/sync/ops` echo of the same upload: a later wall-clock
+            // second, the same server version.
+            let mut echoed = entry.clone();
+            echoed.remote_updated_at += 30;
+            echoed.modified_at = echoed.remote_updated_at;
+            db.upsert_file(&echoed).unwrap();
+            let after = file_entry_payload_for_db(&db, &echoed, FP_ROOT_APPLE);
+            assert_eq!(
+                after.content_version, before.content_version,
+                "an op echo is not a content change (hash {hash:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payload_without_a_contract_carries_no_base_version() {
+        let (entry, _) = uploaded_row();
+        let payload = file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
+        assert_eq!(
+            crate::engine_bridge::parse_base_version_number(payload.content_version.as_deref()),
+            None,
+            "no contract means no known server version: {:?}",
+            payload.content_version
+        );
+        assert_eq!(
+            crate::engine_bridge::parse_base_version_number(payload.version_identifier.as_deref()),
+            None,
+            "{:?}",
+            payload.version_identifier
         );
     }
 

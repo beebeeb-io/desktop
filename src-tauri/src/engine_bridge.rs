@@ -4479,8 +4479,32 @@ fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The content version the File Provider extension holds for an item
+/// (`docs/IPC_PROTOCOL.md`, "Version identifiers"): the server's version
+/// number, then the content hash when the row has one.
+///
+/// The extension hands it back as the base of its next write, and
+/// [`parse_base_version_number`] reads the first segment as the
+/// `base_version_number` the server compares with the file's current version.
+/// It never carries a wall-clock value: a re-stamp of the row without a new
+/// server version (the `/sync/ops` echo of an upload, a finished upload's
+/// `remote_updated_at`) is not a content change, and must neither force a
+/// re-download nor turn into a base the server refuses.
+pub(crate) fn item_content_version(current_version: i64, content_hash: Option<&str>) -> String {
+    match content_hash {
+        Some(hash) => format!("{current_version}:{hash}"),
+        None => current_version.to_string(),
+    }
+}
 
-fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
+/// The item's full version identifier: server version, then modification
+/// time and size. Older extensions fall back to it when the payload has no
+/// content version, so it leads with the server version too.
+pub(crate) fn item_version_identifier(current_version: i64, modified_at: i64, size_bytes: i64) -> String {
+    format!("{current_version}:{modified_at}:{size_bytes}")
+}
+
+pub(crate) fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
     version_identifier.and_then(|value| {
         value
             .split(':')
@@ -12385,6 +12409,322 @@ mod tests {
         assert!(
             applied.contains(&grandchild.to_string()) && applied.contains(&folder.to_string()),
             "every flipped row is reported for the working-set signal: {applied:?}"
+        );
+    }
+
+    // ── A server that keeps versions and refuses a stale base ──────────────
+
+    /// One file on [`VersionedServerMock`]: every completed version's chunks,
+    /// encrypted exactly as the client sent them.
+    #[derive(Default)]
+    struct MockServerFile {
+        versions: Vec<Vec<Vec<u8>>>,
+    }
+
+    #[derive(Default)]
+    struct VersionedServerState {
+        files: std::collections::BTreeMap<String, MockServerFile>,
+        /// session id -> (file id, chunks received so far)
+        sessions: HashMap<String, (String, Vec<Vec<u8>>)>,
+        next_file: usize,
+        next_session: usize,
+        /// Every `uploads/init` body, in order, with the status it got.
+        inits: Vec<(serde_json::Value, u16)>,
+    }
+
+    /// Upload mock that behaves like the server's version check: a replace
+    /// (`file_id` set) whose `base_version_number` is not the file's current
+    /// version gets 409; a replace naming an id the server never minted
+    /// creates a file under that id, as the server does for a client-chosen
+    /// id. A create (`file_id` absent) mints `server-file-N`.
+    struct VersionedServerMock {
+        base_url: String,
+        state: Arc<Mutex<VersionedServerState>>,
+        stop: Arc<AtomicBool>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl VersionedServerMock {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let state = Arc::new(Mutex::new(VersionedServerState::default()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_state = Arc::clone(&state);
+            let server_stop = Arc::clone(&stop);
+            let handle = thread::spawn(move || {
+                let started = std::time::Instant::now();
+                while !server_stop.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(30) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let request = read_http_request(&mut stream);
+                            let response = versioned_server_response(&request, &server_state);
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("versioned server mock accept failed: {e}"),
+                    }
+                }
+            });
+            Self {
+                base_url,
+                state,
+                stop,
+                handle,
+            }
+        }
+
+        fn finish(self) -> VersionedServerState {
+            self.stop.store(true, Ordering::SeqCst);
+            self.handle.join().unwrap();
+            Arc::try_unwrap(self.state)
+                .unwrap_or_else(|_| panic!("mock state still shared"))
+                .into_inner()
+                .unwrap()
+        }
+    }
+
+    impl VersionedServerState {
+        /// Each `uploads/init` as `(file_id, base_version_number, status)`.
+        fn init_summary(&self) -> Vec<(serde_json::Value, serde_json::Value, u16)> {
+            self.inits
+                .iter()
+                .map(|(body, status)| (body["file_id"].clone(), body["base_version_number"].clone(), *status))
+                .collect()
+        }
+
+        /// The plaintext of `file_id`'s latest version.
+        fn latest_plaintext(&self, file_id: &str, master_key: [u8; 32]) -> Vec<u8> {
+            let file = self
+                .files
+                .get(file_id)
+                .unwrap_or_else(|| panic!("no server file {file_id}"));
+            let chunks = file
+                .versions
+                .last()
+                .unwrap_or_else(|| panic!("{file_id} has no version"));
+            let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+            let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+            chunks
+                .iter()
+                .flat_map(|chunk| beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, chunk).unwrap())
+                .collect()
+        }
+    }
+
+    fn versioned_server_response(request: &RecordedRequest, state: &Arc<Mutex<VersionedServerState>>) -> String {
+        let mut s = state.lock().unwrap();
+        let method = request.method.as_str();
+        let path = request.path.as_str();
+        if method == "POST" && path == "/api/v1/uploads/init" {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let file_id = match body["file_id"].as_str() {
+                Some(id) => {
+                    if let Some(file) = s.files.get(id)
+                        && let Some(base) = body["base_version_number"].as_i64()
+                        && base != file.versions.len() as i64
+                    {
+                        s.inits.push((body, 409));
+                        return http_json(
+                            "409 Conflict",
+                            serde_json::json!({ "error": "stale base version for replacement upload" }),
+                        );
+                    }
+                    s.files.entry(id.to_string()).or_default();
+                    id.to_string()
+                }
+                None => {
+                    s.next_file += 1;
+                    let id = format!("server-file-{}", s.next_file);
+                    s.files.insert(id.clone(), MockServerFile::default());
+                    id
+                }
+            };
+            s.next_session += 1;
+            let session = format!("session-{}", s.next_session);
+            s.sessions.insert(session.clone(), (file_id.clone(), Vec::new()));
+            let response = serde_json::json!({
+                "file_id": file_id,
+                "tenant_id": "tenant-1",
+                "object_version_id": format!("object-init-{}", s.next_session),
+                "upload_session_id": session,
+                "chunk_size_bytes": body["chunk_size_bytes"],
+                "chunk_count": body["chunk_count"],
+                "storage_format_version": 2,
+                "storage_pool_id": "pool-1",
+                "region": "local"
+            });
+            s.inits.push((body, 201));
+            return http_json("201 Created", response);
+        }
+        if method == "PATCH" && path.starts_with("/api/v1/files/") {
+            return http_json("200 OK", serde_json::json!({ "ok": true }));
+        }
+        if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
+            let mut parts = rest.split('/');
+            let session = parts.next().unwrap_or_default().to_string();
+            let action = parts.next().unwrap_or_default();
+            if method == "PUT" && action == "chunks" {
+                let index: usize = parts.next().unwrap_or("0").parse().unwrap();
+                let Some((_, chunks)) = s.sessions.get_mut(&session) else {
+                    return http_json("404 Not Found", serde_json::json!({ "error": "no session" }));
+                };
+                if chunks.len() <= index {
+                    chunks.resize(index + 1, Vec::new());
+                }
+                chunks[index] = request.body.clone();
+                return http_json(
+                    "200 OK",
+                    serde_json::json!({ "index": index, "size": request.body.len(), "skipped": false }),
+                );
+            }
+            if method == "POST" && action == "complete" {
+                let Some((file_id, chunks)) = s.sessions.remove(&session) else {
+                    return http_json("404 Not Found", serde_json::json!({ "error": "no session" }));
+                };
+                // nonce (12) + tag (16) per chunk.
+                let size: usize = chunks.iter().map(|chunk| chunk.len().saturating_sub(28)).sum();
+                let file = s.files.entry(file_id.clone()).or_default();
+                file.versions.push(chunks);
+                let version = file.versions.len();
+                return http_json(
+                    "200 OK",
+                    serde_json::json!({
+                        "file_id": file_id,
+                        "version_number": version,
+                        "current_object_version_id": format!("object-{file_id}-v{version}"),
+                        "size_bytes": size,
+                        "mime_type": "text/plain"
+                    }),
+                );
+            }
+        }
+        http_json(
+            "404 Not Found",
+            serde_json::json!({ "error": format!("unexpected {method} {path}") }),
+        )
+    }
+
+    /// Run the queue until nothing is due, moving the clock past every
+    /// backoff so a refused op is retried. Returns the number of passes.
+    async fn drain_upload_queue(bridge: &EngineBridge, sync_root: &Path) -> usize {
+        let mut now = now_secs();
+        for pass in 1..=12 {
+            bridge.process_due_operations(sync_root, now).await.unwrap();
+            now = now.saturating_add(10_000);
+            if bridge.db.list_due_operations(now).unwrap().is_empty() {
+                return pass;
+            }
+        }
+        12
+    }
+
+    fn finder_file_target(
+        file_id: Option<&str>,
+        filename: &str,
+        contents: &Path,
+        base_version_identifier: Option<String>,
+    ) -> FinderWriteTarget {
+        FinderWriteTarget {
+            file_id: file_id.map(str::to_string),
+            parent_id: None,
+            filename: filename.to_string(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: Some(contents.to_string_lossy().into_owned()),
+            content_type: Some("text/plain".into()),
+            base_version_identifier,
+        }
+    }
+
+    /// The content version the extension holds for `file_id`, read the way
+    /// the extension gets it: from the IPC item payload (no IPC socket off
+    /// unix, so the same formula directly).
+    fn held_content_version(bridge: &EngineBridge, file_id: &str) -> String {
+        let entry = bridge.db.get_file(file_id).unwrap().unwrap();
+        #[cfg(unix)]
+        {
+            crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root")
+                .content_version
+                .unwrap()
+        }
+        #[cfg(not(unix))]
+        {
+            let contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+            item_content_version(contract.current_version, entry.content_hash.as_deref())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_modify_after_a_desktop_upload_sends_the_server_version_as_its_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [21u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+
+        let created = dir.path().join("created.txt");
+        std::fs::write(&created, b"twenty-eight bytes of text.\n").unwrap();
+        bridge
+            .queue_finder_create(finder_file_target(None, "t.txt", &created, None))
+            .unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        let rows = bridge.db.list_files().unwrap();
+        assert_eq!(rows.len(), 1, "one row after the create: {rows:?}");
+        let server_id = rows[0].file_id.clone();
+        assert_eq!(rows[0].status, FileStatus::Local);
+
+        // The `/sync/ops` echo of that upload re-stamps the row with a later
+        // wall-clock second, as it does on a device.
+        let mut echoed = bridge.db.get_file(&server_id).unwrap().unwrap();
+        echoed.remote_updated_at += 30;
+        echoed.modified_at = echoed.remote_updated_at;
+        bridge.db.upsert_file(&echoed).unwrap();
+
+        let base = held_content_version(&bridge, &server_id);
+        let edited = dir.path().join("edited.txt");
+        std::fs::write(&edited, b"twenty-eight bytes of text.\nmore-bytes12").unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(
+                Some(&server_id),
+                "t.txt",
+                &edited,
+                Some(base.clone()),
+            ))
+            .unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        assert!(
+            state.inits.iter().all(|(_, status)| *status == 201),
+            "no upload may be refused (identifier {base:?}): {:?}",
+            state.init_summary()
+        );
+        let replace = state
+            .inits
+            .iter()
+            .find(|(body, _)| body["file_id"] == serde_json::json!(server_id))
+            .unwrap_or_else(|| panic!("no replace upload was sent: {:?}", state.init_summary()));
+        assert_eq!(
+            replace.0["base_version_number"],
+            serde_json::json!(1),
+            "the base must be the server version, not the identifier {base:?}"
+        );
+        assert_eq!(
+            state.latest_plaintext(&server_id, master_key),
+            b"twenty-eight bytes of text.\nmore-bytes12"
+        );
+        assert_eq!(state.files[&server_id].versions.len(), 2);
+        let row = bridge.db.get_file(&server_id).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            FileStatus::Local,
+            "the edit must not leave the file read-only"
         );
     }
 }
