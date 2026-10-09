@@ -453,7 +453,7 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
 
 /**
  * Must-render row 15 (M3, FA-M4): `finder_setup_retry` fails with one of two fixed Rust sentences, the
- * reconciler not running (NOT_RUNNING, "…starts again when Beebeeb is reopened") and the reconciler
+ * reconciler not running (NOT_RUNNING, "…Quit and reopen Beebeeb to start it again.") and the reconciler
  * held (FINDER_SETUP_HELD, the quiet-Missing sentence). Both carry the remedy, so the hook shows the
  * sentence verbatim as a neutral note (`actionNote`), never under "Couldn’t retry" and never as a
  * fixed toast that hides it. The note goes when the state changes or the next action runs.

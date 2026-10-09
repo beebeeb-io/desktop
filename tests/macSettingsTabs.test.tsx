@@ -19,6 +19,7 @@ import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import { expand, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted, type TreeNode } from './fixtures/componentHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const React = { createElement, Fragment }
 
@@ -801,7 +802,9 @@ describe('Sync tab', () => {
 
   // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: a neutral note.
   test('a failed Try again is Rust\'s sentence as a neutral note, never a toast or a second error surface', async () => {
-    const sentence = 'the Finder reconciler is not running (it starts again when Beebeeb is reopened)'
+    // The not-running answer, read from driver.rs so this feeds what Rust sends; it is the ruled sentence.
+    const sentence = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+    expect(sentence).toBe('Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.')
     const { m } = await openSync({ finder: finder.failed, retry: () => { throw sentence } })
     await pressFinder(m, 'Try again')
     expect(m.toasts).toEqual([])
@@ -1065,14 +1068,28 @@ describe('Sync tab', () => {
     expect(m.toasts).toEqual([])
   })
 
-  test('a repair whose engine stop is unconfirmed says to quit and reopen, ahead of the partial-cleanup sentence (row 11)', async () => {
-    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: ['The sync engine did not confirm it stopped. Restart Beebeeb before syncing again.'], engine_stop_unconfirmed: true }) })
+  // Row 11 on a Mac: when the engine stop is unconfirmed, Repair says so through the flag alone, and its
+  // `warnings` does not also carry the engine-stop text (lib.rs, MacosIntegrationResetResult).
+  test('a repair whose engine stop is unconfirmed, and nothing else left over, says only to quit and reopen (row 11)', async () => {
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], engine_stop_unconfirmed: true }) })
+    await press(m, 'Repair…')
+    await pressFinder(m, 'Repair')
+    const lines = statuses(m).map((el) => textOf(el.props.children).trim())
+    expect(lines).toContain(finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED)
+    expect(lines.filter((line) => line.includes(finderSetupCopy.FINDER_REPAIR_PARTIAL))).toEqual([])
+    expect(m.toasts).toEqual([])
+  })
+
+  test('an unconfirmed engine stop and a step Repair could not finish: quit and reopen first, then the partial-cleanup sentence (row 11)', async () => {
+    const leftover = 'Could not remove Finder File Provider domain: io.beebeeb.bridge 3'
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [leftover], engine_stop_unconfirmed: true }) })
     await press(m, 'Repair…')
     await pressFinder(m, 'Repair')
     expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(
       `${finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED} ${finderSetupCopy.FINDER_REPAIR_PARTIAL}`,
     )
-    expect(visibleText(m)).not.toContain('The sync engine did not confirm')
+    expect(visibleText(m)).not.toContain('io.beebeeb.bridge')
+    expect(m.toasts).toEqual([])
   })
 
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
