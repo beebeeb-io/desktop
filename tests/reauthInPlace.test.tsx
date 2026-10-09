@@ -20,6 +20,7 @@ import * as switchCopy from '../src/accountSwitchCopy'
 import * as signIn from '../src/onboardingSignIn'
 import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE } from '../src/finderSetupCopy'
 import { loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const React = { createElement, Fragment }
 const Card = loadComponent('Onboarding.tsx', 'Card', { React })
@@ -182,6 +183,19 @@ describe('reauth mode', () => {
     expect(clearCalls(v.m)).toHaveLength(0)
   })
 
+  // FT-I4: the person who confirmed the switch to account B must not see A's address. The address
+  // typed in the mismatched sign-in is carried to the next sign-in form and beats the prefill.
+  test('after the switch, sign-in opens with the address typed in the mismatched sign-in', async () => {
+    const v = openView('reauth')
+    await v.m.flush(); await v.m.flush()
+    expect(v.find('SignInStep')!.props.initialEmail).toBeUndefined()
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 }, 'b@beebeeb.io')
+    await v.m.flush()
+    v.find('AccountSwitchStep')!.props.onSwitched()
+    await v.m.flush()
+    expect(v.find('SignInStep')!.props.initialEmail).toBe('b@beebeeb.io')
+  })
+
   test('setup mode: Cancel goes back to sign-in rather than closing the window', async () => {
     const v = openView('setup', { signedIn: false })
     await v.m.flush(); await v.m.flush()
@@ -198,11 +212,12 @@ describe('reauth mode', () => {
 })
 
 describe('SignInStep reports what the sign-in became', () => {
-  function openSignIn(backend: Record<string, (args: any) => unknown>) {
+  function openSignIn(backend: Record<string, (args: any) => unknown>, props: { initialEmail?: string } = {}) {
     const done: unknown[] = []
+    const emails: unknown[] = []
     const m = mount('Onboarding.tsx', 'SignInStep', {
       backend: { last_signed_in_email: () => null, ...backend },
-      props: { onDone: (settled: unknown) => done.push(settled) },
+      props: { ...props, onDone: (settled: unknown, email: unknown) => { done.push(settled); emails.push(email) } },
       bindings: {
         ...signIn,
         lastSignedInEmail: desktopApi.lastSignedInEmail,
@@ -212,7 +227,7 @@ describe('SignInStep reports what the sign-in became', () => {
       },
     })
     mounted.push(m)
-    return { m, done }
+    return { m, done, emails }
   }
 
   const field = (m: Mounted, label: string) => m.elements().find((el) => el.props.label === label)!
@@ -248,6 +263,27 @@ describe('SignInStep reports what the sign-in became', () => {
     await submitPassword(m)
     expect(done).toEqual([{ kind: 'account_mismatch', pendingChanges: 4 }])
     expect(clearCalls(m)).toHaveLength(0)
+  })
+
+  test('it hands over the address that was typed, so a switch can carry it (FT-I4)', async () => {
+    const { m, emails } = openSignIn({
+      desktop_login: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: { pending_changes: 1 } }),
+    })
+    await m.flush()
+    await submitPassword(m)
+    expect(emails).toEqual(['user@beebeeb.io'])
+  })
+
+  test('an initial address beats the prefill of the last signed-in account', async () => {
+    const { m } = openSignIn({ last_signed_in_email: () => 'a@beebeeb.io' }, { initialEmail: 'b@beebeeb.io' })
+    await m.flush(); await m.flush()
+    expect(field(m, 'Email').props.value).toBe('b@beebeeb.io')
+  })
+
+  test('with no initial address the prefill still fills an empty field', async () => {
+    const { m } = openSignIn({ last_signed_in_email: () => 'a@beebeeb.io' })
+    await m.flush(); await m.flush()
+    expect(field(m, 'Email').props.value).toBe('a@beebeeb.io')
   })
 
   test('a 2FA account learns its outcome from the code step, not the password step', async () => {
@@ -362,6 +398,26 @@ describe('AccountSwitchStep', () => {
     await m.click('Sign out and switch')
     expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(1)
     expect(events).toEqual(['switched'])
+  })
+
+  // FB-I2 (spec §5.6: "The switch leaves no vault key and no account email behind"): the switch asks
+  // the sign-out to forget the previous account's address too.
+  test('the switch signs out with forgetEmail, so the previous address is not kept', async () => {
+    const { m } = openSwitch(3)
+    await m.flush()
+    await m.click('Sign out and switch')
+    expect(clearCalls(m).map((c) => c.args)).toEqual([{ forgetEmail: true }])
+  })
+
+  test('an address that could not be forgotten stops the switch: the Rust sentence verbatim, and the step stays', async () => {
+    const sentence = rustStr('lib.rs', 'SIGN_OUT_EMAIL_NOT_FORGOTTEN')
+    const { m, events } = openSwitch(2, () => { throw sentence })
+    await m.flush()
+    await m.click('Sign out and switch')
+    expect(m.toasts.map((t) => t.message)).toEqual([sentence])
+    expect(events).toEqual([])
+    expect(m.tree().props.title).toBe(switchCopy.ACCOUNT_SWITCH_TITLE)
+    expect(m.elements().filter((el) => el.type === 'button').map((b) => b.props.disabled)).toEqual([false, false])
   })
 
   test('while the sign-out runs, neither button can be pressed again', async () => {

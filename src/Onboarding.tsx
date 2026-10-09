@@ -41,6 +41,11 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   const [step, setStep] = useState<Step>('signin')
   // How many unsent changes the switch warning names; set when a sign-in turns out to be another account.
   const [pendingSwitch, setPendingSwitch] = useState(0)
+  // FT-I4: the address typed in the sign-in that turned out to be another account. After "Sign out
+  // and switch" the next sign-in form opens with it, so the person who confirmed account B never sees
+  // A's address (the prefill), and B's password is not tried against A's email.
+  const [switchEmail, setSwitchEmail] = useState<string | undefined>(undefined)
+  const [signInEmail, setSignInEmail] = useState<string | undefined>(undefined)
   // `null` until `desktop_platform` has answered, so the Finder step never flashes the wrong
   // variant. A platform that cannot be read stays resolvable through the capability snapshot
   // (below); only when both are unknown does it become 'unknown', which takes the Windows/Linux
@@ -103,9 +108,10 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
     }
   }
 
-  const afterSignIn = (settled: SignInSettled) => {
+  const afterSignIn = (settled: SignInSettled, email?: string) => {
     if (settled.kind === 'account_mismatch') {
       setPendingSwitch(settled.pendingChanges)
+      setSwitchEmail(email)
       setStep('switch')
       return
     }
@@ -143,11 +149,14 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
       </aside>
 
       <main className="onboarding-main">
-        {step === 'signin' && <SignInStep onDone={afterSignIn} />}
+        {step === 'signin' && <SignInStep onDone={afterSignIn} initialEmail={signInEmail} />}
         {step === 'switch' && (
           <AccountSwitchStep
             pendingChanges={pendingSwitch}
-            onSwitched={() => setStep('signin')}
+            onSwitched={() => {
+              setSignInEmail(switchEmail)
+              setStep('signin')
+            }}
             onCancel={() => (mode === 'reauth' ? void closeWindow() : setStep('signin'))}
           />
         )}
@@ -239,11 +248,13 @@ function Field({
  * issued at 2FA setup — the server's `/auth/2fa/verify` accepts either in the
  * same field (`verify_totp_or_backup`).
  */
-function SignInStep({ onDone }: { onDone: (settled: SignInSettled) => void }) {
+function SignInStep({ onDone, initialEmail }: { onDone: (settled: SignInSettled, email: string) => void; initialEmail?: string }) {
   type Mode = 'password' | 'totp' | 'backup'
   const [mode, setMode] = useState<Mode>('password')
 
-  const [email, setEmail] = useState('')
+  // `initialEmail` (after an account switch, FT-I4) is the field's first value, so it beats the
+  // prefill below, which only ever fills an empty field.
+  const [email, setEmail] = useState(initialEmail ?? '')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
@@ -292,7 +303,7 @@ function SignInStep({ onDone }: { onDone: (settled: SignInSettled) => void }) {
       startTotpStep('totp')
       return
     }
-    onDone(result.settled)
+    onDone(result.settled, email)
   }
 
   const submitTotpForm = async (event: FormEvent) => {
@@ -312,7 +323,7 @@ function SignInStep({ onDone }: { onDone: (settled: SignInSettled) => void }) {
       requestAnimationFrame(() => totpInputRef.current?.focus())
       return
     }
-    onDone(result.settled)
+    onDone(result.settled, email)
   }
 
   if (mode === 'totp' || mode === 'backup') {
@@ -409,7 +420,10 @@ function SignInStep({ onDone }: { onDone: (settled: SignInSettled) => void }) {
 /**
  * R8: another account is signing in on this Mac. Nothing has changed yet. "Sign out and switch"
  * is the full sign-out (Finder entry removed, queue and cache purged), then a fresh sign-in.
- * A failed sign-out is a toast (an action that gates nothing more than itself).
+ * The sign-out also forgets the previous account's address (`forgetEmail`, FB-I2; spec §5.6: "The
+ * switch leaves no vault key and no account email behind"). An `Err` means the sign-out did not
+ * happen (including `SIGN_OUT_EMAIL_NOT_FORGOTTEN`): its sentence is shown verbatim as a toast and
+ * the step stays; it never continues to sign-in on an `Err`.
  *
  * Drawn in design/hifi/macos-settings-dialogs.html §4 (onboarding-window variant): no close, the
  * confirm is the filled destructive button, and focus is on Cancel when the step opens, so a stray
@@ -424,7 +438,7 @@ function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingCh
   }, [])
   const switchAccount = async () => {
     setBusy(true)
-    const result = await command<void>('clear_session')
+    const result = await command<unknown>('clear_session', { forgetEmail: true })
     setBusy(false)
     if (!result.ok) {
       showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason })
