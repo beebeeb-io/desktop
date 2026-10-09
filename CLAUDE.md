@@ -214,11 +214,14 @@ keeps Beebeeb in Finder: a pure `core` (the state machine of spec §5), a pure `
 and one `driver` task that runs one `NSFileProviderManager` call at a time through
 `macos/FileProviderBridge.m`, which returns structured `(domain, code, message, underlying)` errors.
 Triggers: launch (after the startup restore), keys arriving (`apply_session`,
-`desktop_unlock_with_recovery_phrase`, `unlock_vault`), "Try again", and the userEnabled flip.
+`desktop_unlock_with_recovery_phrase`, `unlock_vault`, and `reauth_in_place`: a same-account re-sign-in
+that loads the key from the Keychain), "Try again", and the userEnabled flip.
 Sign-out removes the domain and holds until the next sign-in. Repair removes, then checks once, so a
 signed-in Mac ends with Beebeeb back in Finder. A revoked session keeps Beebeeb in Finder (R2).
 Lock cancels a running check and never removes. Surfaces read `finder_setup_state` (through
-`src/finderSetup.ts`) and listen to `finder-setup-changed`. All copy lives in `src/finderSetupCopy.ts`.
+`src/finderSetup.ts`) and listen to `finder-setup-changed`; the same hook reads `sync_status.engine_refusal`
+on load and on every event, so a refused engine start names its own cause. A loaded `Missing` is a quiet
+row (no pill, no activity, one sentence). All copy lives in `src/finderSetupCopy.ts`.
 
 **Launch rule.** `launch_location` classifies where the app runs from: a path containing
 `/AppTranslocation/` is `translocated`; a bundle directly at `/Volumes/<name>/` is `disk_image`; an
