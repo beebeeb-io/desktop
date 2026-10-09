@@ -484,6 +484,18 @@ impl EngineBridge {
             if self.is_stopping() {
                 break;
             }
+            // The list is read once per pass, and an upload that lands moves
+            // the later ops of its file along (`chain_queued_ops_after_upload`),
+            // so run each op as it is NOW.
+            let Some(op) = self.db.get_operation(&op.op_id)? else {
+                continue;
+            };
+            if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+                && self.db.has_earlier_live_upload(&op.op_id)?
+            {
+                // Not an attempt: it waits for the earlier upload of its file.
+                continue;
+            }
             let result = self
                 .execute_operation(&op, sync_root, now, &mut outcome.post_complete_errors)
                 .await;
@@ -808,6 +820,7 @@ impl EngineBridge {
                     content_type,
                     Some(session.object_version_id.clone()),
                 )?;
+                self.chain_queued_ops_after_upload(op, local_file_id, &server_file_id)?;
                 self.record_transfer_done(crate::transfer_progress::Direction::Up, &server_file_id, plaintext_size);
                 #[cfg(target_os = "windows")]
                 self.defer_local_upload_finalization(op, &server_file_id, sync_root, payload_path)?;
@@ -1173,6 +1186,71 @@ impl EngineBridge {
         self.db.set_file_contract_state(&contract)?;
         if local_file_id != server_file_id {
             self.db.delete_file(local_file_id)?;
+        }
+        Ok(())
+    }
+
+    /// This device's queued writes to one file form a chain. When one of its
+    /// uploads lands, the ops queued after it for the same file move along:
+    ///
+    /// - A create swaps its provisional id for the server's. Every op still
+    ///   queued under the provisional id is re-keyed to the server id, and an
+    ///   encrypted name it carries is re-encrypted under that id (the name key
+    ///   derives from the file id). Run under the provisional id, a replace
+    ///   would make the server create a second file under that id.
+    /// - An upload based on the same version as the one that landed is
+    ///   rebased onto the version it produced: the system holds that base
+    ///   until it reads the item again, so a quick second save carries it.
+    ///   Across a create's id swap an upload with no base (a brand-new item
+    ///   has none) gets the created version.
+    ///
+    /// Any other base is left alone: it was not this chain's. Uploads of one
+    /// file also run in queue order (`StateDb::has_earlier_live_upload`), so
+    /// a rebased upload never runs before the one it follows, and the newest
+    /// bytes land last.
+    fn chain_queued_ops_after_upload(
+        &self,
+        completed: &PendingOperation,
+        local_file_id: &str,
+        server_file_id: &str,
+    ) -> anyhow::Result<()> {
+        let rekeyed = local_file_id != server_file_id;
+        let contract = self.db.get_file_contract_state(server_file_id)?;
+        let produced_version = contract
+            .as_ref()
+            .map(|contract| contract.current_version)
+            .filter(|version| *version > 0);
+        let produced_object_version_id = contract.and_then(|contract| contract.current_object_version_id);
+        let mut moved = Vec::new();
+        for op in self.db.list_operations_for_file(local_file_id)? {
+            if op.op_id == completed.op_id {
+                continue;
+            }
+            let mut next = op.clone();
+            if rekeyed {
+                next.file_id = Some(server_file_id.to_string());
+                next.metadata_json = metadata_rekeyed_to(self.api.master_key(), &op, server_file_id)?;
+            }
+            let same_base = op.base_version == completed.base_version && (op.base_version.is_some() || rekeyed);
+            if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+                && same_base
+                && produced_version.is_some()
+            {
+                next.base_version = produced_version;
+                next.base_object_version_id = produced_object_version_id.clone();
+            }
+            if next != op {
+                moved.push(next);
+            }
+        }
+        if !moved.is_empty() {
+            self.db.update_operation_chain(&moved, now_secs())?;
+            tracing::info!(
+                file_id = %server_file_id,
+                ops = moved.len(),
+                rekeyed,
+                "upload chain: queued writes moved onto the version that landed"
+            );
         }
         Ok(())
     }
@@ -3902,6 +3980,37 @@ fn upload_session_is_gone(error: &anyhow::Error) -> bool {
         .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
         .filter_map(reqwest::Error::status)
         .any(|status| matches!(status.as_u16(), 400 | 404 | 410))
+}
+
+/// `op`'s metadata with its encrypted name (if it carries one) re-encrypted
+/// for `file_id`. The plaintext name is the op's display name; the MIME hint
+/// is the op's content type, else the one guessed from the name, as the
+/// Finder write path does.
+fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &str) -> anyhow::Result<Option<String>> {
+    let Some(raw) = op.metadata_json.as_deref() else {
+        return Ok(None);
+    };
+    let mut metadata: serde_json::Value = serde_json::from_str(raw)?;
+    if metadata.get("name_encrypted").and_then(|v| v.as_str()).is_none() {
+        return Ok(Some(raw.to_string()));
+    }
+    let Some(name) = metadata_display_name(&metadata, op) else {
+        anyhow::bail!(
+            "queued operation {} has an encrypted name but no display name",
+            op.op_id
+        );
+    };
+    let mime = metadata["content_type"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| beebeeb_core::media::guess_mime_type(&name).map(str::to_string));
+    metadata["name_encrypted"] = serde_json::json!(encrypted_metadata_for_name(
+        master_key,
+        file_id,
+        &name,
+        mime.as_deref()
+    )?);
+    Ok(Some(serde_json::to_string(&metadata)?))
 }
 
 fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
@@ -12490,6 +12599,12 @@ mod tests {
         next_session: usize,
         /// Every `uploads/init` body, in order, with the status it got.
         inits: Vec<(serde_json::Value, u16)>,
+        /// Every `PATCH /files/{id}`: (file id, body).
+        patches: Vec<(String, serde_json::Value)>,
+        /// Sessions whose first chunk PUT answers 500 once.
+        fail_first_chunk_once: HashSet<String>,
+        /// Sessions whose chunk PUTs answer only after this delay.
+        delay_chunks: HashMap<String, Duration>,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -12520,7 +12635,10 @@ mod tests {
                         Ok((mut stream, _)) => {
                             stream.set_nonblocking(false).unwrap();
                             let request = read_http_request(&mut stream);
-                            let response = versioned_server_response(&request, &server_state);
+                            let (delay, response) = versioned_server_response(&request, &server_state);
+                            if let Some(delay) = delay {
+                                std::thread::sleep(delay);
+                            }
                             let _ = stream.write_all(response.as_bytes());
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -12587,8 +12705,21 @@ mod tests {
         }
     }
 
-    fn versioned_server_response(request: &RecordedRequest, state: &Arc<Mutex<VersionedServerState>>) -> String {
+    fn versioned_server_response(
+        request: &RecordedRequest,
+        state: &Arc<Mutex<VersionedServerState>>,
+    ) -> (Option<Duration>, String) {
         let mut s = state.lock().unwrap();
+        let delay = request
+            .path
+            .strip_prefix("/api/v1/uploads/")
+            .and_then(|rest| rest.split('/').next())
+            .filter(|_| request.method == "PUT")
+            .and_then(|session| s.delay_chunks.get(session).copied());
+        (delay, versioned_server_answer(request, &mut s))
+    }
+
+    fn versioned_server_answer(request: &RecordedRequest, s: &mut VersionedServerState) -> String {
         let method = request.method.as_str();
         let path = request.path.as_str();
         if method == "POST" && path == "/api/v1/uploads/init" {
@@ -12632,7 +12763,11 @@ mod tests {
             s.inits.push((body, 201));
             return http_json("201 Created", response);
         }
-        if method == "PATCH" && path.starts_with("/api/v1/files/") {
+        if method == "PATCH"
+            && let Some(id) = path.strip_prefix("/api/v1/files/")
+        {
+            let body = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+            s.patches.push((id.to_string(), body));
             return http_json("200 OK", serde_json::json!({ "ok": true }));
         }
         if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
@@ -12641,6 +12776,9 @@ mod tests {
             let action = parts.next().unwrap_or_default();
             if method == "PUT" && action == "chunks" {
                 let index: usize = parts.next().unwrap_or("0").parse().unwrap();
+                if s.fail_first_chunk_once.remove(&session) {
+                    return http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }));
+                }
                 let Some((_, chunks)) = s.sessions.get_mut(&session) else {
                     return http_json("404 Not Found", serde_json::json!({ "error": "no session" }));
                 };
@@ -12948,5 +13086,219 @@ mod tests {
                 "{identifier}"
             );
         }
+    }
+
+    // ── This device's own queued uploads of one file form a chain ─────────
+
+    impl VersionedServerState {
+        /// Files that have at least one completed version.
+        fn files_with_content(&self) -> Vec<String> {
+            self.files
+                .iter()
+                .filter(|(_, file)| !file.versions.is_empty())
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+    }
+
+    /// A row the server holds at version 1 (seeded on the mock too).
+    fn seed_uploaded_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
+        server.seed_file(file_id, 1);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 10,
+                modified_at: 1_700_000_000,
+                content_hash: None,
+                remote_updated_at: 1_700_000_000,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.current_version = 1;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    fn queue_save(bridge: &EngineBridge, dir: &Path, file_id: &str, filename: &str, bytes: &[u8], base: &str) {
+        let contents = dir.join(format!("save-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&contents, bytes).unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(
+                Some(file_id),
+                filename,
+                &contents,
+                Some(base.to_string()),
+            ))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_queued_save_rebases_after_the_first_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [23u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "two-saves");
+
+        // Both saves are based on version 1: the second came before the
+        // system learned of the version the first produces.
+        queue_save(&bridge, dir.path(), "two-saves", "notes.txt", b"first save", "1");
+        queue_save(
+            &bridge,
+            dir.path(),
+            "two-saves",
+            "notes.txt",
+            b"first save, second save",
+            "1",
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![
+                (serde_json::json!("two-saves"), serde_json::json!(1), 201),
+                (serde_json::json!("two-saves"), serde_json::json!(2), 201),
+            ],
+            "the second upload is based on the version the first produced"
+        );
+        assert_eq!(state.files["two-saves"].versions.len(), 3);
+        assert_eq!(
+            state.latest_plaintext("two-saves", master_key),
+            b"first save, second save",
+            "the newest bytes are the file's latest version"
+        );
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        assert_eq!(
+            bridge.db.get_file("two-saves").unwrap().unwrap().status,
+            FileStatus::Local
+        );
+    }
+
+    #[tokio::test]
+    async fn a_later_save_waits_for_an_earlier_save_that_is_backing_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [24u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "backoff");
+        // The first save's upload fails once (a dropped chunk) and backs off.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-1".into());
+
+        queue_save(&bridge, dir.path(), "backoff", "notes.txt", b"older save", "1");
+        queue_save(
+            &bridge,
+            dir.path(),
+            "backoff",
+            "notes.txt",
+            b"older save, newer save",
+            "1",
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        assert_eq!(state.files["backoff"].versions.len(), 3, "{:?}", state.init_summary());
+        assert_eq!(
+            state.latest_plaintext("backoff", master_key),
+            b"older save, newer save",
+            "the older save must not land after the newer one: {:?}",
+            state.init_summary()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_modify_queued_while_its_create_uploads_lands_on_the_created_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [25u8; 32];
+        let server = VersionedServerMock::start();
+        // The create's chunk takes a while, so the edit arrives mid-upload.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .delay_chunks
+            .insert("session-1".into(), Duration::from_millis(400));
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+
+        let created = dir.path().join("created.txt");
+        std::fs::write(&created, b"created bytes").unwrap();
+        bridge
+            .queue_finder_create(finder_file_target(None, "t.txt", &created, None))
+            .unwrap();
+        let local_id = bridge.db.list_files().unwrap()[0].file_id.clone();
+
+        let ((), ()) = tokio::join!(
+            async {
+                drain_upload_queue(&bridge, &sync_root).await;
+            },
+            async {
+                while server.state.lock().unwrap().inits.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                // The system holds the item under its provisional id.
+                let base = held_content_version(&bridge, &local_id);
+                queue_save(&bridge, dir.path(), &local_id, "t.txt", b"created bytes, edited", &base);
+                assert!(
+                    server.state.lock().unwrap().files_with_content().is_empty(),
+                    "the edit must be queued while the create is still uploading"
+                );
+            }
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        let server_id = {
+            let files = state.files_with_content();
+            assert_eq!(
+                files.len(),
+                1,
+                "exactly one file on the server: {:?}",
+                state.init_summary()
+            );
+            files[0].clone()
+        };
+        assert!(
+            !state.files.contains_key(&local_id),
+            "no file may be created under the provisional id"
+        );
+        assert_eq!(state.files[&server_id].versions.len(), 2, "{:?}", state.init_summary());
+        assert_eq!(
+            state.latest_plaintext(&server_id, master_key),
+            b"created bytes, edited",
+            "the edit is the created file's latest version"
+        );
+        assert_eq!(
+            state.inits[1].0["base_version_number"],
+            serde_json::json!(1),
+            "the edit is based on the created version"
+        );
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        for (id, body) in state.patches.iter().filter(|(id, _)| id == &server_id) {
+            let name = body["name_encrypted"].as_str().unwrap();
+            assert_eq!(
+                beebeeb_core::encrypt::decrypt_name(&mk, id, name).ok().as_deref(),
+                Some("t.txt"),
+                "every name sent for the server file is encrypted under its id"
+            );
+        }
+        let rows = bridge.db.list_files().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].file_id, server_id);
+        assert_eq!(rows[0].status, FileStatus::Local);
     }
 }

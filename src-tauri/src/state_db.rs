@@ -355,6 +355,32 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// The `operation_queue` columns [`pending_operation_from_row`] reads, in order.
+const PENDING_OPERATION_COLUMNS: &str = "op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+    base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+    last_error, backup_source_key, created_at, updated_at";
+
+fn pending_operation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOperation> {
+    Ok(PendingOperation {
+        op_id: row.get(0)?,
+        kind: OperationKind::from_str(&row.get::<_, String>(1)?),
+        file_id: row.get(2)?,
+        parent_id: row.get(3)?,
+        target_path: row.get(4)?,
+        metadata_json: row.get(5)?,
+        payload_path: row.get(6)?,
+        base_version: row.get(7)?,
+        base_object_version_id: row.get(8)?,
+        attempts: row.get(9)?,
+        max_attempts: row.get(10)?,
+        next_retry_at: row.get(11)?,
+        last_error: row.get(12)?,
+        backup_source_key: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
 /// Append one change to `fp_changes` and advance the persistent anchor
 /// cursor, on an existing connection (the public [`StateDb::record_file_change`]
 /// and the mutating row operations below share this).
@@ -2648,7 +2674,7 @@ impl StateDb {
                     last_error, backup_source_key, created_at, updated_at
              FROM operation_queue
              WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![now], |row| {
             Ok(PendingOperation {
@@ -3042,6 +3068,77 @@ impl StateDb {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    /// One queued operation as it is now, or `None` once it is gone.
+    pub fn get_operation(&self, op_id: &str) -> Result<Option<PendingOperation>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!("SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE op_id = ?1"),
+            params![op_id],
+            pending_operation_from_row,
+        )
+        .optional()
+    }
+
+    /// Every queued operation for `file_id`, in queue order, whatever its
+    /// retry state.
+    pub fn list_operations_for_file(&self, file_id: &str) -> Result<Vec<PendingOperation>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue
+             WHERE file_id = ?1
+             ORDER BY created_at ASC, rowid ASC"
+        ))?;
+        let rows = stmt.query_map(params![file_id], pending_operation_from_row)?;
+        rows.collect()
+    }
+
+    /// Whether an upload of the same file was queued before `op_id` and can
+    /// still run (paused or backing off included; one that used up its
+    /// attempts cannot). This device's uploads of one file run in queue order:
+    /// a later save carries newer bytes and is based on what the earlier one
+    /// produces, so it must never land first.
+    pub fn has_earlier_live_upload(&self, op_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM operation_queue AS this
+                JOIN operation_queue AS earlier
+                  ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
+                WHERE this.op_id = ?1
+                  AND earlier.kind IN ('upload_version', 'upload_file')
+                  AND earlier.attempts < earlier.max_attempts
+                  AND (earlier.created_at < this.created_at
+                       OR (earlier.created_at = this.created_at AND earlier.rowid < this.rowid)))",
+            params![op_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Move queued operations along a chain in one transaction: their file id
+    /// (a create's provisional id swapped for the server's), base version,
+    /// base object version and metadata (a name re-encrypted for the new id).
+    pub fn update_operation_chain(&self, ops: &[PendingOperation], now: i64) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        for op in ops {
+            tx.execute(
+                "UPDATE operation_queue
+                 SET file_id = ?1, base_version = ?2, base_object_version_id = ?3, metadata_json = ?4,
+                     updated_at = ?5
+                 WHERE op_id = ?6",
+                params![
+                    op.file_id,
+                    op.base_version,
+                    op.base_object_version_id,
+                    op.metadata_json,
+                    now,
+                    op.op_id
+                ],
+            )?;
+        }
+        tx.commit()
     }
 
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
