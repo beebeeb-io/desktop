@@ -92,6 +92,17 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
     }
   }, [hostOs, mode])
 
+  // The window closes itself through the `onboarding-close` capability (core:window:allow-close,
+  // this window only). The close is awaited, and a refusal falls back to the DOM close, as the
+  // ReadyStep does, so a rejection is never silently dropped.
+  const closeWindow = async () => {
+    try {
+      await getCurrentWindow().close()
+    } catch {
+      window.close()
+    }
+  }
+
   const afterSignIn = (settled: SignInSettled) => {
     if (settled.kind === 'account_mismatch') {
       setPendingSwitch(settled.pendingChanges)
@@ -100,7 +111,7 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
     }
     if (settled.kind === 'reauthenticated' && settled.vaultUnlocked) {
       // The same account, its keys here: sync resumes; nothing else to set up.
-      void getCurrentWindow().close()
+      void closeWindow()
       return
     }
     setStep('unlock')
@@ -137,7 +148,7 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
           <AccountSwitchStep
             pendingChanges={pendingSwitch}
             onSwitched={() => setStep('signin')}
-            onCancel={() => (mode === 'reauth' ? void getCurrentWindow().close() : setStep('signin'))}
+            onCancel={() => (mode === 'reauth' ? void closeWindow() : setStep('signin'))}
           />
         )}
         {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} />}

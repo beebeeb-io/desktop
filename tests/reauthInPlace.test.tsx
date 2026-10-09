@@ -40,9 +40,14 @@ function stepStubs() {
   }
 }
 
-function openView(mode: 'setup' | 'reauth', opts: { signedIn?: boolean } = {}) {
+function openView(mode: 'setup' | 'reauth', opts: { signedIn?: boolean; closeRefused?: boolean } = {}) {
   const signedIn = opts.signedIn ?? true
   const closed: string[] = []
+  // `closeRefused`: the Tauri ACL rejects the close (no `core:window:allow-close` grant). The view
+  // must then fall back to the DOM close, never leave the rejection unhandled.
+  const close = opts.closeRefused
+    ? async () => { throw new Error('window.close not allowed') }
+    : async () => { closed.push('close') }
   const stubs = stepStubs()
   const m = mount('Onboarding.tsx', 'OnboardingView', {
     backend: {
@@ -54,7 +59,7 @@ function openView(mode: 'setup' | 'reauth', opts: { signedIn?: boolean } = {}) {
     bindings: {
       ...desktopApi,
       loadFinderSetup: () => desktopApi.command('finder_setup_state'),
-      getCurrentWindow: () => ({ close: async () => { closed.push('close') } }),
+      getCurrentWindow: () => ({ close }),
       // The capability snapshot (main.tsx's CapabilityProvider) and the macOS rail copy, which the
       // view reads on every render even though the rail itself is empty here.
       useCapabilities: () => ({ host_os: 'macos' }),
@@ -64,6 +69,7 @@ function openView(mode: 'setup' | 'reauth', opts: { signedIn?: boolean } = {}) {
     },
   })
   mounted.push(m)
+  ;(globalThis as any).window.close = () => { closed.push('dom-close') }
   const find = (name: string) => m.elements().find((el) => el.type === stubs.byName[name])
   const shown = () => Object.keys(stubs.byName).filter((name) => find(name) !== undefined)
   return { m, find, shown, has: (name: string) => find(name) !== undefined, closed }
@@ -105,6 +111,14 @@ describe('reauth mode', () => {
     expect(v.m.calls.map((c) => c.name)).not.toContain('clear_session')
   })
 
+  test('the same account: a close the window ACL refuses falls back to the DOM close (awaited, never unhandled)', async () => {
+    const v = openView('reauth', { closeRefused: true })
+    await v.m.flush(); await v.m.flush()
+    v.find('SignInStep')!.props.onDone({ kind: 'reauthenticated', vaultUnlocked: true })
+    await v.m.flush()
+    expect(v.closed).toEqual(['dom-close'])
+  })
+
   test('the same account without keys on this Mac goes on to the recovery phrase', async () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
@@ -142,6 +156,17 @@ describe('reauth mode', () => {
     v.find('AccountSwitchStep')!.props.onCancel()
     await v.m.flush()
     expect(v.closed).toEqual(['close'])
+    expect(clearCalls(v.m)).toHaveLength(0)
+  })
+
+  test('Cancel in reauth mode: a close the window ACL refuses falls back to the DOM close', async () => {
+    const v = openView('reauth', { closeRefused: true })
+    await v.m.flush(); await v.m.flush()
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 })
+    await v.m.flush()
+    v.find('AccountSwitchStep')!.props.onCancel()
+    await v.m.flush()
+    expect(v.closed).toEqual(['dom-close'])
     expect(clearCalls(v.m)).toHaveLength(0)
   })
 
