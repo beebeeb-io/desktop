@@ -784,13 +784,22 @@ describe('Sync tab', () => {
     expect(calls(m, 'finder_setup_state')).toBe(reads)
   })
 
-  test('a failed Finder action is ONE toast with the action\'s one sentence, and does not add a second surface', async () => {
-    const { m } = await openSync({ finder: finder.failed, retry: () => { throw new Error('bridge down') } })
+  // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: a neutral note.
+  test('a failed Try again is Rust\'s sentence as a neutral note, never a toast or a second error surface', async () => {
+    const sentence = 'the Finder reconciler is not running (it starts again when Beebeeb is reopened)'
+    const { m } = await openSync({ finder: finder.failed, retry: () => { throw sentence } })
     await pressFinder(m, 'Try again')
-    expect(m.toasts).toEqual([{ variant: 'error', message: 'Beebeeb couldn’t retry adding itself to Finder.' }])
-    expect(JSON.stringify(m.toasts)).not.toContain('bridge down')
+    expect(m.toasts).toEqual([])
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(sentence)
     expect(alerts(m)).toHaveLength(1)
     expect(find(m, (el) => el.props['data-error-surface'] === 'finder-setup')).toHaveLength(1)
+  })
+
+  test('a Try again that fails at the IPC level (not one of Rust\'s answers) keeps the one fixed toast', async () => {
+    const { m } = await openSync({ finder: finder.failed, retry: () => { throw new Error('finder_setup_retry is not a registered command') } })
+    await pressFinder(m, 'Try again')
+    expect(m.toasts).toEqual([{ variant: 'error', message: 'Beebeeb couldn’t retry adding itself to Finder.' }])
+    expect(JSON.stringify(m.toasts)).not.toContain('registered')
   })
 
   test('Repair… asks first, says it turns off Open Beebeeb at login and adds itself back, and sends nothing until the second click', async () => {

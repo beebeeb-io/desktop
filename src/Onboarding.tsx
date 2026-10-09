@@ -646,6 +646,12 @@ function MacFinderStep({ onDone }: { onDone: () => void }) {
           style={{ marginTop: 16 }}
         >
           <div>{notice.sentence}</div>
+          {/* Row 15: what a failed Try again said (Rust's fixed sentence, with its remedy). */}
+          {finder.actionNote ? (
+            <div role="status" style={{ marginTop: 8 }}>
+              {finder.actionNote}
+            </div>
+          ) : null}
           {notice.send ? (
             <div className="button-row" style={{ marginTop: 10 }}>
               <button className="button" onClick={() => void act(notice.send!)} disabled={busy}>

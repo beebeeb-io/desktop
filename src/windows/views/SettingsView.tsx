@@ -1053,6 +1053,12 @@ function MacFinderIntegrationPanel() {
           {presentation.action && <PrimaryBtn onClick={() => void finder.run(presentation.action!)}>{presentation.actionLabel}</PrimaryBtn>}
         </div>
       )}
+      {/* Row 15: what a failed Try again said (Rust's fixed sentence, with its remedy), neutrally. */}
+      {finder.actionNote && (
+        <div role="status" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5, color: T.ink2 }}>
+          {finder.actionNote}
+        </div>
+      )}
     </SettingsSectionShell>
   )
 }

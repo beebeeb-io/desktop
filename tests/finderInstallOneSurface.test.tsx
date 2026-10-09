@@ -29,6 +29,7 @@ import * as finderSetupCopy from '../src/finderSetupCopy'
 import { T } from '../src/windows/ui'
 import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
 import { finderBus, finderView, tick, useFinderSetupModule } from './fixtures/finderSetupHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const TIMEOUT = 'Timed out waiting for the Beebeeb File Provider domain to become available'
 const OTHER = 'Finder location must be absolute: relative/path'
@@ -330,14 +331,16 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     expect(count(m, 'finder_setup_state')).toBe(1)
   })
 
-  test('a failed action is one toast, and adds no second inline surface', async () => {
-    const backend = { ...macBackend({ view: finderView({ setup: 'failed', reason: 'timeout' }) }), finder_setup_retry: () => { throw new Error('no reconciler') } }
+  // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: shown verbatim as
+  // a neutral note, never as a toast or a second error surface.
+  test('a failed Try again says Rust\'s sentence as a neutral note: no toast, no second error surface', async () => {
+    const sentence = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+    const backend = { ...macBackend({ view: finderView({ setup: 'failed', reason: 'timeout' }) }), finder_setup_retry: () => { throw sentence } }
     const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill } })
     await settle(m)
     await m.click('Try again')
-    expect(m.toasts.map((t) => t.message)).toEqual(['Beebeeb couldn’t retry adding itself to Finder.'])
-    expect(m.toasts.map((t) => t.title)).toEqual([undefined])
-    expect(JSON.stringify(m.toasts)).not.toContain('no reconciler')
+    expect(m.toasts).toEqual([])
+    expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
     expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
   })
 
@@ -574,12 +577,12 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
       expect(count(m, 'finder_setup_state')).toBe(1)
     })
 
-    test('a failed action is one toast, and adds no second inline surface', async () => {
-      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'timeout' }), { finder_setup_retry: () => { throw new Error('no reconciler') } })
+    test('a failed Try again says Rust\'s sentence as a neutral note: no toast, no second error surface (row 15)', async () => {
+      const sentence = rustStr('lib.rs', 'FINDER_SETUP_HELD')
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'timeout' }), { finder_setup_retry: () => { throw sentence } })
       await m.click('Try again')
-      expect(m.toasts.map((t) => t.message)).toEqual(['Beebeeb couldn’t retry adding itself to Finder.'])
-      expect(m.toasts.map((t) => t.title)).toEqual([undefined])
-      expect(JSON.stringify(m.toasts)).not.toContain('no reconciler')
+      expect(m.toasts).toEqual([])
+      expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
       expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
     })
 

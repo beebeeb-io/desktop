@@ -23,6 +23,7 @@ import {
   finderSetupLoadPresentation,
 } from '../src/finderSetupCopy'
 import { mount, type Handler, type Mounted } from './fixtures/componentHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const view = (over: Partial<FinderSetupView> = {}): FinderSetupView => ({
   setup: 'adding',
@@ -282,33 +283,33 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
   } as const
 
   test('a failed action is one error toast with the action\'s one sentence, and the reason is not shown', async () => {
-    const h = mountHook(backendWith({ finder_setup_retry: () => { throw new Error('io.beebeeb.bridge 3') } }))
+    const h = mountHook(backendWith({ finder_setup_show_app: () => { throw new Error('io.beebeeb.bridge 3') } }))
     await h.settle()
-    const result = await h.hook().run('try_again')
+    const result = await h.hook().run('show_in_finder')
     expect(result.ok).toBe(false)
-    expect(h.m.toasts).toEqual([{ variant: 'error', message: SENTENCES.try_again }])
+    expect(h.m.toasts).toEqual([{ variant: 'error', message: SENTENCES.show_in_finder }])
     expect(JSON.stringify(h.m.toasts)).not.toContain('io.beebeeb')
   })
 
-  test('every action has its own sentence, and the bridge code appears in none of them', async () => {
+  // Try again is the exception (row 15, below): Rust's finder_setup_retry fails only with fixed
+  // sentences, so its failure is said verbatim. The other three keep one fixed sentence each.
+  test('every other action has its own sentence, and the bridge code appears in none of them', async () => {
     const throwing = () => { throw new Error('io.beebeeb.bridge 3') }
     const h = mountHook(backendWith({
-      finder_setup_retry: throwing,
       open_login_items_and_extensions_settings: throwing,
       finder_setup_show_app: throwing,
       finder_setup_copy_details: throwing,
     }))
     await h.settle()
-    for (const action of ['try_again', 'open_system_settings', 'show_in_finder', 'copy_details'] as const) {
+    for (const action of ['open_system_settings', 'show_in_finder', 'copy_details'] as const) {
       await h.hook().run(action)
     }
     expect(h.m.toasts.map((t) => t.message)).toEqual([
-      SENTENCES.try_again,
       SENTENCES.open_system_settings,
       SENTENCES.show_in_finder,
       SENTENCES.copy_details,
     ])
-    expect(h.m.toasts.map((t) => t.variant)).toEqual(['error', 'error', 'error', 'error'])
+    expect(h.m.toasts.map((t) => t.variant)).toEqual(['error', 'error', 'error'])
     expect(h.m.toasts.some((t) => 'title' in t && t.title !== undefined)).toBe(false)
     expect(JSON.stringify(h.m.toasts)).not.toContain('io.beebeeb')
   })
@@ -340,12 +341,65 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
   })
 
   test('a failed action never replaces the view the surface is showing', async () => {
-    const h = mountHook(backendWith({ finder_setup_retry: () => { throw new Error('nope') } }))
+    const h = mountHook(backendWith({ finder_setup_retry: () => { throw rustStr('lib.rs', 'FINDER_SETUP_HELD') } }))
     await h.settle()
     await h.hook().run('try_again')
     h.m.render()
     expect(h.hook().load).toEqual({ status: 'loaded', view: failedTimeout })
     expect(h.hook().presentation).toMatchObject({ kind: 'notice', reason: 'timeout' })
+  })
+})
+
+/**
+ * Must-render row 15 (M3, FA-M4): `finder_setup_retry` fails with one of two fixed Rust sentences, the
+ * reconciler not running (NOT_RUNNING, "…starts again when Beebeeb is reopened") and the reconciler
+ * held (FINDER_SETUP_HELD, the quiet-Missing sentence). Both carry the remedy, so the hook shows the
+ * sentence verbatim as a neutral note (`actionNote`), never under "Couldn’t retry" and never as a
+ * fixed toast that hides it. The note goes when the state changes or the next action runs.
+ */
+describe('a failed Try again says Rust\'s sentence (row 15)', () => {
+  const HELD = rustStr('lib.rs', 'FINDER_SETUP_HELD')
+  const NOT_RUNNING = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+  const failing = (reason: unknown) => ({ finder_setup_state: () => failedTimeout, finder_setup_retry: () => { throw reason } })
+
+  for (const [name, sentence] of [['held', HELD], ['not running', NOT_RUNNING]] as const) {
+    test(`${name}: the sentence verbatim as a neutral note, and no toast`, async () => {
+      const h = mountHook(failing(sentence))
+      await h.settle()
+      const result = await h.hook().run('try_again')
+      h.m.render()
+      expect(result.ok).toBe(false)
+      expect(h.hook().actionNote).toBe(sentence)
+      expect(h.m.toasts).toEqual([])
+    })
+  }
+
+  test('a failure that is not one of Rust\'s answers (the command is missing) keeps the fixed toast', async () => {
+    const h = mountHook(failing(new Error('finder_setup_retry is not a registered command')))
+    await h.settle()
+    await h.hook().run('try_again')
+    h.m.render()
+    expect(h.hook().actionNote).toBeNull()
+    expect(h.m.toasts).toEqual([{ variant: 'error', message: 'Beebeeb couldn’t retry adding itself to Finder.' }])
+  })
+
+  test('the note goes on the next finder-setup-changed, and when the next action runs', async () => {
+    let fail = true
+    const h = mountHook({ finder_setup_state: () => failedTimeout, finder_setup_retry: () => { if (fail) throw HELD } })
+    await h.settle()
+    await h.hook().run('try_again')
+    h.m.render()
+    expect(h.hook().actionNote).toBe(HELD)
+    h.bus.emit(view())
+    h.m.render()
+    expect(h.hook().actionNote).toBeNull()
+    await h.hook().run('try_again')
+    h.m.render()
+    expect(h.hook().actionNote).toBe(HELD)
+    fail = false
+    await h.hook().run('try_again')
+    h.m.render()
+    expect(h.hook().actionNote).toBeNull()
   })
 })
 

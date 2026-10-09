@@ -194,6 +194,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
 
   const TRAY = 'WindowsTray.tsx | open_finder_location'
   const OPEN_SETTINGS = 'pages/SyncFolder.tsx | open_login_items_and_extensions_settings'
+  const RETRY = 'finderSetup.ts | wrapper:runFinderSetupAction'
 
   test('the census reads the whole of src and finds the call sites, so an empty read cannot pass for a clean one', () => {
     expect(sources.length).toBeGreaterThan(30)
@@ -239,11 +240,38 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     })
   })
 
-  test('no use that can run on a Mac renders a reason or the warnings, except the two pinned exemptions', () => {
+  test('no use that can run on a Mac renders a reason or the warnings, except the three pinned exemptions', () => {
     const leaks = Object.fromEntries(
       Object.entries(column((group) => only(group.flatMap((site) => site.violations), true))).filter(([, found]) => Object.keys(found).length > 0),
     )
-    expect(leaks).toEqual({ [TRAY]: { reason: 1 }, [OPEN_SETTINGS]: { reason: 1 } })
+    expect(leaks).toEqual({ [TRAY]: { reason: 1 }, [OPEN_SETTINGS]: { reason: 1 }, [RETRY]: { reason: 1 } })
+  })
+
+  /**
+   * Exemption 3 (must-render row 15, lead ruling on M3 / FA-M4): useFinderSetup.run shows the reason of
+   * a failed Try again verbatim, because `finder_setup_retry` can only fail with Rust's fixed sentences,
+   * which carry the remedy. This pins both halves: the hook reads the reason for `try_again` alone (and
+   * not for an IPC-level `unsupported` failure), and the Rust command's every `Err` is a constant.
+   */
+  test('exemption 3, useFinderSetup.run: only Try again\'s reason, and finder_setup_retry fails only with fixed sentences', () => {
+    const run = functionText('finderSetup.ts', 'useFinderSetup').replace(/\/\/.*$/gm, '')
+    expect(run.match(/result\.reason/g)).toHaveLength(1)
+    const guard = run.indexOf("if (action === 'try_again' && !result.unsupported)")
+    expect(guard).toBeGreaterThan(-1)
+    expect(run.indexOf('setActionNote(result.reason)')).toBeGreaterThan(guard)
+
+    const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+    const body = (text: string, start: string) => text.slice(text.indexOf(start), text.indexOf('\n}\n', text.indexOf(start)))
+    const retry = body(lib, 'fn finder_setup_retry_impl(state: &AppState) -> Result<(), String> {')
+    expect(retry.match(/Err\(|\?;|\?\n/g)).toEqual(['?;', 'Err('])
+    expect(retry).toContain('.ok_or_else(|| FINDER_SETUP_MACOS_ONLY.to_string())?;')
+    expect(retry).toContain('return Err(FINDER_SETUP_HELD.to_string());')
+    expect(retry.trim().endsWith('handle.trigger(finder_setup::core::Trigger::TryAgain)')).toBe(true)
+    const tryAgain = body(lib, 'async fn finder_setup_try_again(state: &AppState, base_url: &str) -> Result<(), String> {')
+    expect(tryAgain).not.toMatch(/\?;|Err\(/)
+    expect(tryAgain.trim().endsWith('finder_setup_retry_impl(state)')).toBe(true)
+    const driver = readFileSync(new URL('../src-tauri/src/finder_setup/driver.rs', import.meta.url), 'utf8')
+    expect(body(driver, 'pub fn trigger(&self, trigger: Trigger) -> Result<(), String> {')).toContain('.map_err(|_| NOT_RUNNING.to_string())')
   })
 
   test('the uses that sit only on a non-macOS side are seen, so the analysis did read them (pinned)', () => {

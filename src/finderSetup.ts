@@ -241,9 +241,16 @@ export interface FinderSetupController {
   /**
    * Run one action. A failed action raises one error toast with the action's one sentence (it
    * gates nothing; the reason is never shown) and is also returned, so a surface may react to
-   * success, e.g. to confirm that details were copied.
+   * success, e.g. to confirm that details were copied. Try again is the exception: see `actionNote`.
    */
   run: (action: FinderSetupAction) => Promise<CommandResult<void>>
+  /**
+   * What a failed Try again said (must-render row 15), or null. `finder_setup_retry` fails only with
+   * Rust's fixed sentences (the reconciler held: `FINDER_SETUP_HELD`; not running: `NOT_RUNNING`), and
+   * each carries the remedy, so it is shown verbatim as a neutral status line, never under "Couldn’t
+   * retry". It goes when the state changes or the next action runs.
+   */
+  actionNote: string | null
 }
 
 /**
@@ -265,6 +272,7 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   const { enabled = true, writeClipboard } = options
   const [stored, setLoad] = useState<FinderSetupLoad>({ status: 'loading' })
   const [refusal, setRefusal] = useState<EngineRefusal | null>(null)
+  const [actionNote, setActionNote] = useState<string | null>(null)
   const eventsSeen = useRef(0)
   const refusalReads = useRef(0)
   const alive = useRef(false)
@@ -298,6 +306,7 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
       (view) => {
         eventsSeen.current += 1
         setLoad({ status: 'loaded', view })
+        setActionNote(null)
         void readRefusal()
       },
       {
@@ -319,12 +328,20 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
 
   const run = useCallback(
     async (action: FinderSetupAction): Promise<CommandResult<void>> => {
+      setActionNote(null)
       const result = await runFinderSetupAction(action, { writeClipboard })
       if (!result.ok) {
-        // One fixed sentence per action, never `result.reason` (task 17b): on a Mac that is a
-        // redacted bridge code. An `unsupported` failure says the same sentence, because that flag
-        // is a substring guess on the reason and must not put a command name in front of a person.
-        showToast({ variant: 'error', message: FINDER_ACTION_FAILED[action] })
+        if (action === 'try_again' && !result.unsupported) {
+          // Row 15 (census exemption 3, pinned by tests/finderSetupSourceContract.test.ts): Rust's
+          // `finder_setup_retry` fails only with fixed sentences that carry the remedy, so it is said
+          // verbatim and neutrally, never hidden behind a fixed "couldn't retry".
+          setActionNote(result.reason)
+        } else {
+          // One fixed sentence per action, never `result.reason` (task 17b): on a Mac that is a
+          // redacted bridge code. An `unsupported` failure says the same sentence, because that flag
+          // is a substring guess on the reason and must not put a command name in front of a person.
+          showToast({ variant: 'error', message: FINDER_ACTION_FAILED[action] })
+        }
       }
       return result
     },
@@ -334,5 +351,5 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   // A disabled hook shows nothing, even if it was enabled a moment ago and holds a stale view.
   const load: FinderSetupLoad = enabled ? stored : { status: 'loading' }
   const shownRefusal = enabled ? refusal : null
-  return { load, refusal: shownRefusal, presentation: finderSetupLoadPresentation(load, shownRefusal), retry, run }
+  return { load, refusal: shownRefusal, presentation: finderSetupLoadPresentation(load, shownRefusal), retry, run, actionNote: enabled ? actionNote : null }
 }

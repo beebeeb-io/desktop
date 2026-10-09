@@ -688,6 +688,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             {row.sentence}
           </Note>
         ) : null}
+        {finder.actionNote ? <Note kind="status">{finder.actionNote}</Note> : null}
         {repairFailed && repairRemoved ? (
           <Note kind="alert" surface="finder-repair" title={REPAIR_REMOVED_TITLE}>
             {repairRemovedBody('Add to Finder')}

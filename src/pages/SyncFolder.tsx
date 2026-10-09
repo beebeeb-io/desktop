@@ -290,6 +290,12 @@ export default function SyncFolder() {
           ) : null}
         </div>
       )}
+      {/* Row 15: what a failed Try again said (Rust's fixed sentence, with its remedy), neutrally. */}
+      {isMacos && finder.actionNote && (
+        <div className="notice" role="status" style={{ marginBottom: 14 }}>
+          {finder.actionNote}
+        </div>
+      )}
       {/* Adding, and a loaded Missing (FA-I2: its one resting sentence, no action), are neutral lines. */}
       {(macPresentation?.kind === 'adding' || macPresentation?.kind === 'resting') && (
         <div className="notice" role="status" style={{ marginBottom: 14 }}>

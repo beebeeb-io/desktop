@@ -185,13 +185,24 @@ describe('Onboarding Finder step on macOS', () => {
   })
 
   test('a failed action is a toast, never a second inline surface', async () => {
-    const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => { throw new Error('bridge down') } })
+    const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => { throw new Error('finder_setup_retry is not a registered command') } })
     await s.settle()
     await s.m.click('Try again')
     expect(s.m.toasts.map((t) => t.message)).toEqual(['Beebeeb couldn’t retry adding itself to Finder.'])
     expect(s.m.toasts.map((t) => t.title)).toEqual([undefined])
-    expect(JSON.stringify(s.m.toasts)).not.toContain('bridge down')
+    expect(JSON.stringify(s.m.toasts)).not.toContain('registered')
     expect(s.m.elements().filter((el) => el.props.role === 'alert')).toHaveLength(1)
+    expect(visibleErrorSurfaces(s.m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
+  })
+
+  // Row 15: Rust's own answer to Try again carries the remedy, so it is said, neutrally, under the notice.
+  test('a failed Try again says Rust\'s sentence as a neutral note under the notice, no toast', async () => {
+    const sentence = 'Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.'
+    const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => { throw sentence } })
+    await s.settle()
+    await s.m.click('Try again')
+    expect(s.m.toasts).toEqual([])
+    expect(s.m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
     expect(visibleErrorSurfaces(s.m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
   })
 
