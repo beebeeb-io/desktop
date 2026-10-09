@@ -30,6 +30,16 @@ inside queueCreateItem / queueModifyItem:
     anywhere in the file, no `"request_id"` literal and no `UUID()` in those
     functions (each would bypass or randomise the key).
 
+The app cannot read the system's contents URL (it is outside the app's
+sandbox), so the path the request carries must be the App Group copy, not the
+system's URL. Inside each write function the guard also requires:
+
+  * exactly one `let stagedContents = try stageUploadContents(contentsURL,
+    kind: kind)` and `contentsPath: stagedContents?.path` in the builder call
+    (the key's fingerprint still comes from `contentsURL`, the system's file);
+  * a `defer` that discards the copy (`UploadStaging.discard(stagedContents)`),
+    so it never outlives the exchange.
+
 Truth line: `ipc-timeout guard: N/N call sites correct` and exit 0. Anything
 else, or a non-zero exit, is RED.
 
@@ -51,7 +61,9 @@ EXPECTED = {
 
 # Write-queue call sites: function -> (op, builder, argument patterns the builder call must contain).
 FINGERPRINT_ARG = r"contents:\s*contentsURL\.flatMap\s*\{\s*IPCContentFingerprint\.ofFile\(at:\s*\$0\)\s*\}"
-PATH_ARG = r"contentsPath:\s*contentsURL\?\.path"
+PATH_ARG = r"contentsPath:\s*stagedContents\?\.path"
+STAGE_CALL = r"let\s+stagedContents\s*=\s*try\s+stageUploadContents\(\s*contentsURL\s*,\s*kind:\s*kind\s*\)"
+DISCARD = r"defer\s*\{\s*if\s+let\s+stagedContents\s*\{\s*UploadStaging\.discard\(stagedContents\)\s*\}\s*\}"
 WRITE_SITES = {
     "queueCreateItem": ("QueueFinderCreate", "IPCWriteRequest.create", [PATH_ARG, FINGERPRINT_ARG]),
     "queueModifyItem": (
@@ -152,6 +164,10 @@ def check(src):
             for pattern in arg_patterns:
                 if not re.search(pattern, build_args):
                     problems.append(f"{op}: the {builder}( call no longer passes {pattern!r} (the request_id inputs)")
+        if len(re.findall(STAGE_CALL, body)) != 1:
+            problems.append(f"{op}: {func} must stage the contents for the app exactly once ({STAGE_CALL!r})")
+        if len(re.findall(DISCARD, body)) != 1:
+            problems.append(f"{op}: {func} must discard the staged copy in a defer ({DISCARD!r})")
         if re.search(r"\bUUID\(\)", body):
             problems.append(f"{op}: {func} uses UUID(); a random id per call cannot dedup a retry")
         if '"request_id"' in body:
@@ -197,6 +213,11 @@ def self_test(src):
     fp = "contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }"
     assert src.count(w) == 2 and src.count(h) == 1, "self-test: expected call-site text not found"
     assert src.count(fp) == 2, "self-test: expected fingerprint argument not found"
+    staged_path = "contentsPath: stagedContents?.path"
+    stage = "let stagedContents = try stageUploadContents(contentsURL, kind: kind)"
+    discard = "                UploadStaging.discard(stagedContents)\n"
+    assert src.count(staged_path) == 2 and src.count(stage) == 2 and src.count(discard) == 2, \
+        "self-test: expected staging text not found"
     assert src.count("IPCWriteRequest.create(") == 1 and src.count("IPCWriteRequest.modify(") == 1
 
     def first(s, old, new):
@@ -231,6 +252,14 @@ def self_test(src):
         "Modify builder call removed": first(src, "IPCWriteRequest.modify(", "IPCWriteRequestModifyRemoved("),
         "Modify sends something other than the built request": last(
             src, "sendRequest(\n            request,", "sendRequest(\n            [:],"),
+        "Create sends the system's contents URL instead of the App Group copy": first(
+            src, staged_path, "contentsPath: contentsURL?.path"),
+        "Modify sends the system's contents URL instead of the App Group copy": last(
+            src, staged_path, "contentsPath: contentsURL?.path"),
+        "Create no longer stages the contents": first(src, stage, "let stagedContents: URL? = contentsURL"),
+        "Modify no longer stages the contents": last(src, stage, "let stagedContents: URL? = contentsURL"),
+        "Create no longer discards the staged copy": first(src, discard, ""),
+        "Modify no longer discards the staged copy": last(src, discard, ""),
     }
     bad = 0
     for name, mutated in mutants.items():

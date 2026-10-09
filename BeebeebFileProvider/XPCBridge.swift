@@ -20,6 +20,12 @@ enum BeebeebIPCError: LocalizedError {
     case timedOut(seconds: Int)
     /// Finder cancelled the transfer.
     case cancelled
+    /// The extension could not copy a write's contents into the App Group
+    /// upload-staging directory (disk full, an I/O error, no container). The
+    /// file is still on the user's disk, so this is TRANSIENT: the system
+    /// retries the write instead of giving up on it. The payload is the
+    /// error's domain and code only, never a path (see `UploadStaging`).
+    case uploadStagingFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -35,6 +41,8 @@ enum BeebeebIPCError: LocalizedError {
             return "Beebeeb's sync engine did not answer within \(seconds) seconds. Open Beebeeb, make sure it is unlocked, and try again."
         case .cancelled:
             return "The transfer was cancelled."
+        case .uploadStagingFailed(let reason):
+            return "Beebeeb could not prepare this file for upload (\(reason)). It will try again."
         }
     }
 }
@@ -88,6 +96,10 @@ extension BeebeebIPCError: CustomNSError {
             return NSFileProviderError.serverUnreachable.rawValue
         case .cancelled:
             return NSFileProviderError.cannotSynchronize.rawValue
+        case .uploadStagingFailed:
+            // The contents never reached the app, and the user's file is
+            // intact: retry, like an unreachable daemon.
+            return NSFileProviderError.serverUnreachable.rawValue
         }
     }
 
@@ -96,7 +108,7 @@ extension BeebeebIPCError: CustomNSError {
     /// transient; request-shape failures and user cancellations are not.
     var isTransient: Bool {
         switch self {
-        case .daemonUnavailable, .invalidResponse, .timedOut:
+        case .daemonUnavailable, .invalidResponse, .timedOut, .uploadStagingFailed:
             return true
         case .daemonRejected, .invalidIdentifier, .cancelled:
             return false
@@ -388,11 +400,21 @@ final class XPCBridge {
         contentsURL: URL?,
         contentType: String?
     ) throws -> WriteQueueResult {
+        // The app cannot open the system's contents URL (it is outside the
+        // app's sandbox), so it gets an App Group copy instead; see
+        // `UploadStaging`. The key is still derived from the system's file:
+        // that is what stays the same across the system's retries.
+        let stagedContents = try stageUploadContents(contentsURL, kind: kind)
+        defer {
+            if let stagedContents {
+                UploadStaging.discard(stagedContents)
+            }
+        }
         let request = IPCWriteRequest.create(
             parentIdentifier: parentIdentifier.rawValue,
             filename: filename,
             kind: kind.rawValue,
-            contentsPath: contentsURL?.path,
+            contentsPath: stagedContents?.path,
             contentType: contentType,
             contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
         )
@@ -415,12 +437,19 @@ final class XPCBridge {
         baseVersionIdentifier: String?,
         changedFields: NSFileProviderItemFields
     ) throws -> WriteQueueResult {
+        // See `queueCreateItem`: the app gets an App Group copy.
+        let stagedContents = try stageUploadContents(contentsURL, kind: kind)
+        defer {
+            if let stagedContents {
+                UploadStaging.discard(stagedContents)
+            }
+        }
         let request = IPCWriteRequest.modify(
             itemIdentifier: itemIdentifier.rawValue,
             parentIdentifier: parentIdentifier.rawValue,
             filename: filename,
             kind: kind.rawValue,
-            contentsPath: contentsURL?.path,
+            contentsPath: stagedContents?.path,
             contentType: contentType,
             baseVersionIdentifier: baseVersionIdentifier,
             changedFields: UInt64(truncatingIfNeeded: changedFields.rawValue),
@@ -441,6 +470,26 @@ final class XPCBridge {
             if let fields = payload as? [String: Any], let id = fields["request_id"] as? String {
                 NSLog("BeebeebFileProvider: \(operation) request_id=\(id.prefix(12))")
             }
+        }
+    }
+
+    /// Copy a FILE write's contents into the App Group upload-staging
+    /// directory for the app. A folder has no contents to hand over. Throws
+    /// the transient `uploadStagingFailed`; the caller deletes the copy once
+    /// the exchange is over, whatever its outcome.
+    private func stageUploadContents(_ contentsURL: URL?, kind: BeebeebItemKind) throws -> URL? {
+        guard kind == .file, let contentsURL else {
+            return nil
+        }
+        do {
+            guard let groupContainer = Self.resolveGroupContainer() else {
+                throw BeebeebIPCError.uploadStagingFailed("App Group container unavailable")
+            }
+            return try UploadStaging.stage(contentsOf: contentsURL, in: groupContainer)
+        } catch {
+            // Category only: the reason carries no path or file name.
+            NSLog("BeebeebFileProvider: upload staging failed: \(error.localizedDescription)")
+            throw error
         }
     }
 
