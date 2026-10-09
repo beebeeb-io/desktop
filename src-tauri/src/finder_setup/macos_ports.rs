@@ -49,7 +49,8 @@ impl MacosPorts {
 /// bridge call that is merely in flight (a `getDomains` read, the startup sweep, a working-set signal) to
 /// return, short enough that a stuck `fileproviderd` still ends in a `timeout`. Inside the operation's
 /// own limit (`op_limit`: 10 s for `Observe`, 15 s for `RemoveDomain`), so it adds nothing to the bound
-/// Lock and Sign-out derive their acknowledgement waits from.
+/// Lock and Sign-out derive their acknowledgement waits from. The two reads a person waits on ("Open in
+/// Finder" and the `userEnabled` read) wait for the same time (F7 follow-up): they have no operation limit.
 const BRIDGE_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// One bridge call at a time, on a blocking thread off the async executor (Task 8 fix round 1).
@@ -63,10 +64,12 @@ const BRIDGE_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 ///
 /// The permit is taken BEFORE the blocking spawn and moved into the closure, so it is released when
 /// the OS call returns and at no earlier point, whatever happens to the future waiting for it. A
-/// busy gate fails at once with `OP_TIMEOUT` (it never queues behind a stuck call), except for the two
+/// busy gate fails at once with `OP_TIMEOUT` (it never queues behind a stuck call), except for the
 /// calls that must not be lost to a call that is merely in flight: a removal (sign-out, Repair), which
 /// the core never retries, and the launch read that heals a leftover domain. Those use
 /// [`BridgeGate::run_waiting`], which waits a bounded time for the permit without a thread of its own.
+/// The two reads a person clicked and waits on ("Open in Finder", the `userEnabled` read) use its
+/// synchronous form, [`BridgeGate::run_sync_waiting`].
 #[derive(Clone)]
 struct BridgeGate(Arc<Semaphore>);
 
@@ -97,6 +100,56 @@ impl BridgeGate {
         let result = call();
         drop(permit);
         result
+    }
+
+    /// Like [`BridgeGate::run_sync`], but a busy gate is waited for, at most `wait`, before it answers `OP_TIMEOUT`:
+    /// [`BridgeGate::run_waiting`]'s wait, for a caller that cannot await. The call runs on the caller's thread, as
+    /// with `run_sync`, and the caller's thread is blocked for the wait. The callers are synchronous: plain Tauri
+    /// commands and native-menu actions, which run on the main thread, and the upload menu action inside a task, so
+    /// neither `block_on` nor a tokio timer is available. The wait is therefore made here, parked on the semaphore's
+    /// own FIFO queue.
+    pub(crate) fn run_sync_waiting<T>(
+        &self,
+        wait: std::time::Duration,
+        call: impl FnOnce() -> Result<T, FpError>,
+    ) -> Result<T, FpError> {
+        let permit = self.acquire_parked(wait)?;
+        let result = call();
+        drop(permit);
+        result
+    }
+
+    /// The permit, waited for on this thread for at most `wait`. A waiter that gives up drops its place in the queue
+    /// (and any permit already handed to it), as a cut-off `run_waiting` does.
+    fn acquire_parked(&self, wait: std::time::Duration) -> Result<tokio::sync::OwnedSemaphorePermit, FpError> {
+        use std::task::{Context, Poll, Wake, Waker};
+        /// Wakes the parked caller when the semaphore hands it the permit.
+        struct Unpark(std::thread::Thread);
+        impl Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let deadline = std::time::Instant::now() + wait;
+        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        // `unconstrained`: inside a task, that task's cooperative budget must not turn a free permit into a wait.
+        let mut acquire = std::pin::pin!(tokio::task::unconstrained(self.0.clone().acquire_owned()));
+        loop {
+            if let Poll::Ready(acquired) = acquire.as_mut().poll(&mut cx) {
+                return acquired
+                    .map_err(|_closed| FpError::app(app_code::UNEXPECTED_BRIDGE_RETURN, "the bridge gate was closed"));
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(FpError::app(
+                    app_code::OP_TIMEOUT,
+                    "an earlier bridge call has not returned",
+                ));
+            }
+            // A spurious or early wake-up only polls again.
+            std::thread::park_timeout(left);
+        }
     }
 
     async fn run<T: Send + 'static>(
@@ -165,9 +218,9 @@ impl BridgeGate {
 }
 
 // The bridge calls everyone else in the app makes (lead ruling T8-gate-all): each takes the shared
-// gate, and a busy gate answers `OP_TIMEOUT` at once instead of running beside a stuck call. No
-// other file names a bridge function; `no_file_provider_bridge_call_is_made_outside_the_bridge_gate`
-// (lib.rs) pins it.
+// gate, and a busy gate answers `OP_TIMEOUT` instead of running beside a stuck call: at once, or for the
+// two reads a person waits on, after `BRIDGE_GATE_WAIT`. No other file names a bridge function;
+// `no_file_provider_bridge_call_is_made_outside_the_bridge_gate` (lib.rs) pins it.
 
 /// Whether `error` is the gate answering "busy" (an earlier bridge call has not returned), as opposed to
 /// the OS failing. The engine's working-set signal owes its ids to the next tick in that case.
@@ -183,14 +236,16 @@ pub(crate) fn with_shared_gate_held<T>(f: impl FnOnce() -> T) -> T {
         .expect("the shared gate is free at the start of the test")
 }
 
-/// The URL of the Beebeeb folder in Finder, for "Open in Finder".
+/// The URL of the Beebeeb folder in Finder, for "Open in Finder". A person clicked and waits for it, so it waits a
+/// little for the gate: the `Ready` poll reads the domain every 3 s, and a click that meets that read must not fail.
 pub(crate) fn visible_url() -> Result<Option<String>, FpError> {
-    BridgeGate::shared().run_sync(macos_file_provider::visible_url)
+    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::visible_url)
 }
 
-/// The domain's state, read from the OS (the `finder_domain_user_enabled` command).
+/// The domain's state, read from the OS (the `finder_domain_user_enabled` command). Waits a little for the gate,
+/// for the same reason as [`visible_url`].
 pub(crate) fn domain_state() -> Result<super::core::DomainState, FpError> {
-    BridgeGate::shared().run_sync(macos_file_provider::domain_state)
+    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::domain_state)
 }
 
 /// The engine's best-effort working-set signal (task 1697).
@@ -839,24 +894,20 @@ mod tests {
         assert_eq!(gate.run(|| Ok(7)).await, Ok(7));
     }
 
-    /// Lead ruling (fix round 2): ONLY the removal and the launch read wait. The working-set signal, the
-    /// other reads, the UserDisabled poll and the startup sweep keep failing fast, so a busy gate never
-    /// stalls them and the engine's tick never waits.
+    /// Lead ruling (fix round 2): the removal and the launch read wait. The working-set signal, the
+    /// reconciler's other reads, the poll and the startup sweep keep failing fast, so a busy gate never
+    /// stalls them and the engine's tick never waits. Since the F7 follow-up the two reads a person waits on
+    /// wait as well (`the_two_reads_a_person_waits_on_wait_a_little_for_the_gate`).
     #[tokio::test]
-    async fn everything_but_the_removal_and_the_launch_read_still_fails_fast() {
-        // The signal and the reads: `run_sync` on the shared gate, held. They answer at once.
+    async fn the_signal_the_poll_and_the_sweep_still_fail_fast() {
+        // The signal: `run_sync` on the shared gate, held. It answers at once.
         super::with_shared_gate_held(|| {
             let began = std::time::Instant::now();
-            for busy in [
-                signal_working_set().map(|_| ()),
-                visible_url().map(|_| ()),
-                domain_state().map(|_| ()),
-            ] {
-                assert!(is_gate_busy(&busy.expect_err("the gate is held")));
-            }
+            let busy = signal_working_set().map(|_| ());
+            assert!(is_gate_busy(&busy.expect_err("the gate is held")));
             assert!(
                 began.elapsed() < Duration::from_millis(500),
-                "they failed fast: {:?}",
+                "it failed fast: {:?}",
                 began.elapsed()
             );
         });
@@ -882,16 +933,146 @@ mod tests {
                 "{fails_fast} fails fast:\n{body}"
             );
         }
-        for wrapper in [
-            "fn visible_url(",
-            "fn domain_state(",
-            "fn signal_working_set(",
-            "fn cleanup_stale_domains(",
-        ] {
+        for wrapper in ["fn signal_working_set(", "fn cleanup_stale_domains("] {
             let body = &source[source.find(wrapper).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
-            assert!(!body.contains("run_waiting"), "{wrapper} fails fast:\n{body}");
+            assert!(
+                !body.contains("run_waiting") && !body.contains("run_sync_waiting"),
+                "{wrapper} fails fast:\n{body}"
+            );
         }
+    }
+
+    /// F7 follow-up (review minor 1): "Open in Finder" (`visible_url`) and the onboarding card's
+    /// `finder_domain_user_enabled` (`domain_state`) are what a person clicked and waits on. Since the `Ready` poll
+    /// reads the domain every 3 s, a click can meet the gate held by that read: they wait for it, on the same bound
+    /// as the removal, instead of failing at once. The engine's working-set signal does not (it owes the signal to
+    /// its next tick instead).
+    #[test]
+    fn the_two_reads_a_person_waits_on_wait_a_little_for_the_gate() {
+        let source = production();
+        for (wrapper, call) in [
+            ("fn visible_url(", "macos_file_provider::visible_url"),
+            ("fn domain_state(", "macos_file_provider::domain_state"),
+        ] {
+            let body = &source[source.find(wrapper).unwrap_or_else(|| panic!("{wrapper}"))..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(
+                squeeze(body).contains(&squeeze(&format!(
+                    "BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, {call})"
+                ))),
+                "{wrapper} waits a little for the shared gate:\n{body}"
+            );
+        }
+        let signal = &source[source.find("fn signal_working_set(").unwrap()..];
+        let signal = &signal[..signal.find("\n}\n").unwrap()];
+        assert!(
+            squeeze(signal).contains(&squeeze(
+                "BridgeGate::shared().run_sync(macos_file_provider::signal_working_set)"
+            )),
+            "the signal still fails fast:\n{signal}"
+        );
+    }
+
+    /// F7 follow-up (review minor 1): the synchronous wait. A call that meets the gate held by a call in flight
+    /// (the `Ready` poll's read) waits for it and runs; held for longer than the wait, it fails with the same
+    /// busy error as before, runs nothing, and leaves the queue. Its callers are synchronous: a plain Tauri command
+    /// (on the main thread) and a menu action inside a task, so the last part waits from inside a runtime.
+    #[test]
+    fn a_synchronous_call_waits_for_a_gate_held_less_than_the_bound_and_fails_busy_after_it() {
+        use std::sync::mpsc;
+        fn hold(gate: &BridgeGate) -> (mpsc::Sender<()>, std::thread::JoinHandle<Result<i32, FpError>>) {
+            let (release, held) = mpsc::channel::<()>();
+            let (inside, entered) = mpsc::channel::<()>();
+            let gate = gate.clone();
+            let holder = std::thread::spawn(move || {
+                gate.run_sync(move || {
+                    inside.send(()).unwrap();
+                    let _ = held.recv();
+                    Ok(1)
+                })
+            });
+            entered.recv().expect("the holder is inside its call");
+            (release, holder)
+        }
+
+        // Held for 1 s, inside the bound: the call waits, then runs.
+        let gate = BridgeGate::new();
+        let (release, holder) = hold(&gate);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = release.send(());
+        });
+        let began = std::time::Instant::now();
+        assert_eq!(
+            gate.run_sync_waiting(BRIDGE_GATE_WAIT, || Ok(5)),
+            Ok(5),
+            "a gate busy for 1 s inside a {BRIDGE_GATE_WAIT:?} wait does not fail the call"
+        );
+        let waited = began.elapsed();
+        assert!(waited >= Duration::from_millis(900), "it really waited: {waited:?}");
+        assert!(waited < BRIDGE_GATE_WAIT, "and not the whole bound: {waited:?}");
+        releaser.join().unwrap();
+        assert_eq!(holder.join().unwrap(), Ok(1));
+        assert!(gate.is_idle(), "the permit is back");
+
+        // Held for longer than the bound: the existing busy error, and nothing ran.
+        let (release, holder) = hold(&gate);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_by_waiter = ran.clone();
+        let began = std::time::Instant::now();
+        let error = gate
+            .run_sync_waiting(Duration::from_millis(200), move || {
+                ran_by_waiter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect_err("the holder never returned inside the wait");
+        let waited = began.elapsed();
+        assert_eq!(
+            (error.domain.as_str(), error.code, error.message.as_str()),
+            (
+                crate::finder_setup::error::APP_DOMAIN,
+                app_code::OP_TIMEOUT,
+                "an earlier bridge call has not returned"
+            )
+        );
+        assert!(is_gate_busy(&error));
+        assert!(waited >= Duration::from_millis(200), "it waited its bound: {waited:?}");
+        assert!(waited < Duration::from_secs(2), "and no longer: {waited:?}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "nothing ran beside the held call");
+        assert!(!gate.is_idle(), "the holder still has the permit");
+        release.send(()).unwrap();
+        assert_eq!(holder.join().unwrap(), Ok(1));
+        assert!(gate.is_idle(), "the waiter that gave up left the queue");
+        assert_eq!(gate.run_sync(|| Ok(7)), Ok(7));
+
+        // From inside a task (the upload menu action calls "Open in Finder" there): no panic, and the same wait.
+        let (release, holder) = hold(&gate);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = release.send(());
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let inside_a_task = runtime.block_on(async { gate.run_sync_waiting(BRIDGE_GATE_WAIT, || Ok(9)) });
+        assert_eq!(inside_a_task, Ok(9));
+        releaser.join().unwrap();
+        assert_eq!(holder.join().unwrap(), Ok(1));
+        assert!(gate.is_idle());
+
+        // And from a task that has spent its cooperative budget: a free gate is taken at once, not waited out.
+        let (taken, took) = runtime.block_on(async {
+            let spend = tokio::sync::Semaphore::new(1);
+            while tokio::task::coop::has_budget_remaining() {
+                drop(spend.acquire().await.unwrap());
+            }
+            let began = std::time::Instant::now();
+            (gate.run_sync_waiting(BRIDGE_GATE_WAIT, || Ok(11)), began.elapsed())
+        });
+        assert_eq!(taken, Ok(11));
+        assert!(
+            took < Duration::from_millis(500),
+            "a free gate is not waited for: {took:?}"
+        );
     }
 
     /// The wait sits INSIDE `within`'s limit for both operations, so it adds nothing to the bound the
