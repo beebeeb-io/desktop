@@ -515,6 +515,11 @@ impl EngineBridge {
                         outcome.paused_op_ids.push(op.op_id);
                     } else {
                         let attempts = op.attempts.saturating_add(1);
+                        if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+                            && error_http_status(&error) == Some(409)
+                        {
+                            log_refused_upload(&op, attempts);
+                        }
                         let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
                         self.db.record_operation_attempt(
                             &op.op_id,
@@ -3980,6 +3985,43 @@ fn upload_session_is_gone(error: &anyhow::Error) -> bool {
         .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
         .filter_map(reqwest::Error::status)
         .any(|status| matches!(status.as_u16(), 400 | 404 | 410))
+}
+
+/// The HTTP status of the request that failed somewhere in `error`'s chain,
+/// if it was an HTTP error.
+pub(crate) fn error_http_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .and_then(reqwest::Error::status)
+        .map(|status| status.as_u16())
+}
+
+/// One warning per upload attempt the server refused with 409 (a stale base,
+/// or another upload of the file in progress), and a distinct one when that
+/// attempt used up the op's attempts and parks it. Ids and counts only: the
+/// file's name and the request URL never reach the log.
+fn log_refused_upload(op: &PendingOperation, attempt: i64) {
+    let file_id = op.file_id.as_deref().unwrap_or_default();
+    if attempt >= op.max_attempts {
+        tracing::warn!(
+            op_id = %op.op_id,
+            file_id,
+            attempt,
+            max_attempts = op.max_attempts,
+            base_version = ?op.base_version,
+            "upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue"
+        );
+    } else {
+        tracing::warn!(
+            op_id = %op.op_id,
+            file_id,
+            attempt,
+            max_attempts = op.max_attempts,
+            base_version = ?op.base_version,
+            "upload refused by the server (409 Conflict); will retry"
+        );
+    }
 }
 
 /// `op`'s metadata with its encrypted name (if it carries one) re-encrypted
@@ -13300,5 +13342,116 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].file_id, server_id);
         assert_eq!(rows[0].status, FileStatus::Local);
+    }
+
+    // ── Observability: a refused upload leaves a trace ─────────────────────
+
+    /// Everything `tracing` emits on this thread while `body` runs, as text.
+    /// `#[tokio::test]` runs the future on the test's own thread, so a
+    /// thread-local subscriber sees all of it.
+    async fn capture_logs_async(body: impl std::future::Future<Output = ()>) -> String {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        body.await;
+        drop(guard);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upload_refused_with_409_is_logged_on_every_retry_and_when_it_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [26u8; 32]);
+        // The server is at version 2; this save is based on 1 (stale).
+        seed_uploaded_row(&bridge, &server, "stale-file");
+        server.seed_file("stale-file", 2);
+        queue_save(
+            &bridge,
+            dir.path(),
+            "stale-file",
+            "private-notes.txt",
+            b"stale save",
+            "1",
+        );
+        let mut stale = bridge.db.list_due_operations(i64::MAX).unwrap().remove(0);
+        stale.max_attempts = 3;
+        bridge.db.enqueue_operation(&stale).unwrap();
+        // Another upload fails once for a different reason (500): not a 409.
+        seed_uploaded_row(&bridge, &server, "flaky-file");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-1".into());
+        queue_save(&bridge, dir.path(), "flaky-file", "other-notes.txt", b"flaky save", "1");
+        let flaky = bridge
+            .db
+            .list_due_operations(i64::MAX)
+            .unwrap()
+            .into_iter()
+            .find(|op| op.file_id.as_deref() == Some("flaky-file"))
+            .unwrap();
+
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.inits.iter().filter(|(_, status)| *status == 409).count(),
+            3,
+            "three refused attempts: {:?}",
+            state.init_summary()
+        );
+        let refused: Vec<&str> = logs.lines().filter(|line| line.contains("upload refused")).collect();
+        assert_eq!(refused.len(), 3, "one line per refused attempt, got:\n{logs}");
+        assert!(refused.iter().all(|line| line.contains("WARN")), "{logs}");
+        assert_eq!(
+            refused.iter().filter(|line| line.contains("will retry")).count(),
+            2,
+            "{logs}"
+        );
+        assert_eq!(
+            refused.iter().filter(|line| line.contains("parked")).count(),
+            1,
+            "the final refusal says the op is parked:\n{logs}"
+        );
+        assert!(
+            refused
+                .iter()
+                .all(|line| line.contains(&stale.op_id) && line.contains("stale-file") && line.contains("409")),
+            "{logs}"
+        );
+        assert!(
+            !refused.iter().any(|line| line.contains(&flaky.op_id)),
+            "a failure other than 409 is not logged as one:\n{logs}"
+        );
+        assert!(
+            refused
+                .iter()
+                .all(|line| !line.contains("notes.txt") && !line.contains("/api/v1") && !line.contains("127.0.0.1")),
+            "no name, path or URL may reach the log:\n{logs}"
+        );
     }
 }

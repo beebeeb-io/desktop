@@ -2067,6 +2067,8 @@ async fn hydrate_over_ipc(
     let identifier_check: Result<(), &'static str> = Ok(());
 
     if let Err(msg) = identifier_check {
+        // The identifier is untrusted wire input: never logged.
+        tracing::warn!(reason = "invalid_identifier", "Finder hydrate failed");
         return HydrateOutcome::Reply(IpcResponse::Error { message: msg.to_string() });
     }
     // `dest_path` arrives straight off the wire (untrusted). Bound
@@ -2174,7 +2176,7 @@ async fn hydrate_over_ipc(
             }
             match outcome {
                 Ok(()) => HydrateOutcome::Reply(IpcResponse::Ok {}),
-                Err(e) => HydrateOutcome::Reply(IpcResponse::Error { message: e.to_string() }),
+                Err(e) => HydrateOutcome::Reply(hydrate_failure_reply(file_id, e)),
             }
         }
         None => {
@@ -2183,6 +2185,54 @@ async fn hydrate_over_ipc(
             HydrateOutcome::ClientGone
         }
     }
+}
+
+/// The reply to a hydrate that failed: the extension's `fetchContents` fails
+/// with it, and the system shows the item as failing to download. It leaves
+/// one warning in the daemon log with the item id and a fixed category; the
+/// error's text can carry a path or a URL, so it is classified, never logged.
+fn hydrate_failure_reply(file_id: &str, error: anyhow::Error) -> IpcResponse {
+    tracing::warn!(
+        file_id,
+        reason = hydrate_failure_category(&error),
+        "Finder hydrate failed"
+    );
+    IpcResponse::Error {
+        message: error.to_string(),
+    }
+}
+
+/// Fixed category for a failed hydrate, for [`hydrate_failure_reply`].
+fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
+    if let Some(status) = crate::engine_bridge::error_http_status(error) {
+        return match status {
+            404 => "not_found",
+            401 => "unauthorized",
+            403 => "forbidden",
+            409 => "conflict",
+            500..=599 => "server_error",
+            _ => "http_other",
+        };
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+    {
+        return "network";
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+    {
+        return "io";
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<rusqlite::Error>().is_some())
+    {
+        return "database";
+    }
+    "other"
 }
 
 fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
@@ -5017,5 +5067,57 @@ mod tests {
             "no file name or path may reach the log:\n{logs}"
         );
         assert!(!logs.contains("/Users/"), "no path may reach the log:\n{logs}");
+    }
+
+    /// A real `reqwest` error carrying `status`, from a one-shot local server.
+    fn http_status_error(status: &str) -> anyhow::Error {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/v1/files/file-404", listener.local_addr().unwrap());
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            std::io::Write::write_all(&mut stream, reply.as_bytes()).unwrap();
+        });
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { reqwest::get(&url).await.unwrap().error_for_status().unwrap_err() });
+        server.join().unwrap();
+        anyhow::Error::new(error)
+    }
+
+    #[test]
+    fn a_failed_hydrate_is_logged_with_its_category_and_never_the_path() {
+        let not_found = http_status_error("404 Not Found");
+        let logs = capture_logs(|| {
+            let reply = hydrate_failure_reply("file-404", not_found);
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+            let reply = hydrate_failure_reply(
+                "file-io",
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/Users/someone/secret-report.txt").into(),
+            );
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+        });
+        let failures: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder hydrate failed"))
+            .collect();
+        assert_eq!(failures.len(), 2, "one warning per failed hydrate, got:\n{logs}");
+        assert!(failures.iter().all(|line| line.contains("WARN")), "{logs}");
+        assert!(
+            failures[0].contains("file-404") && failures[0].contains("not_found"),
+            "{logs}"
+        );
+        assert!(
+            failures[1].contains("file-io") && failures[1].contains("\"io\""),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("secret-report"),
+            "no file name may reach the log:\n{logs}"
+        );
+        assert!(!logs.contains("/Users/"), "no path may reach the log:\n{logs}");
+        assert!(!logs.contains("/api/v1"), "no URL may reach the log:\n{logs}");
     }
 }
