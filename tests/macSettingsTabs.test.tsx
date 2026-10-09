@@ -41,6 +41,7 @@ const baseBindings = {
   ConfirmSheet,
   ConfigLoadFailed,
   withPinned,
+  finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
   // The Mac's number format is pinned so the label does not depend on the machine running the test.
   storageLine: (storage: any) => model.storageLine(storage, 'nl-NL'),
 }
@@ -79,9 +80,10 @@ const useFinderSetupModule = ({ bus, copied }: FinderHarness) => ({
   bindings: {
     loadFinderSetup: finderSetup.loadFinderSetup,
     runFinderSetupAction: (action: finderSetupCopy.FinderSetupAction) =>
-      finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(text) } }),
+      finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(await text) } }),
     finderSetupLoadPresentation: finderSetupCopy.finderSetupLoadPresentation,
     FINDER_ACTION_FAILED: finderSetupCopy.FINDER_ACTION_FAILED,
+    FINDER_COPIED_MS: finderSetupCopy.FINDER_COPIED_MS,
     FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
     commandUnavailableLabel: desktopApi.commandUnavailableLabel,
     subscribeFinderSetup: bus.subscribeFinderSetup,
@@ -729,6 +731,13 @@ describe('Sync tab', () => {
     expect(calls(m, 'finder_setup_retry')).toBe(1)
     expect(calls(m, 'finder_setup_state')).toBe(reads)
     expect(m.toasts).toEqual([])
+  })
+
+  test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+    const { m } = await openSync({ finder: finder.folderTaken })
+    await pressFinder(m, 'Copy details')
+    expect(buttons(m)).toContain('Copied')
+    expect(buttons(m)).not.toContain('Copy details')
   })
 
   test('folder_taken offers Copy details and no Try again; Copy details uses the shared action and the pasteboard once', async () => {

@@ -83,7 +83,7 @@ function mountSyncFolder(backend: Record<string, any>, opts: { caps?: string | n
     expand: true,
     backend,
     hookModules: [useFinderSetupModule(bus)],
-    bindings: { ...desktopApi, ...finderInstallCard, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
+    bindings: { ...desktopApi, ...finderInstallCard, finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
   })
   mounted.push(m)
   return { m, bus }
@@ -252,6 +252,7 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
       sync_status: () => ({ logged_in: true, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: over.refusal ?? null }),
       finder_setup_state: () => { if (view instanceof Error) throw view; return view },
       finder_setup_retry: () => undefined,
+      finder_setup_copy_details: () => 'details',
       open_finder_location: () => undefined,
       open_login_items_and_extensions_settings: () => undefined,
       reset_macos_integration: () => ({ pending_operations_preserved: 0, removed_cache_files: 0, warnings: [] }),
@@ -342,6 +343,15 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     expect(m.toasts).toEqual([])
     expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
     expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
+  })
+
+  test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'failed', reason: 'folder_taken' }) })
+    const backendHasDetails = btns(m).includes('Copy details')
+    expect(backendHasDetails).toBe(true)
+    await m.click('Copy details')
+    await settle(m)
+    expect(btns(m)).toContain('Copied')
   })
 
   test('a user-disabled extension is a neutral status with Open System Settings, never a red error', async () => {
@@ -595,6 +605,13 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
       expect(textOf(notices[0].props.children)).toContain(finderSetupCopy.FINDER_REASON_COPY.user_disabled.sentence)
       await m.click('Open System Settings')
       expect(count(m, 'open_login_items_and_extensions_settings')).toBe(1)
+    })
+
+    test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'signing' }), { finder_setup_copy_details: () => 'details' })
+      await m.click('Copy details')
+      await settle(m)
+      expect(btns(m)).toEqual(['Copied'])
     })
 
     test('ready shows no error surface and an Active chip', async () => {

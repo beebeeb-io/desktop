@@ -40,6 +40,7 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { useFinderSetup } from './finderSetup'
+import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
   accountInitial,
@@ -683,7 +684,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             kind={row.tone}
             surface="finder-setup"
             reason={row.tone === 'alert' ? monoReason(row.reason) : null}
-            actions={row.action ? <Btn onClick={() => void finder.run(row.action!)}>{row.actionLabel}</Btn> : null}
+            actions={row.action ? <Btn onClick={() => void finder.run(row.action!)}>{finderActionButtonLabel(row.action, row.actionLabel, finder.copied)}</Btn> : null}
           >
             {row.sentence}
           </Note>

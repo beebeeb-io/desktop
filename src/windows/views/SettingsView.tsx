@@ -55,7 +55,7 @@ import {
   commitPreferredRegionSelection,
 } from '../dataResidencySettingsModel'
 import { useFinderSetup } from '../../finderSetup'
-import { FINDER_SETUP_TITLE, finderStatusPill } from '../../finderSetupCopy'
+import { FINDER_SETUP_TITLE, finderActionButtonLabel, finderStatusPill } from '../../finderSetupCopy'
 import { setDesktopThemePreference } from '../theme'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
 
@@ -1050,7 +1050,11 @@ function MacFinderIntegrationPanel() {
         >
           <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{presentation.sentence}</span>
           {/* No action for an unconfirmed engine stop: only a relaunch helps (row 9). */}
-          {presentation.action && <PrimaryBtn onClick={() => void finder.run(presentation.action!)}>{presentation.actionLabel}</PrimaryBtn>}
+          {presentation.action && (
+            <PrimaryBtn onClick={() => void finder.run(presentation.action!)}>
+              {finderActionButtonLabel(presentation.action, presentation.actionLabel, finder.copied)}
+            </PrimaryBtn>
+          )}
         </div>
       )}
       {/* Row 15: what a failed Try again said (Rust's fixed sentence, with its remedy), neutrally. */}

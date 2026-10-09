@@ -57,9 +57,10 @@ export function useFinderSetupModule(bus: ReturnType<typeof finderBus>, copied: 
     bindings: {
       loadFinderSetup: finderSetup.loadFinderSetup,
       runFinderSetupAction: (action: copy.FinderSetupAction) =>
-        finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(text) } }),
+        finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(await text) } }),
       finderSetupLoadPresentation: copy.finderSetupLoadPresentation,
       FINDER_ACTION_FAILED: copy.FINDER_ACTION_FAILED,
+      FINDER_COPIED_MS: copy.FINDER_COPIED_MS,
       FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
       commandUnavailableLabel,
       subscribeFinderSetup: bus.subscribeFinderSetup,

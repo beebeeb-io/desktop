@@ -107,6 +107,20 @@ export const FINDER_ACTION_LABEL: Readonly<Record<FinderSetupAction, string>> = 
 }
 
 /**
+ * "Copy details" says this on its button for a moment after the details reached the pasteboard (lead
+ * ruling FT-clipboard; review M2): for `folder_taken` and `signing` it is the only action, so a person
+ * needs to know it worked. Wording for Guus on #114.
+ */
+export const FINDER_COPIED_LABEL = 'Copied'
+/** How long "Copied" stays on the button. */
+export const FINDER_COPIED_MS = 2000
+
+/** The label a notice's action button shows: "Copied" for a moment after a successful Copy details. */
+export function finderActionButtonLabel(action: FinderSetupAction | null, label: string | null, copied: boolean): string | null {
+  return action === 'copy_details' && copied ? FINDER_COPIED_LABEL : label
+}
+
+/**
  * The one sentence a failed action says (a failed action gates nothing, so it is a toast, and the
  * toast is this sentence alone: no title, never the reason). Task 17b, lead ruling: every macOS error
  * from the File Provider bridge that reaches the frontend is a bare domain and code, and a person

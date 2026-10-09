@@ -19,7 +19,7 @@ import { submitPassword, submitTotpCode, type SignInSettled } from './onboarding
 import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, KEY_REPLACED_RECOVERY_COPY, accountSwitchBody } from './accountSwitchCopy'
 import { classifyFinderInstallResult } from './finderInstallCard'
 import { loadFinderSetup, useFinderSetup } from './finderSetup'
-import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE, FINDER_SETUP_TITLE } from './finderSetupCopy'
+import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE, FINDER_SETUP_TITLE, finderActionButtonLabel } from './finderSetupCopy'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
 
@@ -633,7 +633,7 @@ function MacFinderStep({ onDone }: { onDone: () => void }) {
       ? {
           tone: presentation.tone,
           sentence: presentation.sentence,
-          actionLabel: presentation.actionLabel,
+          actionLabel: finderActionButtonLabel(noticeAction, presentation.actionLabel, finder.copied),
           send: noticeAction ? () => finder.run(noticeAction) : null,
         }
       : presentation.kind === 'unavailable'

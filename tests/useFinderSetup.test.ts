@@ -77,6 +77,7 @@ function mountHook(backend: Record<string, Handler>, opts: { auto?: boolean; dep
       runFinderSetupAction: finderSetup.runFinderSetupAction,
       finderSetupLoadPresentation,
       FINDER_ACTION_FAILED,
+      FINDER_COPIED_MS: 2000,
       FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
       commandUnavailableLabel,
       subscribeFinderSetup: bus.subscribeFinderSetup,
@@ -321,6 +322,37 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
     expect(h.m.toasts).toEqual([{ variant: 'error', message: SENTENCES.show_in_finder }])
   })
 
+  // FT-clipboard: the write starts inside the click (WebKit's transient activation), and a success says
+  // "Copied" on the button for a moment.
+  test('copy_details: the write starts synchronously inside run, before any await', async () => {
+    let writes = 0
+    const h = mountHook(backendWith(), { deps: { writeClipboard: async (text) => { writes += 1; await text } } })
+    await h.settle()
+    const pending = h.hook().run('copy_details')
+    expect(writes).toBe(1)
+    await pending
+  })
+
+  test('copy_details: a success sets `copied` for a moment; any other action, or a failure, does not', async () => {
+    const h = mountHook(backendWith(), { deps: { writeClipboard: async (text) => { await text } } })
+    await h.settle()
+    expect(h.hook().copied).toBe(false)
+    await h.hook().run('copy_details')
+    h.m.render()
+    expect(h.hook().copied).toBe(true)
+    await h.hook().run('try_again')
+    h.m.render()
+    expect(h.hook().copied).toBe(false)
+  })
+
+  test('copy_details: a refused pasteboard does not say Copied', async () => {
+    const h = mountHook(backendWith(), { deps: { writeClipboard: async () => { throw new Error('denied') } } })
+    await h.settle()
+    await h.hook().run('copy_details')
+    h.m.render()
+    expect(h.hook().copied).toBe(false)
+  })
+
   test('copy_details: the pasteboard refusing is a toast, and the details were still asked for', async () => {
     const h = mountHook(backendWith(), { deps: { writeClipboard: async () => { throw new Error('denied') } } })
     await h.settle()
@@ -332,7 +364,7 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
 
   test('copy_details: the text the command returned reaches the pasteboard, with no toast', async () => {
     const written: string[] = []
-    const h = mountHook(backendWith(), { deps: { writeClipboard: async (text) => { written.push(text) } } })
+    const h = mountHook(backendWith(), { deps: { writeClipboard: async (text) => { written.push(await text) } } })
     await h.settle()
     const result = await h.hook().run('copy_details')
     expect(result.ok).toBe(true)

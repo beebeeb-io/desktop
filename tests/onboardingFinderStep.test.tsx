@@ -79,16 +79,17 @@ function openMacStep(initial: FinderSetupView | 'unreadable', backend: Record<st
       bindings: {
         loadFinderSetup: finderSetup.loadFinderSetup,
         runFinderSetupAction: (action: copy.FinderSetupAction) =>
-          finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(text) } }),
+          finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(await text) } }),
         finderSetupLoadPresentation: copy.finderSetupLoadPresentation,
         FINDER_ACTION_FAILED: copy.FINDER_ACTION_FAILED,
+        FINDER_COPIED_MS: copy.FINDER_COPIED_MS,
         FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
         commandUnavailableLabel: desktopApi.commandUnavailableLabel,
         subscribeFinderSetup: bus.subscribeFinderSetup,
         loadEngineRefusal: desktopApi.loadEngineRefusal,
       },
     }],
-    bindings: { Card, FINDER_SETUP_TITLE: copy.FINDER_SETUP_TITLE },
+    bindings: { Card, FINDER_SETUP_TITLE: copy.FINDER_SETUP_TITLE, finderActionButtonLabel: copy.finderActionButtonLabel },
   })
   mounted.push(m)
   const settle = async () => { await m.flush(); await tick(); await m.flush() }
@@ -175,6 +176,14 @@ describe('Onboarding Finder step on macOS', () => {
       expect(s.calls(command)).toBe(1)
       expect(s.m.toasts).toEqual([])
     }
+  })
+
+  test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+    const s = openMacStep(failedView('folder_taken'))
+    await s.settle()
+    await s.m.click('Copy details')
+    await s.settle()
+    expect(buttons(s.m)).toEqual(['Copied'])
   })
 
   test('Copy details puts the details on the pasteboard', async () => {

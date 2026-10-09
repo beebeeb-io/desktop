@@ -12,6 +12,7 @@ import { listen } from '@tauri-apps/api/event'
 import { command, loadEngineRefusal, type CommandResult, type EngineRefusal } from './desktopApi'
 import {
   FINDER_ACTION_FAILED,
+  FINDER_COPIED_MS,
   FINDER_OPEN_FAILED,
   FINDER_REPAIR_FAILED,
   FINDER_SHOW_FILE_FAILED,
@@ -183,7 +184,48 @@ export function finderShowFileFailedToast(): ToastInput {
 }
 
 export interface FinderActionDeps {
-  writeClipboard?: (text: string) => Promise<void>
+  /**
+   * The pasteboard write (a test seam; default `writeTextToPasteboard`). It is called synchronously in
+   * the click, with the text as a promise, because the details are still on their way (FT-clipboard).
+   */
+  writeClipboard?: (text: Promise<string>) => Promise<void>
+}
+
+/** What `writeTextToPasteboard` writes with: the platform's clipboard and `ClipboardItem`, injectable for tests. */
+export interface PasteboardEnv {
+  clipboard: { write?: (items: never[]) => Promise<void>; writeText: (text: string) => Promise<void> }
+  ClipboardItem?: new (items: Record<string, Promise<Blob>>) => unknown
+}
+
+function platformPasteboard(): PasteboardEnv {
+  return {
+    clipboard: navigator.clipboard as unknown as PasteboardEnv['clipboard'],
+    ClipboardItem: typeof ClipboardItem === 'undefined' ? undefined : (ClipboardItem as unknown as PasteboardEnv['ClipboardItem']),
+  }
+}
+
+/**
+ * Put text on the pasteboard from a click (lead ruling FT-clipboard). WebKit allows a pasteboard write
+ * only inside the click's transient activation, and an await on the IPC call that fetches the text
+ * would lose it. So this must be called SYNCHRONOUSLY in the click handler: it starts
+ * `navigator.clipboard.write([new ClipboardItem({'text/plain': <promise>})])` at once (WebKit accepts a
+ * promise-valued item), and falls back to `writeText` when that is refused or `ClipboardItem` is
+ * missing. Device check D0 confirms it on a Mac; if D0 shows NotAllowedError, a pbcopy command is next.
+ */
+export function writeTextToPasteboard(text: Promise<string>, env: PasteboardEnv = platformPasteboard()): Promise<void> {
+  const { clipboard, ClipboardItem: Item } = env
+  if (Item && typeof clipboard.write === 'function') {
+    const blob = text.then((value) => new Blob([value], { type: 'text/plain' }))
+    blob.catch(() => {})
+    let started: Promise<void>
+    try {
+      started = clipboard.write([new Item({ 'text/plain': blob }) as never])
+    } catch (error) {
+      started = Promise.reject(error)
+    }
+    return started.catch(async () => clipboard.writeText(await text))
+  }
+  return text.then((value) => clipboard.writeText(value))
 }
 
 export interface FinderSetupOptions extends FinderActionDeps {
@@ -196,16 +238,32 @@ export interface FinderSetupOptions extends FinderActionDeps {
   enabled?: boolean
 }
 
-export async function copyFinderSetupDetails(deps: FinderActionDeps = {}): Promise<CommandResult<void>> {
-  const details = await command<string>('finder_setup_copy_details')
-  if (!details.ok) return details
-  const write = deps.writeClipboard ?? ((text: string) => navigator.clipboard.writeText(text))
+/**
+ * "Copy details": fetch the text and put it on the pasteboard. The write starts before the text has
+ * come back (synchronously, still inside the click; see `writeTextToPasteboard`). A failed details
+ * command is returned as is; a refused pasteboard is a plain failed result, for the surface to toast.
+ */
+export function copyFinderSetupDetails(deps: FinderActionDeps = {}): Promise<CommandResult<void>> {
+  const details = command<string>('finder_setup_copy_details')
+  const text = details.then((answer) => (answer.ok ? answer.value : Promise.reject(new Error('no details'))))
+  text.catch(() => {})
+  const write = deps.writeClipboard ?? ((pending: Promise<string>) => writeTextToPasteboard(pending))
+  let written: Promise<void>
   try {
-    await write(details.value)
-    return { ok: true, value: undefined }
-  } catch {
-    return { ok: false, reason: 'The details could not be put on the pasteboard.', unsupported: false }
+    written = write(text)
+  } catch (error) {
+    written = Promise.reject(error)
   }
+  written.catch(() => {})
+  return details.then(async (answer): Promise<CommandResult<void>> => {
+    if (!answer.ok) return answer
+    try {
+      await written
+      return { ok: true, value: undefined }
+    } catch {
+      return { ok: false, reason: 'The details could not be put on the pasteboard.', unsupported: false }
+    }
+  })
 }
 
 export function runFinderSetupAction(action: FinderSetupAction, deps: FinderActionDeps = {}): Promise<CommandResult<void>> {
@@ -251,6 +309,8 @@ export interface FinderSetupController {
    * retry". It goes when the state changes or the next action runs.
    */
   actionNote: string | null
+  /** A Copy details just put the details on the pasteboard: the button says "Copied" for a moment. */
+  copied: boolean
 }
 
 /**
@@ -273,6 +333,8 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   const [stored, setLoad] = useState<FinderSetupLoad>({ status: 'loading' })
   const [refusal, setRefusal] = useState<EngineRefusal | null>(null)
   const [actionNote, setActionNote] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const eventsSeen = useRef(0)
   const refusalReads = useRef(0)
   const alive = useRef(false)
@@ -323,13 +385,23 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
     return () => {
       alive.current = false
       stop()
+      if (copiedTimer.current !== null) clearTimeout(copiedTimer.current)
     }
   }, [read, readRefusal, enabled])
 
   const run = useCallback(
     async (action: FinderSetupAction): Promise<CommandResult<void>> => {
       setActionNote(null)
+      setCopied(false)
+      if (copiedTimer.current !== null) clearTimeout(copiedTimer.current)
+      // Synchronous up to the pasteboard write: Copy details must start it inside the click.
       const result = await runFinderSetupAction(action, { writeClipboard })
+      if (result.ok && action === 'copy_details' && alive.current) {
+        setCopied(true)
+        copiedTimer.current = setTimeout(() => {
+          if (alive.current) setCopied(false)
+        }, FINDER_COPIED_MS)
+      }
       if (!result.ok) {
         if (action === 'try_again' && !result.unsupported) {
           // Row 15 (census exemption 3, pinned by tests/finderSetupSourceContract.test.ts): Rust's
@@ -351,5 +423,13 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   // A disabled hook shows nothing, even if it was enabled a moment ago and holds a stale view.
   const load: FinderSetupLoad = enabled ? stored : { status: 'loading' }
   const shownRefusal = enabled ? refusal : null
-  return { load, refusal: shownRefusal, presentation: finderSetupLoadPresentation(load, shownRefusal), retry, run, actionNote: enabled ? actionNote : null }
+  return {
+    load,
+    refusal: shownRefusal,
+    presentation: finderSetupLoadPresentation(load, shownRefusal),
+    retry,
+    run,
+    actionNote: enabled ? actionNote : null,
+    copied: enabled && copied,
+  }
 }

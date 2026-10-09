@@ -5,11 +5,12 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { copyFinderSetupDetails, FINDER_FAILURE_REASONS, finderOpenFailedToast, finderRepairFailedToast, finderShowFileFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
+import { copyFinderSetupDetails, writeTextToPasteboard, FINDER_FAILURE_REASONS, finderOpenFailedToast, finderRepairFailedToast, finderShowFileFailedToast, type FinderFailureReason, type FinderSetupView } from '../src/finderSetup'
 import {
   FINDER_ACTION_FAILED,
   FINDER_ACTION_LABEL,
   FINDER_ADDING_LINE,
+  FINDER_COPIED_LABEL,
   FINDER_OPEN_FAILED,
   FINDER_REPAIR_ENGINE_UNCONFIRMED,
   FINDER_REPAIR_FAILED,
@@ -373,15 +374,91 @@ describe('copyFinderSetupDetails', () => {
   test('puts the command text on the pasteboard', async () => {
     backend(() => 'Beebeeb 0.8.12 on macOS 26.0')
     const written: string[] = []
-    const result = await copyFinderSetupDetails({ writeClipboard: async (text) => { written.push(text) } })
+    const result = await copyFinderSetupDetails({ writeClipboard: async (text) => { written.push(await text) } })
     expect(result.ok).toBe(true)
     expect(written).toEqual(['Beebeeb 0.8.12 on macOS 26.0'])
+  })
+
+  // FT-clipboard: WebKit allows a pasteboard write only inside the click's transient activation, and
+  // an await on the IPC call before the write loses it. So the write starts synchronously, with the
+  // text as a promise, before the details have come back.
+  test('the write starts synchronously, before the details command has answered', async () => {
+    let answer!: (text: string) => void
+    ;(globalThis as any).window = { __TAURI_INTERNALS__: { invoke: () => new Promise((resolve) => { answer = resolve }) } }
+    const order: string[] = []
+    const pending = copyFinderSetupDetails({ writeClipboard: async (text) => { order.push('write'); order.push(await text) } })
+    expect(order).toEqual(['write'])
+    answer('details')
+    expect((await pending).ok).toBe(true)
+    expect(order).toEqual(['write', 'details'])
+  })
+
+  test('a details command that fails is its own failed result, and nothing is written', async () => {
+    backend(() => { throw new Error('no reconciler') })
+    const written: string[] = []
+    const result = await copyFinderSetupDetails({ writeClipboard: async (text) => { written.push(await text) } })
+    expect(result).toEqual({ ok: false, reason: 'no reconciler', unsupported: false })
+    expect(written).toEqual([])
   })
 
   test('a refused pasteboard is a plain failed result, for the surface to toast', async () => {
     backend(() => 'x')
     const result = await copyFinderSetupDetails({ writeClipboard: async () => { throw new Error('denied') } })
     expect(result).toEqual({ ok: false, reason: 'The details could not be put on the pasteboard.', unsupported: false })
+  })
+})
+
+/** FT-clipboard: the default pasteboard writer, with the platform's clipboard and ClipboardItem injected. */
+describe('writeTextToPasteboard', () => {
+  class FakeItem {
+    constructor(public readonly items: Record<string, Promise<Blob>>) {}
+  }
+
+  test('one ClipboardItem whose text/plain is a promise, written synchronously; the blob carries the text', async () => {
+    const writes: FakeItem[][] = []
+    let answer!: (text: string) => void
+    const text = new Promise<string>((resolve) => { answer = resolve })
+    const done = writeTextToPasteboard(text, {
+      clipboard: { write: async (items: FakeItem[]) => { writes.push(items) }, writeText: async () => { throw new Error('not this one') } },
+      ClipboardItem: FakeItem,
+    })
+    expect(writes).toHaveLength(1)
+    expect(Object.keys(writes[0][0].items)).toEqual(['text/plain'])
+    answer('details')
+    await done
+    expect(await (await writes[0][0].items['text/plain']).text()).toBe('details')
+  })
+
+  test('a refused write falls back to writeText with the same text', async () => {
+    const fallback: string[] = []
+    await writeTextToPasteboard(Promise.resolve('details'), {
+      clipboard: { write: async () => { throw new Error('NotAllowedError') }, writeText: async (t: string) => { fallback.push(t) } },
+      ClipboardItem: FakeItem,
+    })
+    expect(fallback).toEqual(['details'])
+  })
+
+  test('no ClipboardItem (an older WebKit): writeText', async () => {
+    const fallback: string[] = []
+    await writeTextToPasteboard(Promise.resolve('details'), {
+      clipboard: { write: async () => { throw new Error('unused') }, writeText: async (t: string) => { fallback.push(t) } },
+      ClipboardItem: undefined,
+    })
+    expect(fallback).toEqual(['details'])
+  })
+
+  test('both refused: the write fails, for the caller to report', async () => {
+    const result = writeTextToPasteboard(Promise.resolve('details'), {
+      clipboard: { write: async () => { throw new Error('a') }, writeText: async () => { throw new Error('b') } },
+      ClipboardItem: FakeItem,
+    })
+    await expect(result).rejects.toThrow('b')
+  })
+})
+
+describe('the "Copied" label (FT-clipboard)', () => {
+  test('one word, no ellipsis, no exclamation', () => {
+    expect(FINDER_COPIED_LABEL).toBe('Copied')
   })
 })
 

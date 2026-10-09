@@ -11,7 +11,7 @@ import {
 import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
 import { finderOpenFailedToast, finderRepairFailedToast, useFinderSetup } from '../finderSetup'
-import { finderRepairWarningNote, finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
+import { finderActionButtonLabel, finderRepairWarningNote, finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
 import { preservedFilesLine, repairRemovedNotice } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
@@ -284,7 +284,7 @@ export default function SyncFolder() {
           {macPresentation.action ? (
             <div className="button-row" style={{ marginTop: 10 }}>
               <button className="button" onClick={() => void runFinderAction(macPresentation.action!)} disabled={busy}>
-                {macPresentation.actionLabel}
+                {finderActionButtonLabel(macPresentation.action, macPresentation.actionLabel, finder.copied)}
               </button>
             </div>
           ) : null}
