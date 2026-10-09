@@ -86,6 +86,52 @@ While a hydrate runs the daemon also watches the socket. If the client hangs up
 socket) the daemon drops the download, writes nothing to disk, and restores the
 file's status (`DownloadingStatusGuard` in `engine_bridge.rs`).
 
+## Write contents on macOS (`contents_path` → App Group upload staging)
+
+The system hands `createItem` / `modifyItem` a contents URL that only the
+extension's sandbox can read. The app (the daemon) is a different sandboxed
+process and cannot open it: before this section existed every Finder file
+create ended in `"Upload source is not a file"` and a definitive -2005, while
+folder creates (no contents) worked. So on macOS `contents_path` is never the
+system's URL; it is a copy the extension makes in the shared App Group
+container.
+
+```mermaid
+sequenceDiagram
+    participant S as File Provider system
+    participant X as Extension (XPCBridge + UploadStaging)
+    participant D as Daemon (ipc_socket.rs)
+    S->>X: createItem(template, contents URL)
+    X->>X: copy into <group>/upload-staging/<uuid> (0600, mtime now)
+    X->>D: QueueFinderCreate{contents_path: <group>/upload-staging/<uuid>, request_id}
+    D->>D: validate: regular file directly in upload-staging
+    D->>D: StagedPayload::copy into the daemon's own staging, enqueue
+    D->>D: delete the upload-staging copy
+    D-->>X: WriteQueued / Error
+    X->>X: delete the copy (defer; already gone is fine)
+    X-->>S: completion
+```
+
+| Rule | Where |
+| --- | --- |
+| Directory: `<App Group container>/upload-staging/`, owner-only `0700`, excluded from backups. Created by whichever side gets there first; the daemon forces the mode at startup. | `UploadStaging.directory(in:)`, `macos_prepare_upload_staging_dir` |
+| One file per request, named by a random UUID (never the user's file name), copied with `copyItem` (an APFS clone), then `0600` and mtime set to now. The `request_id` fingerprint is still taken from the system's file, so retries keep their key. | `UploadStaging.stage`, `XPCBridge.queueCreateItem/queueModifyItem` |
+| A failed copy is `uploadStagingFailed`, TRANSIENT (`serverUnreachable`): the system retries; nothing is left behind. | `BeebeebIPCError` |
+| The daemon accepts `contents_path` only if it is absolute, has no `.`/`..` segment, its parent canonicalizes to the staging directory itself (which must not be a symlink), and the entry is a regular file, not a symlink (`lstat`). Otherwise `Error {"Upload contents refused (<category>)"}` with `malformed_path`, `traversal`, `staging_unavailable`, `outside_staging`, `missing`, `symlink`, `not_a_file` or `unreadable`. A refused path is never deleted. | `validate_staged_contents_path` |
+| An accepted copy is deleted once the request is answered: queued, refused by the engine or the namespace guard, a bad `request_id`, or a repeat answered from the first attempt's result. The deletion rides in the dedup work closure, so a socket shutdown cannot delete a copy that detached work still reads. The extension deletes it after the reply too. | `StagedContents`, `handle_connection` |
+| Orphans (a crash on either side) are purged at daemon startup and every 5 minutes when older than 1 hour. Age-bound, not "everything": the extension may be staging a copy at that moment. 1 hour is six times the 600 s write timeout. | `UPLOAD_STAGING_MAX_AGE`, `runner.rs` |
+| Every refused create/modify/delete logs `warn!("Finder write refused", op, reason)` with a fixed category; never a name, path or contents. | `log_refused_write`, `write_outcome_response` |
+
+Linux keeps the unconfined behaviour (`WriteContentsPolicy::AnyPath`): the
+daemon is not sandboxed and no client sends writes over its socket.
+
+Plaintext at rest: the copy is plaintext, as is the system's own staged file
+and the daemon's `StagedPayload` copy. It lives from the extension's copy until
+the reply (both sides delete it), in an owner-only, backup-excluded directory;
+a crash can leave it for at most about an hour plus one purge interval while
+the daemon runs, and until the first purge after the next unlock when it does not
+(the purge runs only while the vault is unlocked).
+
 ## Timeouts (Swift client)
 
 Applied as `SO_RCVTIMEO`/`SO_SNDTIMEO`, i.e. per `read()`/`write()` call:
@@ -425,6 +471,8 @@ so no plaintext ever crosses the socket.
 | new | old (before 1697) | The old daemon answers `ListChanges` with `unknown variant` — an `Error` reply the replica surfaces as `finishEnumeratingWithError`, and `currentSyncAnchor` falls back to the persisted App Group copy. The old daemon ignores the new payload fields (`created_at`, `modified_at`, `child_item_count`, `content_version`, `metadata_version`), so listings work with no dates/counts. |
 | new | old (before 1698) | The old daemon ignores the `pinned` field (`#[serde(default)]`). It has no trash-container arm: a `ListFileProviderItems` for the trash container falls through to the real-folder branch (empty), `Trashing` rows still enumerate at the root (pre-1698 shape), and `QueueFinderDelete` for an unknown id queues a doomed op. The extension treats an unknown trash container as an empty listing — honest degradation, no crash. |
 | new | old (before 1699) | The old daemon replies `unknown variant` to `FetchThumbnail`; the extension surfaces a per-thumbnail error and Finder falls back to generic icons. Browsing, hydrate and writes are unaffected. The old extension never sends `FetchThumbnail` and never sent the now-retired `SetFileStatus`/`RecordOpenedFile`/`EnforceSmartCache`, so a new daemon plus old extension is a no-change pair for 1699. |
+| new | old (before upload staging) | The extension sends an App Group copy. The App Group is shared with the app, so the old daemon can read it by construction (not device-tested); the old daemon does not delete the copy, the extension's `defer` does. |
+| old (before upload staging) | new | The old extension sends the system's contents URL; the daemon refuses it (`outside_staging`, logged) instead of failing to read it. Same user-visible failure as before; both halves ship in one app bundle, so this only lasts until the update completes. |
 | old | new | The old extension writes its request with no delimiter and does not close: `FrameReader` accepts a buffer that is already one complete JSON value. It requests no progress, so it gets one reply, now `{"Ok":{}}\n` (which its parser accepts). It sends no `request_id`, so its write-queue requests take the pre-1684 path. |
 
 ## Tests
@@ -441,4 +489,6 @@ so no plaintext ever crosses the socket.
 | Swift badge mapping (status→decoration identifier, one badge per item, unknown status → none), thumbnail variant/max-dimension/eligibility helpers, `FetchThumbnail` request shape + reply decoding, thumbnail timeout constant, `pendingItemsDidChange` completes | same file (`1699-D*`, `1699-T*`, `1699-P1`) | same |
 | Daemon table: concurrent same key runs once, repeat after completion, different keys, TTL expiry, key reused for another request shape, stale result, refreshed cache hit, `forget_where`, failed result not remembered, panicking leader, capacity | `ipc_write_dedup_tests.rs` | `cargo test` counts |
 | Daemon over the real socket, counting REAL queued operations in the state DB | `ipc_socket_framing_tests.rs` (`concurrent_creates_with_one_request_id_...`, `a_repeat_after_completion_...`, `different_request_ids_...`, `a_request_without_a_request_id_...`, `a_cached_create_is_not_returned_...`, `concurrent_modifies_...`, real-delete-then-recreate, trash op finished, trash op pending, `Trashing` row, refreshed reply). The two concurrency tests hold the state DB lock so the leader is parked and every request provably overlaps it; with a tiny source file they would otherwise finish serially and exercise the cached path instead of the in-flight wait | `cargo test` counts |
-| XPCBridge call sites still use the builder and pass the key inputs (XPCBridge is not compiled into the Swift harness) | `scripts/check-ipc-timeouts.py` (+ `--self-test`, 14 mutations) | `ipc-timeout guard: 3/3 call sites correct` |
+| XPCBridge call sites still use the builder and pass the key inputs, stage the contents, send the staged path and discard the copy | `scripts/check-ipc-timeouts.py` (+ `--self-test`, 20 mutations) | `ipc-timeout guard: 3/3 call sites correct` |
+| Upload staging, daemon: contents validation (inside / outside / `..` / `.` / symlink / missing / not a file / malformed / staging dir missing or a symlink), the copy deleted on success and on every refusal, never for a refused path, kept while detached work still reads it at socket shutdown, the age-bound purge, refusal logging (category only) | `ipc_socket.rs` tests (`staged_contents_*`, `upload_staging_*`, `every_refused_write_*`), `ipc_socket_framing_tests.rs` (`staged_*`, `contents_not_directly_*`, `a_write_refused_*`, `concurrent_staged_*`, `a_create_still_in_flight_*`) | `cargo test` counts |
+| Upload staging, extension: directory path and `0700`, UUID names, exact bytes + `0600` + fresh mtime, a failed copy is transient with no file left and no path in the text, discard | `BeebeebFileProviderTests/main.swift` (`upload-staging-S1`..`S5`) | `ipc-framing: N passed, 0 failed` |
