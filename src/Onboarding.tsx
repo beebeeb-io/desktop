@@ -101,6 +101,39 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
     }
   }, [hostOs, mode])
 
+  // The window outlives a sign-out: closing it only hides it, and every "Sign in" (Status, the Finder row, the menu)
+  // shows and focuses this same WebView again (`open_onboarding_window`), so the flow would come back on the step it
+  // was left on, past a sign-in form a signed-out person could no longer reach. When the window is shown or focused
+  // again, a flow on a step that needs a session reads the session, and if it has ended, starts over at sign-in.
+  // What a sign-out keeps for the next sign-in still applies: the form is prefilled with the last signed-in address,
+  // and an account switch's typed address (FT-I4) is untouched, because the switch already sits on the sign-in step.
+  const stepRef = useRef(step)
+  useEffect(() => {
+    stepRef.current = step
+  }, [step])
+  useEffect(() => {
+    let cancelled = false
+    const needsSession = (at: Step) => at === 'unlock' || at === 'finder' || at === 'pinning' || at === 'ready'
+    const recheck = async () => {
+      if (!needsSession(stepRef.current)) return
+      const status = await loadSyncStatus()
+      // Only an explicit "signed out" starts over; a status that cannot be read is no evidence of a sign-out.
+      if (cancelled || status?.logged_in !== false || !needsSession(stepRef.current)) return
+      // An address carried by an earlier switch is not this sign-in's; the form's own prefill fills it instead. The
+      // rest of the flow's state (the switch's count and address, the replaced-key note) is set by the sign-in itself.
+      setSignInEmail(undefined)
+      setStep('signin')
+    }
+    const onShown = () => void recheck()
+    window.addEventListener('visibilitychange', onShown)
+    window.addEventListener('focus', onShown)
+    return () => {
+      cancelled = true
+      window.removeEventListener('visibilitychange', onShown)
+      window.removeEventListener('focus', onShown)
+    }
+  }, [])
+
   // The window closes itself through the `onboarding-close` capability (core:window:allow-close,
   // this window only). The close is awaited, and a refusal falls back to the DOM close, as the
   // ReadyStep does, so a rejection is never silently dropped.
