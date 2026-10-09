@@ -9,7 +9,7 @@
  * What it does not: React scheduling, or a real Tauri event loop (tests/finderSetup.test.ts pins
  * the subscription's own wiring).
  */
-import { commandUnavailableLabel } from '../../src/desktopApi'
+import { commandUnavailableLabel, loadEngineRefusal } from '../../src/desktopApi'
 import * as finderSetup from '../../src/finderSetup'
 import * as copy from '../../src/finderSetupCopy'
 import type { FinderSetupView } from '../../src/finderSetup'
@@ -63,6 +63,7 @@ export function useFinderSetupModule(bus: ReturnType<typeof finderBus>, copied: 
       FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
       commandUnavailableLabel,
       subscribeFinderSetup: bus.subscribeFinderSetup,
+      loadEngineRefusal,
     },
   }
 }

@@ -11,7 +11,7 @@ import {
 } from '../desktopApi'
 import { useCapabilities } from '../capabilities'
 import { useFinderSetup, type FinderSetupLoad } from '../finderSetup'
-import { finderSetupLoadPresentation, finderStatusPill } from '../finderSetupCopy'
+import { finderStatusPill, type FinderSetupPresentation } from '../finderSetupCopy'
 import { useToast } from '../windows/ui'
 
 type PageLink = 'versions' | 'selective-sync' | 'finder' | 'account'
@@ -58,10 +58,9 @@ function finderSetupState(installState: FinderInstallState | null) {
  * `Missing` has no pill (`label: null`) and its line is the one resting sentence (FA-I2); before the
  * first answer the line is empty, so no ad-hoc "Checking" string is shown (M6).
  */
-function macFinderSetupState(load: FinderSetupLoad): { label: string | null; className: string; detail: string } {
+function macFinderSetupState(load: FinderSetupLoad, presentation: FinderSetupPresentation): { label: string | null; className: string; detail: string } {
   const pill = finderStatusPill(load)
   const className = !pill || pill.tone === 'idle' ? '' : pill.tone
-  const presentation = finderSetupLoadPresentation(load)
   return { label: pill?.label ?? null, className, detail: presentation.kind === 'notice' ? presentation.sentence : presentation.line }
 }
 
@@ -161,6 +160,11 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
     if (!status.logged_in) {
       return { label: 'Signed out', className: 'warn', detail: 'Sign in to start the drive.' }
     }
+    // Must-render row 8: when the engine start was refused, the line says why (Rust's sentence,
+    // verbatim) instead of a generic "locked or paused".
+    if (status.engine_refusal) {
+      return { label: 'Locked or paused', className: 'warn', detail: status.engine_refusal.sentence }
+    }
     if (status.conflicts > 0) {
       return { label: 'Needs review', className: 'error', detail: 'Resolve conflicts before assuming all files are current.' }
     }
@@ -178,7 +182,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
       ? Math.min(100, Math.round((storage.used_bytes / storage.quota_bytes) * 100))
       : 0
   const isMacos = platform === 'macos'
-  const finderSetup = isMacos ? macFinderSetupState(finder.load) : finderSetupState(finderInstallState)
+  const finderSetup = isMacos ? macFinderSetupState(finder.load, finder.presentation) : finderSetupState(finderInstallState)
 
   const openSetup = async () => {
     if (!status?.logged_in) {

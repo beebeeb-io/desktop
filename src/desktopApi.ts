@@ -22,6 +22,34 @@ export interface SyncStatus {
   // while every call it makes fails. Drives the persistent "You're signed
   // out on this device" banner.
   auth_expired?: boolean
+  /**
+   * Why sync did not start, when the engine start was refused (Lane R, ruling P; must-render rows
+   * 8–10): the local data's account could not be confirmed, another account's data is on a Windows
+   * PC, or an earlier engine stop was never confirmed. Parsed by `loadSyncStatus`; null otherwise.
+   */
+  engine_refusal?: EngineRefusal | null
+}
+
+/** The closed set of `sync_status.engine_refusal` codes (`account_binding::Refusal::code()` in Rust). */
+export const ENGINE_REFUSAL_CODES = ['identity_unknown', 'other_account_on_windows', 'engine_stop_unconfirmed'] as const
+export type EngineRefusalCode = (typeof ENGINE_REFUSAL_CODES)[number]
+export interface EngineRefusal {
+  code: EngineRefusalCode
+  /** Rust's fixed sentence for the code; shown verbatim. */
+  sentence: string
+}
+
+/**
+ * `sync_status.engine_refusal`, strictly: `{code, sentence}` with a code from the closed set and a
+ * non-blank sentence, else `null`. A value outside the contract is no refusal (the surface keeps its
+ * own sentence), never a guess at what it meant.
+ */
+export function parseEngineRefusal(value: unknown): EngineRefusal | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const { code, sentence } = value as Record<string, unknown>
+  if (typeof code !== 'string' || !(ENGINE_REFUSAL_CODES as readonly string[]).includes(code)) return null
+  if (typeof sentence !== 'string' || sentence.trim().length === 0) return null
+  return { code: code as EngineRefusalCode, sentence }
 }
 
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
@@ -421,7 +449,12 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
   if (result.ok && result.value.session_revision !== undefined) observeAccountSession(result.value.session_revision)
-  return result.ok ? result.value : null
+  return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
+}
+
+/** The current engine refusal, or `null` when there is none or the status cannot be read. */
+export async function loadEngineRefusal(): Promise<EngineRefusal | null> {
+  return (await loadSyncStatus())?.engine_refusal ?? null
 }
 
 export async function openUrl(url: string): Promise<CommandResult<void>> {

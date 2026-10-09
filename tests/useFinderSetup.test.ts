@@ -12,6 +12,7 @@
  * Finder…". It is an inline unavailable state with one action that reads again.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
+import * as desktopApi from '../src/desktopApi'
 import { commandUnavailableLabel } from '../src/desktopApi'
 import * as finderSetup from '../src/finderSetup'
 import type { FinderSetupController, FinderSetupOptions, FinderSetupView } from '../src/finderSetup'
@@ -78,6 +79,7 @@ function mountHook(backend: Record<string, Handler>, opts: { auto?: boolean; dep
       FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
       commandUnavailableLabel,
       subscribeFinderSetup: bus.subscribeFinderSetup,
+      loadEngineRefusal: desktopApi.loadEngineRefusal,
     },
   })
   mounted.push(m)
@@ -344,6 +346,68 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
     h.m.render()
     expect(h.hook().load).toEqual({ status: 'loaded', view: failedTimeout })
     expect(h.hook().presentation).toMatchObject({ kind: 'notice', reason: 'timeout' })
+  })
+})
+
+/**
+ * Must-render row 9 (FT-I5): there is no event for an engine refusal, so the hook reads
+ * `sync_status.engine_refusal` when it loads and again on every `finder-setup-changed`, and a
+ * `failed` + `unknown` presents the refusal's sentence.
+ */
+describe('the engine refusal (row 9)', () => {
+  const IDENTITY = { code: 'identity_unknown', sentence: 'Beebeeb couldn’t confirm which account this computer’s local files belong to, so sync didn’t start. Connect to the internet and open Beebeeb again.' }
+  const status = (engine_refusal: unknown) => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal })
+  const unknownFailure = view({ setup: 'failed', reason: 'unknown' })
+  const statusCalls = (h: ReturnType<typeof mountHook>) => h.m.calls.filter((c) => c.name === 'sync_status').length
+
+  test('it reads sync_status on load, and a failed + unknown says the refusal\'s sentence', async () => {
+    const h = mountHook({ finder_setup_state: () => unknownFailure, sync_status: () => status(IDENTITY) })
+    await h.settle()
+    expect(statusCalls(h)).toBe(1)
+    expect(h.hook().presentation).toMatchObject({ kind: 'notice', sentence: IDENTITY.sentence, action: 'try_again' })
+  })
+
+  test('it reads sync_status again on every finder-setup-changed, and follows what it says', async () => {
+    let refusal: unknown = null
+    const h = mountHook({ finder_setup_state: () => view(), sync_status: () => status(refusal) })
+    await h.settle()
+    expect(statusCalls(h)).toBe(1)
+    refusal = IDENTITY
+    h.bus.emit(unknownFailure)
+    await h.settle()
+    expect(statusCalls(h)).toBe(2)
+    expect(h.hook().presentation).toMatchObject({ sentence: IDENTITY.sentence })
+    refusal = null
+    h.bus.emit(unknownFailure)
+    await h.settle()
+    expect(statusCalls(h)).toBe(3)
+    expect(h.hook().presentation).toMatchObject({ sentence: 'Beebeeb couldn’t be added to Finder.' })
+  })
+
+  test('a refusal read that answers after a newer one is dropped', async () => {
+    const answers: Array<(v: unknown) => void> = []
+    const h = mountHook({ finder_setup_state: () => unknownFailure, sync_status: () => new Promise((resolve) => { answers.push(resolve) }) })
+    await h.settle()
+    h.bus.emit(unknownFailure)
+    await h.settle()
+    expect(answers).toHaveLength(2)
+    answers[1](status(null))
+    await h.settle()
+    answers[0](status(IDENTITY)) // the older read finishes last
+    await h.settle()
+    expect(h.hook().presentation).toMatchObject({ sentence: 'Beebeeb couldn’t be added to Finder.' })
+  })
+
+  test('a status that cannot be read leaves the generic sentence', async () => {
+    const h = mountHook({ finder_setup_state: () => unknownFailure, sync_status: () => { throw new Error('down') } })
+    await h.settle()
+    expect(h.hook().presentation).toMatchObject({ sentence: 'Beebeeb couldn’t be added to Finder.', action: 'try_again' })
+  })
+
+  test('a disabled hook never reads sync_status', async () => {
+    const h = mountHook({ finder_setup_state: () => unknownFailure, sync_status: () => status(IDENTITY) }, { deps: { enabled: false } })
+    await h.settle()
+    expect(statusCalls(h)).toBe(0)
   })
 })
 

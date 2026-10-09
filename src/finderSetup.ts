@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { command, type CommandResult } from './desktopApi'
+import { command, loadEngineRefusal, type CommandResult, type EngineRefusal } from './desktopApi'
 import {
   FINDER_ACTION_FAILED,
   FINDER_OPEN_FAILED,
@@ -229,6 +229,11 @@ export type FinderSetupLoad =
 
 export interface FinderSetupController {
   load: FinderSetupLoad
+  /**
+   * `sync_status.engine_refusal` as of the last read (on load and on every `finder-setup-changed`;
+   * there is no event of its own), or null. Already folded into `presentation`.
+   */
+  refusal: EngineRefusal | null
   /** What to render, from `finderSetupCopy`. Never "Adding" unless the reconciler said so. */
   presentation: FinderSetupPresentation
   /** Read the state again. It is the one action of the `unavailable` presentation. */
@@ -247,6 +252,8 @@ export interface FinderSetupController {
  * - It subscribes to `finder-setup-changed`, and reads `finder_setup_state` once the subscription
  *   has landed, so no transition falls between the two. An event that arrives while a read is in
  *   flight wins over that read, because the read may be the older of the two.
+ * - It reads `sync_status.engine_refusal` at the same moment and again on every event (a refusal has
+ *   no event of its own), and only the newest of those reads counts (must-render row 9).
  * - A state that cannot be read (a rejected command, an unparsable shape) is `unavailable`, never
  *   "Adding" (ruling 7a); `retry` reads again.
  * - A failed action is one error toast: the action's one sentence, no title, never the reason.
@@ -257,8 +264,18 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   const { showToast } = useToast()
   const { enabled = true, writeClipboard } = options
   const [stored, setLoad] = useState<FinderSetupLoad>({ status: 'loading' })
+  const [refusal, setRefusal] = useState<EngineRefusal | null>(null)
   const eventsSeen = useRef(0)
+  const refusalReads = useRef(0)
   const alive = useRef(false)
+
+  // The newest read wins: an older answer that lands after a newer one was issued is dropped.
+  const readRefusal = useCallback(async () => {
+    const issued = ++refusalReads.current
+    const next = await loadEngineRefusal()
+    if (!alive.current || issued !== refusalReads.current) return
+    setRefusal(next)
+  }, [])
 
   const read = useCallback(async () => {
     const eventsBefore = eventsSeen.current
@@ -270,8 +287,9 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
   const retry = useCallback(async () => {
     if (!enabled) return
     setLoad({ status: 'loading' })
+    void readRefusal()
     await read()
-  }, [read, enabled])
+  }, [read, readRefusal, enabled])
 
   useEffect(() => {
     if (!enabled) return
@@ -280,17 +298,24 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
       (view) => {
         eventsSeen.current += 1
         setLoad({ status: 'loaded', view })
+        void readRefusal()
       },
       {
-        onInvalid: () => void read(),
-        onSubscribed: () => void read(),
+        onInvalid: () => {
+          void read()
+          void readRefusal()
+        },
+        onSubscribed: () => {
+          void read()
+          void readRefusal()
+        },
       },
     )
     return () => {
       alive.current = false
       stop()
     }
-  }, [read, enabled])
+  }, [read, readRefusal, enabled])
 
   const run = useCallback(
     async (action: FinderSetupAction): Promise<CommandResult<void>> => {
@@ -308,5 +333,6 @@ export function useFinderSetup(options: FinderSetupOptions = {}): FinderSetupCon
 
   // A disabled hook shows nothing, even if it was enabled a moment ago and holds a stale view.
   const load: FinderSetupLoad = enabled ? stored : { status: 'loading' }
-  return { load, presentation: finderSetupLoadPresentation(load), retry, run }
+  const shownRefusal = enabled ? refusal : null
+  return { load, refusal: shownRefusal, presentation: finderSetupLoadPresentation(load, shownRefusal), retry, run }
 }

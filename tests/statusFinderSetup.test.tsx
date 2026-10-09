@@ -13,6 +13,7 @@ import * as desktopApi from '../src/desktopApi'
 import * as copy from '../src/finderSetupCopy'
 import { loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { finderBus, finderView, tick, useFinderSetupModule } from './fixtures/finderSetupHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const finderSetupState = loadComponent('pages/Status.tsx', 'finderSetupState', {})
 const macFinderSetupState = loadComponent('pages/Status.tsx', 'macFinderSetupState', { ...copy })
@@ -29,16 +30,18 @@ interface Opening {
   finder?: unknown
   /** The capability snapshot's host OS, or none. */
   caps?: string | null
+  /** What `sync_status` answers (default: signed out, engine stopped). */
+  syncStatus?: Record<string, unknown>
 }
 
-function openStatus({ platform, finder = finderView(), caps = null }: Opening) {
+function openStatus({ platform, finder = finderView(), caps = null, syncStatus }: Opening) {
   const bus = finderBus()
   const intervals: Array<() => Promise<void>> = []
   const m = mount('pages/Status.tsx', 'Status', {
     expand: true,
     backend: {
       desktop_platform: () => { if (platform === 'fails') throw new Error('desktop_platform is down'); return platform },
-      sync_status: () => ({ logged_in: false, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }),
+      sync_status: () => syncStatus ?? ({ logged_in: false, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }),
       finder_setup_state: () => { if (finder instanceof Error) throw finder; return finder },
       finder_location_state: () => missing,
     },
@@ -152,6 +155,41 @@ describe('Status page, Finder row, on macOS', () => {
     const { m, calls } = openStatus({ platform: 'macos', caps: 'macos' })
     await m.flush()
     expect(calls('finder_location_state')).toBe(0)
+  })
+})
+
+/**
+ * Must-render rows 8 and 9 (FT-I5): `sync_status.engine_refusal` is why sync did not start. Status
+ * shows its sentence on the sync-health line (macOS and Linux), and on a Mac the Finder row of a
+ * `failed` + `unknown` says it instead of the generic "couldn’t be added".
+ */
+describe('Status page: the engine refusal (rows 8 and 9)', () => {
+  const IDENTITY = { code: 'identity_unknown', sentence: rustStr('account_binding.rs', 'IDENTITY_UNKNOWN') }
+  const signedIn = (engine_refusal: unknown) => ({ logged_in: true, vault_unlocked: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal })
+  const healthLine = (m: Mounted) =>
+    m.elements().filter((el) => el.type === 'p' && el.props.className === 'page-copy').map((el) => textOf(el.props.children)).at(-1)
+
+  for (const platform of ['macos', 'linux']) {
+    test(`${platform}: the refusal's sentence is the sync-health line`, async () => {
+      const { m } = openStatus({ platform, caps: platform, syncStatus: signedIn(IDENTITY), finder: finderView({ setup: 'ready' }) })
+      await settle(m)
+      expect(healthLine(m)).toBe(IDENTITY.sentence)
+    })
+  }
+
+  test('no refusal: the sync-health line is what it was', async () => {
+    const { m } = openStatus({ platform: 'macos', syncStatus: signedIn(null), finder: finderView({ setup: 'ready' }) })
+    await settle(m)
+    expect(healthLine(m)).not.toBe(IDENTITY.sentence)
+    expect(textOf(m.tree())).not.toContain(IDENTITY.sentence)
+  })
+
+  test('macOS: a failed + unknown Finder row says the refusal, not the generic sentence', async () => {
+    const { m } = openStatus({ platform: 'macos', syncStatus: signedIn(IDENTITY), finder: finderView({ setup: 'failed', reason: 'unknown' }) })
+    await settle(m)
+    const finderRow = m.elements().filter((el) => el.props.className === 'row-detail').map((el) => textOf(el.props.children))[0]
+    expect(finderRow).toContain(IDENTITY.sentence)
+    expect(textOf(m.tree())).not.toContain(copy.FINDER_REASON_COPY.unknown.sentence)
   })
 })
 

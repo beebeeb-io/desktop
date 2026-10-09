@@ -85,6 +85,7 @@ const useFinderSetupModule = ({ bus, copied }: FinderHarness) => ({
     FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
     commandUnavailableLabel: desktopApi.commandUnavailableLabel,
     subscribeFinderSetup: bus.subscribeFinderSetup,
+    loadEngineRefusal: desktopApi.loadEngineRefusal,
   },
 })
 
@@ -534,13 +535,14 @@ describe('Sync tab', () => {
   const pressFinder = async (m: Mounted, label: string) => { await button(m, label).props.onClick(); await settleFinder(m) }
   const calls = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
 
-  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
+  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; refusal?: unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
     // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
     const st: { finder: any; unreadable: boolean; kept: string | null } = { finder: opts.finder ?? finder.installed, unreadable: opts.unreadable ?? false, kept: opts.kept ?? null }
     return {
       st,
       backend: {
         finder_setup_state: () => { if (st.unreadable) throw new Error('no reconciler'); return st.finder },
+        sync_status: () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: opts.refusal ?? null }),
         finder_setup_retry: opts.retry ?? (() => undefined),
         finder_setup_copy_details: () => 'details',
         finder_setup_show_app: () => undefined,
@@ -664,6 +666,22 @@ describe('Sync tab', () => {
       expect(visibleText(m).includes(`reason: ${reason}`)).toBe(reason !== 'user_disabled') // the mono line is for alerts only
       expect(m.toasts).toEqual([])
     }
+  })
+
+  // Must-render row 9 (FT-I5): a failed + unknown with an engine refusal says the refusal's sentence.
+  test('an engine refusal replaces the unknown sentence; identity_unknown keeps Try again', async () => {
+    const sentence = 'Beebeeb couldn’t confirm which account this computer’s local files belong to, so sync didn’t start. Connect to the internet and open Beebeeb again.'
+    const { m } = await openSync({ finder: finderView({ setup: 'failed', reason: 'unknown' }), refusal: { code: 'identity_unknown', sentence } })
+    expect(alerts(m).map((el) => textOf(el.props.children))[0]).toContain(sentence)
+    expect(visibleText(m)).not.toContain(finderSetupCopy.FINDER_REASON_COPY.unknown.sentence)
+    expect(buttons(m).filter((b) => b === 'Try again')).toHaveLength(1)
+  })
+
+  test('engine_stop_unconfirmed: its sentence and no Try again, because only a relaunch helps', async () => {
+    const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+    const { m } = await openSync({ finder: finderView({ setup: 'failed', reason: 'unknown' }), refusal: { code: 'engine_stop_unconfirmed', sentence } })
+    expect(alerts(m).map((el) => textOf(el.props.children))[0]).toContain(sentence)
+    expect(buttons(m)).not.toContain('Try again')
   })
 
   test('a failure notice\'s Try again asks the reconciler (finder_setup_retry); it does not re-read the state', async () => {

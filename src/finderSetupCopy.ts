@@ -4,6 +4,7 @@
  * reason; "Try again" only inside a failure. Pinned by tests/finderSetupCopy.test.ts, which also
  * holds the design artefact to the same strings.
  */
+import type { EngineRefusal } from './desktopApi'
 import type { FinderFailureReason, FinderSetupLoad, FinderSetupView } from './finderSetup'
 
 export type FinderSetupAction = 'try_again' | 'open_system_settings' | 'show_in_finder' | 'copy_details'
@@ -135,8 +136,9 @@ export type FinderSetupPresentation =
       tone: 'alert' | 'status'
       reason: FinderFailureReason
       sentence: string
-      action: FinderSetupAction
-      actionLabel: string
+      /** `null` only for an `engine_stop_unconfirmed` refusal: nothing but a relaunch helps. */
+      action: FinderSetupAction | null
+      actionLabel: string | null
     }
   /**
    * The state could not be read. The one action is a re-read (`useFinderSetup().retry`), NOT the
@@ -147,14 +149,31 @@ export type FinderSetupPresentation =
 /**
  * One state, one presentation. `quiet` = no view yet. A loaded `Missing` without a reason is
  * `resting` (FA-I2); with a reason (D7: running from the disk image) it is that reason's notice.
+ *
+ * `refusal` is `sync_status.engine_refusal` (must-render row 9, FT-I5). When the engine start was
+ * refused, the reconciler's re-add fails as `unknown`, whose sentence names the wrong cause; so a
+ * `failed` + `unknown` with a refusal says the refusal's sentence. Its action stays Try again (the
+ * retry re-identifies the session), except for `engine_stop_unconfirmed`, which has no action because
+ * only quitting and reopening Beebeeb helps. Every other state ignores the refusal.
  */
-export function finderSetupPresentation(view: FinderSetupView | null): FinderSetupPresentation {
+export function finderSetupPresentation(view: FinderSetupView | null, refusal: EngineRefusal | null = null): FinderSetupPresentation {
   if (!view) return { kind: 'quiet', line: '' }
   if (view.setup === 'ready') return { kind: 'ready', line: FINDER_READY_LINE }
   if (view.setup === 'adding') return { kind: 'adding', line: FINDER_ADDING_LINE }
   const reason: FinderFailureReason | null =
     view.setup === 'user_disabled' ? 'user_disabled' : view.setup === 'failed' ? (view.reason ?? 'unknown') : view.reason
   if (!reason) return { kind: 'resting', line: FINDER_RESTING_LINE }
+  if (view.setup === 'failed' && reason === 'unknown' && refusal) {
+    const relaunchOnly = refusal.code === 'engine_stop_unconfirmed'
+    return {
+      kind: 'notice',
+      tone: 'alert',
+      reason,
+      sentence: refusal.sentence,
+      action: relaunchOnly ? null : 'try_again',
+      actionLabel: relaunchOnly ? null : FINDER_ACTION_LABEL.try_again,
+    }
+  }
   const copy = FINDER_REASON_COPY[reason]
   return {
     kind: 'notice',
@@ -167,11 +186,11 @@ export function finderSetupPresentation(view: FinderSetupView | null): FinderSet
 }
 
 /** The presentation of a load that may not have succeeded (lead ruling 7a: never "Adding"). */
-export function finderSetupLoadPresentation(load: FinderSetupLoad): FinderSetupPresentation {
+export function finderSetupLoadPresentation(load: FinderSetupLoad, refusal: EngineRefusal | null = null): FinderSetupPresentation {
   if (load.status === 'unavailable') {
     return { kind: 'unavailable', line: FINDER_UNAVAILABLE_LINE, actionLabel: FINDER_ACTION_LABEL.try_again }
   }
-  return finderSetupPresentation(load.status === 'loaded' ? load.view : null)
+  return finderSetupPresentation(load.status === 'loaded' ? load.view : null, refusal)
 }
 
 /**

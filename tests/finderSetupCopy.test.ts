@@ -29,6 +29,7 @@ import {
   type FinderSetupAction,
 } from '../src/finderSetupCopy'
 import { finderHint } from '../src/macSettingsModel'
+import { rustStr } from './fixtures/rustConstants'
 
 const view = (over: Partial<FinderSetupView> = {}): FinderSetupView => ({
   setup: 'missing',
@@ -173,6 +174,59 @@ describe('a loaded Missing is a quiet row (FA-I2)', () => {
 
   test('it has no pill', () => {
     expect(finderStatusPill({ status: 'loaded', view: view({ setup: 'missing' }) })).toBeNull()
+  })
+})
+
+/**
+ * Must-render row 9 (FT-I5): when the engine start was refused, the reconciler's re-add fails as
+ * `unknown`, and "Beebeeb couldn’t be added to Finder." names the wrong cause. A `failed` + `unknown`
+ * with a refusal present says the refusal's sentence instead. The action stays Try again (Lane R's
+ * retry re-identifies), except for `engine_stop_unconfirmed`, where only quitting and reopening helps,
+ * so there is no action. One test per code.
+ */
+describe('an engine refusal replaces the generic unknown sentence (row 9)', () => {
+  const refusal = (code: 'identity_unknown' | 'other_account_on_windows' | 'engine_stop_unconfirmed', file = 'account_binding.rs') => ({
+    code,
+    sentence: rustStr(file, code.toUpperCase()),
+  })
+  const unknownFailure = view({ setup: 'failed', reason: 'unknown' })
+
+  test('identity_unknown: its sentence, and Try again', () => {
+    const r = refusal('identity_unknown')
+    expect(finderSetupPresentation(unknownFailure, r)).toEqual({
+      kind: 'notice', tone: 'alert', reason: 'unknown', sentence: r.sentence, action: 'try_again', actionLabel: 'Try again',
+    })
+  })
+
+  test('other_account_on_windows: its sentence, and Try again', () => {
+    const r = refusal('other_account_on_windows')
+    expect(finderSetupPresentation(unknownFailure, r)).toEqual({
+      kind: 'notice', tone: 'alert', reason: 'unknown', sentence: r.sentence, action: 'try_again', actionLabel: 'Try again',
+    })
+  })
+
+  test('engine_stop_unconfirmed: its sentence, and no action (only a relaunch helps)', () => {
+    const r = refusal('engine_stop_unconfirmed')
+    expect(finderSetupPresentation(unknownFailure, r)).toEqual({
+      kind: 'notice', tone: 'alert', reason: 'unknown', sentence: r.sentence, action: null, actionLabel: null,
+    })
+  })
+
+  test('a failure with no reason is unknown too, so the refusal applies', () => {
+    expect(finderSetupPresentation(view({ setup: 'failed', reason: null }), refusal('identity_unknown'))).toMatchObject({ sentence: refusal('identity_unknown').sentence })
+  })
+
+  test('any other reason or state keeps its own presentation', () => {
+    const r = refusal('identity_unknown')
+    for (const v of [view({ setup: 'failed', reason: 'timeout' }), view({ setup: 'adding' }), view({ setup: 'ready' }), view({ setup: 'missing' }), view({ setup: 'user_disabled', reason: 'user_disabled' })]) {
+      expect(finderSetupPresentation(v, r)).toEqual(finderSetupPresentation(v))
+    }
+  })
+
+  test('the load presentation passes the refusal through, and the pill stays the notice\'s', () => {
+    const r = refusal('engine_stop_unconfirmed')
+    expect(finderSetupLoadPresentation({ status: 'loaded', view: unknownFailure }, r)).toEqual(finderSetupPresentation(unknownFailure, r))
+    expect(finderStatusPill({ status: 'loaded', view: unknownFailure })).toEqual({ label: 'Setup blocked', tone: 'error' })
   })
 })
 

@@ -1049,7 +1049,8 @@ function MacFinderIntegrationPanel() {
           }}
         >
           <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{presentation.sentence}</span>
-          <PrimaryBtn onClick={() => void finder.run(presentation.action)}>{presentation.actionLabel}</PrimaryBtn>
+          {/* No action for an unconfirmed engine stop: only a relaunch helps (row 9). */}
+          {presentation.action && <PrimaryBtn onClick={() => void finder.run(presentation.action!)}>{presentation.actionLabel}</PrimaryBtn>}
         </div>
       )}
     </SettingsSectionShell>

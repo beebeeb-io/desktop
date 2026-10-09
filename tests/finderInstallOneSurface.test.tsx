@@ -244,11 +244,11 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
   const INSTALL_ERA = ['install_finder_location', 'finder_location_state', 'continue_without_finder_location', 'finder_domain_user_enabled']
 
   /** `platform: 'fails'` is a desktop_platform that rejects; `caps` is the capability snapshot's host OS. */
-  function macBackend(over: { view?: unknown; platform?: string } = {}) {
+  function macBackend(over: { view?: unknown; platform?: string; refusal?: unknown } = {}) {
     const { view = finderView(), platform = 'macos' } = over
     return {
       desktop_platform: () => { if (platform === 'fails') throw new Error('desktop_platform is down'); return platform },
-      sync_status: () => ({ logged_in: true, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }),
+      sync_status: () => ({ logged_in: true, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: over.refusal ?? null }),
       finder_setup_state: () => { if (view instanceof Error) throw view; return view },
       finder_setup_retry: () => undefined,
       open_finder_location: () => undefined,
@@ -256,7 +256,7 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
       reset_macos_integration: () => ({ pending_operations_preserved: 0, removed_cache_files: 0, warnings: [] }),
     }
   }
-  async function openMac(over: { view?: unknown; platform?: string } = {}, caps: string | null = 'macos') {
+  async function openMac(over: { view?: unknown; platform?: string; refusal?: unknown } = {}, caps: string | null = 'macos') {
     const { m, bus } = mountSyncFolder(macBackend(over), { caps, extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
     await settle(m)
     return { m, bus }
@@ -313,6 +313,14 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
     expect(btns(m).filter((b) => b === 'Try again')).toHaveLength(1)
     expect(m.toasts).toEqual([])
     expect(m.elements().filter((el) => el.props['data-error-surface'] === 'finder-setup').map((el) => el.props.role)).toEqual(['alert'])
+  })
+
+  // Must-render row 9: an engine refusal on a failed + unknown is the notice's sentence.
+  test('engine_stop_unconfirmed: the refusal\'s sentence in the one alert, and no Try again', async () => {
+    const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+    const { m } = await openMac({ view: finderView({ setup: 'failed', reason: 'unknown' }), refusal: { code: 'engine_stop_unconfirmed', sentence } })
+    expect(visibleErrorSurfaces(m)).toEqual([`inline: ${sentence}`])
+    expect(btns(m)).not.toContain('Try again')
   })
 
   test('a failure notice\'s Try again asks the reconciler (finder_setup_retry) and does not re-read the state', async () => {
@@ -511,6 +519,7 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
         expand: true,
         backend: {
           finder_setup_state: () => { if (view instanceof Error) throw view; return view },
+          sync_status: () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: null }),
           finder_setup_retry: () => undefined,
           open_login_items_and_extensions_settings: () => undefined,
           ...over,
@@ -535,6 +544,14 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
       expect(btns(m).filter((b) => b === 'Try again')).toHaveLength(1)
       expect(m.toasts).toEqual([])
       expect(m.elements().filter((el) => el.props['data-error-surface'] === 'finder-setup').map((el) => el.props.role)).toEqual(['alert'])
+    })
+
+    test('engine_stop_unconfirmed: the refusal\'s sentence in the one alert, and no Try again (row 9)', async () => {
+      const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+      const refused = () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: { code: 'engine_stop_unconfirmed', sentence } })
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'unknown' }), { sync_status: refused })
+      expect(visibleErrorSurfaces(m)).toEqual([`inline: ${sentence}`])
+      expect(btns(m)).toEqual([])
     })
 
     test('a failure notice\'s Try again asks the reconciler (finder_setup_retry) and does not re-read the state', async () => {

@@ -281,11 +281,13 @@ export default function SyncFolder() {
           style={{ marginBottom: 14 }}
         >
           <div>{macPresentation.sentence}</div>
-          <div className="button-row" style={{ marginTop: 10 }}>
-            <button className="button" onClick={() => void runFinderAction(macPresentation.action)} disabled={busy}>
-              {macPresentation.actionLabel}
-            </button>
-          </div>
+          {macPresentation.action ? (
+            <div className="button-row" style={{ marginTop: 10 }}>
+              <button className="button" onClick={() => void runFinderAction(macPresentation.action!)} disabled={busy}>
+                {macPresentation.actionLabel}
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
       {/* Adding, and a loaded Missing (FA-I2: its one resting sentence, no action), are neutral lines. */}

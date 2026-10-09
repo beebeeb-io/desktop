@@ -85,6 +85,7 @@ function openMacStep(initial: FinderSetupView | 'unreadable', backend: Record<st
         FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
         commandUnavailableLabel: desktopApi.commandUnavailableLabel,
         subscribeFinderSetup: bus.subscribeFinderSetup,
+        loadEngineRefusal: desktopApi.loadEngineRefusal,
       },
     }],
     bindings: { Card, FINDER_SETUP_TITLE: copy.FINDER_SETUP_TITLE },
@@ -118,6 +119,18 @@ describe('Onboarding Finder step on macOS', () => {
     expect(s.done()).toBe(1)
     await s.settle()
     expect(s.done()).toBe(1)
+  })
+
+  // Must-render row 9: a failed + unknown with an engine refusal says the refusal's sentence.
+  test('an engine refusal on a failed + unknown is the notice; engine_stop_unconfirmed has no button', async () => {
+    const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+    const s = openMacStep(failedView('unknown'), {
+      sync_status: () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: { code: 'engine_stop_unconfirmed', sentence } }),
+    })
+    await s.settle()
+    expect(notices(s.m)).toHaveLength(1)
+    expect(textOf(notices(s.m)[0].props.children)).toContain(sentence)
+    expect(buttons(s.m)).toEqual([])
   })
 
   test('a Ready that is already there when the step opens advances too', async () => {

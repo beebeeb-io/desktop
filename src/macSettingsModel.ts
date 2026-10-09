@@ -9,7 +9,7 @@
  * The window itself (`MacSettings.tsx`) is mounted only at `?window=settings-v2&platform=macos`
  * until slice 6 flips macOS to it; nothing rendered today imports this file.
  */
-import type { Subscription, VaultItem } from './desktopApi'
+import type { EngineRefusal, Subscription, VaultItem } from './desktopApi'
 import type { FinderFailureReason, FinderSetupView } from './finderSetup'
 import {
   FINDER_ADDING_LINE,
@@ -95,7 +95,15 @@ export type FinderRow =
   /** A loaded `Missing` (FA-I2): its one sentence, no button, no activity. */
   | { kind: 'resting' }
   | { kind: 'added' }
-  | { kind: 'notice'; tone: 'alert' | 'status'; reason: FinderFailureReason; sentence: string; action: FinderSetupAction; actionLabel: string }
+  | {
+      kind: 'notice'
+      tone: 'alert' | 'status'
+      reason: FinderFailureReason
+      sentence: string
+      /** `null` for an unconfirmed engine stop: only a relaunch helps (must-render row 9). */
+      action: FinderSetupAction | null
+      actionLabel: string | null
+    }
 
 /**
  * One row, one reconciler state (spec 2026-10-06). `loadFailed` is a LOAD failure (the state could
@@ -104,10 +112,11 @@ export type FinderRow =
  * amended, lead ruling FA-I2): a quiet row with one sentence and no button, never "Adding", and there
  * is no "missing" row with an add button (R5). The sentence and the action of a notice come from
  * `finderSetupCopy` (one sentence, one action per reason); the raw error never reaches this row.
+ * `refusal` (`sync_status.engine_refusal`) turns a `failed` + `unknown` into the refusal's sentence.
  */
-export function finderRow(view: FinderSetupView | null, loadFailed = false): FinderRow {
+export function finderRow(view: FinderSetupView | null, loadFailed = false, refusal: EngineRefusal | null = null): FinderRow {
   if (view === null) return loadFailed ? { kind: 'unavailable' } : { kind: 'loading' }
-  const presentation = finderSetupPresentation(view)
+  const presentation = finderSetupPresentation(view, refusal)
   switch (presentation.kind) {
     case 'ready':
       return { kind: 'added' }

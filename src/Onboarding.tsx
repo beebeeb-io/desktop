@@ -616,14 +616,16 @@ function MacFinderStep({ onDone }: { onDone: () => void }) {
 
   // Two different "Try again"s, never crossed (lead rulings 7a / c5). A failure notice asks the
   // reconciler to check again (`run`); the unreadable state has nothing to ask yet, so its one
-  // action only reads the state again (`retry`).
+  // action only reads the state again (`retry`). A notice with no action (an unconfirmed engine
+  // stop: only a relaunch helps, row 9) is its sentence alone.
+  const noticeAction = presentation.kind === 'notice' ? presentation.action : null
   const notice =
     presentation.kind === 'notice'
       ? {
           tone: presentation.tone,
           sentence: presentation.sentence,
           actionLabel: presentation.actionLabel,
-          send: () => finder.run(presentation.action),
+          send: noticeAction ? () => finder.run(noticeAction) : null,
         }
       : presentation.kind === 'unavailable'
         ? { tone: 'alert' as const, sentence: presentation.line, actionLabel: presentation.actionLabel, send: () => finder.retry() }
@@ -639,11 +641,13 @@ function MacFinderStep({ onDone }: { onDone: () => void }) {
           style={{ marginTop: 16 }}
         >
           <div>{notice.sentence}</div>
-          <div className="button-row" style={{ marginTop: 10 }}>
-            <button className="button" onClick={() => void act(notice.send)} disabled={busy}>
-              {notice.actionLabel}
-            </button>
-          </div>
+          {notice.send ? (
+            <div className="button-row" style={{ marginTop: 10 }}>
+              <button className="button" onClick={() => void act(notice.send!)} disabled={busy}>
+                {notice.actionLabel}
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : presentation.kind === 'adding' || presentation.kind === 'ready' ? (
         // Only what the reconciler said. Before its first answer, and while it rests in Missing (the

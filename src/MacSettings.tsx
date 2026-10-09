@@ -592,7 +592,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setTree((current) => (current === null ? current : withPinned(current, id, pinned)))
   }
 
-  const row = finderRow(finder.load.status === 'loaded' ? finder.load.view : null, finder.load.status === 'unavailable')
+  const row = finderRow(finder.load.status === 'loaded' ? finder.load.view : null, finder.load.status === 'unavailable', finder.refusal)
   const keep = keepOnMac(tree, treeLoadFailed)
   const config = settings.state.status === 'ready' ? settings.state.config : null
 
@@ -657,7 +657,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             kind={row.tone}
             surface="finder-setup"
             reason={row.tone === 'alert' ? monoReason(row.reason) : null}
-            actions={<Btn onClick={() => void finder.run(row.action)}>{row.actionLabel}</Btn>}
+            actions={row.action ? <Btn onClick={() => void finder.run(row.action!)}>{row.actionLabel}</Btn> : null}
           >
             {row.sentence}
           </Note>
