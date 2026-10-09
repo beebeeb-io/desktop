@@ -19171,7 +19171,10 @@ mod finder_setup_wiring_tests {
                         number + 1
                     );
                     assert!(
-                        line.contains(".run(") || line.contains(".run_sync(") || line.contains(".run_waiting("),
+                        line.contains(".run(")
+                            || line.contains(".run_sync(")
+                            || line.contains(".run_waiting(")
+                            || line.contains(".run_sync_waiting("),
                         "{name}:{}: a bridge call that does not take the gate: {line}",
                         number + 1
                     );
