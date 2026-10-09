@@ -384,6 +384,41 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         case directoryNotEmpty
     }
 
+    /// What a create or modify the app accepted hands back to the system.
+    struct QueuedWriteCompletion {
+        let item: NSFileProviderItem?
+        let shouldFetchContent: Bool
+    }
+
+    /// The completion for a create or modify the app answered with
+    /// `WriteQueued`. `shouldFetchContent` is false in every branch.
+    ///
+    /// Apple's contract (`NSFileProviderReplicatedExtension.h`, createItem and
+    /// modifyItem): a provider sets `shouldFetchContent` when the content
+    /// described by the returned item does NOT match the contents the system
+    /// handed over; the system then fetches the provider's content and writes
+    /// it to disk. The app uploads exactly the bytes the system handed over,
+    /// so there is never anything to fetch. Setting it made the system fetch
+    /// the server's previous version and write it over the user's edit, and
+    /// after a create fetch an identifier the server never knew (a 404).
+    ///
+    /// - Queued with an item: the item, as the app describes it.
+    /// - Ignored (a temporary Finder item the app does not sync): no item.
+    ///   Unchanged behaviour; nothing was queued, so there is nothing to fetch.
+    /// - Queued but no item (the app could not read the row back, a rare
+    ///   race): no item, as before. For a modify, Apple treats a nil item as
+    ///   "delete the item on disk"; that is the existing behaviour, not
+    ///   changed here.
+    static func queuedWriteCompletion(_ result: WriteQueueResult) -> QueuedWriteCompletion {
+        if result.ignored {
+            return QueuedWriteCompletion(item: nil, shouldFetchContent: false)
+        }
+        if let model = result.item {
+            return QueuedWriteCompletion(item: FileProviderItem(model: model), shouldFetchContent: false)
+        }
+        return QueuedWriteCompletion(item: nil, shouldFetchContent: false)
+    }
+
     /// The server trash / permanent-delete path for one item. The DAEMON
     /// decides the outcome: an unknown item is an idempotent `Ignored`
     /// (ruling: "unknown items report success"), a known item queues the
@@ -436,13 +471,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 contentsURL: url,
                 contentType: kind == .file ? contentType?.identifier : nil
             )
-            if result.ignored {
-                completionHandler(nil, [], false, nil)
-            } else if let model = result.item {
-                completionHandler(FileProviderItem(model: model), [], true, nil)
-            } else {
-                completionHandler(nil, [], true, nil)
-            }
+            let completion = Self.queuedWriteCompletion(result)
+            completionHandler(completion.item, [], completion.shouldFetchContent, nil)
             signalErrorResolvedIfPending()
         } catch {
             noteFailure(error)
@@ -497,13 +527,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 baseVersionIdentifier: Self.versionIdentifier(version),
                 changedFields: changedFields
             )
-            if result.ignored {
-                completionHandler(nil, [], false, nil)
-            } else if let model = result.item {
-                completionHandler(FileProviderItem(model: model), [], true, nil)
-            } else {
-                completionHandler(nil, [], true, nil)
-            }
+            let completion = Self.queuedWriteCompletion(result)
+            completionHandler(completion.item, [], completion.shouldFetchContent, nil)
             signalErrorResolvedIfPending()
         } catch {
             noteFailure(error)

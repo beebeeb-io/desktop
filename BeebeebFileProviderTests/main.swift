@@ -1755,5 +1755,33 @@ check("upload-staging-S6: a package or any other non-regular item is refused bef
     }
 }
 
+// MARK: - A queued write never asks the system to fetch its own bytes back
+
+// Apple's createItem/modifyItem contract: `shouldFetchContent` is for a
+// provider that CHANGED the content; the system then fetches the provider's
+// copy and writes it over the file on disk. The app uploads exactly the
+// system's bytes, so asking for a fetch made the system write the server's
+// previous version over the user's edit (and, after a create, fetch an
+// identifier the server never knew).
+check("a queued create or modify never asks the system to re-fetch its own bytes") {
+    let queued = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: item1697(capabilities: BeebeebProviderItem.read), ignored: false, message: "queued")
+    )
+    try expect(!queued.shouldFetchContent, "a queued write with an item must complete with shouldFetchContent false")
+    try expect(queued.item?.itemIdentifier.rawValue == "1697-item", "the item the app returned must be handed to the system")
+
+    let noItem = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: false, message: "queued")
+    )
+    try expect(!noItem.shouldFetchContent, "a queued write without an item has nothing to fetch")
+    try expect(noItem.item == nil, "no item from the app means no item for the system")
+
+    let ignored = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: true, message: "ignored temporary item")
+    )
+    try expect(!ignored.shouldFetchContent, "an ignored temporary item is never fetched")
+    try expect(ignored.item == nil, "an ignored item returns no item")
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)
