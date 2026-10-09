@@ -3,6 +3,8 @@
 #import <dispatch/dispatch.h>
 #include <dirent.h>
 #include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -13,22 +15,84 @@ static NSString *BeebeebDomainIdentifier = @"io.beebeeb.app.domain";
 // "Drive" while the system showed "Beebeeb"). Which side wins on an existing
 // registration is device-verifiable only (addDomain updates the stored
 // domain); the registered truth is now the app's own name.
+//
+// Correction — 2026-10-06 (spec docs/specs/2026-10-06-macos-finder-setup-reconciler.md §2):
+// the forensics line above read the ZOMBIE's name. "Beebeeb" was the display name of the
+// orphan `io.beebeeb.desktop.FileProvider` domain, whose folder is
+// ~/Library/CloudStorage/Beebeeb-Beebeeb. Renaming ours to "Beebeeb" made ours ask for that
+// same folder, and every add then failed with the folder collision. The name stays "Beebeeb"
+// (the orphan is cleared by spec §11's one-off helper); this note keeps the wrong claim visible.
 static NSString *BeebeebDomainDisplayName = @"Beebeeb";
 
-static void BeebeebCopyMessage(NSString *message, char *buffer, unsigned long buffer_len) {
+// Spec 2026-10-06 §6.1: every failure crosses the FFI as (domain, code, message) plus the
+// NSUnderlyingErrorKey error's domain and code (the folder collision may arrive as an
+// underlying POSIX EEXIST). Mirrored by `BeebeebFpErrorC` in src-tauri/src/macos_file_provider.rs.
+typedef struct {
+    int64_t code;
+    int64_t underlying_code;
+    int32_t has_underlying;
+    char domain[128];
+    char underlying_domain[128];
+    char message[1024];
+} BeebeebFpError;
+
+// Layout pins. The Rust side asserts the same numbers at compile time, and its
+// `bridge_error_tests` compare the exported `beebeeb_fp_test_error_*` values at runtime.
+_Static_assert(sizeof(BeebeebFpError) == 1304, "BeebeebFpError changed: update BeebeebFpErrorC in macos_file_provider.rs");
+_Static_assert(_Alignof(BeebeebFpError) == 8, "BeebeebFpError alignment changed: update BeebeebFpErrorC");
+_Static_assert(offsetof(BeebeebFpError, code) == 0, "BeebeebFpError.code moved");
+_Static_assert(offsetof(BeebeebFpError, underlying_code) == 8, "BeebeebFpError.underlying_code moved");
+_Static_assert(offsetof(BeebeebFpError, has_underlying) == 16, "BeebeebFpError.has_underlying moved");
+_Static_assert(offsetof(BeebeebFpError, domain) == 20, "BeebeebFpError.domain moved");
+_Static_assert(offsetof(BeebeebFpError, underlying_domain) == 148, "BeebeebFpError.underlying_domain moved");
+_Static_assert(offsetof(BeebeebFpError, message) == 276, "BeebeebFpError.message moved");
+
+// Errors this bridge synthesizes when no NSError exists. Codes mirrored by
+// `finder_setup::error::bridge_code` in Rust; `beebeeb_fp_test_bridge_codes` exports them so a
+// Rust test pins the two sets against each other.
+static NSString *const BeebeebBridgeErrorDomain = @"io.beebeeb.bridge";
+enum {
+    BeebeebBridgeManagerUnavailable = 1,
+    BeebeebBridgeStabilizationTimeout = 2,
+    BeebeebBridgeResolveUrlTimeout = 3,
+    BeebeebBridgeSignalTimeout = 4,
+    BeebeebBridgeNoIdentifier = 5,
+};
+
+// Every write into a caller's buffer goes through here: bounded by the buffer's own length and
+// always NUL-terminated (strlcpy copies at most buffer_len - 1 bytes, then terminates).
+static void BeebeebCopyString(NSString *value, char *buffer, size_t buffer_len) {
     if (buffer == NULL || buffer_len == 0) {
         return;
     }
-    const char *utf8 = [message UTF8String];
-    strlcpy(buffer, utf8 ?: "unknown File Provider error", buffer_len);
+    const char *utf8 = [value UTF8String];
+    strlcpy(buffer, utf8 ?: "", buffer_len);
 }
 
-static void BeebeebCopyError(NSError *error, char *buffer, unsigned long buffer_len) {
-    NSString *message = [NSString stringWithFormat:@"%@ (%@ %ld)",
-                                                   error.localizedDescription ?: @"unknown File Provider error",
-                                                   error.domain ?: @"unknown-domain",
-                                                   (long)error.code];
-    BeebeebCopyMessage(message, buffer, buffer_len);
+static void BeebeebFillError(NSError *error, BeebeebFpError *out) {
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->code = (int64_t)error.code;
+    BeebeebCopyString(error.domain ?: @"unknown-domain", out->domain, sizeof(out->domain));
+    BeebeebCopyString(error.localizedDescription ?: @"unknown File Provider error", out->message, sizeof(out->message));
+    NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+    if ([underlying isKindOfClass:[NSError class]]) {
+        out->has_underlying = 1;
+        out->underlying_code = (int64_t)underlying.code;
+        BeebeebCopyString(underlying.domain ?: @"unknown-domain", out->underlying_domain, sizeof(out->underlying_domain));
+    }
+}
+
+static void BeebeebFillBridgeError(int64_t code, NSString *message, BeebeebFpError *out) {
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->code = code;
+    BeebeebCopyString(BeebeebBridgeErrorDomain, out->domain, sizeof(out->domain));
+    BeebeebCopyString(message, out->message, sizeof(out->message));
 }
 
 static NSFileProviderDomain *BeebeebDomain(void) {
@@ -44,35 +108,53 @@ static NSFileProviderDomain *BeebeebDomain(void) {
     return domain;
 }
 
-static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain,
-                                     double timeout_seconds,
-                                     char *error_buffer,
-                                     unsigned long error_buffer_len) {
-    NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:domain];
-    if (manager == nil) {
-        BeebeebCopyMessage(@"File Provider manager is unavailable for the Beebeeb domain",
-                           error_buffer,
-                           error_buffer_len);
+// The system's live registry. Returns 0 and fills `*found` (nil when not registered), or -1.
+static int BeebeebFindOurDomain(NSFileProviderDomain **found, BeebeebFpError *out_error) {
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSArray<NSFileProviderDomain *> *found_domains = nil;
+    __block NSError *found_error = nil;
+    [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
+        found_domains = domains;
+        found_error = error;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    if (found_error != nil) {
+        BeebeebFillError(found_error, out_error);
         return -1;
     }
+    *found = nil;
+    for (NSFileProviderDomain *domain in found_domains) {
+        if ([domain.identifier isEqualToString:BeebeebDomainIdentifier]) {
+            *found = domain;
+            break;
+        }
+    }
+    return 0;
+}
 
+static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain, double timeout_seconds, BeebeebFpError *out_error) {
+    NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:domain];
+    if (manager == nil) {
+        BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable,
+                               @"File Provider manager is unavailable for the Beebeeb domain", out_error);
+        return -1;
+    }
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block NSError *found_error = nil;
     [manager waitForStabilizationWithCompletionHandler:^(NSError *error) {
         found_error = error;
         dispatch_semaphore_signal(semaphore);
     }];
-
     int64_t timeout_nanos = (int64_t)(timeout_seconds * (double)NSEC_PER_SEC);
     long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, timeout_nanos));
     if (wait_result != 0) {
-        BeebeebCopyMessage(@"Timed out waiting for the Beebeeb File Provider domain to become available",
-                           error_buffer,
-                           error_buffer_len);
+        BeebeebFillBridgeError(BeebeebBridgeStabilizationTimeout,
+                               @"Timed out waiting for the Beebeeb File Provider domain to become available", out_error);
         return -1;
     }
     if (found_error != nil) {
-        BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+        BeebeebFillError(found_error, out_error);
         return -1;
     }
     return 0;
@@ -157,14 +239,13 @@ static int BeebeebKeptFolderState(NSURL *location) {
 // `src-tauri/src/finder_removal.rs` pins every removal in the repo to this mode.
 //
 // Returns: 0 = removed (`kept_state` says what the reported folder holds; `location_buffer` holds
-// its path whenever it has one); -1 = error (`error_buffer` set; `kept_state` and
-// `location_buffer` are still filled, review M2).
+// its path whenever it has one); -1 = error (`out_error` set, spec 2026-10-06 §6.1; `kept_state`
+// and `location_buffer` are still filled, review M2).
 static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
                                               char *location_buffer,
                                               unsigned long location_buffer_len,
                                               int *kept_state,
-                                              char *error_buffer,
-                                              unsigned long error_buffer_len) {
+                                              BeebeebFpError *out_error) {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block NSURL *found_location = nil;
     __block NSError *found_error = nil;
@@ -189,10 +270,10 @@ static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
     }
     NSString *path = found_location.path;
     if (path.length > 0) {
-        BeebeebCopyMessage(path, location_buffer, location_buffer_len);
+        BeebeebCopyString(path, location_buffer, location_buffer_len);
     }
     if (found_error != nil) {
-        BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+        BeebeebFillError(found_error, out_error);
         return -1;
     }
     return 0;
@@ -211,72 +292,14 @@ int beebeeb_fp_kept_folder_state_for_path(const char *path) {
     }
 }
 
-static int BeebeebDomainExists(BOOL *exists, char *error_buffer, unsigned long error_buffer_len) {
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    __block NSArray<NSFileProviderDomain *> *found_domains = nil;
-    __block NSError *found_error = nil;
-
-    [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
-        found_domains = domains;
-        found_error = error;
-        dispatch_semaphore_signal(semaphore);
-    }];
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-    if (found_error != nil) {
-        BeebeebCopyError(found_error, error_buffer, error_buffer_len);
-        return -1;
-    }
-
-    *exists = NO;
-    for (NSFileProviderDomain *domain in found_domains) {
-        if ([domain.identifier isEqualToString:BeebeebDomainIdentifier]) {
-            *exists = YES;
-            break;
-        }
-    }
-    return 0;
-}
-
-int beebeeb_fp_status(char *error_buffer, unsigned long error_buffer_len) {
-    @autoreleasepool {
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        __block NSArray<NSFileProviderDomain *> *found_domains = nil;
-        __block NSError *found_error = nil;
-
-        [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
-            found_domains = domains;
-            found_error = error;
-            dispatch_semaphore_signal(semaphore);
-        }];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-        if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
-            return -1;
-        }
-        for (NSFileProviderDomain *domain in found_domains) {
-            if ([domain.identifier isEqualToString:BeebeebDomainIdentifier]) {
-                if (BeebeebWaitForDomainReady(domain, 2.0, error_buffer, error_buffer_len) != 0) {
-                    return -1;
-                }
-                return 1;
-            }
-        }
-        return 0;
-    }
-}
-
-int beebeeb_fp_visible_url(char *url_buffer, unsigned long url_buffer_len, char *error_buffer, unsigned long error_buffer_len) {
+int beebeeb_fp_visible_url(char *url_buffer, unsigned long url_buffer_len, BeebeebFpError *out_error) {
     @autoreleasepool {
         NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
         if (manager == nil) {
-            BeebeebCopyMessage(@"File Provider manager is unavailable for the Beebeeb domain",
-                               error_buffer,
-                               error_buffer_len);
+            BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable,
+                                   @"File Provider manager is unavailable for the Beebeeb domain", out_error);
             return -1;
         }
-
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         __block NSURL *found_url = nil;
         __block NSError *found_error = nil;
@@ -286,149 +309,95 @@ int beebeeb_fp_visible_url(char *url_buffer, unsigned long url_buffer_len, char 
             found_error = error;
             dispatch_semaphore_signal(semaphore);
         }];
-
         long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
         if (wait_result != 0) {
-            BeebeebCopyMessage(@"Timed out resolving the Beebeeb Finder location",
-                               error_buffer,
-                               error_buffer_len);
+            BeebeebFillBridgeError(BeebeebBridgeResolveUrlTimeout, @"Timed out resolving the Beebeeb Finder location", out_error);
             return -1;
         }
         if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            BeebeebFillError(found_error, out_error);
             return -1;
         }
         if (found_url == nil) {
             return 0;
         }
-        BeebeebCopyMessage(found_url.path ?: found_url.absoluteString, url_buffer, url_buffer_len);
+        BeebeebCopyString(found_url.path ?: found_url.absoluteString, url_buffer, url_buffer_len);
         return 1;
     }
 }
 
-// Issue 4 (task 1524, 2026-09-28): `addDomain` replies success even when the domain
-// already exists and the USER has disabled it in System Settings -> General -> Login
-// Items & Extensions -> File Providers. A user-disabled domain never launches its
-// extension, so the old single monolithic `beebeeb_fp_install` (addDomain, then
-// unconditionally `waitForStabilizationWithCompletionHandler`) always burned the full
-// 10s timeout and reported a generic, misleading "Timed out waiting..." error in that
-// case -- nothing timed out, the user (or macOS) turned the extension off.
-//
-// `beebeeb_fp_install` is now decomposed into the small primitives below so the
-// install decision (wait for stabilization vs. short-circuit with a distinct
-// "user disabled" result) is made in Rust, where it is unit-testable as a pure
-// function (`macos_file_provider::decide_install_step`) instead of being buried
-// inside this Objective-C orchestration. This file now only exposes dumb,
-// synchronous-blocking FFI primitives that mirror the existing style of
-// `beebeeb_fp_status`/`beebeeb_fp_visible_url`/`beebeeb_fp_remove`.
-
-// Returns: 1 = domain exists, 0 = domain does not exist, -1 = lookup error (error_buffer set).
-int beebeeb_fp_domain_exists(char *error_buffer, unsigned long error_buffer_len) {
-    @autoreleasepool {
-        BOOL exists = NO;
-        if (BeebeebDomainExists(&exists, error_buffer, error_buffer_len) != 0) {
-            return -1;
-        }
-        return exists ? 1 : 0;
-    }
-}
+// Issue 4 (task 1524): `addDomain` replies success even when the domain already exists and the
+// USER has disabled it in System Settings, and a user-disabled domain never launches its
+// extension, so a wait for stabilization would burn its full timeout. The install decision
+// therefore lives in Rust; this file exposes dumb, synchronous-blocking primitives. Since spec
+// 2026-10-06 the decision is the Finder reconciler (src-tauri/src/finder_setup/core.rs).
 
 // Returns: 1 = userEnabled == YES, 0 = userEnabled == NO, 2 = domain not registered,
-// -1 = lookup error (error_buffer set).
-int beebeeb_fp_domain_user_enabled(char *error_buffer, unsigned long error_buffer_len) {
+// -1 = lookup error (out_error set). `userEnabled` has shipped since macOS 11.0, below this
+// bridge's 14.0 deployment target (`-mmacosx-version-min=14.0` in src-tauri/build.rs).
+int beebeeb_fp_domain_user_enabled(BeebeebFpError *out_error) {
     @autoreleasepool {
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        __block NSArray<NSFileProviderDomain *> *found_domains = nil;
-        __block NSError *found_error = nil;
-
-        [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
-            found_domains = domains;
-            found_error = error;
-            dispatch_semaphore_signal(semaphore);
-        }];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-        if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+        NSFileProviderDomain *ours = nil;
+        if (BeebeebFindOurDomain(&ours, out_error) != 0) {
             return -1;
         }
-
-        for (NSFileProviderDomain *domain in found_domains) {
-            if ([domain.identifier isEqualToString:BeebeebDomainIdentifier]) {
-                // `userEnabled` has shipped since macOS 11.0
-                // (FILEPROVIDER_API_AVAILABILITY_V3_IOS == API_AVAILABLE(macos(11.0),
-                // ios(16.0)), confirmed against this SDK's FileProvider.framework
-                // NSFileProviderDomain.h), well below this bridge's own macOS 14.0
-                // minimum deployment target (`-mmacosx-version-min=14.0` in
-                // src-tauri/build.rs) -- no `@available` guard is needed to read it here.
-                return domain.userEnabled ? 1 : 0;
-            }
+        if (ours == nil) {
+            return 2;
         }
-        return 2;
+        return ours.userEnabled ? 1 : 0;
     }
 }
 
-// Calls `+[NSFileProviderManager addDomain:completionHandler:]` only -- does not wait
-// for stabilization. Returns: 0 = success, -1 = error (error_buffer set).
-int beebeeb_fp_add_domain(char *error_buffer, unsigned long error_buffer_len) {
+// `+[NSFileProviderManager addDomain:completionHandler:]` only; does not wait for
+// stabilization. Returns: 0 = success, -1 = error (out_error set).
+int beebeeb_fp_add_domain(BeebeebFpError *out_error) {
     @autoreleasepool {
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         __block NSError *found_error = nil;
-
         [NSFileProviderManager addDomain:BeebeebDomain() completionHandler:^(NSError *error) {
             found_error = error;
             dispatch_semaphore_signal(semaphore);
         }];
         dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
         if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            BeebeebFillError(found_error, out_error);
             return -1;
         }
         return 0;
     }
 }
 
-// Waits up to `timeout_seconds` for the Beebeeb domain to stabilize. Returns: 0 =
-// success, -1 = timeout or error (error_buffer set, see BeebeebWaitForDomainReady).
-int beebeeb_fp_wait_for_domain_ready(double timeout_seconds, char *error_buffer, unsigned long error_buffer_len) {
+// Returns: 0 = stable, -1 = timeout or error (out_error set).
+int beebeeb_fp_wait_for_domain_ready(double timeout_seconds, BeebeebFpError *out_error) {
     @autoreleasepool {
-        return BeebeebWaitForDomainReady(BeebeebDomain(), timeout_seconds, error_buffer, error_buffer_len);
+        return BeebeebWaitForDomainReady(BeebeebDomain(), timeout_seconds, out_error);
     }
 }
 
 // Returns: 0 = removed (`kept_state` and `location_buffer` say what was kept), -1 = error
-// (`error_buffer` set). See BeebeebRemoveDomainKeepingUnsynced.
+// (`out_error` set). See BeebeebRemoveDomainKeepingUnsynced.
 int beebeeb_fp_remove(char *location_buffer,
                       unsigned long location_buffer_len,
                       int *kept_state,
-                      char *error_buffer,
-                      unsigned long error_buffer_len) {
+                      BeebeebFpError *out_error) {
     @autoreleasepool {
         return BeebeebRemoveDomainKeepingUnsynced(BeebeebDomain(),
                                                   location_buffer,
                                                   location_buffer_len,
                                                   kept_state,
-                                                  error_buffer,
-                                                  error_buffer_len);
+                                                  out_error);
     }
 }
 
-// Task 1697: signal the replica's WORKING SET after the daemon applied an
-// operation batch. Under NSFileProviderReplicatedExtension the working set is
-// the ONLY container whose signal the system honors (Mgr.h: "the system will
-// ignore any other container"); the extension's enumerator then pulls the
-// daemon's change log via ListChanges. Returns: 0 = signaled (or domain not
-// registered yet — nothing to signal), -1 = error (error_buffer set).
-int beebeeb_fp_signal_working_set(char *error_buffer, unsigned long error_buffer_len) {
+// Task 1697: signal the replica's WORKING SET after the daemon applied an operation batch. Under
+// NSFileProviderReplicatedExtension the working set is the ONLY container whose signal the
+// system honors; the extension's enumerator then pulls the daemon's change log via ListChanges.
+// Returns: 0 = signaled (or domain not registered yet — nothing to signal), -1 = error.
+int beebeeb_fp_signal_working_set(BeebeebFpError *out_error) {
     @autoreleasepool {
         NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
         if (manager == nil) {
-            // The domain is not (yet) registered: nothing to signal is not a
-            // failure — the sync engine must keep running.
-            BeebeebCopyMessage(@"File Provider manager is unavailable for the Beebeeb domain",
-                               error_buffer,
-                               error_buffer_len);
+            // Not registered: nothing to signal is not a failure; the engine keeps running.
             return 0;
         }
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -441,44 +410,34 @@ int beebeeb_fp_signal_working_set(char *error_buffer, unsigned long error_buffer
         // Bounded wait: signaling is best-effort UI refresh, never sync state.
         long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
         if (wait_result != 0) {
-            BeebeebCopyMessage(@"Timed out signaling the Beebeeb File Provider working set",
-                               error_buffer,
-                               error_buffer_len);
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out signaling the Beebeeb File Provider working set", out_error);
             return -1;
         }
         if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            BeebeebFillError(found_error, out_error);
             return -1;
         }
         return 0;
     }
 }
 
-// Task 1698 part 3 (closes 1696 / audit G8): enumerate EVERY registered
-// File Provider domain identifier so the (signed) app can sweep the zombie
-// domains left by earlier bundle ids. The identifiers are returned
-// newline-separated in `ids_buffer`; the return value is the domain count,
-// or -1 on error (error_buffer set). Requires app identity: an unsigned CLI
-// context gets -2001 through here as a normal -1 error.
-int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len,
-                            char *error_buffer, unsigned long error_buffer_len) {
+// Task 1698 part 3: every registered identifier of THIS provider, newline-separated.
+// Returns the count, or -1 (out_error set).
+int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len, BeebeebFpError *out_error) {
     @autoreleasepool {
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         __block NSArray<NSFileProviderDomain *> *found_domains = nil;
         __block NSError *found_error = nil;
-
         [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
             found_domains = domains;
             found_error = error;
             dispatch_semaphore_signal(semaphore);
         }];
         dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
         if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+            BeebeebFillError(found_error, out_error);
             return -1;
         }
-
         NSMutableString *joined = [NSMutableString string];
         for (NSFileProviderDomain *domain in found_domains) {
             if (joined.length > 0) {
@@ -486,35 +445,94 @@ int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len,
             }
             [joined appendString:domain.identifier ?: @""];
         }
-        BeebeebCopyMessage(joined, ids_buffer, ids_buffer_len);
+        BeebeebCopyString(joined, ids_buffer, ids_buffer_len);
         return (int)found_domains.count;
     }
 }
 
-// Task 1698 part 3: remove ONE domain by identifier (the sweep's per-domain
-// primitive — the Rust side owns the filtering decision and never passes our
-// own identifier here). Task 1882: it keeps un-synced files like every removal.
-// Returns: 0 = removed (or already gone; `kept_state` and `location_buffer`
-// say what was kept), -1 = error (error_buffer set).
+// Task 1698 part 3: remove ONE domain by identifier. Task 1882: it keeps un-synced files like
+// every removal. Returns 0 = removed (or already gone; `kept_state` and `location_buffer` say what
+// was kept), -1 (out_error set).
 int beebeeb_fp_remove_domain_by_id(const char *identifier,
                                    char *location_buffer,
                                    unsigned long location_buffer_len,
                                    int *kept_state,
-                                   char *error_buffer,
-                                   unsigned long error_buffer_len) {
+                                   BeebeebFpError *out_error) {
     @autoreleasepool {
         if (identifier == NULL) {
-            BeebeebCopyMessage(@"no domain identifier given", error_buffer, error_buffer_len);
+            BeebeebFillBridgeError(BeebeebBridgeNoIdentifier, @"no domain identifier given", out_error);
             return -1;
         }
         NSString *domain_id = [NSString stringWithUTF8String:identifier];
-        NSFileProviderDomain *domain = [[NSFileProviderDomain alloc] initWithIdentifier:domain_id
-                                                                            displayName:domain_id];
+        NSFileProviderDomain *domain = [[NSFileProviderDomain alloc] initWithIdentifier:domain_id displayName:domain_id];
         return BeebeebRemoveDomainKeepingUnsynced(domain,
                                                   location_buffer,
                                                   location_buffer_len,
                                                   kept_state,
-                                                  error_buffer,
-                                                  error_buffer_len);
+                                                  out_error);
     }
+}
+
+// ── Test hooks (spec §13.1 "Bridge") ─────────────────────────────────────────
+// Called only from Rust tests in macos_file_provider.rs. They touch no system service.
+//
+// Build a real NSError (with an underlying error when `underlying_domain` is non-NULL) and
+// run it through the SAME BeebeebFillError every call above uses.
+void beebeeb_fp_test_fill_error(const char *domain, int64_t code, const char *message,
+                                const char *underlying_domain, int64_t underlying_code,
+                                BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSMutableDictionary *info = [NSMutableDictionary dictionary];
+        info[NSLocalizedDescriptionKey] = [NSString stringWithUTF8String:message ?: ""];
+        if (underlying_domain != NULL) {
+            info[NSUnderlyingErrorKey] = [NSError errorWithDomain:[NSString stringWithUTF8String:underlying_domain]
+                                                             code:(NSInteger)underlying_code
+                                                         userInfo:nil];
+        }
+        NSError *error = [NSError errorWithDomain:[NSString stringWithUTF8String:domain ?: ""]
+                                             code:(NSInteger)code
+                                         userInfo:info];
+        BeebeebFillError(error, out_error);
+    }
+}
+
+void beebeeb_fp_test_fill_bridge_error(int64_t code, const char *message, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        BeebeebFillBridgeError(code, [NSString stringWithUTF8String:message ?: ""], out_error);
+    }
+}
+
+unsigned long beebeeb_fp_test_error_size(void) {
+    return sizeof(BeebeebFpError);
+}
+
+unsigned long beebeeb_fp_test_error_align(void) {
+    return _Alignof(BeebeebFpError);
+}
+
+// `out` holds 6 values: the offsets of code, underlying_code, has_underlying, domain,
+// underlying_domain, message, in declaration order.
+void beebeeb_fp_test_error_offsets(unsigned long *out) {
+    if (out == NULL) {
+        return;
+    }
+    out[0] = offsetof(BeebeebFpError, code);
+    out[1] = offsetof(BeebeebFpError, underlying_code);
+    out[2] = offsetof(BeebeebFpError, has_underlying);
+    out[3] = offsetof(BeebeebFpError, domain);
+    out[4] = offsetof(BeebeebFpError, underlying_domain);
+    out[5] = offsetof(BeebeebFpError, message);
+}
+
+// `out` holds 5 values: ManagerUnavailable, StabilizationTimeout, ResolveUrlTimeout,
+// SignalTimeout, NoIdentifier.
+void beebeeb_fp_test_bridge_codes(int64_t *out) {
+    if (out == NULL) {
+        return;
+    }
+    out[0] = BeebeebBridgeManagerUnavailable;
+    out[1] = BeebeebBridgeStabilizationTimeout;
+    out[2] = BeebeebBridgeResolveUrlTimeout;
+    out[3] = BeebeebBridgeSignalTimeout;
+    out[4] = BeebeebBridgeNoIdentifier;
 }

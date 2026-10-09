@@ -17,6 +17,7 @@ use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
 mod account;
+mod account_binding;
 mod account_dto;
 mod api_client;
 mod browser_login;
@@ -24,12 +25,20 @@ mod browser_login;
 mod callback_gate;
 mod config;
 mod conflict;
+mod desktop_capabilities;
 mod desktop_search;
 mod diagnostic_redaction;
-mod desktop_capabilities;
 mod engine_bridge;
 mod engine_status;
 mod finder_removal;
+// Spec 2026-10-06 (macOS Finder setup reconciler). Only macOS runs the reconciler; on
+// Windows/Linux these types exist for `AppState` and the commands.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod finder_setup;
+// Spec 2026-10-06 §8, the lifecycle log. Only macOS writes it (the same lifetime as
+// `finder_setup`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod lifecycle_log;
 #[cfg(test)]
 #[path = "../tests/support/bridge.rs"]
 mod native_parity_tests;
@@ -60,21 +69,31 @@ mod linux_fuse {
     #[path = "inode_map.rs"]
     pub mod inode_map;
 }
+mod link_health;
 mod lockfile;
 #[cfg(target_os = "macos")]
 mod macos_file_provider;
-mod link_health;
 mod popover_data;
+// Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
+// an account switch. Windows keeps its refusal while a session exists and never asks.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+mod reauth;
 mod runner;
-mod state_db;
-mod transfer_progress;
 mod staged_payload;
+mod state_db;
+mod state_paths;
+mod transfer_progress;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
 // so dead-code is allowed for the module (remove the allow when slice 6 lands).
 #[allow(dead_code)]
 mod surfaces;
-mod state_paths;
+// Per-process scratch dirs so unit tests never touch the person's real config or cache.
+#[cfg(test)]
+mod test_sandbox;
+// Layout-independent comparison of source text, for the tests that pin the code by reading it.
+#[cfg(test)]
+mod source_pin;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
 // `QueueFinderCreate`; the macOS File Provider extension drives that over the
@@ -239,6 +258,9 @@ pub struct AppState {
     /// `set_zoom` but not a readback API, so the menu owns this small bit of
     /// process state.
     pub menu_zoom_scale: Mutex<f64>,
+    /// The macOS Finder reconciler (spec 2026-10-06). Set once in `setup()` on macOS; empty on
+    /// Windows/Linux and in tests that install none.
+    pub finder_setup: std::sync::OnceLock<finder_setup::driver::FinderSetupHandle>,
 }
 
 impl AppState {
@@ -264,9 +286,10 @@ impl AppState {
         }
         let active_id = self.active_account_id.lock().ok().and_then(|g| g.clone());
         if let Some(id) = active_id
-            && let Some(found) = accounts.iter().find(|a| a.id == id) {
-                return Ok(found.clone());
-            }
+            && let Some(found) = accounts.iter().find(|a| a.id == id)
+        {
+            return Ok(found.clone());
+        }
         // Fallback: first registered account (the only one in Phase 0).
         Ok(accounts[0].clone())
     }
@@ -280,6 +303,7 @@ impl Default for AppState {
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             menu_zoom_scale: Mutex::new(1.0),
+            finder_setup: std::sync::OnceLock::new(),
         }
     }
 }
@@ -305,43 +329,255 @@ fn clear_cached_profile(state: &AppState) {
     }
 }
 
+/// One lock for everything that writes or clears a session (Task 11; Task 12 lead ruling 1): the Keychain items, the
+/// session in memory with the flags that mirror it, and the owner record a session writes. Every session transition
+/// takes its turn under it: [`claim_session_write`] checks, under this lock, that no other transition of the account
+/// happened since the writer's own transition began, and moves the account's [`account::SessionGeneration`] on; Lock and
+/// Sign-out move it on under it too ([`end_sessions_in_flight`], [`finish_sign_out_turn`]). Held only across synchronous
+/// work, never across an `.await` (clippy's `await_holding_lock` checks it). While a turn writes `state.db` or the
+/// Keychain, another transition that needs the lock waits for that I/O (up to the database's busy timeout). A poisoned
+/// lock is recovered: it guards no data, only the order.
+static SESSION_KEYCHAIN_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_session_keychain_writes() -> std::sync::MutexGuard<'static, ()> {
+    SESSION_KEYCHAIN_WRITES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Proof that the holder has the session-write lock for a session transition that is still current. In production only
+/// [`claim_session_write`], [`check_session_turn`], [`end_sessions_in_flight`] and [`finish_sign_out_turn`] make one,
+/// and every writer of a session (the Keychain items, and the functions that install, replace or name the session in
+/// memory) takes one, so none of them can write outside a checked turn. Dropping it ends the turn. The one clear that
+/// takes the engine-slot guard instead, [`clear_session_holding_slot`] (Lock and Sign-out), ends every transition in
+/// flight first and then clears outside this lock on purpose: `bump_vault_epoch` must never wait under it.
+struct SessionWrite {
+    _writes: std::sync::MutexGuard<'static, ()>,
+}
+
+impl fmt::Debug for SessionWrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SessionWrite")
+    }
+}
+
+#[cfg(test)]
+impl SessionWrite {
+    /// Tests only: the lock without a generation check, to seed the in-memory Keychain the way an earlier sign-in left
+    /// it. Used as a temporary, so the lock is released at the end of the statement.
+    fn for_test() -> Self {
+        Self {
+            _writes: lock_session_keychain_writes(),
+        }
+    }
+}
+
+/// What a sign-in says when another session transition (a Sign-out, another sign-in) happened while it worked, so it
+/// saved nothing.
+const SESSION_CHANGED_WHILE_WAITING: &str =
+    "Something changed on this computer while Beebeeb was working; nothing was saved. Try again.";
+
+/// What a sign-in says when a Lock happened while it worked (Task 12 fix round 1, item 8).
+const SIGN_IN_LOCKED_MEANWHILE: &str = "Beebeeb was locked while signing in. Sign in again.";
+
+/// What the recovery-phrase unlock says when a Lock happened while the phrase was being checked (a Lock keeps the person
+/// signed in, so the phrase is all that is asked again).
+const RECOVERY_UNLOCK_LOCKED_MEANWHILE: &str =
+    "Beebeeb was locked while the recovery phrase was being checked, so nothing was saved. Enter the phrase once more.";
+
+/// What the Keychain unlock says when a Lock or a Sign-out happened while it unlocked (after a Sign-out there is nothing
+/// left to unlock, so the advice is the neutral one; Task 12 fix round 2, item 5).
+const KEYCHAIN_UNLOCK_INTERRUPTED: &str = "Beebeeb was signed out or locked while unlocking. Try again.";
+
+/// A transition's turn was refused: another session transition happened since it began. Each path says why in its own
+/// words (one distinct sentence per path, so the frontend can tell them apart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionChanged {
+    by_lock: bool,
+}
+
+impl SessionChanged {
+    /// What moved `acct`'s generation last, as a refusal.
+    fn of(acct: &AccountRuntime) -> Self {
+        Self {
+            by_lock: acct.last_session_transition() == account::SessionTransition::Lock,
+        }
+    }
+
+    fn sign_in_sentence(self) -> &'static str {
+        if self.by_lock {
+            SIGN_IN_LOCKED_MEANWHILE
+        } else {
+            SESSION_CHANGED_WHILE_WAITING
+        }
+    }
+
+    fn recovery_unlock_sentence(self) -> &'static str {
+        if self.by_lock {
+            RECOVERY_UNLOCK_LOCKED_MEANWHILE
+        } else {
+            UNLOCK_ACCOUNT_CHANGED
+        }
+    }
+
+    fn keychain_unlock_sentence(self) -> &'static str {
+        KEYCHAIN_UNLOCK_INTERRUPTED
+    }
+}
+
+/// A sign-in's refusal, by default.
+impl From<SessionChanged> for String {
+    fn from(changed: SessionChanged) -> Self {
+        changed.sign_in_sentence().to_string()
+    }
+}
+
+/// Take the turn of the session transition that captured `turn` (Task 12, lead ruling 1): the session-write lock and,
+/// on macOS and Linux, a refusal when any other transition of `acct` happened since (a Lock or a Sign-out, or another
+/// sign-in that wrote first). On success the generation moves on and `turn` follows it, so the same transition's next
+/// write passes and every OLDER transition is refused from now on. Windows orders its transitions with
+/// `SESSION_TRANSITION` and its attempt fences and never refuses here; its generation still moves.
+fn claim_session_write(
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+) -> Result<SessionWrite, SessionChanged> {
+    let write = check_session_turn(acct, turn)?;
+    *turn = acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::Write);
+    Ok(write)
+}
+
+/// The same check as [`claim_session_write`] without moving the generation on: for a write that changes nothing a
+/// sign-in decides on (a cached profile), or that moves it only when it turns out to change something (the naming of a
+/// session, Task 12 fix round 1 item 5). The caller moves it on, holding the returned turn, when it does.
+fn check_session_turn(
+    acct: &AccountRuntime,
+    turn: &account::SessionGeneration,
+) -> Result<SessionWrite, SessionChanged> {
+    let writes = lock_session_keychain_writes();
+    #[cfg(not(target_os = "windows"))]
+    if !acct.session_unchanged_since(*turn) {
+        tracing::info!("a session transition wrote nothing: another one happened since it began");
+        return Err(SessionChanged::of(acct));
+    }
+    #[cfg(target_os = "windows")]
+    let _ = turn;
+    Ok(SessionWrite { _writes: writes })
+}
+
+/// Lock and Sign-out (`by`): every session transition that began before this call is refused from now on (it can no
+/// longer pass [`claim_session_write`]). Always succeeds. The caller clears under the returned turn, or drops it at once.
+fn end_sessions_in_flight(acct: &AccountRuntime, by: account::SessionTransition) -> SessionWrite {
+    let writes = lock_session_keychain_writes();
+    acct.advance_session_generation_holding_session_write_lock(by);
+    SessionWrite { _writes: writes }
+}
+
+/// Sign-out's last turn on macOS and Linux (Task 12 fix round 1, item 2): under the session-write lock, clear the
+/// Keychain (both layouts), check that nothing of the account is left, clear memory once more (an unlock that began after
+/// the sign-out's earlier memory clear may have put a session there), and only THEN move the generation on, before the
+/// lock is released. So a transition that began before this point is refused at its next check, and one that begins
+/// after it finds nothing to unlock. The caller still holds the engine slot (`_engine_slot`), so no start can read keys
+/// in between. `best_effort`: the already-signed-out path, where a store that cannot answer is not a failure. The
+/// generation moves whatever the result.
+#[cfg(not(target_os = "windows"))]
+fn finish_sign_out_turn(
+    acct: &AccountRuntime,
+    _engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
+    best_effort: bool,
+) -> Result<(), String> {
+    let (result, cleared_keys) = {
+        let write = SessionWrite {
+            _writes: lock_session_keychain_writes(),
+        };
+        let result = match clear_keychain_session_holding(&write, acct.id.as_str()) {
+            Err(error) if best_effort => {
+                tracing::warn!(%error, "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing");
+                Ok(())
+            }
+            cleared => cleared,
+        };
+        let result = result.and_then(|()| ensure_keychain_holds_no_account(acct.id.as_str()));
+        let cleared_keys = match acct.session.lock() {
+            Ok(mut guard) => guard.take().is_some(),
+            Err(poisoned) => {
+                let cleared = poisoned.into_inner().take().is_some();
+                acct.session.clear_poison();
+                cleared
+            }
+        };
+        acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::SignOut);
+        drop(write);
+        (result, cleared_keys)
+    };
+    if cleared_keys {
+        tracing::warn!("sign-out cleared a session that was put in memory while it ran");
+        bump_vault_epoch();
+    }
+    result
+}
+
+/// Store a new session's token and vault key, with the email that goes with them (see
+/// [`forget_account_email_in_keychain`]: the email kept for the session before is removed first). Only inside a checked
+/// turn (`_write`).
 fn persist_session_to_keychain(
+    _write: &SessionWrite,
     account_id: &str,
     token: &str,
-    master_key: [u8; 32],
+    master_key: &[u8; 32],
     email: Option<&str>,
 ) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store_for(account_id));
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
+    forget_account_email_in_keychain(account_id)?;
     vault
         .install_session(token)
         .map_err(|e| keychain_error("store session in Keychain", e))?;
     vault
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))?;
-    // Persist the account email alongside the secrets so the Account page can
-    // show it after an auto-unlock on relaunch. Non-fatal (see helper): the email
-    // is display metadata, so a store that can't hold it never fails the login.
-    // Empty/None → skip.
+    // The session's own email, after its secrets: the Account page shows it after an auto-unlock on relaunch, and
+    // the restore knows the stored session by it. None/empty (a sign-in that could not fetch the account record)
+    // writes nothing, so the stored session has no email and stays unidentified until a fetch names it.
     persist_account_email_to_keychain(&vault, email)
 }
 
-fn persist_session_token_to_keychain(account_id: &str, token: &str, email: Option<&str>) -> Result<(), String> {
+/// Store a new session's token (its vault key comes later, from the recovery phrase), with the email that goes with
+/// it (see [`forget_account_email_in_keychain`]). Only inside a checked turn (`_write`).
+fn persist_session_token_to_keychain(
+    _write: &SessionWrite,
+    account_id: &str,
+    token: &str,
+    email: Option<&str>,
+) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store_for(account_id));
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
+    forget_account_email_in_keychain(account_id)?;
     vault
         .install_session(token)
         .map_err(|e| keychain_error("store session in Keychain", e))?;
     persist_account_email_to_keychain(&vault, email)
 }
 
+/// Remove the account email the Keychain kept for the session stored before. Every write of a new session token
+/// calls this BEFORE it stores the token, and writes the new session's own email (if it has one) after: the restore
+/// knows a stored session by that email, so the Keychain must never hold one account's token or key next to another
+/// account's email, not even when a later step of the write fails. A removal that fails fails the write, as a token
+/// that cannot be stored does; an email that is not there is no failure.
+fn forget_account_email_in_keychain(account_id: &str) -> Result<(), String> {
+    use keychain::AuthSecretStore as _;
+    platform_keychain_store_for(account_id)
+        .delete_account_email()
+        .map_err(|e| keychain_error("remove the previous account email from Keychain", e))
+}
+
 /// Store the account email in the credential vault if one is provided.
 ///
-/// Always returns `Ok(())`: the email is display metadata (it lets the Account
-/// page show who is signed in after an auto-unlock), NOT key material required
-/// to authenticate or unlock. A store that can't hold it must never fail an
-/// otherwise-successful login — so a persist error is logged and swallowed
-/// rather than surfaced. `None`/empty is a no-op.
+/// Always returns `Ok(())`: a store that can't hold the email must never fail an otherwise-successful login, so a
+/// persist error is logged and swallowed rather than surfaced. That is safe because the writers of a new session
+/// remove the previous email first ([`forget_account_email_in_keychain`]): a failed write leaves NO email, and the
+/// restore then treats the session as unidentified (no engine until a fetch names it) rather than as another
+/// account. The email shows on the Account page after an auto-unlock and is what the restore knows the session by.
+/// `None`/empty writes nothing.
 fn persist_account_email_to_keychain(
     vault: &AuthVault<keychain::PlatformKeychainStore>,
     email: Option<&str>,
@@ -355,7 +591,9 @@ fn persist_account_email_to_keychain(
     Ok(())
 }
 
-fn persist_vault_key_to_keychain(account_id: &str, master_key: [u8; 32]) -> Result<(), String> {
+/// Store the vault key the recovery phrase proved. Only inside a checked turn (`_write`). The key is borrowed: no copy of
+/// it is made here but the one the store wipes (`SecretBytes`).
+fn persist_vault_key_to_keychain(_write: &SessionWrite, account_id: &str, master_key: &[u8; 32]) -> Result<(), String> {
     AuthVault::new(platform_keychain_store_for(account_id))
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))
@@ -421,7 +659,8 @@ fn load_session_from_vault<S: keychain::AuthSecretStore>(
     vault
         .unlock()
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;
-    let mut master_key = [0u8; 32];
+    // Wiped when this function returns (Task 12 fix round 1, item 10): the one copy that outlives it is the session's.
+    let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
     master_key.copy_from_slice(vault.master_key().map_err(|e| keychain_error("read vault key", e))?);
     // Prefer an email already known in memory (e.g. carried through from a live
     // unlock). Otherwise recover the one persisted in the credential vault so the
@@ -436,7 +675,7 @@ fn load_session_from_vault<S: keychain::AuthSecretStore>(
     };
     Ok(Some(Session {
         token: token.expose_for_request().to_string(),
-        master_key,
+        master_key: *master_key,
         email,
     }))
 }
@@ -458,7 +697,18 @@ fn keychain_session_present(account_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+// Windows' sign-out and startup discard; on macOS and Linux the sign-out clears inside its last turn
+// (`clear_keychain_session_holding`), and only tests call this.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn clear_keychain_session(account_id: &str) -> Result<(), String> {
+    let writes = SessionWrite {
+        _writes: lock_session_keychain_writes(),
+    };
+    clear_keychain_session_holding(&writes, account_id)
+}
+
+/// [`clear_keychain_session`] inside a turn the caller already holds (the sign-out's last turn).
+fn clear_keychain_session_holding(_write: &SessionWrite, account_id: &str) -> Result<(), String> {
     // Clear the id-segmented trio (the live layout post-migration).
     let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
     vault
@@ -473,6 +723,34 @@ fn clear_keychain_session(account_id: &str) -> Result<(), String> {
         .clear_session()
         .map_err(|e| keychain_error("clear legacy Keychain session", e))
 }
+
+/// R8: a startup 401 drops only the rejected token, in the id-keyed and the legacy store. The vault key and the email
+/// stay, so the same account signs in again without its recovery phrase. Only inside a checked turn (`_write`), so a
+/// newer session's token is never the one removed.
+#[cfg(not(target_os = "windows"))]
+fn clear_keychain_session_token(_write: &SessionWrite, account_id: &str) -> Result<(), String> {
+    AuthVault::new(platform_keychain_store_for(account_id))
+        .clear_session_token()
+        .map_err(|e| keychain_error("clear Keychain session token", e))?;
+    AuthVault::new(keychain::legacy_platform_keychain_store())
+        .clear_session_token()
+        .map_err(|e| keychain_error("clear legacy Keychain session token", e))
+}
+
+/// A startup 401 keeps the vault key and the email (R9), so a sign-out (and with it "Sign out and switch") must leave
+/// none of the account's items for the next one: no token, no vault key, no email, in either layout. An item that cannot
+/// be read counts as still there (fail closed); a store that cannot hold secrets has nothing to leave.
+#[cfg(not(target_os = "windows"))]
+fn ensure_keychain_holds_no_account(account_id: &str) -> Result<(), String> {
+    if keychain_session_trace(account_id) || keychain_vault_key_present(account_id) || keychain_email_trace(account_id)
+    {
+        return Err(SIGN_OUT_KEYCHAIN_NOT_CLEARED.to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+const SIGN_OUT_KEYCHAIN_NOT_CLEARED: &str = "Sign-out paused: Beebeeb couldn’t remove the previous account’s keys from this computer. Try again; if it keeps happening, restart Beebeeb.";
 
 /// Read the segmented keychain account-email credential WITHOUT unlocking
 /// (email is metadata, not key material — no lock-state gate). `None` on
@@ -533,6 +811,28 @@ fn persist_last_signed_in_email(email: Option<String>) {
     }
 }
 
+/// What a sign-out that is an account switch says when it could not forget the previous account's email. Nothing was
+/// torn down, so trying again is safe.
+const SIGN_OUT_EMAIL_NOT_FORGOTTEN: &str = "Sign-out paused: Beebeeb couldn’t remove the previous account’s email from this computer. Try again; if it keeps happening, restart Beebeeb.";
+
+/// An account switch's sign-out (spec §5.6: "The switch leaves no vault key and no account email behind, or it
+/// stops"): forget the sign-in prefill (`last_signed_in_email`, which a sign-out and a startup 401 keep) before anything
+/// is torn down. Unlike [`persist_last_signed_in_email`] this is not best-effort: a `desktop.toml` that cannot be read
+/// or written stops the switch. An email that is not there is written nothing.
+fn forget_last_signed_in_email() -> Result<(), String> {
+    let mut cfg = DesktopConfig::load().map_err(|error| {
+        tracing::warn!(%error, "account switch: desktop.toml could not be read to forget the previous email");
+        SIGN_OUT_EMAIL_NOT_FORGOTTEN.to_string()
+    })?;
+    if cfg.last_signed_in_email.take().is_some() {
+        cfg.save().map_err(|error| {
+            tracing::warn!(%error, "account switch: desktop.toml could not be written to forget the previous email");
+            SIGN_OUT_EMAIL_NOT_FORGOTTEN.to_string()
+        })?;
+    }
+    Ok(())
+}
+
 /// Result of the one bounded startup session probe (`GET /api/v1/auth/me`).
 ///
 /// The classification is deliberately three-valued: only a DEFINITIVE HTTP
@@ -541,8 +841,11 @@ fn persist_last_signed_in_email(email: Option<String>) {
 /// and must fail OPEN (offline users must never be logged out by startup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StartupSessionCheck {
-    /// `GET /auth/me` answered 2xx — the stored token is valid.
-    Authorized,
+    /// `GET /auth/me` answered 2xx — the stored token is valid. `profile` is the account the server named in that
+    /// answer (`None` when the body could not be read: still authorized, only the profile is missing).
+    Authorized {
+        profile: Option<account_dto::AccountProfile>,
+    },
     /// `GET /auth/me` answered exactly 401 — the stored token is definitively
     /// rejected; the session may be discarded (auto sign-out).
     Unauthorized,
@@ -568,9 +871,7 @@ async fn probe_startup_session(base_url: &str, token: &str) -> StartupSessionChe
         Ok(client) => client,
         Err(error) => return StartupSessionCheck::Inconclusive(format!("client build: {error}")),
     };
-    let request = client
-        .get(format!("{base_url}/api/v1/auth/me"))
-        .bearer_auth(token);
+    let request = client.get(format!("{base_url}/api/v1/auth/me")).bearer_auth(token);
     let response = match tokio::time::timeout(std::time::Duration::from_secs(5), request.send()).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return StartupSessionCheck::Inconclusive(format!("network error: {error}")),
@@ -578,7 +879,16 @@ async fn probe_startup_session(base_url: &str, token: &str) -> StartupSessionChe
     };
     match response.status() {
         reqwest::StatusCode::UNAUTHORIZED => StartupSessionCheck::Unauthorized,
-        status if status.is_success() => StartupSessionCheck::Authorized,
+        status if status.is_success() => {
+            let profile = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                response.json::<account_dto::AccountProfile>(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok);
+            StartupSessionCheck::Authorized { profile }
+        }
         status => StartupSessionCheck::Inconclusive(format!("HTTP {status}")),
     }
 }
@@ -597,11 +907,8 @@ async fn probe_startup_session(base_url: &str, token: &str) -> StartupSessionChe
 /// Best-effort on the keychain clear: a store that cannot answer (the Linux
 /// fail-closed stub) must not panic startup — log and continue, the flags
 /// still route the app to signed-out.
-fn discard_unusable_startup_session(
-    state: &AppState,
-    acct: &crate::account::AccountRuntime,
-    email: Option<String>,
-) {
+#[cfg(target_os = "windows")]
+fn discard_unusable_startup_session(state: &AppState, acct: &crate::account::AccountRuntime, email: Option<String>) {
     tracing::info!(
         account_id = acct.id.as_str(),
         "stored session token was rejected by the server (HTTP 401) at startup; \
@@ -617,6 +924,34 @@ fn discard_unusable_startup_session(
             %error,
             "could not clear the server-rejected keychain session trio at startup (best-effort)"
         );
+    }
+    set_auth_present(state, false);
+    set_auth_email(state, None);
+}
+
+/// R8 (spec 2026-10-06): the server rejected the stored token at startup. Drop only that token, keep the vault key and
+/// the email, and boot signed out. The next sign-in as the same account swaps in a new token and needs no recovery
+/// phrase (`reauth_in_place`). Beebeeb stays in Finder (this is not a sign-out by choice). Another account goes through
+/// the switch: full sign-out first. Inside the restore's own turn (`turn`): when another session transition happened
+/// while the probe waited (a sign-in may have stored a new token since), nothing is removed and no flag changes.
+#[cfg(not(target_os = "windows"))]
+fn discard_unusable_startup_session(
+    state: &AppState,
+    acct: &crate::account::AccountRuntime,
+    email: Option<String>,
+    turn: &mut account::SessionGeneration,
+) {
+    let Ok(write) = claim_session_write(acct, turn) else {
+        tracing::info!("the server rejected the stored token at startup, but the session changed since; left as it is");
+        return;
+    };
+    tracing::info!(
+        account_id = acct.id.as_str(),
+        "stored session token was rejected by the server (HTTP 401) at startup; dropping the token, keeping the keys (R8)"
+    );
+    persist_last_signed_in_email(email.or_else(|| signout_email_to_preserve(acct)));
+    if let Err(error) = clear_keychain_session_token(&write, acct.id.as_str()) {
+        tracing::warn!(%error, "could not clear the server-rejected session token at startup (best-effort)");
     }
     set_auth_present(state, false);
     set_auth_email(state, None);
@@ -656,6 +991,15 @@ fn discard_unusable_startup_session(
 /// `NotFound`) is logged at `warn!` instead — it is unexpected but must still
 /// not block startup, since onboarding can recover.
 async fn restore_session_on_startup(app: &tauri::AppHandle) {
+    restore_session_inner(app).await;
+    // Whichever way the restore returned (refused on Windows, no account, a session already installed, nothing in
+    // the Keychain, a revoked token, ...), the upgrade's one-time adoption window is over. The restore adopts on
+    // what it loaded before it gets here; this closes the window on every path that did not.
+    adopt_unbound_local_data_at_startup(None);
+}
+
+/// The startup restore proper (see [`restore_session_on_startup`], which shuts the adoption window after it).
+async fn restore_session_inner(app: &tauri::AppHandle) {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -669,20 +1013,70 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
         tracing::warn!("no active account during startup restore");
         return;
     };
-
-    // Don't clobber a session already installed this run (e.g. a fresh login
-    // that landed before this startup task ran).
-    if acct.session.lock().map(|g| g.is_some()).unwrap_or(false) {
+    if !restore_stored_session(&state, &acct, &runner::api_base_url()).await {
         return;
+    }
+    // Windows keeps today's rule: a restored session with no email is named by the server before the engine start.
+    #[cfg(target_os = "windows")]
+    if acct
+        .session
+        .lock()
+        .map(|guard| guard.as_ref().is_some_and(|session| session.email.is_none()))
+        .unwrap_or(false)
+    {
+        establish_session_identity(&state, &acct, &runner::api_base_url(), None).await;
+    }
+    if let Err(error) = start_engine_if_possible(
+        app.clone(),
+        &state,
+        #[cfg(target_os = "windows")]
+        &_transition,
+    )
+    .await
+    {
+        tracing::warn!(%error, "startup engine refused");
+    }
+    // macOS and Linux (fix round 1, item 7): a restored session the probe could not name asks the server once more in
+    // the background, through the account's single flight, and its engine start follows a successful naming. The
+    // start above never waits for it.
+    #[cfg(not(target_os = "windows"))]
+    tauri::async_runtime::spawn(identify_then_start(app.clone(), IdentifyPace::Now));
+}
+
+/// Everything the startup restore does before its engine start, against the server at `base_url` (production passes
+/// [`runner::api_base_url`]; a test passes a loopback stand-in): read the Keychain, offer the upgrade's adoption what
+/// it read, ask the server whether the stored token still works, and put the session in memory. Returns whether a
+/// session is in memory now, so the caller starts an engine for it.
+async fn restore_stored_session(state: &AppState, acct: &AccountRuntime, base_url: &str) -> bool {
+    // This restore is one session transition (lead ruling 1, Task 12): its generation is captured before anything is
+    // read, and every write below happens in its turn. A Lock, a Sign-out or a sign-in that completes while the probe
+    // waits ends the turn, and the restore then writes nothing, installs nothing and asks for no engine.
+    let mut turn = acct.session_generation();
+    // Don't clobber a session already installed this run (e.g. a fresh login
+    // that landed before this startup task ran). The upgrade's adoption window is over either way.
+    if acct.session.lock().map(|g| g.is_some()).unwrap_or(false) {
+        adopt_unbound_local_data_at_startup(None);
+        return false;
     }
 
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-    let session = match load_session_from_keychain(acct.id.as_str(), email) {
+    let loaded = load_session_from_keychain(acct.id.as_str(), email);
+    // R10: local data from before the account binding is adopted, once, by the account whose vault key this
+    // computer holds, before the probe and before anything can start. With no vault key nobody is adopted and
+    // the window shuts all the same. In this restore's turn: what was read is still what is stored.
+    {
+        let Ok(_write) = claim_session_write(acct, &mut turn) else {
+            adopt_unbound_local_data_at_startup(None);
+            return false;
+        };
+        adopt_unbound_local_data_at_startup(startup_adoption_candidate(&loaded).as_ref());
+    }
+    let session = match loaded {
         // Both token + master key present → vault is unlocked; resume.
         Ok(Some(session)) => session,
         // No stored session TOKEN at all (never signed in / logged out).
         // Leave onboarding to prompt for sign-in. Not an error.
-        Ok(None) => return,
+        Ok(None) => return false,
         Err(error) => {
             // The token IS present but `unlock()` failed. Two very different cases:
             //   1. Key genuinely ABSENT — `AuthStoreError::NotFound` (Display:
@@ -697,7 +1091,7 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
             } else {
                 tracing::warn!(%error, "credential-store error while attempting auto-unlock at startup");
             }
-            return;
+            return false;
         }
     };
 
@@ -710,54 +1104,63 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
     // fails OPEN — keep the session and current behavior; an offline user
     // must never be logged out by startup. Still inside the spawned startup
     // task: setup() is never blocked by this.
-    match probe_startup_session(&runner::api_base_url(), &session.token).await {
+    let probed = match probe_startup_session(base_url, &session.token).await {
         StartupSessionCheck::Unauthorized => {
-            discard_unusable_startup_session(&state, &acct, session.email.clone());
-            return;
+            #[cfg(not(target_os = "windows"))]
+            discard_unusable_startup_session(state, acct, session.email.clone(), &mut turn);
+            #[cfg(target_os = "windows")]
+            discard_unusable_startup_session(state, acct, session.email.clone());
+            return false;
         }
-        StartupSessionCheck::Authorized => {}
+        StartupSessionCheck::Authorized { profile } => profile,
         StartupSessionCheck::Inconclusive(reason) => {
             tracing::info!(
                 %reason,
                 "startup session probe inconclusive; failing open and keeping the stored session"
             );
+            None
         }
-    }
+    };
 
-    let token = session.token.clone();
-    let master_key = session.master_key;
+    let token = zeroize::Zeroizing::new(session.token.clone());
     let email = session.email.clone();
     {
+        // Everything the restore puts in memory, in its turn: the session, the flags that mirror it, and what the
+        // probe learned of the account.
+        let Ok(write) = claim_session_write(acct, &mut turn) else {
+            tracing::info!("the session changed while the startup probe waited; nothing restored");
+            return false;
+        };
         match acct.session.lock() {
             Ok(mut guard) => *guard = Some(session),
             Err(_) => {
                 tracing::warn!("session mutex poisoned during startup restore");
-                return;
+                return false;
+            }
+        }
+        set_auth_present(state, true);
+        // Mirror `apply_session` / the live-unlock path: keep `auth_email` in step
+        // with the restored session so the Account page shows the signed-in email
+        // after an auto-unlock, instead of going blank until the next login. Only
+        // overwrite when the restored session actually carries an email — never
+        // clobber an already-known address with `None`.
+        if email.is_some() {
+            set_auth_email(state, email);
+        }
+        // R10 (lead rulings 4 and 5): the account the server named while the session still works. The session is
+        // named after it (its user id is known from now on, so the binding compares ids), and an owner record of this
+        // account written before ids were known is completed. The profile is cached either way.
+        if let Some(profile) = probed {
+            name_session_after_profile(&write, state, acct, &token, &profile, owner_record_dir().as_deref());
+            if let Ok(mut cached) = acct.cached_profile.lock() {
+                *cached = Some(profile);
             }
         }
     }
-    set_auth_present(&state, true);
-    // Mirror `apply_session` / the live-unlock path: keep `auth_email` in step
-    // with the restored session so the Account page shows the signed-in email
-    // after an auto-unlock, instead of going blank until the next login. Only
-    // overwrite when the restored session actually carries an email — never
-    // clobber an already-known address with `None`.
-    if email.is_some() {
-        set_auth_email(&state, email);
-    }
     tracing::info!("vault auto-unlocked from credential store on startup");
-    if let Err(error) = start_engine_if_possible(
-        app.clone(),
-        &state,
-        token,
-        master_key,
-        #[cfg(target_os = "windows")]
-        &_transition,
-    )
-    .await
-    {
-        tracing::warn!(%error, "startup engine refused");
-    }
+    // A restored session the probe could not name (offline, or an unreadable answer) asks the server once more, but not
+    // here (fix round 1, item 7): the caller does that without holding up the engine start.
+    true
 }
 
 // UI cache epoch, independent of the credential-bearing command lease epoch.
@@ -777,7 +1180,23 @@ static UI_SESSION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 /// makes the existing UI refetch, and slice 2 changes nothing a user sees.
 static VAULT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Unit tests only: a test that reads the epoch (the popover's storage cache is keyed by it) holds this gate
+/// exclusively while it runs, and every other test's `bump_vault_epoch()` waits for it. The epoch is one static
+/// for the whole test process, and any Lock, Sign-out or sign-in test that ran in parallel moved it under the
+/// popover tests' feet (a fetch count that was 1 became 2, in about one full run in ten).
+#[cfg(test)]
+static EPOCH_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+// Set on a thread that holds `EPOCH_GATE` exclusively, so its own `lock_vault` bump does not wait for itself.
+#[cfg(test)]
+thread_local! {
+    static HOLDS_EPOCH_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn bump_vault_epoch() {
+    #[cfg(test)]
+    let _shared =
+        (!HOLDS_EPOCH_GATE.with(std::cell::Cell::get)).then(|| EPOCH_GATE.read().unwrap_or_else(|e| e.into_inner()));
     VAULT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -804,11 +1223,12 @@ fn set_auth_email(state: &AppState, email: Option<String>) {
     }
 }
 
+/// Starts the sync engine for the configured sync root, if there is one. It takes no keys: the session
+/// is read under the engine slot by `spawn_bound_engine` (lead ruling T9-starts), so a Lock that got
+/// there first leaves nothing to start (`Ok`, with the vault left locked).
 async fn start_engine_if_possible(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
-    token: String,
-    master_key: [u8; 32],
     #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -829,34 +1249,39 @@ async fn start_engine_if_possible(
         // restart-while-paused stays paused (the in-memory AtomicBool
         // always defaults to false; desktop.toml is the source of truth).
         acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
-        let pause_flag = acct.sync_paused.clone();
-        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
+        engine_start_refusal(&acct)?;
         if let Some(prev) = engine_slot.take() {
             // Task 1538 Codex P1: this is a re-login/sync-root-change
             // respawn, not sign-out — there's no purge to gate here, but an
             // unconfirmed stop is still worth knowing about (a not-really-
             // gone previous task could still be touching the same state.db
             // the freshly spawned runner is about to open).
-            if !prev.abort().await.is_stopped() {
+            if !stop_engine_in_slot(&acct, prev).await.is_stopped() {
                 #[cfg(target_os = "windows")]
                 return Err("Could not stop the previous sync engine; retry locking before restarting sync.".into());
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
             }
         }
+        // Fix round 1: an unconfirmed stop of the old engine has set the flag; refuse the new one.
+        engine_start_refusal(&acct)?;
         #[cfg(target_os = "windows")]
         {
             windows_cf::ensure_reactivation_allowed()?;
             SESSION_COMMANDS.validate_start(generation)?;
         }
-        *engine_slot = Some(EngineRunner::spawn(
-            app,
-            root,
-            token,
-            master_key,
-            pause_flag,
-            auth_health,
-        ));
+        // A vault locked in the meantime is not an error here: nothing to start, and Lock has said so. A start
+        // deferred for a Finder removal is not one either: the reconciler removes the domain and its next check
+        // starts the engine.
+        match spawn_bound_engine(app, state, &acct, &mut engine_slot, root)? {
+            EngineStart::Started => {}
+            EngineStart::NoSession => {
+                tracing::info!("engine start skipped: the vault was locked before it held the engine slot");
+            }
+            EngineStart::FinderRemovalOwed => {
+                tracing::info!("engine start deferred: the previous account's Finder domain is removed first");
+            }
+        }
     }
     Ok(())
 }
@@ -917,6 +1342,40 @@ async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
     open_onboarding_window_impl(&app)
 }
 
+/// R8: "Sign in again" on macOS opens sign-in in place. Nothing is cleared first, and the onboarding window starts at
+/// the sign-in step whatever `sync_status` says (`mode=reauth`).
+#[tauri::command]
+async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        Err("Only available on macOS and Linux.".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        const URL: &str = "index.html?window=onboarding&mode=reauth";
+        if let Some(existing) = app.get_webview_window("onboarding") {
+            existing
+                .eval("window.location.search = '?window=onboarding&mode=reauth'")
+                .map_err(|e| e.to_string())?;
+            let _ = existing.show();
+            let _ = existing.set_focus();
+            return Ok(());
+        }
+        let window = tauri::WebviewWindowBuilder::new(&app, "onboarding", tauri::WebviewUrl::App(URL.into()))
+            .title("Welcome to Beebeeb")
+            .inner_size(860.0, 640.0)
+            .min_inner_size(780.0, 560.0)
+            .resizable(true)
+            .center()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let _ = window.show();
+        let _ = window.set_focus();
+        Ok(())
+    }
+}
+
 /// Result of an OPAQUE sign-in attempt handed back to the frontend.
 ///
 /// `requires_2fa == false` means the session is fully installed and onboarding
@@ -924,9 +1383,65 @@ async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
 /// password was accepted but a TOTP code is still needed: `desktop_login`
 /// stashed a [`Pending2fa`] in `AppState`, and the frontend must collect the
 /// 6-digit code and call `desktop_login_2fa` to complete sign-in.
+///
+/// R8 adds `reauthenticated` (the account already on this Mac signed in again in place; with `vault_unlocked` its
+/// keys are in memory, so no recovery phrase) and `account_mismatch` (another account: nothing changed on this Mac,
+/// and the frontend shows the warning with the number of changes that have not uploaded). `key_replaced` is true only
+/// for a re-sign-in whose kept vault key the server no longer accepts (spec §5.6): the key was removed, so the recovery
+/// phrase step follows and says why. All five fields are ALWAYS serialized
+/// (`{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":null}`
+/// for a plain sign-in): the frontend's `settledFrom` reads them strictly, and
+/// `login_outcome_json_is_the_frontends_contract` pins every shape.
 #[derive(serde::Serialize)]
 struct LoginOutcome {
     requires_2fa: bool,
+    reauthenticated: bool,
+    vault_unlocked: bool,
+    key_replaced: bool,
+    account_mismatch: Option<AccountMismatchDto>,
+}
+
+/// What the frontend needs to warn before an account switch: how many changes on this Mac have not uploaded yet.
+#[derive(serde::Serialize)]
+struct AccountMismatchDto {
+    pending_changes: u64,
+}
+
+impl LoginOutcome {
+    fn signed_in() -> Self {
+        Self {
+            requires_2fa: false,
+            reauthenticated: false,
+            vault_unlocked: false,
+            key_replaced: false,
+            account_mismatch: None,
+        }
+    }
+
+    fn needs_2fa() -> Self {
+        Self {
+            requires_2fa: true,
+            ..Self::signed_in()
+        }
+    }
+
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    fn reauthenticated(vault_unlocked: bool, key_replaced: bool) -> Self {
+        Self {
+            reauthenticated: true,
+            vault_unlocked,
+            key_replaced,
+            ..Self::signed_in()
+        }
+    }
+
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    fn account_mismatch(pending_changes: u64) -> Self {
+        Self {
+            account_mismatch: Some(AccountMismatchDto { pending_changes }),
+            ..Self::signed_in()
+        }
+    }
 }
 
 /// Authenticate with the current OPAQUE login endpoints.
@@ -945,10 +1460,22 @@ struct LoginOutcome {
 ///
 /// Spec: docs/superpowers/plans/2026-05-07-desktop-sync-client.md (onboarding §1)
 #[tauri::command]
-async fn desktop_login(state: State<'_, AppState>, email: String, password: String) -> Result<LoginOutcome, String> {
+async fn desktop_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    email: String,
+    password: String,
+) -> Result<LoginOutcome, String> {
     #[cfg(target_os = "windows")]
     let attempt = AUTH_ATTEMPTS.begin()?;
     let work = async {
+        // This sign-in is one session transition (lead ruling 1, Task 12): captured before it looks at anything, so a
+        // Lock, a Sign-out or another sign-in that completes while it waits for the server is never followed by its
+        // writes.
+        let mut turn = state.active_account()?.session_generation();
+        // Windows refuses a sign-in while a session exists and never asks which account it is (R8).
+        #[cfg(target_os = "windows")]
+        let _ = &app;
         #[cfg(target_os = "windows")]
         let _transition = SESSION_TRANSITION.lock().await;
         #[cfg(target_os = "windows")]
@@ -972,7 +1499,7 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
             .build()
             .map_err(|e| format!("reqwest build: {e}"))?;
 
-        let email = email.trim().to_lowercase();
+        let email = account_binding::canonical_email(&email);
         if email.is_empty() || password.is_empty() {
             return Err("Email and password are required.".to_string());
         }
@@ -1069,6 +1596,16 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "No partial_token in login finish response".to_string())?
                 .to_string();
+            // A Lock or a Sign-out that completed while the password was checked clears the challenge; this one is not
+            // set after it. macOS and Linux only: Windows orders this step with `SESSION_TRANSITION` and its attempt
+            // fence, as before (Task 12 fix round 1, item 3).
+            #[cfg(not(target_os = "windows"))]
+            {
+                let acct = state.active_account()?;
+                if !acct.session_unchanged_since(turn) {
+                    return Err(SessionChanged::of(&acct).into());
+                }
+            }
             {
                 let mut guard = state
                     .pending_2fa
@@ -1080,13 +1617,16 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
                 });
             }
             tracing::info!("desktop login requires 2FA; awaiting TOTP code");
-            return Ok(LoginOutcome { requires_2fa: true });
+            return Ok(LoginOutcome::needs_2fa());
         }
-        let session_token = finish_body
-            .get("session_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "No session_token in login finish response".to_string())?
-            .to_string();
+        // Wiped when this login is done with it (it lives only as long as the sign-in handshake).
+        let session_token = zeroize::Zeroizing::new(
+            finish_body
+                .get("session_token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "No session_token in login finish response".to_string())?
+                .to_string(),
+        );
 
         let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
         #[cfg(target_os = "windows")]
@@ -1098,28 +1638,61 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
             return Err("Sign out of the current account before signing in again.".into());
         }
 
+        // R8 (spec 2026-10-06): the account already on this Mac signs in again in place; another account is an
+        // account switch. Decided before anything is stored.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let settlement = match settle_sign_in(app.clone(), &state, &session_token, &profile, None, &mut turn).await
+            {
+                Ok(settlement) => settlement,
+                Err(failure) => {
+                    // A re-sign-in that failed before its token reached the Keychain stored nothing of the new
+                    // session, so it is revoked, as a first sign-in whose token could not be stored is.
+                    if !failure.token_stored {
+                        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+                    }
+                    return Err(failure.message);
+                }
+            };
+            match settlement {
+                SignInSettlement::Fresh => {}
+                SignInSettlement::Reauthenticated {
+                    vault_unlocked,
+                    key_replaced,
+                } => {
+                    return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));
+                }
+                SignInSettlement::AccountMismatch { pending_changes } => {
+                    // Nothing on this Mac changed. The session just minted for the other account is revoked;
+                    // after the switch the person signs in again.
+                    let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+                    return Ok(LoginOutcome::account_mismatch(pending_changes));
+                }
+                SignInSettlement::Unconfirmed => {
+                    // The server could not say whose key this Mac holds: nothing changed, the new session is
+                    // revoked, and trying again is safe.
+                    let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+                    return Err(SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+                }
+            }
+        }
+
         // Resolve the active account up front so we can both cache the profile and
         // segment the keychain write under its id (task 0800). The cache is
         // per-account (decision 0800); `pending_2fa` above stays on `AppState`.
-        let account_id = state.active_account()?.id.as_str().to_string();
-        if let Ok(acct) = state.active_account()
-            && let Ok(mut guard) = acct.cached_profile.lock()
-        {
-            *guard = Some(profile);
-        }
-
-        if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+        let acct = state.active_account()?;
+        // The session is known by the server's spelling of the email, not by what was typed (R2).
+        let email = session_email(Some(&profile)).unwrap_or(email);
+        let stored = store_first_sign_in(&state, &acct, &mut turn, &session_token, &email, profile);
+        if let Err(e) = stored {
             #[cfg(target_os = "windows")]
             drop(_transition);
             let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
             return Err(e);
         }
-
-        set_auth_present(&state, true);
-        set_auth_email(&state, Some(email.clone()));
         tracing::info!("desktop account session installed");
 
-        Ok(LoginOutcome { requires_2fa: false })
+        Ok(LoginOutcome::signed_in())
     };
     #[cfg(target_os = "windows")]
     {
@@ -1129,6 +1702,27 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
     {
         work.await
     }
+}
+
+/// A first sign-in by password (with or without a second factor): its token, the profile and the flags, written in the
+/// sign-in's turn (lead ruling 1, Task 12). Refused, with nothing written, when any session transition happened since
+/// the sign-in began (a Lock, a Sign-out, another sign-in that stored first); the caller then revokes the new session.
+fn store_first_sign_in(
+    state: &AppState,
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+    token: &str,
+    email: &str,
+    profile: account_dto::AccountProfile,
+) -> Result<(), String> {
+    let write = claim_session_write(acct, turn)?;
+    persist_session_token_to_keychain(&write, acct.id.as_str(), token, Some(email))?;
+    if let Ok(mut guard) = acct.cached_profile.lock() {
+        *guard = Some(profile);
+    }
+    set_auth_present(state, true);
+    set_auth_email(state, Some(email.to_string()));
+    Ok(())
 }
 
 /// Complete a 2FA-gated sign-in: trade the held partial token + the user's TOTP
@@ -1145,10 +1739,21 @@ async fn desktop_login(state: State<'_, AppState>, email: String, password: Stri
 /// `POST /api/v1/auth/2fa/verify` with body `{ partial_token, code }` →
 /// `{ user_id, session_token }`. The TOTP code is never logged.
 #[tauri::command]
-async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(), String> {
+async fn desktop_login_2fa(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<LoginOutcome, String> {
     #[cfg(target_os = "windows")]
     let attempt = AUTH_ATTEMPTS.begin()?;
     let work = async {
+        // This sign-in is one session transition (lead ruling 1, Task 12): captured before it looks at anything, so a
+        // Lock, a Sign-out or another sign-in that completes while it waits for the server is never followed by its
+        // writes.
+        let mut turn = state.active_account()?.session_generation();
+        // Windows refuses a sign-in while a session exists and never asks which account it is (R8).
+        #[cfg(target_os = "windows")]
+        let _ = &app;
         #[cfg(target_os = "windows")]
         let _transition = SESSION_TRANSITION.lock().await;
         #[cfg(target_os = "windows")]
@@ -1205,11 +1810,14 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
             .json()
             .await
             .map_err(|e| format!("parse 2FA verify response: {e}"))?;
-        let session_token = verify_body
-            .get("session_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
-            .to_string();
+        // Wiped when this login is done with it (it lives only as long as the sign-in handshake).
+        let session_token = zeroize::Zeroizing::new(
+            verify_body
+                .get("session_token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
+                .to_string(),
+        );
 
         // Same post-finish setup as `desktop_login`'s no-2FA success path. The
         // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.
@@ -1223,22 +1831,63 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
             return Err("Sign out of the current account before signing in again.".into());
         }
 
-        let account_id = state.active_account()?.id.as_str().to_string();
-        if let Ok(acct) = state.active_account()
-            && let Ok(mut guard) = acct.cached_profile.lock()
+        // R8 (spec 2026-10-06): the same check as `desktop_login`, before anything is stored. Whatever it finds, the
+        // second factor is spent, so the held challenge is dropped on every way out but a first sign-in (which drops it
+        // at the end).
+        #[cfg(not(target_os = "windows"))]
         {
-            *guard = Some(profile);
+            let settlement = match settle_sign_in(app.clone(), &state, &session_token, &profile, None, &mut turn).await
+            {
+                Ok(settlement) => settlement,
+                Err(failure) => {
+                    if !failure.token_stored {
+                        let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+                    }
+                    if let Ok(mut guard) = state.pending_2fa.lock() {
+                        *guard = None;
+                    }
+                    return Err(failure.message);
+                }
+            };
+            match settlement {
+                SignInSettlement::Fresh => {}
+                SignInSettlement::Reauthenticated {
+                    vault_unlocked,
+                    key_replaced,
+                } => {
+                    if let Ok(mut guard) = state.pending_2fa.lock() {
+                        *guard = None;
+                    }
+                    return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));
+                }
+                SignInSettlement::AccountMismatch { pending_changes } => {
+                    // Nothing on this Mac changed. The session just minted for the other account is revoked.
+                    let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+                    if let Ok(mut guard) = state.pending_2fa.lock() {
+                        *guard = None;
+                    }
+                    return Ok(LoginOutcome::account_mismatch(pending_changes));
+                }
+                SignInSettlement::Unconfirmed => {
+                    let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
+                    if let Ok(mut guard) = state.pending_2fa.lock() {
+                        *guard = None;
+                    }
+                    return Err(SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+                }
+            }
         }
 
-        if let Err(e) = persist_session_token_to_keychain(&account_id, &session_token, Some(&email)) {
+        let acct = state.active_account()?;
+        // The session is known by the server's spelling of the email, not by what was typed (R2).
+        let email = session_email(Some(&profile)).unwrap_or(email);
+        let stored = store_first_sign_in(&state, &acct, &mut turn, &session_token, &email, profile);
+        if let Err(e) = stored {
             #[cfg(target_os = "windows")]
             drop(_transition);
             let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
             return Err(e);
         }
-
-        set_auth_present(&state, true);
-        set_auth_email(&state, Some(email));
         // Challenge satisfied — drop the pending state so a stale partial token
         // can't be reused.
         if let Ok(mut guard) = state.pending_2fa.lock() {
@@ -1246,7 +1895,7 @@ async fn desktop_login_2fa(state: State<'_, AppState>, code: String) -> Result<(
         }
         tracing::info!("desktop account session installed after 2FA");
 
-        Ok(())
+        Ok(LoginOutcome::signed_in())
     };
     #[cfg(target_os = "windows")]
     {
@@ -1283,28 +1932,30 @@ async fn desktop_unlock_with_recovery_phrase(
             windows_cf::ensure_reactivation_allowed()?;
         }
         let acct = state.active_account()?;
-        let existing = acct
+        // The unlock is one session transition (lead ruling 1, Task 12): captured before it reads anything.
+        let mut turn = acct.session_generation();
+        let session_installed = acct
             .session
             .lock()
             .map_err(|_| "session mutex poisoned".to_string())?
-            .as_ref()
-            .map(|session| (session.token.clone(), session.master_key));
-        if let Some((token, master_key)) = existing {
-            start_engine_if_possible(
+            .is_some();
+        if session_installed {
+            let started = start_engine_if_possible(
                 app,
                 &state,
-                token,
-                master_key,
                 #[cfg(target_os = "windows")]
                 &_transition,
             )
-            .await?;
-            return Ok(());
+            .await;
+            keys_arrived(&state, KeysFrom::SignIn);
+            return started;
         }
 
         let account_id = acct.id.as_str().to_string();
-        let token = load_session_token_from_keychain(&account_id)?
-            .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
+        let token = zeroize::Zeroizing::new(
+            load_session_token_from_keychain(&account_id)?
+                .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?,
+        );
         let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
         let base_url = runner::api_base_url();
         let client = reqwest::Client::builder()
@@ -1321,40 +1972,21 @@ async fn desktop_unlock_with_recovery_phrase(
         let _transition = SESSION_TRANSITION.lock().await;
         #[cfg(target_os = "windows")]
         AUTH_ATTEMPTS.validate(&attempt)?;
-        let master_key = *verified_key;
-        persist_vault_key_to_keychain(&account_id, master_key)?;
-        // `desktop_login` already persisted the email when it stored the token, but
-        // persist again here (idempotent) so the invariant "a fully-provisioned
-        // session has its email in the store" holds even if memory and store drift.
-        if let Some(email) = email.as_deref() {
-            let vault = AuthVault::new(platform_keychain_store_for(&account_id));
-            if let Err(e) = vault.store_account_email(email) {
-                // Non-fatal: the email is display metadata, not required to unlock.
-                tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
-            }
-        }
-
-        {
-            let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-            *guard = Some(Session {
-                token: token.clone(),
-                master_key,
-                email,
-            });
-            bump_vault_epoch();
-        }
-        set_auth_present(&state, true);
+        install_recovered_session(&state, &acct, &mut turn, &token, email, &verified_key)?;
+        // Both copies are wiped here, not at the end of the function: the engine start below awaits, and the
+        // session in memory is the only holder of the keys from now on.
+        drop(token);
+        drop(verified_key);
         tracing::info!("vault provisioned from recovery phrase");
-        start_engine_if_possible(
+        let started = start_engine_if_possible(
             app,
             &state,
-            token,
-            master_key,
             #[cfg(target_os = "windows")]
             &_transition,
         )
-        .await?;
-        Ok(())
+        .await;
+        keys_arrived(&state, KeysFrom::SignIn);
+        started
     };
     #[cfg(target_os = "windows")]
     {
@@ -1366,7 +1998,89 @@ async fn desktop_unlock_with_recovery_phrase(
     }
 }
 
+/// The recovery-phrase unlock's writes, after the server confirmed the phrase: the vault key and the email are written,
+/// and the session put in memory, in ONE turn of the unlock (lead ruling 1, Task 12), and only while the account it
+/// started with is still the one stored (a sign-in, a Lock or a Sign-out may have run while the phrase was being
+/// checked). Nothing can land between the write and the install.
+fn install_recovered_session(
+    state: &AppState,
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+    token: &str,
+    email: Option<String>,
+    verified_key: &[u8; 32],
+) -> Result<(), String> {
+    {
+        let write = store_recovered_vault_key(acct, turn, token, email.as_deref(), verified_key)?;
+        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        *guard = Some(Session {
+            token: token.to_string(),
+            master_key: *verified_key,
+            email,
+        });
+        drop(guard);
+        set_auth_present(state, true);
+        drop(write);
+    }
+    bump_vault_epoch();
+    Ok(())
+}
+
 const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
+
+/// What the recovery-phrase unlock says when a Sign-out, or another account's sign-in, happened while it waited for the
+/// server (Task 12 fix round 2, item 5).
+const UNLOCK_ACCOUNT_CHANGED: &str =
+    "You were signed out, or another account signed in, while Beebeeb was unlocking. Try again.";
+
+/// The recovery-phrase unlock's write of the verified vault key (and the account email), for the session it started
+/// with: `started_token` is the token it read from the Keychain, `started_email` the identity it knew. Between that
+/// read and this write the unlock waited for the server, and a sign-in or sign-out can have run: another account's
+/// token may be stored now, or none, or the same account's replacement. In the unlock's turn (`turn`, see
+/// [`claim_session_write`]) any session transition since it began stops the write, and the stored token, the identity
+/// and the empty memory are checked again: one account's key is never written next to another account's token or
+/// email. Returns the turn, still held, so the caller installs the session in memory before anything else can run.
+fn store_recovered_vault_key(
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+    started_token: &str,
+    started_email: Option<&str>,
+    master_key: &[u8; 32],
+) -> Result<SessionWrite, String> {
+    let account_id = acct.id.as_str();
+    // The unlock's turn (lead ruling 1, Task 12): any session transition since the unlock began stops it here. Then,
+    // in the same turn, the stored token, the identity and the empty memory are checked against what it started with.
+    let write = claim_session_write(acct, turn).map_err(|changed| changed.recovery_unlock_sentence().to_string())?;
+    let stored = load_session_token_from_keychain(account_id)?.map(zeroize::Zeroizing::new);
+    let session_installed = acct
+        .session
+        .lock()
+        .map_err(|_| "session mutex poisoned".to_string())?
+        .is_some();
+    let identity = acct
+        .auth_email
+        .lock()
+        .map_err(|_| "auth email mutex poisoned".to_string())?
+        .clone();
+    if stored.as_ref().map(|token| token.as_str()) != Some(started_token)
+        || session_installed
+        || identity.as_deref() != started_email
+    {
+        return Err(UNLOCK_ACCOUNT_CHANGED.to_string());
+    }
+    persist_vault_key_to_keychain(&write, account_id, master_key)?;
+    // `desktop_login` already persisted the email when it stored the token, but persist again here (idempotent) so
+    // the invariant "a fully-provisioned session has its email in the store" holds even if memory and store drift.
+    if let Some(email) = started_email {
+        let vault = AuthVault::new(platform_keychain_store_for(account_id));
+        if let Err(e) = vault.store_account_email(email) {
+            // Non-fatal: the email is display metadata, not required to unlock.
+            tracing::warn!(error = %e, "could not persist account email during recovery-phrase unlock");
+        }
+    }
+    // The caller puts the session in memory before it lets this turn go.
+    Ok(write)
+}
 
 /// Derive the vault key from a recovery phrase, prove it belongs to the
 /// signed-in account, and only then hand it to `persist`.
@@ -1409,32 +2123,66 @@ async fn verify_vault_key_from_phrase(
     Ok(zeroize::Zeroizing::new(master_key_struct.to_bytes()))
 }
 
-/// Ask the server whether `master_key` is the signed-in account's key by
-/// comparing its `recovery_check` (HKDF of the key; never the key itself)
-/// against the stored one: `POST /api/v1/auth/verify-recovery-check`.
-///
-/// `Ok(true)` on a match; `Ok(false)` ONLY on a server-confirmed mismatch
-/// (400 `invalid_recovery_phrase`, which the server also returns for an account
-/// with no check on file — web applies the same policy). Any other outcome
-/// (network error, 401, 5xx, unparseable body) is `Err`: an unreachable
-/// verifier must never be read as "valid", so the caller fails closed.
-async fn recovered_key_matches_account(
+/// The server's answer to "is this key the signed-in account's?" (`POST /api/v1/auth/verify-recovery-check`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryCheckAnswer {
+    Matches,
+    /// A `400` whose code is exactly [`INVALID_RECOVERY_PHRASE_CODE`]: the key is not the account's. A server that has
+    /// no distinct code for it sends the same answer for an account with no recovery check on file (spec §5.6).
+    Mismatch,
+    /// A `400` whose code is exactly [`RECOVERY_CHECK_MISSING`]: the account has no recovery check on file.
+    NoCheckOnFile,
+}
+
+/// The `error` code the server sends when the key's check is not the account's. Matched exactly; nothing else is.
+const INVALID_RECOVERY_PHRASE_CODE: &str = "invalid_recovery_phrase";
+
+/// The `error` code the server sends when the account has no recovery check on file. Matched exactly; nothing else is.
+const RECOVERY_CHECK_MISSING: &str = "recovery_check_missing";
+
+/// Ask the server whether `master_key` is the signed-in account's key by comparing its `recovery_check` (HKDF of the
+/// key; never the key itself) against the stored one. Only a completed answer is `Ok`: a `200` that says valid, or a
+/// `400` with one of the two exact codes above. A network error, a 401, a 5xx, an unreadable success body, and any other
+/// `400` (no JSON, another code, a body the server's extractor rejected, an intermediary's page) are `Err`: they say
+/// nothing about the key, and an unreachable verifier is never read as "valid" (the caller fails closed).
+async fn recovery_check_answer(
     client: &reqwest::Client,
     base_url: &str,
     session_token: &str,
     master_key: &beebeeb_core::kdf::MasterKey,
-) -> Result<bool, String> {
-    let recovery_check = encode_base64(&*beebeeb_core::opaque::compute_recovery_check(master_key));
+) -> Result<RecoveryCheckAnswer, String> {
+    // The check stands in for the key at the server, so its text is wiped after the request (fix round 1, item 10),
+    // and the body is serialized from a borrow of it (no second copy in a JSON value).
+    let recovery_check = zeroize::Zeroizing::new(encode_base64(&*beebeeb_core::opaque::compute_recovery_check(
+        master_key,
+    )));
+    #[derive(serde::Serialize)]
+    struct RecoveryCheckBody<'a> {
+        recovery_check: &'a str,
+    }
     let resp = client
         .post(format!("{base_url}/api/v1/auth/verify-recovery-check"))
         .bearer_auth(session_token)
-        .json(&serde_json::json!({ "recovery_check": recovery_check }))
+        .json(&RecoveryCheckBody {
+            recovery_check: &recovery_check,
+        })
         .send()
         .await
         .map_err(|e| format!("Could not verify the recovery phrase (network error: {e}). Try again."))?;
     let status = resp.status();
     if status == reqwest::StatusCode::BAD_REQUEST {
-        return Ok(false);
+        let body = resp.text().await.unwrap_or_default();
+        let code = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("error").and_then(|code| code.as_str()).map(str::to_string));
+        return match code.as_deref() {
+            Some(INVALID_RECOVERY_PHRASE_CODE) => Ok(RecoveryCheckAnswer::Mismatch),
+            Some(RECOVERY_CHECK_MISSING) => Ok(RecoveryCheckAnswer::NoCheckOnFile),
+            // Any other 400 says nothing about the key: answered like a server error, never as a mismatch.
+            _ => Err(format!(
+                "Could not verify the recovery phrase (server returned {status}). Try again."
+            )),
+        };
     }
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err("Your session expired. Sign in again before unlocking the vault.".to_string());
@@ -1449,10 +2197,24 @@ async fn recovered_key_matches_account(
         .await
         .map_err(|e| format!("Could not verify the recovery phrase (unreadable response: {e}). Try again."))?;
     if body.get("valid").and_then(|v| v.as_bool()) == Some(true) {
-        Ok(true)
+        Ok(RecoveryCheckAnswer::Matches)
     } else {
         Err("Could not verify the recovery phrase (unexpected response). Try again.".to_string())
     }
+}
+
+/// The recovery-phrase unlock's question: is the key from this phrase the signed-in account's? `Ok(true)` only on a
+/// match. An account with no check on file proves nothing here either, so it stays `Ok(false)` (web applies the same
+/// policy); see [`recovery_check_answer`] for what is `Err`.
+async fn recovered_key_matches_account(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    master_key: &beebeeb_core::kdf::MasterKey,
+) -> Result<bool, String> {
+    recovery_check_answer(client, base_url, session_token, master_key)
+        .await
+        .map(|answer| answer == RecoveryCheckAnswer::Matches)
 }
 
 fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
@@ -1495,6 +2257,230 @@ fn encode_base64(bytes: &[u8]) -> String {
 /// now return the whole profile so the caller can both gate on 2FA AND cache
 /// the profile into `AppState` — that's what powers the `account_profile`
 /// IPC without a second round-trip (the "all pages empty" data-layer fix).
+/// The email a session is known by (R2, fix round 2 of Task 10; fix round 3): the SERVER's own spelling of it, from
+/// the account's profile, and nothing else. Typed text is never an identity: a password login lowercases what was
+/// typed client-side and a browser login does not, so the same account would have two, and signing in the other way
+/// would look like another account. The profile's spelling and user id are what name an account here. Without a profile a session
+/// has no email and is unidentified: no engine starts for it (see `authorize_engine_start`).
+fn session_email(profile: Option<&account_dto::AccountProfile>) -> Option<String> {
+    profile
+        .map(|profile| profile.email.trim())
+        .filter(|email| !email.is_empty())
+        .map(str::to_string)
+}
+
+/// The server's record of the account behind `session_token`, for a sign-in that only has the credentials a browser
+/// handed over. `None` when the server cannot be reached or does not answer with a profile: the sign-in then has no
+/// identity, and no engine starts until [`establish_session_identity`] gets one.
+async fn fetch_canonical_profile(session_token: &str) -> Option<account_dto::AccountProfile> {
+    fetch_canonical_profile_at(&runner::api_base_url(), session_token).await
+}
+
+async fn fetch_canonical_profile_at(base_url: &str, session_token: &str) -> Option<account_dto::AccountProfile> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .default_headers(api_client::provenance_headers())
+        .build()
+        .ok()?;
+    fetch_session_profile(&client, base_url, session_token).await.ok()
+}
+
+/// A session whose account is not known by its user id (its sign-in could not fetch the account record, the Keychain
+/// kept no email, or the startup probe could not name it) asks the server again, and ONE fetch that succeeds names it
+/// (lead ruling 5, Task 12): see [`name_session_after_profile`]. The startup restore calls this before it starts an
+/// engine; app activation and "Try again" call it too ([`identify_unidentified_session`]), so recovering from a failed
+/// fetch needs no relaunch. A failed fetch changes nothing (`false`), so the engine start keeps refusing; a session that
+/// is identified already, that was replaced while the fetch ran, or whose turn ended (a Lock, a Sign-out) is left
+/// alone. `owner_dir`: where the owner record a naming completes lives (`None`: no owner record is touched).
+async fn establish_session_identity(
+    state: &AppState,
+    acct: &account::AccountRuntime,
+    base_url: &str,
+    owner_dir: Option<&Path>,
+) -> bool {
+    // One session transition: captured before the session is read, and the write below happens only in its turn.
+    let turn = acct.session_generation();
+    let (token, email) = match acct.session.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(session) => (zeroize::Zeroizing::new(session.token.clone()), session.email.clone()),
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    if session_knows_its_user_id(acct, email.as_deref()) {
+        return false;
+    }
+    let Some(profile) = fetch_canonical_profile_at(base_url, &token).await else {
+        return false;
+    };
+    // Checked, not yet moved on (fix round 1, item 5): a fetch that names nothing must not refuse a sign-in in flight.
+    let Ok(write) = check_session_turn(acct, &turn) else {
+        return false;
+    };
+    let named = name_session_after_profile(&write, state, acct, &token, &profile, owner_dir);
+    if named {
+        // Who the session is known as changed: a transition that began before this one is refused from now on.
+        acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::Write);
+    }
+    drop(write);
+    named
+}
+
+/// Does the session know its account's user id: is a profile cached whose email is this session's own (see
+/// [`identity_of_session`])? A session that does not is compared by email alone at an engine start.
+fn session_knows_its_user_id(acct: &account::AccountRuntime, email: Option<&str>) -> bool {
+    let profile = acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
+    identity_of_session(email, profile.as_ref()).user_id.is_some()
+}
+
+/// Name the session in memory after the server's own record of its account (R2; lead rulings 4 and 5, Task 12): its
+/// email becomes the server's spelling, the profile is cached (from now on its user id is known), and the Account page
+/// and the Keychain follow. Only the session whose token is `token`, and only when it has no email yet or the same
+/// address in its canonical form (`account_binding::same_email`): an answer never names a session it was not fetched for, nor one another name was
+/// given meanwhile. Inside a checked turn (`write`). `true` when it changed the session.
+///
+/// The owner record comes FIRST (fix round 1, item 1). With an owner record (`owner_dir`, macOS and Linux) the session is
+/// named only after the record has been completed with the account's id and the server's spelling
+/// ([`backfill_local_data_owner`]); a backfill that fails names nothing, so the stored email stays exactly as it was and
+/// the next engine start still knows the account's own data (a later fetch tries again). Without one (Windows) a
+/// session that has an email is never renamed to another spelling: only an email-less session is named, as before.
+fn name_session_after_profile(
+    write: &SessionWrite,
+    state: &AppState,
+    acct: &account::AccountRuntime,
+    token: &str,
+    profile: &account_dto::AccountProfile,
+    owner_dir: Option<&Path>,
+) -> bool {
+    let Some(email) = session_email(Some(profile)) else {
+        return false;
+    };
+    let known = {
+        let Ok(guard) = acct.session.lock() else {
+            return false;
+        };
+        match guard.as_ref() {
+            Some(session)
+                if session.token == token
+                    && session
+                        .email
+                        .as_deref()
+                        .is_none_or(|known| account_binding::same_email(known, &email)) =>
+            {
+                session.email.clone()
+            }
+            _ => return false,
+        }
+    };
+    let renames = known.as_deref().is_some_and(|known| known != email);
+    match owner_dir {
+        Some(dir) => match backfill_local_data_owner(write, dir, profile) {
+            Ok(true) => tracing::info!("R10: the owner record of the local data now names its account by user id"),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "R10: the owner record could not be completed, so the session is not renamed; a later fetch tries again");
+                return false;
+            }
+        },
+        // No owner record to complete (Windows): another spelling of a known email is never taken over.
+        None if renames => return false,
+        None => {}
+    }
+    {
+        let Ok(mut guard) = acct.session.lock() else {
+            return false;
+        };
+        match guard.as_mut() {
+            Some(session) if session.token == token => session.email = Some(email.clone()),
+            _ => return false,
+        }
+    }
+    if let Ok(mut cached) = acct.cached_profile.lock() {
+        *cached = Some(profile.clone());
+    }
+    set_auth_email(state, Some(email.clone()));
+    write_session_email_to_keychain(write, acct, &email);
+    true
+}
+
+/// The Keychain copy of the session's email, written in the naming's turn (Task 12 fix round 2, item 3). A write that
+/// fails is not ignored: it is logged as `keychain_email_write_failed` with the kind of store error only (never its
+/// text or the address) and marked on the account, so the next naming trigger (app activation, "Try again", the next
+/// launch's background request) writes it again. A store that cannot hold secrets (Linux) has nothing to retry.
+/// `true` when the Keychain holds it now.
+fn write_session_email_to_keychain(_write: &SessionWrite, acct: &account::AccountRuntime, email: &str) -> bool {
+    match AuthVault::new(platform_keychain_store_for(acct.id.as_str())).store_account_email(email) {
+        Ok(()) | Err(keychain::AuthStoreError::Unsupported(_)) => {
+            acct.keychain_email_pending.store(false, Ordering::SeqCst);
+            true
+        }
+        Err(error) => {
+            acct.keychain_email_pending.store(true, Ordering::SeqCst);
+            let kind = match error {
+                keychain::AuthStoreError::Unsupported(_) => "unsupported",
+                keychain::AuthStoreError::NotFound => "not_found",
+                keychain::AuthStoreError::InvalidSecret(_) => "invalid_secret",
+                keychain::AuthStoreError::Backend(_) => "backend",
+            };
+            tracing::warn!(
+                event = "keychain_email_write_failed",
+                kind,
+                "the session's email is written to the Keychain again at the next naming"
+            );
+            false
+        }
+    }
+}
+
+/// Where the owner record of this computer's local data lives, for the identity steps that complete it (lead ruling 4).
+/// `None` on Windows, which keeps today's binding (it refuses on an owner that differs instead).
+fn owner_record_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        state_paths::beebeeb_state_dir().ok()
+    }
+}
+
+/// R10 (lead ruling 4, Task 12): while the session still works, the server's record of its account completes the owner
+/// record of this computer's local data. An owner recorded before user ids were known (an email only, possibly spelled
+/// with other letter case) gains the account's user id and the server's spelling of the email, so a later sign-in by
+/// another method compares ids and never takes the account for another. Only an owner that IS this account is
+/// completed: the same user id, or (with no id recorded) the same address in its canonical form (the engine start's
+/// own comparison, `account_binding::same_account`). Any other owner is left to the binding at the next engine start. No database yet, or no owner: nothing to complete. Inside a checked
+/// turn (`_write`).
+fn backfill_local_data_owner(
+    _write: &SessionWrite,
+    state_dir: &Path,
+    profile: &account_dto::AccountProfile,
+) -> Result<bool, String> {
+    let (Some(email), false) = (session_email(Some(profile)), profile.user_id.trim().is_empty()) else {
+        return Ok(false);
+    };
+    let Some(db) = state_db_from_state_dir(state_dir)? else {
+        return Ok(false);
+    };
+    let Some(owner) = db
+        .owner()
+        .map_err(|e| format!("read the local data owner: {e}"))?
+        .filter(account_binding::Identity::is_known)
+    else {
+        return Ok(false);
+    };
+    let complete = account_binding::Identity::new(Some(&profile.user_id), Some(&email));
+    // The engine start's own comparison (ruling A″): the ids when the owner has one, else the canonical email.
+    let this_account = account_binding::same_account(&owner, &complete) == Some(true);
+    if !this_account || owner == complete {
+        return Ok(false);
+    }
+    db.set_owner(&complete)
+        .map_err(|e| format!("record the local data owner: {e}"))?;
+    Ok(true)
+}
+
 async fn fetch_session_profile(
     client: &reqwest::Client,
     base_url: &str,
@@ -1543,12 +2529,16 @@ pub(crate) async fn apply_session(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
     token: String,
-    master_key: [u8; 32],
-    email: Option<String>,
+    master_key: &[u8; 32],
+    profile: Option<account_dto::AccountProfile>,
+    turn: &mut account::SessionGeneration,
     #[cfg(target_os = "windows")] attempt: &auth_attempts::Attempt,
 ) -> Result<(), String> {
     let token = zeroize::Zeroizing::new(token);
-    let master_key = zeroize::Zeroizing::new(master_key);
+    // The session is known by the server's spelling of the email and by nothing the browser handed over (R2). With
+    // no profile (the fetch failed) it has no email: it is installed, and no engine starts for it until a fetch
+    // names it.
+    let email = session_email(profile.as_ref());
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -1564,35 +2554,101 @@ pub(crate) async fn apply_session(
     #[cfg(target_os = "windows")]
     AUTH_ATTEMPTS.validate(attempt)?;
 
-    let account_id = state.active_account()?.id.as_str().to_string();
-    persist_session_to_keychain(&account_id, &token, *master_key, email.as_deref())?;
-    let token_clone = token.to_string();
-
-    {
-        let acct = state.active_account()?;
-        let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
-        *guard = Some(Session {
-            token: token.to_string(),
-            master_key: *master_key,
-            email: email.clone(),
-        });
-        bump_vault_epoch();
-    }
-    set_auth_present(state, true);
-    set_auth_email(state, email);
+    let acct = state.active_account()?;
+    install_new_session_or_revoke(
+        state,
+        &acct,
+        turn,
+        &token,
+        master_key,
+        email,
+        profile,
+        &runner::api_base_url(),
+    )
+    .await?;
+    bump_vault_epoch();
     tracing::info!("session installed");
 
     // If we already know the sync_root, kick off the engine. Otherwise
     // it'll start when the first-launch picker resolves.
-    start_engine_if_possible(
+    let started = start_engine_if_possible(
         app,
         state,
-        token_clone,
-        *master_key,
         #[cfg(target_os = "windows")]
         &_transition,
     )
-    .await?;
+    .await;
+    keys_arrived(state, KeysFrom::SignIn);
+    started
+}
+
+/// What [`install_new_session`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum NewSession {
+    Installed,
+    /// Another session transition happened since the sign-in began: nothing was stored (the caller revokes it).
+    Refused(String),
+}
+
+/// The browser sign-in's writes, in its turn (lead ruling 1, Task 12): its generation was captured before it looked at
+/// this computer, so a Lock, a Sign-out or another sign-in that completed meanwhile stops it here, before anything is
+/// stored. The Keychain (token, vault key, email), the cached profile, the session in memory and the flags are written
+/// in the same turn. `Err`: a write failed after the turn was taken.
+fn install_new_session(
+    state: &AppState,
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+    token: &str,
+    master_key: &[u8; 32],
+    email: Option<String>,
+    profile: Option<account_dto::AccountProfile>,
+) -> Result<NewSession, String> {
+    let write = match claim_session_write(acct, turn) {
+        Ok(write) => write,
+        Err(changed) => return Ok(NewSession::Refused(changed.sign_in_sentence().to_string())),
+    };
+    persist_session_to_keychain(&write, acct.id.as_str(), token, master_key, email.as_deref())?;
+    if let Some(profile) = profile
+        && let Ok(mut cached) = acct.cached_profile.lock()
+    {
+        *cached = Some(profile);
+    }
+    let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    *guard = Some(Session {
+        token: token.to_string(),
+        master_key: *master_key,
+        email: email.clone(),
+    });
+    drop(guard);
+    set_auth_present(state, true);
+    set_auth_email(state, email);
+    drop(write);
+    Ok(NewSession::Installed)
+}
+
+/// [`install_new_session`], and when its turn is refused, the revoke of the session it would have stored (nothing of it
+/// is on this computer), against the server at `base_url`, like a sign-in that could not store its token.
+#[allow(clippy::too_many_arguments)]
+async fn install_new_session_or_revoke(
+    state: &AppState,
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+    token: &str,
+    master_key: &[u8; 32],
+    email: Option<String>,
+    profile: Option<account_dto::AccountProfile>,
+    base_url: &str,
+) -> Result<(), String> {
+    if let NewSession::Refused(error) = install_new_session(state, acct, turn, token, master_key, email, profile)? {
+        if let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .default_headers(api_client::provenance_headers())
+            .build()
+        {
+            let _ = revoke_desktop_session(&client, base_url, token).await;
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -1608,18 +2664,84 @@ enum SignOutOutcome {
     NotSignedIn,
 }
 
-/// [`clear_session_impl`]'s result: what it did, and (task 1882) the folder where macOS kept the
-/// Finder files that had not reached the server when the sign-out removed the Finder location.
+/// What a sign-out or a Lock that HAPPENED could not confirm (FB-24): a closed code and its constant sentence,
+/// serialized as `{"code": …, "sentence": …}` like `sync_status.engine_refusal`. An `Err` from either command keeps
+/// meaning "it did not happen". The variant names mirror the wire codes (`finder_removal_unconfirmed`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+enum ActionWarning {
+    /// Signed out, keys cleared, but the removal from Finder was not confirmed (macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    FinderRemovalUnconfirmed,
+    /// Locked, keys cleared, but the reconciler did not confirm it holds (macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    FinderLockUnconfirmed,
+    /// Locked, keys cleared, but an engine stop (this one or an earlier one) was never confirmed (macOS and Linux).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    EngineStopUnconfirmed,
+}
+
+impl ActionWarning {
+    fn code(self) -> &'static str {
+        match self {
+            Self::FinderRemovalUnconfirmed => "finder_removal_unconfirmed",
+            Self::FinderLockUnconfirmed => "finder_lock_unconfirmed",
+            Self::EngineStopUnconfirmed => "engine_stop_unconfirmed",
+        }
+    }
+
+    fn sentence(self) -> &'static str {
+        match self {
+            Self::FinderRemovalUnconfirmed => FINDER_SIGN_OUT_UNCONFIRMED_WARNING,
+            Self::FinderLockUnconfirmed => FINDER_LOCK_UNCONFIRMED_WARNING,
+            Self::EngineStopUnconfirmed => LOCK_ENGINE_UNCONFIRMED_WARNING,
+        }
+    }
+}
+
+impl serde::Serialize for ActionWarning {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let mut warning = serializer.serialize_struct("ActionWarning", 2)?;
+        warning.serialize_field("code", self.code())?;
+        warning.serialize_field("sentence", self.sentence())?;
+        warning.end()
+    }
+}
+
+/// What `clear_session` and `lock_vault` return when the action happened. `warning` is always serialized (null when
+/// every step was confirmed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct SessionActionOutcome {
+    warning: Option<ActionWarning>,
+}
+
+/// What [`clear_session_impl`] did, and what of it could not be confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SignOutReport {
+struct SignedOut {
     outcome: SignOutOutcome,
-    /// Shown to the person in the app's alert (`show_preserved_files_alert`), never logged.
+    warning: Option<ActionWarning>,
+    /// Task 1882: the folder where macOS kept the Finder files that had not reached the server when the
+    /// sign-out removed the Finder location. Shown to the person in the app's alert
+    /// (`show_preserved_files_alert`), never logged.
     preserved_location: Option<String>,
 }
 
-/// [`clear_session_impl`]'s failure. Review I1 (round 2): a sign-out can still fail AFTER it
-/// removed the Finder location (the Keychain clear), and the folder macOS kept must not be lost
-/// with it: the error carries it, and the alert is raised before the error is returned.
+#[cfg(test)]
+impl SignedOut {
+    /// A sign-out whose every step was confirmed.
+    fn confirmed(outcome: SignOutOutcome) -> Self {
+        Self {
+            outcome,
+            warning: None,
+            preserved_location: None,
+        }
+    }
+}
+
+/// [`clear_session_impl`]'s failure. Review I1 (task 1882 round 2): a sign-out can still fail AFTER it
+/// removed the Finder location, and the folder macOS kept must not be lost with it: the error carries it,
+/// and the alert is raised before the error is returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SignOutFailure {
     message: String,
@@ -1649,9 +2771,9 @@ impl std::fmt::Display for SignOutFailure {
 }
 
 /// The folder a sign-out kept, whether it succeeded or failed after the removal (review I1).
-fn sign_out_kept_folder(result: &Result<SignOutReport, SignOutFailure>) -> Option<&str> {
+fn sign_out_kept_folder(result: &Result<SignedOut, SignOutFailure>) -> Option<&str> {
     match result {
-        Ok(report) => report.preserved_location.as_deref(),
+        Ok(done) => done.preserved_location.as_deref(),
         Err(failure) => failure.preserved_location.as_deref(),
     }
 }
@@ -1659,111 +2781,120 @@ fn sign_out_kept_folder(result: &Result<SignOutReport, SignOutFailure>) -> Optio
 /// The unconfirmed-stop refusal (Bug A / task 1538 Codex P1). Shared by the
 /// fresh-abort path and the Bug-A2 retry gate so a retry cannot be
 /// distinguished from a first refusal by its message.
-const UNCONFIRMED_ENGINE_STOP_ERROR: &str =
-    "Could not stop the sync engine. Please try signing out again; if this keeps \
+const UNCONFIRMED_ENGINE_STOP_ERROR: &str = "Could not stop the sync engine. Please try signing out again; if this keeps \
      happening, restart Beebeeb before signing in with a different account.";
 
 /// Drop any cached session and abort the engine if running.
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFailure> {
+async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<SignedOut, SignOutFailure> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
     let mut _auth_reopen = None;
     let acct = state.active_account()?;
+    // An account switch (spec §5.6) leaves no account email behind, or it stops: the prefill is forgotten before
+    // anything is torn down, and it is never saved again below.
+    if forget_email {
+        forget_last_signed_in_email()?;
+    }
+    // Task 12, lead ruling 1: no session transition that began before this sign-out writes anything from here on (the
+    // session clear below ends any that begins while it runs).
+    drop(end_sessions_in_flight(&acct, account::SessionTransition::SignOut));
+
+    // Spec 2026-10-06 §5.3 (5): a sign-out by choice removes Beebeeb from Finder. The reconciler
+    // cancels any check first and holds, so no check can start an engine after the stop below (plan
+    // "Spec issues" 8). A removal it cannot confirm (not running, no answer in time, or it failed) does
+    // not stop the sign-out: everything below still runs, and the result says it was unconfirmed
+    // (lead rulings T8-⚠lock 1, T7-⚠2 5).
+    #[cfg(target_os = "macos")]
+    let finder_cleanup = finder_remove_for(state, finder_setup::core::Trigger::SignOut).await;
+    // Task 1882 (P0): the removal keeps the files that never reached the server
+    // (`NSFileProviderDomainRemovalModePreserveDirtyUserData`), and the folder macOS kept them in rides the
+    // result to the alert. A removal that was not confirmed is logged here; one that failed but kept a folder
+    // still names it (review M2).
+    #[cfg(target_os = "macos")]
+    let preserved_location = finder_removal::sign_out_kept_location(finder_cleanup.clone());
+    #[cfg(not(target_os = "macos"))]
+    let preserved_location: Option<String> = None;
+    // Review I1: the Finder location is gone from here on, so every failure below carries the folder.
+    let kept_with = |message: String| SignOutFailure {
+        message,
+        preserved_location: preserved_location.clone(),
+    };
+    // What the result says when the sign-out happens: a removal the reconciler did not confirm (FB-24).
+    #[cfg(target_os = "macos")]
+    let removal_warning = finder_cleanup
+        .is_err()
+        .then_some(ActionWarning::FinderRemovalUnconfirmed);
+    #[cfg(not(target_os = "macos"))]
+    let removal_warning: Option<ActionWarning> = None;
+    // Held to the end of the function: a sign-out that stops short with the keys still in memory puts
+    // Finder back (lead ruling T3-⚠2).
+    #[cfg(target_os = "macos")]
+    let _finder_restore = FinderRestoreOnAbort { state, acct: &acct };
 
     // Bug B guard: already signed out everywhere (no auth flag, no in-memory
-    // session, no keychain session) → skip the engine stop and the Cloud
-    // Files teardown entirely. The old flow ran the full teardown anyway and
+    // session, no keychain session). The old flow ran the full teardown anyway and
     // could FAIL (CFAPI/purge preflight) — trapping the user in a
-    // "can't sign out because not signed in" loop. What still runs below, on
-    // BOTH paths: the idempotent keychain clear, the local-state purge (the
-    // queue purge is a cross-account safety invariant — never skipped), and
-    // the auth-flag resets.
+    // "can't sign out because not signed in" loop. On Windows this path skips the
+    // engine stop and the Cloud Files teardown entirely. On macOS and Linux it
+    // still takes the engine slot and stops any engine it finds (Task 12 fix round
+    // 2, item 1), so it also refuses after an unconfirmed engine stop. What it does
+    // skip there, against a signed-in sign-out: saving the email for the next
+    // sign-in; the `SignedOut` lifecycle event (it returns `NotSignedIn`, not
+    // `Completed`); and failing on a Keychain clear that errors (that error is
+    // logged and the sign-out goes on). What still runs below, on BOTH paths:
+    // the idempotent keychain clear, the local-state purge (the queue purge is a
+    // cross-account safety invariant — never skipped), and the auth-flag resets.
     let already_signed_out = {
         let auth_present = state.auth_present.lock().map(|present| *present).unwrap_or(false);
         let session_installed = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
         !auth_present && !session_installed && !keychain_session_present(acct.id.as_str())
     };
-    if already_signed_out {
-        tracing::info!(
-            "sign-out requested while already signed out; skipping engine stop and Cloud Files teardown"
-        );
+    // The engine slot, once taken below, is held until the session is cleared (lead ruling T8-⚠lock 2):
+    // every start reads its keys under the slot, so releasing it first would let a start that was waiting
+    // for it see keys this sign-out is about to clear. `clear_session_holding_slot` makes that order the
+    // only one that compiles. Session installs are ordered against a sign-out separately (Task 12).
+    let mut held_engine_slot = if already_signed_out {
+        #[cfg(target_os = "windows")]
+        tracing::info!("sign-out requested while already signed out; skipping engine stop and Cloud Files teardown");
+        #[cfg(not(target_os = "windows"))]
+        tracing::info!("sign-out requested while already signed out; stopping any engine still in the slot");
+        // macOS and Linux (Task 12 fix round 2, item 1): this path holds the engine slot from here too, BEFORE the
+        // purge, and stops any engine it finds there (one a sign-in that completed after this sign-out began has
+        // started), through the same helper and with the same refusals as the signed-in path. A start that comes during
+        // the purge waits for the slot and then finds no keys.
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some(
+                take_slot_and_stop_engine_for_sign_out(&acct)
+                    .await
+                    .map_err(&kept_with)?,
+            )
+        }
+        #[cfg(target_os = "windows")]
+        {
+            None
+        }
     } else {
         // Remember the signed-in email for the sign-in prefill BEFORE any
         // credential erasure: `clear_keychain_session` deletes the keychain
         // account-email credential, so this capture is the last chance to
         // keep the address the sign-in form should open with. Best-effort —
         // never gates sign-out. On the already-signed-out path the capture
-        // finds nothing and no write happens.
-        persist_last_signed_in_email(signout_email_to_preserve(&acct));
+        // finds nothing and no write happens. An account switch saves nothing (it forgot the email above).
+        if !forget_email {
+            persist_last_signed_in_email(signout_email_to_preserve(&acct));
+        }
         #[cfg(target_os = "windows")]
         close_session_commands().await?;
         // Stop the engine before dropping memory so the IPC listener cannot accept
-        // new File Provider operations with a cloned master key.
-        //
-        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): `abort()` reports
-        // whether the engine's task is CONFIRMED terminated, not just "we asked
-        // and waited a bit". The purge below is a cross-account data-
-        // exfiltration control (findings 1+2) — it is only safe to run once the
-        // OLD engine (and everything nested in its single task: the IPC socket
-        // server, the Windows upload watcher) is genuinely gone and can no
-        // longer drain or enqueue operations behind its back. If we can't
-        // confirm that, refuse to complete sign-out rather than purge anyway
-        // and hand the next account's engine a false sense of a clean slate.
-        //
-        // Bug A2: a refused attempt consumes the engine handle, leaving the
-        // slot empty — without the `engine_stop_unconfirmed` flag below, a
-        // RETRY would see an idle slot, skip this gate entirely, and purge
-        // while the old engine may still be running. The flag (per-account,
-        // in-memory) keeps the gate closed until the process restarts, which
-        // is exactly what the error message tells the user to do.
-        let mut engine_slot = acct.engine.lock().await;
-        if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
-            drop(engine_slot);
-            tracing::error!(
-                "sign-out refused: a previous attempt could not confirm the sync engine \
-                 stopped; restart Beebeeb before signing in with a different account"
-            );
-            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.into());
-        }
-        if let Some(prev) = engine_slot.take() {
-            match prev.abort().await {
-                runner::AbortOutcome::Stopped => {
-                    tracing::info!("engine aborted on logout");
-                }
-                runner::AbortOutcome::RevokeFailed { stage, source } => {
-                    // Bug A misattribution fix: the engine task itself IS
-                    // confirmed stopped here — what failed is the Windows
-                    // Cloud Files callback revocation. Say so, instead of
-                    // blaming the sync engine.
-                    tracing::error!(
-                        stage,
-                        %source,
-                        "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
-                    );
-                    return Err(SignOutFailure::from(format!(
-                        "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
-                         Please try signing out again; if this keeps happening, restart Beebeeb \
-                         before signing in with a different account. ({source})"
-                    )));
-                }
-                runner::AbortOutcome::TaskUnconfirmed => {
-                    acct.engine_stop_unconfirmed
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        "sign-out refused: could not confirm the sync engine stopped; \
-                         refusing to purge local state or clear credentials while it may still be running"
-                    );
-                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.into());
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        drop(engine_slot);
+        // new File Provider operations with a cloned master key (see `take_slot_and_stop_engine_for_sign_out`).
+        let engine_slot = take_slot_and_stop_engine_for_sign_out(&acct)
+            .await
+            .map_err(&kept_with)?;
 
         #[cfg(target_os = "windows")]
         {
@@ -1778,7 +2909,8 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFa
                 _auth_reopen = Some(auth_attempts::ReopenOnDrop(&AUTH_ATTEMPTS));
             }
         }
-    }
+        Some(engine_slot)
+    };
 
     #[cfg(target_os = "windows")]
     {
@@ -1810,7 +2942,8 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFa
         if !already_signed_out {
             if let Some(root) = root {
                 // Cloud Files must release the root before WinRT removes its shell registration.
-                windows_cf::unregister_sync_root(&root).map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
+                windows_cf::unregister_sync_root(&root)
+                    .map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
                 windows_cf::unregister_shell_sync_root(&root)
                     .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
             }
@@ -1845,11 +2978,9 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFa
     // `state_db::StateDb::purge_all_local_state`) and every decrypted cache
     // file this device holds for this account (so it can't be permanently
     // orphaned on disk once the next account's first sync prunes the DB row
-    // that pointed at it). Best-effort and non-fatal per file: logout must
-    // always appear to succeed, and the DB rows are already cleared inside
-    // `purge_all_local_state` regardless of whether every on-disk file
-    // removal below succeeds, so nothing can act on a leftover file again
-    // even if this loop can't delete it.
+    // that pointed at it). Per file it stays best-effort (the DB rows are
+    // cleared regardless). A failure of the purge itself stops the sign-out
+    // (R10, spec 2026-10-06 §5.6).
     //
     // Task 1538 Codex P1 (lib.rs:1085 thread): `db` is resolved from the
     // app-local state dir DIRECTLY — `state_db_from_app_local_state_dir`,
@@ -1862,92 +2993,47 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFa
     // Windows placeholder paths below, never to gate whether the purge runs
     // at all.
     #[cfg(not(target_os = "windows"))]
-    let cfg_sync_root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
-    #[cfg(not(target_os = "windows"))]
-    match state_db_from_app_local_state_dir() {
-        Ok(Some(db)) => match purge_local_state_files(&db, cfg_sync_root.as_deref()) {
-            Ok(summary) => {
-                tracing::info!(
-                    queued_ops_purged = summary.queued_ops_purged,
-                    files_removed = summary.files_removed,
-                    files_skipped = summary.files_skipped,
-                    windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
-                    "purged operation queue and decrypted cache on sign-out"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to purge operation queue / decrypted cache on sign-out");
-            }
-        },
-        Ok(None) => {
-            // No state.db yet — a fresh install that never synced anything.
-            // Nothing to purge; not an error.
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "sign-out purge: could not resolve the local state database; \
-                 operation queue / decrypted cache may not have been cleared"
-            );
-        }
+    {
+        let cfg_sync_root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+        // On a Mac a removal the reconciler could not confirm leaves the domain registered: that is a debt no
+        // engine may start before.
+        #[cfg(target_os = "macos")]
+        let owe_removal = finder_cleanup.is_err();
+        #[cfg(not(target_os = "macos"))]
+        let owe_removal = false;
+        // Test builds only: every sign-out test shares the one scratch state directory the purge below works on, so
+        // two purges at once can find the database held ("database is locked"). They take turns here (a test that
+        // already holds the gate for its whole body says so, and does not wait for itself).
+        #[cfg(test)]
+        let _one_purge_at_a_time = if PURGE_GATE_HELD.try_with(|_| ()).is_ok() {
+            None
+        } else {
+            Some(SIGN_OUT_TEST_PURGE_GATE.lock().await)
+        };
+        purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal)
+            .map_err(&kept_with)?;
     }
 
-    // macOS: remove the Finder File Provider domain on sign-out — the macOS
-    // analogue of the Windows shell-unregister above, so a logged-out
-    // machine has no live File Provider domain pointing at a folder the user
-    // is no longer signed into (finding 2). Best-effort: a failure (incl.
-    // "not registered") is logged, not surfaced — logout must always appear
-    // to succeed. Re-login re-installs the domain via `install_finder_location`.
-    //
-    // Task 1882 (P0): the removal keeps the files that never reached the
-    // server (`NSFileProviderDomainRemovalModePreserveDirtyUserData`); the
-    // folder macOS kept them in rides the report to the alert.
-    #[cfg(target_os = "macos")]
-    let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain_blocking().await);
-    #[cfg(not(target_os = "macos"))]
-    let preserved_location: Option<String> = None;
+    // (macOS: the Finder removal is the reconciler's, at the start of this function: spec 2026-10-06
+    // §5.3 (5). A logged-out Mac has no File Provider domain pointing at a folder the person is no
+    // longer signed into, and no second, direct removal runs here.)
     // Task 1670 round 2: also the account-switch boundary — this codebase's
     // sign-out IS its account-switch mechanism (single active-account slot,
     // see `AppState::active_account`'s own "Phase 0" comment), so there is no
     // separate switch-account hook to add this to.
     purge_macos_hydrate_cache("sign-out");
 
-    finish_sign_out_after_removal(
-        state,
-        &acct,
-        already_signed_out,
-        preserved_location,
-        clear_keychain_session,
-    )
-}
-
-/// The rest of a sign-out once the Finder location is gone (or was never there): drop the
-/// session from memory and clear the Keychain. Review I1 (round 2): every failure from here on
-/// carries the folder macOS kept, so the alert can still name it. `clear_keychain` is
-/// `clear_keychain_session` in the app; tests pass a fake so they never touch the Keychain.
-fn finish_sign_out_after_removal(
-    state: &AppState,
-    acct: &crate::account::AccountRuntime,
-    already_signed_out: bool,
-    preserved_location: Option<String>,
-    clear_keychain: impl FnOnce(&str) -> Result<(), String>,
-) -> Result<SignOutReport, SignOutFailure> {
-    match acct.session.lock() {
-        Ok(mut guard) => {
-            guard.take();
-            bump_vault_epoch();
-            tracing::info!("session cleared via IPC");
-        }
-        Err(_) => {
-            #[cfg(target_os = "windows")]
-            return Err(SignOutFailure {
-                message: "Could not clear the runtime session. The vault is not locked; restart Beebeeb.".to_string(),
-                preserved_location,
-            });
-            #[cfg(not(target_os = "windows"))]
-            tracing::warn!("session mutex poisoned during clear_session");
-        }
-    }
+    // Every path holds the engine slot by now (it took the slot to stop the engine), except the Windows
+    // already-signed-out path, which stopped nothing and holds none: it takes the slot here, only to clear under it.
+    let engine_slot = match held_engine_slot.take() {
+        Some(slot) => slot,
+        None => acct.engine.lock().await,
+    };
+    clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;
+    // Windows: only now may a start waiting for the engine slot get it, and it finds no keys. On macOS and Linux the
+    // slot is held through the last turn below (`finish_sign_out_turn`).
+    #[cfg(target_os = "windows")]
+    drop(engine_slot);
     // Drop the cached account profile so a subsequent `account_profile` IPC
     // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
     clear_cached_profile(state);
@@ -1964,11 +3050,18 @@ fn finish_sign_out_after_removal(
     // sign-in must not inherit a stale `auth_expired: true` banner.
     acct.auth_health.note_result(None);
     if already_signed_out {
-        // Already signed out: the trio should already be gone. The clear is
+        // Already signed out: after a startup 401 (R9) the vault key and the email can still be here. The clear is
         // idempotent, but on a store that cannot answer (e.g. the Linux
         // fail-closed stub) an error must not turn an already-signed-out
-        // no-op into a failure — log it and return success.
-        if let Err(error) = clear_keychain(acct.id.as_str()) {
+        // no-op into a failure — log it and go on to the check (macOS/Linux: inside the last turn).
+        #[cfg(not(target_os = "windows"))]
+        {
+            finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;
+            // Only now may a start waiting for the engine slot get it, and it finds no keys.
+            drop(engine_slot);
+        }
+        #[cfg(target_os = "windows")]
+        if let Err(error) = clear_keychain_session(acct.id.as_str()) {
             tracing::warn!(
                 %error,
                 "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing"
@@ -1976,41 +3069,193 @@ fn finish_sign_out_after_removal(
         }
         set_auth_present(state, false);
         set_auth_email(state, None);
-        return Ok(SignOutReport {
+        return Ok(SignedOut {
             outcome: SignOutOutcome::NotSignedIn,
+            warning: removal_warning,
             preserved_location,
         });
     }
-    // Review I1: the Finder location is already gone, so a failure here must keep the folder.
-    if let Err(message) = clear_keychain(acct.id.as_str()) {
-        return Err(SignOutFailure {
-            message,
-            preserved_location,
-        });
+    // macOS/Linux: the Keychain clear and its check in the sign-out's last turn, which moves the generation on after them.
+    #[cfg(not(target_os = "windows"))]
+    {
+        finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;
+        // Only now may a start waiting for the engine slot get it, and it finds no keys.
+        drop(engine_slot);
     }
+    #[cfg(target_os = "windows")]
+    clear_keychain_session(acct.id.as_str())?;
     set_auth_present(state, false);
     set_auth_email(state, None);
-    Ok(SignOutReport {
+    lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut);
+    // Everything this sign-out can clear is cleared, so it happened; a removal from Finder it could not confirm is a
+    // warning on that success, not an error (FB-24; lead rulings T8-⚠lock 1 and T7-⚠2 5).
+    Ok(SignedOut {
         outcome: SignOutOutcome::Completed,
+        warning: removal_warning,
         preserved_location,
     })
 }
 
+/// Sign-out's engine stop: take the engine slot and stop whatever engine holds it, through the one stop helper
+/// (`stop_engine_in_slot`). Returns the slot, still held, so the session is cleared before any start can take it.
+/// Refuses (with the slot released and nothing cleared) when an earlier stop was never confirmed, when this stop cannot
+/// be confirmed, or when the Windows Cloud Files revocation failed. Both sign-out paths use it (Task 12 fix round 2).
+async fn take_slot_and_stop_engine_for_sign_out(
+    acct: &AccountRuntime,
+) -> Result<tokio::sync::MutexGuard<'_, Option<EngineRunner>>, String> {
+    // Stop the engine before dropping memory so the IPC listener cannot accept
+    // new File Provider operations with a cloned master key.
+    //
+    // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): `abort()` reports
+    // whether the engine's task is CONFIRMED terminated, not just "we asked
+    // and waited a bit". The purge below is a cross-account data-
+    // exfiltration control (findings 1+2) — it is only safe to run once the
+    // OLD engine (and everything nested in its single task: the IPC socket
+    // server, the Windows upload watcher) is genuinely gone and can no
+    // longer drain or enqueue operations behind its back. If we can't
+    // confirm that, refuse to complete sign-out rather than purge anyway
+    // and hand the next account's engine a false sense of a clean slate.
+    //
+    // Bug A2: a refused attempt consumes the engine handle, leaving the
+    // slot empty — without the `engine_stop_unconfirmed` flag below, a
+    // RETRY would see an idle slot, skip this gate entirely, and purge
+    // while the old engine may still be running. The flag (per-account,
+    // in-memory) keeps the gate closed until the process restarts, which
+    // is exactly what the error message tells the user to do.
+    let mut engine_slot = acct.engine.lock().await;
+    if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
+        drop(engine_slot);
+        tracing::error!(
+            "sign-out refused: a previous attempt could not confirm the sync engine \
+             stopped; restart Beebeeb before signing in with a different account"
+        );
+        return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+    }
+    if let Some(prev) = engine_slot.take() {
+        match stop_engine_in_slot(acct, prev).await {
+            runner::AbortOutcome::Stopped => {
+                tracing::info!("engine aborted on logout");
+            }
+            runner::AbortOutcome::RevokeFailed { stage, source } => {
+                // Bug A misattribution fix: the engine task itself IS
+                // confirmed stopped here — what failed is the Windows
+                // Cloud Files callback revocation. Say so, instead of
+                // blaming the sync engine.
+                tracing::error!(
+                    stage,
+                    %source,
+                    "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
+                );
+                return Err(format!(
+                    "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
+                     Please try signing out again; if this keeps happening, restart Beebeeb \
+                     before signing in with a different account. ({source})"
+                ));
+            }
+            runner::AbortOutcome::TaskUnconfirmed => {
+                // (`stop_engine_in_slot` has set `engine_stop_unconfirmed`, before the slot is released.)
+                tracing::error!(
+                    "sign-out refused: could not confirm the sync engine stopped; \
+                     refusing to purge local state or clear credentials while it may still be running"
+                );
+                return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+            }
+        }
+    }
+    Ok(engine_slot)
+}
+
+/// The turn-taking for the purge in the sign-out tests (see `clear_session_impl`). Test builds only.
+#[cfg(all(test, not(target_os = "windows")))]
+static SIGN_OUT_TEST_PURGE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(all(test, not(target_os = "windows")))]
+tokio::task_local! {
+    /// Set inside [`with_the_shared_state_dir`]: this task already holds the gate, so its own sign-out must not wait for it.
+    static PURGE_GATE_HELD: ();
+}
+
+/// Run `body` holding the gate the sign-out purge takes. For a test that works in the shared scratch state directory
+/// itself (it seeds the database before it signs out, and checks it after): from its first write to its last check, no
+/// other test's purge runs. Its own sign-out sees the marker and does not wait for the gate it holds.
+#[cfg(all(test, not(target_os = "windows")))]
+async fn with_the_shared_state_dir<T>(body: impl std::future::Future<Output = T>) -> T {
+    let _gate = SIGN_OUT_TEST_PURGE_GATE.lock().await;
+    PURGE_GATE_HELD.scope((), body).await
+}
+
+/// The local-data purge of a sign-out on macOS and Linux, with the state dir passed in (a unit test points it at a
+/// throwaway one; `clear_session_impl` passes the app's). Purge the queue, the staged payloads and the cache files,
+/// then clear EVERY account row and the owner, so the next sign-in finds a clean database instead of leftovers
+/// (fix round 1 of Task 10). `owe_finder_removal`: the sign-out's Finder removal was not confirmed, so a removal is
+/// owed before any engine starts. Any failure stops the sign-out: a purge that cannot run (state dir unresolved,
+/// database unopenable), one that fails (a file that cannot be removed), a failed clear. A state.db that does not
+/// exist yet is a fresh install: nothing to purge.
+#[cfg(not(target_os = "windows"))]
+fn purge_local_data_for_sign_out(
+    state_dir: Result<PathBuf, String>,
+    sync_root: Option<&Path>,
+    owe_finder_removal: bool,
+) -> Result<(), String> {
+    match state_dir.and_then(|dir| state_db_from_state_dir(&dir)) {
+        Ok(Some(db)) => match purge_local_state_files(&db, sync_root) {
+            Ok(summary) => {
+                tracing::info!(
+                    queued_ops_purged = summary.queued_ops_purged,
+                    files_removed = summary.files_removed,
+                    files_skipped = summary.files_skipped,
+                    windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
+                    "purged operation queue and decrypted cache on sign-out"
+                );
+                if let Err(error) = db.clear_account_data(owe_finder_removal) {
+                    tracing::error!(error = %error, "sign-out stopped: the account rows could not be cleared");
+                    return Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"));
+                }
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "sign-out stopped: the local data could not be purged");
+                Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"))
+            }
+        },
+        // No state.db yet: a fresh install that never synced anything. Nothing to purge; not an error.
+        Ok(None) => Ok(()),
+        Err(error) => {
+            tracing::error!(error = %error, "sign-out stopped: the local state database could not be opened");
+            Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"))
+        }
+    }
+}
+
+/// R10: on macOS and Linux a sign-out whose local-data purge fails stops instead of completing, as
+/// Windows already does. The engine is already stopped, so trying again is safe.
+#[cfg(not(target_os = "windows"))]
+const SIGN_OUT_PURGE_FAILED: &str = "Sign-out paused: Beebeeb couldn’t clear this computer’s local data. Try again; if it keeps happening, restart Beebeeb.";
+
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
 /// an error while work, plaintext cleanup or root unregistration is incomplete;
 /// the UI must retain the account and display that error for recovery/retry.
+/// `forget_email` (`forgetEmail` from the frontend): this sign-out is an account switch, so the sign-in prefill is
+/// forgotten too (spec §5.6). Absent or false: the prefill is kept, as before.
+/// `Ok` means the sign-out happened; its `warning` says what of it could not be confirmed (FB-24).
 ///
 /// Task 1882: when the sign-out kept Finder files that had not reached the
 /// server, the app's alert names the folder. Every frontend sign-out (Settings,
-/// the compact Account page, "Sign in again") ends here; the menu's sign-out
+/// the compact Account page, "Sign in again", the account switch) ends here; the menu's sign-out
 /// raises the same alert in its own handler.
 #[tauri::command]
-async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let result = clear_session_impl(&state).await;
+async fn clear_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    forget_email: Option<bool>,
+) -> Result<SessionActionOutcome, String> {
+    let result = clear_session_impl(&state, forget_email.unwrap_or(false)).await;
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
     // Review I2: and the folder is saved for the Settings › Sync row.
     surface_kept_folder(&app, sign_out_kept_folder(&result));
-    result.map(|_| ()).map_err(|failure| failure.message)
+    result
+        .map(|done| SessionActionOutcome { warning: done.warning })
+        .map_err(|failure| failure.message)
 }
 
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
@@ -2078,9 +3323,23 @@ fn dismiss_kept_unsynced_folder(path: String) -> Result<finder_removal::DismissO
 /// (see its doc): the lock that preceded this already moved the epoch, and a cold start has no
 /// cached storage summary to go stale. Split out of `unlock_vault` so a test can run the real
 /// install after the real `lock_vault`; the Keychain read before it has no Linux backend.
-fn install_unlocked_session(acct: &AccountRuntime, session: Session) -> Result<(), String> {
+fn install_unlocked_session(_write: &SessionWrite, acct: &AccountRuntime, session: Session) -> Result<(), String> {
     let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
     *guard = Some(session);
+    Ok(())
+}
+
+/// The Keychain unlock's install, in its turn (lead ruling 1, Task 12): `turn` was captured before the Keychain was
+/// read, and the session and `auth_present` go into memory only while no other session transition happened since.
+fn install_keychain_session(
+    state: &AppState,
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+    session: Session,
+) -> Result<(), String> {
+    let write = claim_session_write(acct, turn).map_err(|changed| changed.keychain_unlock_sentence().to_string())?;
+    install_unlocked_session(&write, acct, session)?;
+    set_auth_present(state, true);
     Ok(())
 }
 
@@ -2103,43 +3362,40 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             windows_cf::ensure_reactivation_allowed()?;
         }
         let acct = state.active_account()?;
-        let existing = acct
+        let session_installed = acct
             .session
             .lock()
             .map_err(|_| "session mutex poisoned".to_string())?
-            .as_ref()
-            .map(|session| (session.token.clone(), session.master_key));
-        if let Some((token, master_key)) = existing {
-            start_engine_if_possible(
+            .is_some();
+        if session_installed {
+            let started = start_engine_if_possible(
                 app,
                 &state,
-                token,
-                master_key,
                 #[cfg(target_os = "windows")]
                 &_transition,
             )
-            .await?;
-            return Ok(());
+            .await;
+            keys_arrived(&state, KeysFrom::Unlock);
+            return started;
         }
 
+        // The unlock is one session transition (lead ruling 1, Task 12): captured before the Keychain is read, and the
+        // session goes into memory in its turn only.
+        let mut turn = acct.session_generation();
         let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
         let session = load_session_from_keychain(acct.id.as_str(), email)?
             .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
-        let token = session.token.clone();
-        let master_key = session.master_key;
-        install_unlocked_session(&acct, session)?;
-        set_auth_present(&state, true);
+        install_keychain_session(&state, &acct, &mut turn, session)?;
         tracing::info!("vault unlocked from Keychain");
-        start_engine_if_possible(
+        let started = start_engine_if_possible(
             app,
             &state,
-            token,
-            master_key,
             #[cfg(target_os = "windows")]
             &_transition,
         )
-        .await?;
-        Ok(())
+        .await;
+        keys_arrived(&state, KeysFrom::Unlock);
+        started
     };
     #[cfg(target_os = "windows")]
     {
@@ -2153,15 +3409,36 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 
 /// Lock clears all runtime key material and stops the sync daemon, but keeps
 /// the Keychain session so the user can unlock again without re-entering their
-/// recovery phrase.
+/// recovery phrase. `Ok` means the lock happened; its `warning` says what of it could not be confirmed (FB-24).
 #[tauri::command]
-async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
+async fn lock_vault(state: State<'_, AppState>) -> Result<SessionActionOutcome, String> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     let acct = state.active_account()?;
+    // Task 12, lead ruling 1: no session transition that began before this lock writes anything from here on (the
+    // session clear below ends any that begins while it runs).
+    drop(end_sessions_in_flight(&acct, account::SessionTransition::Lock));
     #[cfg(target_os = "windows")]
     close_session_commands().await?;
+    // Spec A (plan "Spec issues" 8): cancel any Finder check and hold BEFORE the engine stops, so the
+    // reconciler cannot start an engine with keys this lock is about to clear. A reconciler that does
+    // not acknowledge (it is stuck, or it has stopped) does not stop the lock: everything below still
+    // runs, and the result says Finder could not be confirmed (lead rulings T8-⚠lock 1 and T7-⚠2 5).
+    #[cfg(target_os = "macos")]
+    let finder_lock = finder_lock_for(&state).await;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = &finder_lock {
+        tracing::warn!(%error, "the Finder reconciler did not acknowledge the lock; locking anyway");
+    }
     let mut engine_slot = acct.engine.lock().await;
+    // Lead ruling T8-lockflag: like sign-out, lock honours an earlier stop that was never confirmed.
+    // It still clears the session, and it says to restart instead of reporting success.
+    #[cfg(not(target_os = "windows"))]
+    let mut engine_unconfirmed = acct.engine_stop_unconfirmed.load(Ordering::SeqCst);
+    #[cfg(not(target_os = "windows"))]
+    if engine_unconfirmed {
+        tracing::error!("vault lock: an earlier sync engine stop was never confirmed; restart Beebeeb");
+    }
     if let Some(prev) = engine_slot.take() {
         // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
         // session/master key right after this — an unconfirmed stop means
@@ -2171,17 +3448,22 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         // stays fast — there's nothing cross-account to protect here), but
         // it's still worth a loud warning rather than a silent "we waited 3s
         // and moved on".
-        if !prev.abort().await.is_stopped() {
+        if !stop_engine_in_slot(&acct, prev).await.is_stopped() {
             #[cfg(target_os = "windows")]
             return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
+            // Lead ruling T8-lockflag: the consumed handle leaves an empty slot, so the flag (set by
+            // `stop_engine_in_slot`) is what keeps every engine start refused (and sign-out) until a restart.
             #[cfg(not(target_os = "windows"))]
-            tracing::warn!("engine did not confirm termination before vault lock cleared the in-memory session");
+            {
+                engine_unconfirmed = true;
+                tracing::error!(
+                    "engine did not confirm termination before vault lock cleared the in-memory session; restart Beebeeb"
+                );
+            }
         } else {
             tracing::info!("engine aborted on vault lock");
         }
     }
-    #[cfg(not(target_os = "windows"))]
-    drop(engine_slot);
     // Task 1670 round 2: UNLIKE the general local-file cache above, the macOS
     // hydrate-cache holds nothing but ephemeral per-Finder-open staging
     // copies (never the user's regular offline files), so purging it on
@@ -2197,19 +3479,12 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         windows_cf::wait_for_credential_release().await?;
     }
 
-    match acct.session.lock() {
-        Ok(mut guard) => {
-            guard.take();
-            bump_vault_epoch();
-            tracing::info!("vault locked; runtime session cleared");
-        }
-        Err(_) => {
-            #[cfg(target_os = "windows")]
-            return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into());
-            #[cfg(not(target_os = "windows"))]
-            tracing::warn!("session mutex poisoned during lock_vault");
-        }
-    }
+    // The session is cleared while this function still holds the engine slot (it cannot be written otherwise:
+    // `clear_session_holding_slot` borrows the guard). Only after that is the slot released, and a start that
+    // was waiting for it reads its keys under the slot and finds none.
+    clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::Lock)?;
+    #[cfg(not(target_os = "windows"))]
+    drop(engine_slot);
     // Drop the cached account profile on lock too, so "locked == no profile"
     // stays honest; the next `unlock_vault` re-fetches.
     clear_cached_profile(&state);
@@ -2227,7 +3502,21 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         AUTH_ATTEMPTS.finish_close();
     }
     set_auth_present(&state, keychain_session_present(acct.id.as_str()));
-    Ok(())
+    // Everything this lock can clear is cleared, so it happened; what it could not confirm is a warning on that
+    // success (FB-24). An engine that may still hold the key comes first: its fix is the more urgent one.
+    #[cfg(not(target_os = "windows"))]
+    if engine_unconfirmed {
+        return Ok(SessionActionOutcome {
+            warning: Some(ActionWarning::EngineStopUnconfirmed),
+        });
+    }
+    #[cfg(target_os = "macos")]
+    if finder_lock.is_err() {
+        return Ok(SessionActionOutcome {
+            warning: Some(ActionWarning::FinderLockUnconfirmed),
+        });
+    }
+    Ok(SessionActionOutcome { warning: None })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2252,6 +3541,10 @@ struct MacosIntegrationResetResult {
     skipped_cache_files: usize,
     pending_operations_preserved: i64,
     sync_root_preserved: Option<String>,
+    /// An engine stop on this account is unconfirmed after Repair's own stop (this one, or an earlier one): its task
+    /// may still run with the keys, so sync starts again only after Beebeeb is quit and reopened (spec §5.6). The
+    /// surfaces render one fixed sentence for it; `warnings` keeps its text for Windows and Linux.
+    engine_stop_unconfirmed: bool,
     warnings: Vec<String>,
 }
 
@@ -2262,6 +3555,9 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+// The install-era Finder state (`finder_install_*` in desktop.toml and the helpers below) is for
+// Windows and Linux only. On macOS the reconciler owns the truth (spec 2026-10-06 §6.1).
+#[cfg(not(target_os = "macos"))]
 fn classify_finder_install_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("turned off in system settings") {
@@ -2282,6 +3578,7 @@ fn classify_finder_install_error(error: &str) -> String {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn finder_install_state_from_config(
     cfg: &DesktopConfig,
     installed: bool,
@@ -2319,21 +3616,10 @@ fn finder_install_state_from_config(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = cfg;
-        if installed {
-            return file_provider_visible_location().ok().flatten();
-        }
-        return None;
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = installed;
-        cfg.sync_root.as_ref().map(|p| p.to_string_lossy().into_owned())
-    }
+    let _ = installed;
+    cfg.sync_root.as_ref().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// The end of Repair, once the Finder location is gone (re-review P1, as review I1 is for
@@ -2342,6 +3628,10 @@ fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
 /// folder would never be named: the error only says Repair failed, and Repair raises no alert of
 /// its own. A save that works shows nothing here: the result carries the folder to the Sync tab.
 /// `surface` is `surface_kept_folder` in the app; the tests pass a recorder.
+///
+/// Windows and Linux only in the app: on macOS Repair saves no config after the removal (spec 2026-10-06 §6.1),
+/// so there is no save that can fail after it.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn finish_repair_after_removal(
     cfg: &mut DesktopConfig,
     preserved_location: Option<&str>,
@@ -2358,6 +3648,7 @@ fn finish_repair_after_removal(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn persist_finder_install_result(
     cfg: &mut DesktopConfig,
     installed: bool,
@@ -2370,6 +3661,7 @@ fn persist_finder_install_result(
 /// The in-memory half of [`persist_finder_install_result`]: stamp the attempt time and the
 /// outcome fields on `cfg` without touching disk, so the state a failed install returns can be
 /// built (and unit-tested) from exactly what gets saved.
+#[cfg(not(target_os = "macos"))]
 fn record_finder_install_result(cfg: &mut DesktopConfig, installed: bool, error: Option<String>) {
     cfg.finder_install_last_attempt_at = Some(now_unix_seconds());
     if installed {
@@ -2394,6 +3686,7 @@ fn record_finder_install_result(cfg: &mut DesktopConfig, installed: bool, error:
 /// Finder", so it is saved and returned as a state (`installed: false`, `status: "error"`,
 /// `last_error` set); the UI renders that one inline and never toasts it. This builds that state
 /// from the freshly recorded result, so what is returned is what is saved.
+#[cfg(not(target_os = "macos"))]
 fn finder_install_failure_state(cfg: &mut DesktopConfig, error: String) -> FinderInstallState {
     record_finder_install_result(cfg, false, Some(error));
     finder_install_state_from_config(cfg, false, None)
@@ -2405,6 +3698,7 @@ fn finder_install_failure_state(cfg: &mut DesktopConfig, error: String) -> Finde
 /// Clears the failure fields (an `error` status becomes `missing`, like the frontend's
 /// `finderInstallStateWhileAttempting`); an `installed` status and the last attempt time are
 /// left alone. Returns whether anything changed, so an attempt with nothing to clear writes nothing.
+#[cfg(not(target_os = "macos"))]
 fn clear_finder_install_failure(cfg: &mut DesktopConfig) -> bool {
     let had_failure = cfg.finder_install_status.as_deref() == Some("error")
         || cfg.finder_install_last_error.is_some()
@@ -2418,6 +3712,7 @@ fn clear_finder_install_failure(cfg: &mut DesktopConfig) -> bool {
 }
 
 /// Start of an install attempt: drop the previous attempt's failure from the saved state.
+#[cfg(not(target_os = "macos"))]
 fn begin_finder_install_attempt(cfg: &mut DesktopConfig) -> Result<(), String> {
     if clear_finder_install_failure(cfg) {
         cfg.save()?;
@@ -2427,6 +3722,7 @@ fn begin_finder_install_attempt(cfg: &mut DesktopConfig) -> Result<(), String> {
 
 /// Save a failed Finder install and return it as an `Ok` state (see
 /// [`finder_install_failure_state`]). Only a failure to save the config itself is an `Err`.
+#[cfg(not(target_os = "macos"))]
 fn finder_install_failed(cfg: &mut DesktopConfig, error: String) -> Result<FinderInstallState, String> {
     let state = finder_install_failure_state(cfg, error);
     cfg.save()?;
@@ -2483,8 +3779,13 @@ fn state_db_from_app_local_state_dir() -> Result<Option<state_db::StateDb>, Stri
 /// for it to depend on.
 fn state_db_from_state_dir(state_dir: &std::path::Path) -> Result<Option<state_db::StateDb>, String> {
     let db_path = state_dir.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(None);
+    // Only a database that is CERTAINLY not there is "none yet". A stat that fails for any other reason (a permission,
+    // a path component that is not a directory) is unreadable, not absent (lead ruling 13, Task 12): every caller then
+    // fails closed (a sign-in decides nothing, a sign-out stops, an engine start refuses).
+    match db_path.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) => return Err(format!("read state.db: {error}")),
     }
     state_db::StateDb::open(&db_path)
         .map(Some)
@@ -2517,7 +3818,20 @@ fn disposable_cache_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// `…/Logs/Beebeeb` anywhere in `path`: the lifecycle log's directory, in the home or in the app's
+/// container (spec 2026-10-06 §8). It survives sign-out, Repair and the account reset (lead ruling
+/// T5-⚠c), so no purge may treat anything under it as disposable, whatever root it sits in.
+fn is_lifecycle_log_path(path: &std::path::Path) -> bool {
+    let names: Vec<&str> = path.components().filter_map(|part| part.as_os_str().to_str()).collect();
+    names
+        .windows(2)
+        .any(|pair| pair[0].eq_ignore_ascii_case("Logs") && pair[1].eq_ignore_ascii_case("Beebeeb"))
+}
+
 fn is_disposable_cache_path(path: &std::path::Path) -> bool {
+    if is_lifecycle_log_path(path) {
+        return false;
+    }
     let canonical_path = match path.canonicalize() {
         Ok(path) => path,
         Err(_) => {
@@ -2533,6 +3847,10 @@ fn is_disposable_cache_path(path: &std::path::Path) -> bool {
             }
         }
     };
+    // A symlink into the log directory is the same directory.
+    if is_lifecycle_log_path(&canonical_path) {
+        return false;
+    }
     disposable_cache_roots()
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
@@ -2568,33 +3886,173 @@ struct LocalStatePurgeSummary {
 /// safety check `reset_macos_integration` already uses — before removal, so
 /// a bug that fed this function an unexpected path can never turn a sign-out
 /// into an arbitrary-file-delete. A gated-out or already-missing path is
-/// logged, not fatal: sign-out must always appear to succeed.
+/// logged, not fatal, per file. Since R10 (task 1834) a failure of the purge
+/// ITSELF is fatal to the sign-out (macOS and Linux) and to an engine start
+/// (the account reset), which both call this one function.
 fn purge_local_state_files(
     db: &state_db::StateDb,
     sync_root: Option<&std::path::Path>,
 ) -> Result<LocalStatePurgeSummary, String> {
-    let purge = db
-        .purge_all_local_state()
-        .map_err(|e| format!("purge operation queue and cache metadata: {e}"))?;
+    purge_local_state_files_in(db, sync_root, &production_staging_dirs())
+}
+
+/// The directories whose plaintext copies the purge sweeps as a whole. A unit test never sweeps the shared
+/// per-process sandbox that the engine-bridge tests stage into (a sweep from one test would delete a copy another
+/// is about to read); the sweep itself is tested with directories the test creates.
+fn production_staging_dirs() -> Vec<PathBuf> {
+    #[cfg(test)]
+    {
+        STAGING_DIRS_OVERRIDE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
+    }
+    #[cfg(not(test))]
+    {
+        release_staging_dirs()
+    }
+}
+
+/// What a release build sweeps: every place the engine stages a plaintext copy. A function of its own, compiled in
+/// every build, so a test can look at the list a release build would use (`production_staging_dirs` is the test
+/// override in a test build).
+fn release_staging_dirs() -> Vec<PathBuf> {
+    engine_bridge::finder_staging_candidates()
+}
+
+/// Unit tests only: empty (nothing is swept) unless a test sets it, so the production call sites can be driven with
+/// directories the test created (`account_binding_tests::StagingOverride`).
+#[cfg(test)]
+static STAGING_DIRS_OVERRIDE: std::sync::Mutex<Option<Vec<PathBuf>>> = std::sync::Mutex::new(None);
+
+/// Every regular file under `dir`, not following symlinks (a link is never a plaintext copy of ours, and
+/// following one could leave the staging directory). A directory that does not exist has none.
+fn files_under(dir: &std::path::Path, depth: u8, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() {
+            out.push(entry.path());
+        } else if kind.is_dir() && depth > 0 {
+            files_under(&entry.path(), depth - 1, out);
+        }
+    }
+}
+
+/// The current user's id, where there is one to compare (Unix). A Windows temp dir is already per-user.
+fn current_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        Some(unsafe { libc::geteuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// A staging directory the sweep may enter (R5, fix round 2): a real directory, not a link, that `uid` owns, under
+/// a parent (`.../beebeeb`) that is a real directory `uid` owns too. On a shared `/tmp` another local user's
+/// `beebeeb/finder-writes` is neither ours to read nor ours to delete from, and a link could lead out of the
+/// staging area. Without a user id to compare (Windows) a real directory is enough.
+fn is_owned_staging_dir(dir: &std::path::Path, uid: Option<u32>) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ours = |path: &std::path::Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && uid.is_none_or(|uid| meta.uid() == uid))
+        };
+        ours(dir) && dir.parent().is_none_or(ours)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = uid;
+        std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
+    }
+}
+
+/// Every orphan regular file in the staging directories this user owns; any other directory is left alone.
+fn orphan_staged_files(staging_dirs: &[PathBuf], uid: Option<u32>) -> Vec<PathBuf> {
+    let mut orphans = Vec::new();
+    for dir in staging_dirs {
+        if is_owned_staging_dir(dir, uid) {
+            files_under(dir, 8, &mut orphans);
+        } else if dir.exists() {
+            tracing::warn!(dir = %dir.display(), "purge did not sweep a staging directory that is not this user's");
+        }
+    }
+    orphans
+}
+
+/// [`purge_local_state_files`] with the staging directories to sweep. In this order: delete the files the rows
+/// point at, and every orphan in the staging directories this user owns, each behind `is_disposable_cache_path`;
+/// if ANY removal fails (a missing file is fine) return an error and clear no row, so a retry finds everything and
+/// nothing is forgotten while a plaintext copy is still on disk; only then clear the rows.
+fn purge_local_state_files_in(
+    db: &state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+    staging_dirs: &[PathBuf],
+) -> Result<LocalStatePurgeSummary, String> {
+    purge_local_state_files_as(db, sync_root, staging_dirs, current_uid())
+}
+
+/// [`purge_local_state_files_in`] as the user `uid` (a test pretends to be another user).
+fn purge_local_state_files_as(
+    db: &state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+    staging_dirs: &[PathBuf],
+    uid: Option<u32>,
+) -> Result<LocalStatePurgeSummary, String> {
+    let mut paths: Vec<PathBuf> = db
+        .local_state_file_paths()
+        .map_err(|e| format!("list the local files: {e}"))?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let owned: std::collections::HashSet<PathBuf> = paths.iter().cloned().collect();
+    paths.extend(
+        orphan_staged_files(staging_dirs, uid)
+            .into_iter()
+            .filter(|path| !owned.contains(path)),
+    );
 
     let mut files_removed = 0usize;
     let mut files_skipped = 0usize;
-    for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
-        let path_buf = PathBuf::from(path);
-        if !is_disposable_cache_path(&path_buf) {
+    let mut failed = 0usize;
+    let mut first_failure: Option<std::io::ErrorKind> = None;
+    for path_buf in &paths {
+        if !is_disposable_cache_path(path_buf) {
             files_skipped += 1;
-            tracing::warn!(path = %path, "sign-out purge skipped a path outside the known cache/staging roots");
+            tracing::warn!(path = %path_buf.display(), "purge skipped a path outside the known cache/staging roots");
             continue;
         }
-        match std::fs::remove_file(&path_buf) {
+        match std::fs::remove_file(path_buf) {
             Ok(()) => files_removed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                files_skipped += 1;
-                tracing::warn!(path = %path, error = %error, "failed to remove local file on sign-out");
+                failed += 1;
+                first_failure.get_or_insert(error.kind());
+                tracing::warn!(path = %path_buf.display(), error = %error, "failed to remove a local file in the purge");
             }
         }
     }
+    if failed > 0 {
+        // No path in the message: it reaches the sign-out error and the engine-start error.
+        return Err(format!(
+            "{failed} local file(s) could not be removed ({})",
+            first_failure.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
+        ));
+    }
+
+    let purge = db
+        .purge_all_local_state()
+        .map_err(|e| format!("purge operation queue and cache metadata: {e}"))?;
 
     // Task 1538 Codex P1 (state_db.rs:1785 thread): a Windows Cloud Files
     // placeholder's plaintext lives in the sync root, not at `cache_path` —
@@ -2660,7 +4118,10 @@ fn purge_local_state_files(
 /// silently dropped (not an error — sign-out must still succeed) when it
 /// doesn't resolve to a real file under an allowed root: an
 /// already-cleaned-up or corrupt row has nothing for the caller to act on.
-fn resolve_purge_placeholder_paths(candidates: &[(String, String)], sync_root: &std::path::Path) -> Vec<(String, PathBuf)> {
+fn resolve_purge_placeholder_paths(
+    candidates: &[(String, String)],
+    sync_root: &std::path::Path,
+) -> Vec<(String, PathBuf)> {
     let allowed_roots = free_up_space_allowed_roots(sync_root);
     candidates
         .iter()
@@ -2696,6 +4157,8 @@ fn remove_stale_ipc_socket() -> Result<bool, String> {
     Ok(false)
 }
 
+// Windows and Linux only: on macOS the reconciler's `ensure_sync_root_and_engine` replaces it.
+#[cfg(not(target_os = "macos"))]
 async fn persist_sync_root_and_start_engine(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -2712,40 +4175,40 @@ async fn persist_sync_root_and_start_engine(
     cfg.save()?;
 
     let acct = state.active_account()?;
-    let session = acct
-        .session
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
-    if let Some((token, key)) = session {
-        // Rehydrate the persisted pause state before spawning.
-        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
-        let pause_flag = acct.sync_paused.clone();
-        let auth_health = acct.auth_health.clone();
+    // Rehydrate the persisted pause state before spawning.
+    acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+    {
         let mut engine_slot = acct.engine.lock().await;
+        engine_start_refusal(&acct)?;
         if let Some(prev) = engine_slot.take() {
             // Task 1538 Codex P1: this is a re-login/sync-root-change
             // respawn, not sign-out — there's no purge to gate here, but an
             // unconfirmed stop is still worth knowing about (a not-really-
             // gone previous task could still be touching the same state.db
             // the freshly spawned runner is about to open).
-            if !prev.abort().await.is_stopped() {
+            if !stop_engine_in_slot(&acct, prev).await.is_stopped() {
                 #[cfg(target_os = "windows")]
                 return Err("Could not stop the previous sync engine; retry locking before restarting sync.".into());
                 tracing::warn!("previous engine did not confirm termination before respawning a new one");
             }
         }
+        // Fix round 1: an unconfirmed stop of the old engine has set the flag; refuse the new one.
+        engine_start_refusal(&acct)?;
         #[cfg(target_os = "windows")]
         {
             windows_cf::ensure_reactivation_allowed()?;
             SESSION_COMMANDS.validate_start(generation)?;
         }
-        *engine_slot = Some(EngineRunner::spawn(app, root, token, key, pause_flag, auth_health));
+        // No session means nothing to start (the root is saved either way); the keys are read under the slot.
+        spawn_bound_engine(app, state, &acct, &mut engine_slot, root)?;
     }
 
     Ok(())
 }
 
+// Windows and Linux only: on macOS the reconciler's `start_check_engine` replaces it, with its limit
+// on the engine-slot wait alone.
+#[cfg(not(target_os = "macos"))]
 async fn start_engine_for_pending_finder_install(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -2758,16 +4221,6 @@ async fn start_engine_for_pending_finder_install(
         SESSION_COMMANDS.generation()?
     };
     let acct = state.active_account()?;
-    let session = acct
-        .session
-        .lock()
-        .map_err(|_| "session mutex poisoned".to_string())?
-        .as_ref()
-        .map(|s| (s.token.clone(), s.master_key));
-
-    let Some((token, key)) = session else {
-        return Err("Unlock the vault before installing the Finder location.".to_string());
-    };
 
     // Rehydrate the persisted pause state before spawning. Best-effort —
     // a missing/unreadable config defaults to not-paused.
@@ -2776,9 +4229,8 @@ async fn start_engine_for_pending_finder_install(
 
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (started, ipc_bind_error) = {
-        let pause_flag = acct.sync_paused.clone();
-        let auth_health = acct.auth_health.clone();
         let mut engine_slot = acct.engine.lock().await;
+        engine_start_refusal(&acct)?;
         if let Some(existing) = engine_slot.as_ref() {
             // Already running (e.g. a retry after a transient failure) —
             // reuse its bind-status handle so we still see a REAL bind
@@ -2790,9 +4242,14 @@ async fn start_engine_for_pending_finder_install(
                 windows_cf::ensure_reactivation_allowed()?;
                 SESSION_COMMANDS.validate_start(generation)?;
             }
-            let runner = EngineRunner::spawn(app, root, token, key, pause_flag, auth_health);
-            let bind_error = runner.ipc_bind_error_handle();
-            *engine_slot = Some(runner);
+            // The keys are read under the slot: a vault that is locked by now is the same refusal as before.
+            if spawn_bound_engine(app, state, &acct, &mut engine_slot, root)? == EngineStart::NoSession {
+                return Err("Unlock the vault before installing the Finder location.".to_string());
+            }
+            let bind_error = engine_slot
+                .as_ref()
+                .map(|runner| runner.ipc_bind_error_handle())
+                .ok_or_else(|| "the sync engine is not in its slot after it started".to_string())?;
             (true, bind_error)
         }
     };
@@ -2810,6 +4267,8 @@ async fn start_engine_for_pending_finder_install(
     Ok(started)
 }
 
+// Windows and Linux only: macOS has `stop_check_engine`.
+#[cfg(not(target_os = "macos"))]
 async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started: bool) {
     if !started {
         return;
@@ -2819,7 +4278,7 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
     if let Some(prev) = engine_slot.take() {
         // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
         // respawn guard.
-        if !prev.abort().await.is_stopped() {
+        if !stop_engine_in_slot(&acct, prev).await.is_stopped() {
             tracing::warn!("pending-finder-install engine did not confirm termination on stop");
         }
     }
@@ -2833,7 +4292,9 @@ async fn stop_pending_finder_install_engine(state: &State<'_, AppState>, started
 /// before returning a generic "Timed out…" message with no indication of
 /// the real cause.
 #[cfg(unix)]
-async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sync::Mutex<Option<String>>>) -> Result<(), String> {
+async fn wait_for_file_provider_ipc_ready(
+    ipc_bind_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
     use tokio::time::{Duration, Instant, sleep, timeout};
@@ -2872,11 +4333,10 @@ async fn wait_for_file_provider_ipc_ready(ipc_bind_error: std::sync::Arc<std::sy
     }
 }
 
-/// Cross-platform (non-`cfg`-gated) mirror of `macos_file_provider::StatusOutcome`.
-/// `finder_location_state` matches on this directly, so it compiles and reads the same
-/// on every target even though only the macOS arm of `file_provider_installed` can
-/// ever actually produce `UserDisabled` (task 1524, Issue 4 -- status-path leg, PR #63
-/// Codex review, `Onboarding.tsx:488`).
+/// Non-macOS mirror of what `macos_file_provider` reported before the reconciler (spec
+/// 2026-10-06 §6.1 retired both on macOS). `finder_location_state` matches on this directly.
+/// Windows and Linux only ever get the error arm from `file_provider_installed`.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileProviderStatusOutcome {
     Installed,
@@ -2884,24 +4344,14 @@ enum FileProviderStatusOutcome {
     UserDisabled,
 }
 
-#[cfg(target_os = "macos")]
-fn file_provider_installed() -> Result<FileProviderStatusOutcome, String> {
-    match macos_file_provider::status()? {
-        macos_file_provider::StatusOutcome::Installed => Ok(FileProviderStatusOutcome::Installed),
-        macos_file_provider::StatusOutcome::NotInstalled => Ok(FileProviderStatusOutcome::NotInstalled),
-        macos_file_provider::StatusOutcome::UserDisabled => Ok(FileProviderStatusOutcome::UserDisabled),
-    }
-}
-
 #[cfg(not(target_os = "macos"))]
 fn file_provider_installed() -> Result<FileProviderStatusOutcome, String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
-/// Cross-platform (non-`cfg`-gated) mirror of `macos_file_provider::InstallOutcome`.
-/// `install_finder_location` matches on this directly, so it compiles and reads the
-/// same on every target even though only the macOS arm of `install_file_provider_domain`
-/// can ever actually produce `UserDisabled` (task 1524, Issue 4).
+/// Non-macOS mirror of what `macos_file_provider::install` reported (retired on macOS).
+/// `install_finder_location` matches on this directly.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileProviderInstallOutcome {
     Installed,
@@ -2913,30 +4363,17 @@ enum FileProviderInstallOutcome {
 /// macOS) has turned it off in System Settings, so waiting for it to come up would
 /// never succeed. `classify_finder_install_error` recognizes this exact copy and
 /// maps it to the `"user_disabled"` reason category the frontend switches on.
+#[cfg(not(target_os = "macos"))]
 const FINDER_USER_DISABLED_MESSAGE: &str = "Beebeeb is turned off in System Settings. Open Login \
     Items & Extensions, turn on Beebeeb under File Providers, then try again.";
-
-/// Review M1 (round 2): a failure carries the folder kept by the install's own cleanup, if any.
-#[cfg(target_os = "macos")]
-fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
-    match macos_file_provider::install()? {
-        macos_file_provider::InstallOutcome::Installed => Ok(FileProviderInstallOutcome::Installed),
-        macos_file_provider::InstallOutcome::UserDisabled => Ok(FileProviderInstallOutcome::UserDisabled),
-    }
-}
 
 #[cfg(not(target_os = "macos"))]
 fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
     Err("File Provider is only available on macOS.".to_string().into())
 }
 
-/// Task 1882: keeps the files that never reached the server; the result names the folder macOS
-/// kept them in, if any.
-#[cfg(target_os = "macos")]
-fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
-    macos_file_provider::remove()
-}
-
+// On macOS the reconciler removes the domain (`finder_remove_for`); nothing calls the bridge's
+// `remove` directly, because every bridge call goes through the one gate (lead ruling T8-gate-all).
 #[cfg(not(target_os = "macos"))]
 fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
     Err("File Provider is only available on macOS.".to_string().into())
@@ -2946,6 +4383,10 @@ fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder
 /// an async runtime worker (1882 round 4). The removal blocks on the system's completion handler,
 /// and when a kept folder reads as missing it then sleeps about a second (`settle_kept_state`).
 /// The failure is the pool's own (a panicked or cancelled job); it carries no path.
+///
+/// Windows and Linux only in the app: on macOS every File Provider call goes through the reconciler's bridge
+/// gate, which runs it on the blocking pool itself (`finder_setup::macos_ports::BridgeGate`).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     tokio::task::spawn_blocking(work)
         .await
@@ -2953,6 +4394,7 @@ async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T + Send + '
 }
 
 /// The removal, off the runtime (round 4).
+#[cfg(not(target_os = "macos"))]
 async fn remove_file_provider_domain_blocking() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure>
 {
     match on_blocking_pool(remove_file_provider_domain).await {
@@ -2962,17 +4404,12 @@ async fn remove_file_provider_domain_blocking() -> Result<finder_removal::Domain
 }
 
 /// The install, off the runtime (round 4): its cleanup is a removal.
+#[cfg(not(target_os = "macos"))]
 async fn install_file_provider_domain_blocking() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
     match on_blocking_pool(install_file_provider_domain).await {
         Ok(result) => result,
         Err(message) => Err(message.into()),
     }
-}
-
-/// The app-start sweep, off the runtime (round 4).
-#[cfg(target_os = "macos")]
-async fn cleanup_stale_domains_blocking() -> Result<macos_file_provider::StaleDomainCleanup, String> {
-    on_blocking_pool(crate::macos_file_provider::cleanup_stale_domains).await?
 }
 
 /// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
@@ -3006,7 +4443,16 @@ pub(crate) fn purge_macos_hydrate_cache(_context: &str) {}
 
 #[cfg(target_os = "macos")]
 fn file_provider_visible_location() -> Result<Option<String>, String> {
-    macos_file_provider::visible_url()
+    user_facing_fp(finder_setup::macos_ports::visible_url())
+}
+
+/// The one conversion from a bridge error to text that can leave the bridge's callers: it
+/// reaches Repair's `warnings` and `open_finder_location`'s returned error, both shown to a
+/// person. Domain and code only, never the OS's message (lead ruling T1-4). `tracing` sites log
+/// the `FpError` itself, which keeps the message for stdout.
+#[cfg(target_os = "macos")]
+fn user_facing_fp<T>(result: Result<T, crate::finder_setup::error::FpError>) -> Result<T, String> {
+    result.map_err(|e| e.redacted())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3020,16 +4466,2078 @@ fn file_provider_visible_location() -> Result<Option<String>, String> {
 /// Settings" onboarding card uses to notice when the user flips it back on.
 #[cfg(target_os = "macos")]
 fn file_provider_domain_user_enabled() -> Result<Option<bool>, String> {
-    match macos_file_provider::domain_user_enabled()? {
-        macos_file_provider::DomainUserEnabledState::Enabled => Ok(Some(true)),
-        macos_file_provider::DomainUserEnabledState::Disabled => Ok(Some(false)),
-        macos_file_provider::DomainUserEnabledState::NotRegistered => Ok(None),
+    // Through `user_facing_fp`, never an `FpError`'s `Display`: the error text reaches the frontend,
+    // and `Display` carries the OS's message (lead ruling T1-4).
+    match user_facing_fp(finder_setup::macos_ports::domain_state())? {
+        finder_setup::core::DomainState::Enabled => Ok(Some(true)),
+        finder_setup::core::DomainState::Disabled => Ok(Some(false)),
+        finder_setup::core::DomainState::NotRegistered => Ok(None),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn file_provider_domain_user_enabled() -> Result<Option<bool>, String> {
     Err("File Provider is only available on macOS.".to_string())
+}
+
+/// Spec 2026-10-06 §5.3: tell the macOS Finder reconciler something happened. A no-op where no
+/// reconciler runs (Windows, Linux, and tests that install none). A reconciler that has stopped
+/// (it panicked; it starts again at the next launch) cannot be told, and that is logged, never
+/// silent (lead ruling 3).
+fn notify_finder(state: &AppState, trigger: finder_setup::core::Trigger) {
+    if let Some(handle) = state.finder_setup.get()
+        && let Err(error) = handle.trigger(trigger)
+    {
+        tracing::warn!(%error, trigger = trigger.as_str(), "finder setup: could not deliver a trigger");
+    }
+}
+
+/// Where keys arrived from, for the lifecycle log (§8): a sign-in that completed is logged, an unlock after a Lock is
+/// not (a Lock is not logged either).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeysFrom {
+    /// A sign-in, a re-sign-in or the recovery-phrase step that completes one.
+    SignIn,
+    /// The Keychain unlock after a Lock.
+    Unlock,
+}
+
+/// Keys arrived on this Mac (spec 2026-10-06 §5.3 (2)). The functions that put a `Session` in
+/// memory call this right after the engine start, whatever its outcome.
+/// `finder_setup_wiring_tests` keeps that list complete.
+fn keys_arrived(state: &AppState, from: KeysFrom) {
+    if from == KeysFrom::SignIn {
+        lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedIn);
+    }
+    notify_finder(state, finder_setup::core::Trigger::KeysArrived);
+}
+
+// ── R8: signing in on a Mac that already holds an account (spec 2026-10-06 §3) ─────────────────────────────────────
+
+/// Where a sign-in looks for what an earlier account left on this computer: the state directory that holds `state.db`.
+/// Production resolves the app's own; a test hands in a throwaway one, so it never reads the real one. A state
+/// directory that cannot be resolved is carried as the error it is: it counts as a trace.
+#[cfg(not(target_os = "windows"))]
+struct LocalSources {
+    state_dir: Result<PathBuf, String>,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl LocalSources {
+    fn production() -> Self {
+        Self {
+            state_dir: state_paths::beebeeb_state_dir(),
+        }
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn for_test(state_dir: &Path) -> Self {
+        Self {
+            state_dir: Ok(state_dir.to_path_buf()),
+        }
+    }
+
+    /// `state.db` when the directory has one: `Ok(None)` for none yet, `Err` for a directory or a database that
+    /// cannot be read.
+    fn state_db(&self) -> Result<Option<state_db::StateDb>, String> {
+        match &self.state_dir {
+            Ok(dir) => state_db_from_state_dir(dir),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+/// R8 + R10: the recorded owner of this computer's local data: the only account R8 compares a sign-in with.
+#[cfg(not(target_os = "windows"))]
+fn local_data_owner(sources: &LocalSources) -> Result<Option<account_binding::Identity>, String> {
+    match sources.state_db()? {
+        Some(db) => db.owner().map_err(|e| format!("read the local data owner: {e}")),
+        None => Ok(None),
+    }
+}
+
+/// Does the Keychain still hold a vault key for this account slot, in the id-keyed or the legacy store? It never
+/// unlocks and never reads the key (the real Keychain answers from the item's attributes). Fails closed.
+#[cfg(not(target_os = "windows"))]
+fn keychain_vault_key_present(account_id: &str) -> bool {
+    keychain::holds_vault_key(&platform_keychain_store_for(account_id))
+        || keychain::holds_vault_key(&keychain::legacy_platform_keychain_store())
+}
+
+/// Does the Keychain still hold a session token for this account slot (id-keyed or legacy)? A read error counts as
+/// present: an unreadable item is a trace, never an absence. (`keychain_session_present` answers the routing
+/// question and reads an error as "no session"; this one answers "is anything left?".)
+#[cfg(not(target_os = "windows"))]
+fn keychain_session_trace(account_id: &str) -> bool {
+    keychain::holds_session_token(&platform_keychain_store_for(account_id))
+        || keychain::holds_session_token(&keychain::legacy_platform_keychain_store())
+}
+
+/// Does the Keychain still hold an account email for this account slot (id-keyed or legacy)? Fails closed like
+/// [`keychain_session_trace`].
+#[cfg(not(target_os = "windows"))]
+fn keychain_email_trace(account_id: &str) -> bool {
+    keychain::holds_account_email(&platform_keychain_store_for(account_id))
+        || keychain::holds_account_email(&keychain::legacy_platform_keychain_store())
+}
+
+/// Changes waiting to upload, or staged copies of them, in the local data. An unreadable `state.db` counts as
+/// present (fail closed).
+#[cfg(not(target_os = "windows"))]
+fn queued_or_staged_present(sources: &LocalSources) -> bool {
+    match sources.state_db() {
+        Ok(Some(db)) => db.queued_or_staged_count().map(|n| n > 0).unwrap_or(true),
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+/// Is there local data that no account is recorded as owning? Rows of `state.db` (the queue, staged payloads, file
+/// rows, cursors, activity: everything `has_account_data` counts, and the cache they point at) in a database whose owner
+/// is not recorded. No database yet is no data. A database or a state directory that cannot be read is an error, not an
+/// answer: the caller settles nothing (`reauth::SignInKind::Unconfirmed`). Credentials are not data: this is about what
+/// a switch would have to purge.
+#[cfg(not(target_os = "windows"))]
+fn unowned_local_data(sources: &LocalSources) -> Result<bool, String> {
+    match sources.state_db()? {
+        Some(db) => db
+            .has_account_data()
+            .map_err(|e| format!("inspect the local data: {e}")),
+        None => Ok(false),
+    }
+}
+
+/// The account this Mac's credentials name, for a Mac with no owner record (a sign-in whose engine has not started):
+/// the cached profile's user id and email, else the email of the session in memory, else the Keychain's. A lock that
+/// cannot be read names nobody.
+#[cfg(not(target_os = "windows"))]
+fn credentials_identity(acct: &AccountRuntime) -> account_binding::Identity {
+    let (user_id, profile_email) = match acct.cached_profile.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(profile) => (Some(profile.user_id.clone()), Some(profile.email.clone())),
+            None => (None, None),
+        },
+        Err(_) => (None, None),
+    };
+    let session_email = acct
+        .session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|session| session.email.clone()));
+    let email = profile_email
+        .filter(|email| !email.trim().is_empty())
+        .or(session_email)
+        .or_else(|| keychain_account_email(acct.id.as_str()));
+    account_binding::Identity::new(user_id.as_deref(), email.as_deref())
+}
+
+/// R8 + R10: the same account signed in again (decided by `reauth::sign_in_kind`), so the record names it by its
+/// user id and the server's own spelling of its email. Never called for another account.
+#[cfg(not(target_os = "windows"))]
+fn record_local_data_owner(sources: &LocalSources, owner: &account_binding::Identity) -> Result<(), String> {
+    match sources.state_db()? {
+        Some(db) => db
+            .set_owner(owner)
+            .map_err(|e| format!("record the local data owner: {e}")),
+        None => Ok(()),
+    }
+}
+
+/// How many changes on this Mac have not uploaded yet: the number in the R8 warning. The queue and the staged copies
+/// no queued operation points at, each once (`StateDb::pending_changes_count`). No database yet is none. A count that
+/// cannot be read is an error, never 0: the sign-in then settles nothing (`LocalDataUnreadable`), because a warning
+/// that says 0 would let the switch delete the only copy of an edit without saying so.
+#[cfg(not(target_os = "windows"))]
+fn pending_changes_count(sources: &LocalSources) -> Result<u64, String> {
+    match sources.state_db()? {
+        Some(db) => db
+            .pending_changes_count()
+            .map_err(|e| format!("count the changes not uploaded: {e}")),
+        None => Ok(0),
+    }
+}
+
+/// Swap the token of the session in memory and keep its keys and email. `false` when no session is in memory. The
+/// replaced token is wiped, not just dropped.
+#[cfg(not(target_os = "windows"))]
+fn replace_session_token_in_memory(_write: &SessionWrite, acct: &AccountRuntime, token: &str) -> Result<bool, String> {
+    let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    match guard.as_mut() {
+        Some(session) => {
+            let mut replaced = std::mem::replace(&mut session.token, token.to_string());
+            zeroize::Zeroize::zeroize(&mut replaced);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Give the session in memory the server's own spelling of its account's email. A same-account re-sign-in does this
+/// so the next engine start compares the identity the owner record holds. `false` when no session is in memory or
+/// the email is empty.
+#[cfg(not(target_os = "windows"))]
+fn name_session_in_memory(_write: &SessionWrite, acct: &AccountRuntime, email: &str) -> Result<bool, String> {
+    let email = email.trim();
+    if email.is_empty() {
+        return Ok(false);
+    }
+    let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    match guard.as_mut() {
+        Some(session) => {
+            session.email = Some(email.to_string());
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// What a re-sign-in resets: the revoked-session streak ends, and the session is present again.
+#[cfg(not(target_os = "windows"))]
+fn reauth_settle_flags(_write: &SessionWrite, state: &AppState, acct: &AccountRuntime, email: &str) {
+    acct.auth_health.note_result(None);
+    set_auth_present(state, true);
+    let email = email.trim();
+    if !email.is_empty() {
+        set_auth_email(state, Some(email.to_string()));
+    }
+}
+
+/// What a sign-in found of an earlier account on this Mac.
+#[cfg(not(target_os = "windows"))]
+struct LocalFacts {
+    traces: reauth::LocalTraces,
+    /// The recorded owner of the local data, when the record names an account.
+    owner: Option<account_binding::Identity>,
+    /// Local data that no account is recorded as owning (credentials are not data).
+    unowned_data: bool,
+    /// The owner record or `state.db` could not be read: nothing can be decided (see `reauth::SignInKind::Unconfirmed`).
+    unreadable: bool,
+    /// The account the credentials name: used when there is no owner record.
+    credentials: account_binding::Identity,
+    /// The number in the switch warning. When it cannot be read the facts are `unreadable`, and this is 0.
+    pending_changes: u64,
+}
+
+/// Every trace of a previous account on this Mac, from its real sources. Reads only: it asks whether a vault key
+/// exists and never reads one. An unreadable source (a poisoned lock, an unreadable `state.db`, a Keychain item that
+/// answers with an error) counts as a trace, never as an absence: a sign-in is `Fresh` only when NOTHING of an
+/// account remains (`reauth::LocalTraces`).
+#[cfg(not(target_os = "windows"))]
+fn gather_local_facts(state: &AppState, acct: &AccountRuntime, sources: &LocalSources) -> LocalFacts {
+    let pending_changes = pending_changes_count(sources);
+    // R10: the recorded owner of the local data is the account on this computer.
+    let owner = local_data_owner(sources);
+    let recorded_owner = !matches!(owner, Ok(None));
+    // Every retained trace counts, including what a startup 401 keeps on purpose (R9: the Keychain email and the
+    // vault key).
+    let traces = reauth::LocalTraces {
+        session_in_memory: acct.session.lock().map(|guard| guard.is_some()).unwrap_or(true),
+        auth_present: state.auth_present.lock().map(|guard| *guard).unwrap_or(true),
+        keychain_token: keychain_session_trace(acct.id.as_str()),
+        keychain_email: keychain_email_trace(acct.id.as_str()),
+        vault_key: keychain_vault_key_present(acct.id.as_str()),
+        recorded_owner,
+        cached_profile: acct.cached_profile.lock().map(|guard| guard.is_some()).unwrap_or(true),
+        queued_or_staged: pending_changes.as_ref().map_or(true, |count| *count > 0)
+            || queued_or_staged_present(sources),
+    };
+    // An owner record that cannot be read is not "no owner record": it is what makes the sign-in `unreadable`.
+    let owner_unreadable = owner.is_err();
+    let owner = owner.ok().flatten().filter(account_binding::Identity::is_known);
+    let data = if owner.is_some() {
+        Ok(false)
+    } else {
+        unowned_local_data(sources)
+    };
+    LocalFacts {
+        traces,
+        owner,
+        unowned_data: matches!(data, Ok(true)),
+        // The switch warning's count that cannot be read settles nothing either (triage 25).
+        unreadable: owner_unreadable || data.is_err() || pending_changes.is_err(),
+        credentials: credentials_identity(acct),
+        pending_changes: pending_changes.unwrap_or(0),
+    }
+}
+
+/// R8: what a sign-in as `profile` (the server's own record of the account behind the new session) is on this Mac,
+/// and how many changes have not uploaded: the pure decision (`reauth::sign_in_kind`) over the account this Mac holds
+/// (the recorded owner of the local data, else what its credentials name) and what else is here. May answer
+/// `NeedsKeyProof` (see [`decide_sign_in`]). Reads only.
+#[cfg(not(target_os = "windows"))]
+fn classify_sign_in(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    profile: &account_dto::AccountProfile,
+) -> (reauth::SignInKind, u64) {
+    classify_sign_in_after(state, acct, sources, profile, None)
+}
+
+/// [`classify_sign_in`] with the server's key proof, when one was asked for: the facts are read again (the proof can
+/// take a while), and the proof decides only if they still ask for it (`reauth::after_key_proof`).
+#[cfg(not(target_os = "windows"))]
+fn classify_sign_in_after(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    profile: &account_dto::AccountProfile,
+    proof: Option<reauth::KeyProof>,
+) -> (reauth::SignInKind, u64) {
+    let facts = gather_local_facts(state, acct, sources);
+    // The account this Mac holds: the recorded owner of the local data, else what its credentials name.
+    let account = facts.owner.as_ref().unwrap_or(&facts.credentials);
+    let local = reauth::LocalAccount {
+        user_id: account.user_id.as_deref(),
+        email: account.email.as_deref(),
+        traces: facts.traces.any(),
+        key_stored: facts.traces.vault_key,
+        // A session in memory always holds its vault key. A lock that cannot be read counts as one: the proof then
+        // cannot read it either, and settles nothing.
+        key_in_memory: facts.traces.session_in_memory,
+        unowned_data: facts.unowned_data,
+        unreadable: facts.unreadable,
+    };
+    let kind = match (reauth::sign_in_kind(&local, &profile.user_id, &profile.email), proof) {
+        (reauth::SignInKind::NeedsKeyProof, Some(proof)) => {
+            reauth::after_key_proof(proof, &local, &profile.user_id, &profile.email)
+        }
+        (kind, _) => kind,
+    };
+    (kind, facts.pending_changes)
+}
+
+/// The vault key stored in one Keychain layout, for the server proof, as a `MasterKey`: wiped on drop and not `Clone`.
+/// The only plain buffer is a `Zeroizing` one that lives inside this function, because the core builds a `MasterKey`
+/// from 32 bytes passed by value (it has no constructor that takes a reference, and it wipes the argument it is
+/// given). `Ok(None)`: this layout holds no key.
+#[cfg(not(target_os = "windows"))]
+fn read_vault_key<S: keychain::AuthSecretStore>(
+    mut vault: AuthVault<S>,
+) -> Result<Option<beebeeb_core::kdf::MasterKey>, String> {
+    match vault.unlock() {
+        Ok(()) => {}
+        Err(keychain::AuthStoreError::NotFound | keychain::AuthStoreError::Unsupported(_)) => return Ok(None),
+        Err(error) => return Err(keychain_error("unlock vault key from Keychain", error)),
+    }
+    let mut raw = zeroize::Zeroizing::new([0u8; 32]);
+    raw.copy_from_slice(vault.master_key().map_err(|e| keychain_error("read vault key", e))?);
+    Ok(Some(beebeeb_core::kdf::MasterKey::from_bytes(*raw)))
+}
+
+/// The vault key this Mac stores (the id-keyed layout, else the legacy one), read for exactly one purpose: the server
+/// proof that it belongs to the account that is signing in. A same-account sign-in with no session in memory stores its
+/// new token in the id-keyed layout and then loads that layout's key (`reauth_swap_token`, through
+/// `load_session_from_keychain`), so the id-keyed key is read first. It is a `MasterKey` from the moment it leaves the
+/// Keychain read, so nothing else holds a plain copy.
+#[cfg(not(target_os = "windows"))]
+fn load_stored_vault_key(account_id: &str) -> Result<Option<beebeeb_core::kdf::MasterKey>, String> {
+    if let Some(key) = read_vault_key(AuthVault::new(platform_keychain_store_for(account_id)))? {
+        return Ok(Some(key));
+    }
+    read_vault_key(AuthVault::new(keychain::legacy_platform_keychain_store()))
+}
+
+/// The vault key of the session in memory, for the server proof (spec §5.6): a same-account sign-in keeps the key in
+/// memory (`reauth_swap_token`), so with a session in memory this is the key that is proved, whatever the Keychain
+/// holds. Read under the session lock into a wiped buffer and made a `MasterKey` (wiped on drop, not `Clone`) before
+/// the lock is released, as [`read_vault_key`] does. `Ok(None)`: no session in memory. A lock that cannot be read is an
+/// error, so the proof settles nothing.
+#[cfg(not(target_os = "windows"))]
+fn read_session_vault_key(acct: &AccountRuntime) -> Result<Option<beebeeb_core::kdf::MasterKey>, String> {
+    let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+    let Some(session) = guard.as_ref() else {
+        return Ok(None);
+    };
+    let mut raw = zeroize::Zeroizing::new([0u8; 32]);
+    raw.copy_from_slice(&session.master_key);
+    Ok(Some(beebeeb_core::kdf::MasterKey::from_bytes(*raw)))
+}
+
+/// Ask the server whether the vault key this Mac kept is the account behind `token`'s (the same check the recovery
+/// phrase goes through). The key proved is the key the sign-in keeps: the key of the session in memory when there is
+/// one (`reauth_swap_token` keeps it), else the key stored in the Keychain (see [`load_stored_vault_key`]). Only a
+/// completed answer decides: no key, an unreadable key, a client that cannot be built, a network or server error, an
+/// expired session:
+/// all are `Unavailable`, and nothing is decided. A `400` decides only with an exact code: `invalid_recovery_phrase` is
+/// `Mismatch`, `recovery_check_missing` is `NoCheckOnFile`, and any other `400` is `Unavailable`.
+#[cfg(not(target_os = "windows"))]
+async fn prove_stored_key(acct: &AccountRuntime, base_url: &str, token: &str) -> reauth::KeyProof {
+    let kept = match read_session_vault_key(acct) {
+        Ok(None) => load_stored_vault_key(acct.id.as_str()),
+        in_memory => in_memory,
+    };
+    let Ok(Some(master_key)) = kept else {
+        return reauth::KeyProof::Unavailable;
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .default_headers(api_client::provenance_headers())
+        .build()
+    else {
+        return reauth::KeyProof::Unavailable;
+    };
+    match recovery_check_answer(&client, base_url, token, &master_key).await {
+        Ok(RecoveryCheckAnswer::Matches) => reauth::KeyProof::Matches,
+        Ok(RecoveryCheckAnswer::Mismatch) => reauth::KeyProof::Mismatch,
+        Ok(RecoveryCheckAnswer::NoCheckOnFile) => reauth::KeyProof::NoCheckOnFile,
+        Err(_) => reauth::KeyProof::Unavailable,
+    }
+}
+
+/// R8: what the sign-in is, with the server's proof where the rules ask for one (`NeedsKeyProof`: a vault key is here,
+/// and either the user ids match or this Mac's account has no user id). Never `NeedsKeyProof`. Reads only, apart from
+/// the one request.
+#[cfg(not(target_os = "windows"))]
+async fn decide_sign_in(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    profile: &account_dto::AccountProfile,
+    token: &str,
+    base_url: &str,
+) -> (reauth::SignInKind, u64) {
+    let (kind, pending_changes) = classify_sign_in(state, acct, sources, profile);
+    if kind != reauth::SignInKind::NeedsKeyProof {
+        return (kind, pending_changes);
+    }
+    let proof = prove_stored_key(acct, base_url, token).await;
+    // The facts are read again after the wait; the caller also refuses when any session transition happened meanwhile.
+    classify_sign_in_after(state, acct, sources, profile, Some(proof))
+}
+
+/// [`decide_sign_in`] for a sign-in whose turn is `turn`: the decision can wait for the server (the key proof), and if a
+/// Lock, a Sign-out or another sign-in completed meanwhile, what it saw is no longer this computer, so nothing is
+/// decided (lead ruling 1, Task 12). Nothing is stored yet, so the caller revokes the new session.
+#[cfg(not(target_os = "windows"))]
+async fn decide_sign_in_in_turn(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    profile: &account_dto::AccountProfile,
+    token: &str,
+    base_url: &str,
+    turn: &account::SessionGeneration,
+) -> Result<(reauth::SignInKind, u64), ReauthError> {
+    let decided = decide_sign_in(state, acct, sources, profile, token, base_url).await;
+    if !acct.session_unchanged_since(*turn) {
+        return Err(ReauthError::before_store(SessionChanged::of(acct)));
+    }
+    Ok(decided)
+}
+
+/// Does this Mac hold anything of an account? For a sign-in that could not learn which account it is: it cannot be
+/// compared, so on a Mac that holds something it is refused (and nothing changes).
+#[cfg(not(target_os = "windows"))]
+fn sign_in_leaves_account_traces(state: &AppState) -> bool {
+    match state.active_account() {
+        Ok(acct) => gather_local_facts(state, &acct, &LocalSources::production())
+            .traces
+            .any(),
+        Err(_) => true,
+    }
+}
+
+/// What a sign-in whose account could not be confirmed says: its record could not be fetched, or the server could not
+/// say whether the key stored on this Mac is the signing-in account's. Nothing changed on this computer.
+#[cfg(not(target_os = "windows"))]
+const SIGN_IN_ACCOUNT_UNKNOWN: &str = "Beebeeb couldn’t confirm which account just signed in, so nothing changed on this computer. Connect to the internet and try again.";
+
+/// What a sign-in says when this computer's own record of its account (the owner record, or `state.db` itself) could
+/// not be read (lead ruling 12, Task 12). Nothing changed on this computer; trying again is safe.
+#[cfg(not(target_os = "windows"))]
+const SIGN_IN_LOCAL_DATA_UNREADABLE: &str = "Beebeeb couldn’t read this Mac’s account data. Try again.";
+
+/// What a successful authentication became on this Mac (R8).
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignInSettlement {
+    Fresh,
+    Reauthenticated {
+        vault_unlocked: bool,
+        /// The vault key this Mac kept was no longer the account's (spec §5.6): it was removed, and the recovery phrase
+        /// step follows (`vault_unlocked` is false).
+        key_replaced: bool,
+    },
+    AccountMismatch {
+        pending_changes: u64,
+    },
+    /// The server could not say whose key this is: nothing changed, and the new session is revoked.
+    Unconfirmed,
+}
+
+/// A same-account re-sign-in that failed, and whether the new token had already been written to the Keychain by
+/// then. Before that nothing of the new session is stored, so the caller revokes it (as it does for a first
+/// sign-in whose token could not be stored); after that the new token is the live one and is kept.
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug)]
+struct ReauthError {
+    message: String,
+    token_stored: bool,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl ReauthError {
+    fn before_store(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            token_stored: false,
+        }
+    }
+
+    fn after_store(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            token_stored: true,
+        }
+    }
+}
+
+/// R8: before anything is stored, decide whether this sign-in is fresh, the same account again, or a different
+/// account. The same account gets only a new token (`reauth_in_place`), and keeps the vault key this Mac kept only once
+/// the server has confirmed it; a key the server no longer accepts is removed instead (`reauth_without_the_kept_key`,
+/// spec §5.6). A different account changes nothing here: the caller revokes the new session and returns the warning. A
+/// sign-in the server could not place is `Unconfirmed`: nothing changes either. Never reads key material to decide (the
+/// one proof reads the kept key into a wiped value). `Fresh` requires that nothing of a previous account remains
+/// (`gather_local_facts`). `handoff_key`: the vault key a browser sign-in handed over (`None` for a password sign-in).
+/// Not on Windows, where sign-in refuses while a session exists.
+#[cfg(not(target_os = "windows"))]
+async fn settle_sign_in(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    token: &str,
+    profile: &account_dto::AccountProfile,
+    handoff_key: Option<&[u8; 32]>,
+    turn: &mut account::SessionGeneration,
+) -> Result<SignInSettlement, ReauthError> {
+    let acct = state.active_account().map_err(ReauthError::before_store)?;
+    let sources = LocalSources::production();
+    let (kind, pending_changes) =
+        decide_sign_in_in_turn(state, &acct, &sources, profile, token, &runner::api_base_url(), turn).await?;
+    match kind {
+        reauth::SignInKind::Fresh => Ok(SignInSettlement::Fresh),
+        reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),
+        reauth::SignInKind::NeedsKeyProof | reauth::SignInKind::Unconfirmed => Ok(SignInSettlement::Unconfirmed),
+        // Lead ruling 12: this computer's own record of its account could not be read. Its own sentence, not the
+        // "connect to the internet" one; nothing is stored, so the caller revokes the new session.
+        reauth::SignInKind::LocalDataUnreadable => Err(ReauthError::before_store(SIGN_IN_LOCAL_DATA_UNREADABLE)),
+        reauth::SignInKind::SameAccount => {
+            let vault_unlocked =
+                reauth_in_place(app, state, &acct, &sources, token, profile, handoff_key, turn).await?;
+            Ok(SignInSettlement::Reauthenticated {
+                vault_unlocked,
+                key_replaced: false,
+            })
+        }
+        reauth::SignInKind::KeyOutdated => {
+            reauth_without_the_kept_key(state, &acct, &sources, token, profile, turn).await
+        }
+    }
+}
+
+/// R8, same account: replace ONLY the session token. The queue, the cache, the Finder domain and the vault key are
+/// never touched (`reauth_tests` pins it). Keys already in memory stay. Otherwise the key this Mac still holds in the
+/// Keychain is loaded (a relaunch after a startup 401). The owner record is rewritten first, with the account's user
+/// id and the server's spelling of its email (a legacy record gets both here); if that fails nothing else has
+/// changed. Returns whether the vault is unlocked afterwards; `false` sends the person to the recovery phrase.
+#[cfg(not(target_os = "windows"))]
+fn reauth_swap_token(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    token: &str,
+    profile: &account_dto::AccountProfile,
+    turn: &mut account::SessionGeneration,
+) -> Result<bool, ReauthError> {
+    let email = session_email(Some(profile));
+    // The re-sign-in's turn (lead ruling 1, Task 12): a Lock, a Sign-out or another sign-in that completed since this
+    // sign-in began stops it here, before anything is written; everything below is written in this one turn.
+    let write = claim_session_write(acct, turn).map_err(ReauthError::before_store)?;
+    // R10: the same account (decided by the caller) owns the local data.
+    record_local_data_owner(
+        sources,
+        &account_binding::Identity::new(Some(&profile.user_id), email.as_deref()),
+    )
+    .map_err(ReauthError::before_store)?;
+    persist_session_token_to_keychain(&write, acct.id.as_str(), token, email.as_deref())
+        .map_err(ReauthError::before_store)?;
+    // From here the new token is the stored one: a failure below is not a sign-in to revoke.
+    let mut vault_unlocked = replace_session_token_in_memory(&write, acct, token).map_err(ReauthError::after_store)?;
+    if vault_unlocked {
+        if let Some(email) = email.as_deref() {
+            name_session_in_memory(&write, acct, email).map_err(ReauthError::after_store)?;
+        }
+    } else {
+        match load_session_from_keychain(acct.id.as_str(), email.clone()) {
+            Ok(Some(session)) => {
+                install_unlocked_session(&write, acct, session).map_err(ReauthError::after_store)?;
+                vault_unlocked = true;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::info!(%error, "re-sign-in: no vault key on this Mac; the recovery phrase step follows")
+            }
+        }
+    }
+    if let Ok(mut cached) = acct.cached_profile.lock() {
+        *cached = Some(profile.clone());
+    }
+    reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
+    drop(write);
+    Ok(vault_unlocked)
+}
+
+/// An engine that did not start after a successful re-sign-in is not a failed sign-in: the session is replaced and the
+/// person is signed in. The failure goes where every engine failure goes: the engine status (`sync_status` reads
+/// "error") and the Finder reconciler's check that `keys_arrived` asks for, which retries the start and reports it.
+#[cfg(not(target_os = "windows"))]
+fn note_engine_start_failure(acct: &AccountRuntime, error: &str) {
+    tracing::warn!(%error, "re-sign-in: signed in, but the sync engine did not start");
+    if let Ok(mut guard) = acct.engine_state.lock() {
+        *guard = "error".to_string();
+    }
+}
+
+/// R8, same account: the token swap above, then, with the keys in memory, a new engine with the new token (the queue in
+/// `state.db` is kept and drains) and the reconciler's one "keys are here" trigger. The engine's own failure does not
+/// fail the sign-in (see [`note_engine_start_failure`]), so a retry never mints a second server session for an account
+/// that is already signed in. A browser sign-in hands over the account's current key (`handoff_key`): when the key in
+/// memory differs from it (compared in constant time), no engine starts here and this returns `false`, so the
+/// handoff installs its own key (`apply_session`), which starts the engine.
+#[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
+async fn reauth_in_place(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    token: &str,
+    profile: &account_dto::AccountProfile,
+    handoff_key: Option<&[u8; 32]>,
+    turn: &mut account::SessionGeneration,
+) -> Result<bool, ReauthError> {
+    let vault_unlocked = reauth_swap_token(state, acct, sources, token, profile, turn)?;
+    if vault_unlocked && handoff_replaces_kept_key(acct, handoff_key) {
+        tracing::info!("browser sign-in: the vault key this Mac kept is not the one handed over; installing that one");
+        return Ok(false);
+    }
+    if vault_unlocked {
+        let started = start_engine_if_possible(app, state).await;
+        keys_arrived(state, KeysFrom::SignIn);
+        if let Err(error) = started {
+            note_engine_start_failure(acct, &error);
+        }
+    }
+    tracing::info!(vault_unlocked, "signed in again in place (R8)");
+    Ok(vault_unlocked)
+}
+
+/// Constant-time equality of two vault keys: every byte is compared, wherever the first difference is.
+#[cfg(not(target_os = "windows"))]
+fn vault_keys_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let difference = a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    std::hint::black_box(difference) == 0
+}
+
+/// Does the session in memory hold exactly `key`? Compared in constant time, under the session lock. No session, or a
+/// lock that cannot be read: `false`.
+#[cfg(not(target_os = "windows"))]
+fn session_holds_vault_key(acct: &AccountRuntime, key: &[u8; 32]) -> bool {
+    acct.session
+        .lock()
+        .map(|guard| {
+            guard
+                .as_ref()
+                .is_some_and(|session| vault_keys_equal(&session.master_key, key))
+        })
+        .unwrap_or(false)
+}
+
+/// A browser sign-in handed over `handoff_key`, the account's current key (spec §5.6). Does it replace what the session
+/// in memory holds? Yes unless memory holds exactly that key. `None` (a password sign-in hands over no key): no.
+#[cfg(not(target_os = "windows"))]
+fn handoff_replaces_kept_key(acct: &AccountRuntime, handoff_key: Option<&[u8; 32]>) -> bool {
+    handoff_key.is_some_and(|handoff| !session_holds_vault_key(acct, handoff))
+}
+
+/// What a re-sign-in says when the outdated vault key could not be removed from this Mac. The new session is revoked
+/// and nothing is installed; trying again is safe.
+#[cfg(not(target_os = "windows"))]
+const SIGN_IN_KEY_NOT_REMOVED: &str =
+    "Beebeeb couldn’t remove this account’s old vault key from this computer, so nothing changed. Try again.";
+
+/// Remove the vault key, and only the key, from both Keychain layouts (the id-keyed and the legacy one), then check
+/// that neither still holds one. Only inside a checked turn (`_write`). A key that is not there, or a store that cannot
+/// hold secrets, is no failure; a key that cannot be removed, or still reads as present, is.
+#[cfg(not(target_os = "windows"))]
+fn delete_vault_key_from_keychain(_write: &SessionWrite, account_id: &str) -> Result<(), String> {
+    use keychain::AuthSecretStore as _;
+    for removed in [
+        platform_keychain_store_for(account_id).delete_wrapped_master_key(),
+        keychain::legacy_platform_keychain_store().delete_wrapped_master_key(),
+    ] {
+        match removed {
+            Ok(()) | Err(keychain::AuthStoreError::NotFound | keychain::AuthStoreError::Unsupported(_)) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "re-sign-in: the outdated vault key could not be removed");
+                return Err(SIGN_IN_KEY_NOT_REMOVED.to_string());
+            }
+        }
+    }
+    if keychain_vault_key_present(account_id) {
+        return Err(SIGN_IN_KEY_NOT_REMOVED.to_string());
+    }
+    Ok(())
+}
+
+/// [`reauth_without_the_kept_key`]'s writes, in the sign-in's turn and under the engine slot (`_engine_slot`), so no
+/// engine start can read keys in between (every start reads its keys under the slot). The session in memory is cleared
+/// first, as Lock clears it; then the owner is recorded, the outdated key is removed from both Keychain layouts, and
+/// the new token is stored with the account's email and no key. A failure up to and including the token write is
+/// `before_store` (the caller revokes the new session); the memory clear stands either way.
+#[cfg(not(target_os = "windows"))]
+fn reauth_swap_token_without_key(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    token: &str,
+    profile: &account_dto::AccountProfile,
+    turn: &mut account::SessionGeneration,
+    _engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
+) -> Result<(), ReauthError> {
+    let email = session_email(Some(profile));
+    let write = claim_session_write(acct, turn).map_err(ReauthError::before_store)?;
+    match acct.session.lock() {
+        Ok(mut guard) => drop(guard.take()),
+        Err(poisoned) => {
+            drop(poisoned.into_inner().take());
+            acct.session.clear_poison();
+        }
+    }
+    record_local_data_owner(
+        sources,
+        &account_binding::Identity::new(Some(&profile.user_id), email.as_deref()),
+    )
+    .map_err(ReauthError::before_store)?;
+    delete_vault_key_from_keychain(&write, acct.id.as_str()).map_err(ReauthError::before_store)?;
+    persist_session_token_to_keychain(&write, acct.id.as_str(), token, email.as_deref())
+        .map_err(ReauthError::before_store)?;
+    if let Ok(mut cached) = acct.cached_profile.lock() {
+        *cached = Some(profile.clone());
+    }
+    reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
+    drop(write);
+    Ok(())
+}
+
+/// R8, same account, but the server says the vault key this Mac kept is no longer the account's: it was changed on
+/// another device (spec §5.6). That key must never reach an engine again. The sign-in's turn is taken first, so every
+/// transition that began before it is refused from now on, as a Lock's is. A session in memory is then ended the way
+/// Lock ends it: on a Mac the reconciler cancels any check and holds (it never removes the domain), and the engine
+/// stops under its slot. Still under the slot, [`reauth_swap_token_without_key`] clears memory, removes the key and
+/// stores the new token. The queue, the cache and Finder stay; the recovery phrase step follows (`vault_unlocked` is
+/// false and `key_replaced` says why), and its server check stores the current key.
+#[cfg(not(target_os = "windows"))]
+async fn reauth_without_the_kept_key(
+    state: &AppState,
+    acct: &AccountRuntime,
+    sources: &LocalSources,
+    token: &str,
+    profile: &account_dto::AccountProfile,
+    turn: &mut account::SessionGeneration,
+) -> Result<SignInSettlement, ReauthError> {
+    drop(claim_session_write(acct, turn).map_err(ReauthError::before_store)?);
+    let keys_in_memory = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(true);
+    #[cfg(target_os = "macos")]
+    if keys_in_memory && let Err(error) = finder_lock_for(state).await {
+        tracing::warn!(%error, "the Finder reconciler did not acknowledge the hold; removing the outdated key anyway");
+    }
+    let mut engine_slot = acct.engine.lock().await;
+    if let Some(engine) = engine_slot.take()
+        && !stop_engine_in_slot(acct, engine).await.is_stopped()
+    {
+        tracing::error!("the sync engine did not confirm it stopped before the outdated vault key was removed");
+    }
+    if keys_in_memory {
+        purge_macos_hydrate_cache("key-outdated");
+    }
+    let swapped = reauth_swap_token_without_key(state, acct, sources, token, profile, turn, &engine_slot);
+    drop(engine_slot);
+    if let Ok(mut engine_state) = acct.engine_state.lock() {
+        *engine_state = "stopped".to_string();
+    }
+    if keys_in_memory {
+        bump_vault_epoch();
+    }
+    tracing::info!(
+        stored = swapped.is_ok(),
+        "signed in again in place without the vault key this Mac kept (spec §5.6)"
+    );
+    swapped.map(|()| SignInSettlement::Reauthenticated {
+        vault_unlocked: false,
+        key_replaced: true,
+    })
+}
+
+/// How long Lock waits for the reconciler to acknowledge it (spec §5.3 (3); lead ruling T8-⚠lock).
+///
+/// The reconciler handles an event only between operations, so the wait must outlast the longest one
+/// it can be inside. That is a `StartEngine` whose socket never comes up: it waits for the engine slot
+/// (up to 15 s), then the socket (3 s), then stops the engine it started: the slot again (15 s) and
+/// `abort()`'s own 3 s + 2 s windows. 15 + 3 + 15 + 5 = 38 s. A shorter wait would make a slow but
+/// working check look like a lock the reconciler never acknowledged.
+/// `the_acknowledgement_timeouts_outlast_the_longest_operation_they_can_wait_behind` pins the sum.
+#[cfg(target_os = "macos")]
+const FINDER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// How long Sign-out and Repair wait for the reconciler's removal: the longest operation it can be
+/// inside (38 s, see [`FINDER_LOCK_TIMEOUT`]) and then its own `RemoveDomain` (15 s) = 53 s.
+#[cfg(target_os = "macos")]
+const FINDER_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+// A test shortens the waits for the one test that needs a wait to run out, without a global that
+// other tests would see: it is scoped to the future that runs the command.
+#[cfg(all(test, target_os = "macos"))]
+tokio::task_local! {
+    static FINDER_WAIT_OVERRIDE: std::time::Duration;
+}
+
+#[cfg(target_os = "macos")]
+fn finder_wait(production: std::time::Duration) -> std::time::Duration {
+    #[cfg(test)]
+    if let Ok(short) = FINDER_WAIT_OVERRIDE.try_with(|wait| *wait) {
+        return short;
+    }
+    production
+}
+
+#[cfg(target_os = "macos")]
+const FINDER_NOT_RUNNING: &str = "Finder setup is not running.";
+
+/// Shown when Lock could not confirm the reconciler stopped (it did not acknowledge in time, or it has
+/// stopped). The keys are already cleared and the engine stopped; the sentence says only what is
+/// unconfirmed. No OS text, no path (lead ruling T1-4). A warning on a Lock that happened (FB-24).
+const FINDER_LOCK_UNCONFIRMED_WARNING: &str =
+    "The vault is locked, but Beebeeb could not confirm that its Finder setup stopped. Restart Beebeeb to be sure.";
+
+/// The same for Sign-out: signed out, keys cleared, but the removal from Finder is unconfirmed.
+const FINDER_SIGN_OUT_UNCONFIRMED_WARNING: &str = "You are signed out, but Beebeeb could not confirm that it was removed from Finder. If it still shows there, restart Beebeeb and sign out again.";
+
+/// Lock when the sync engine's stop is unconfirmed (an earlier stop never was, or this one is not):
+/// its task may still hold the vault key, so this is never a plain success (lead ruling T8-lockflag).
+const LOCK_ENGINE_UNCONFIRMED_WARNING: &str =
+    "The vault is locked, but the sync engine did not confirm it stopped. Restart Beebeeb before unlocking again.";
+
+const ENGINE_START_REFUSED_ERROR: &str =
+    "Could not start the sync engine: a previous one did not confirm it stopped. Restart Beebeeb.";
+
+/// Lead ruling T8-lockflag: every place that puts an engine in the slot calls this with the slot
+/// held, so two engines can never run at once. The flag is set when an engine's stop could not be
+/// confirmed (its task may still be running with the keys) and stays set until a restart.
+/// `finder_setup_wiring_tests` keeps the list of starts complete.
+fn engine_start_refusal(acct: &account::AccountRuntime) -> Result<(), String> {
+    if acct.engine_stop_unconfirmed.load(Ordering::SeqCst) {
+        tracing::error!("engine start refused: an earlier stop was never confirmed; restart Beebeeb");
+        // Spec §5.6: the refusal has its own code and sentence on `sync_status.engine_refusal`, so the surfaces say to
+        // quit and reopen instead of offering a "Try again" that cannot work. Cleared like the binding refusals, by
+        // every session transition (no start runs while the flag is set).
+        *acct
+            .engine_refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(account_binding::Refusal::EngineStopUnconfirmed);
+        return Err(ENGINE_START_REFUSED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// The one way the in-memory session is cleared for a Lock or a Sign-out (lead ruling T10-lockorder). It takes
+/// the engine-slot guard as a parameter, so the clear can only be written while the caller still holds the
+/// slot: "release the slot, then clear the session" would be a use of a moved guard and does not compile. That
+/// order is what keeps a start that was waiting for the slot from finding keys the clear was about to remove
+/// (every start reads its keys under the slot). A poisoned mutex still guards the master key: it is recovered
+/// and cleared, never skipped (and cleared of its poison, so the next unlock can install a session).
+fn clear_session_holding_slot(
+    acct: &account::AccountRuntime,
+    _engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
+    by: account::SessionTransition,
+) -> Result<(), String> {
+    // Every session transition that began before this point is refused from now on (Task 12, lead ruling 1): one that
+    // put its session in memory before it is cleared just below, and one that has not yet written never will. The
+    // session-write lock is not held across the clear (`bump_vault_epoch` must never wait under it).
+    drop(end_sessions_in_flight(acct, by));
+    match acct.session.lock() {
+        Ok(mut guard) => {
+            guard.take();
+            bump_vault_epoch();
+            tracing::info!("runtime session cleared");
+        }
+        #[cfg(target_os = "windows")]
+        Err(_) => return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into()),
+        #[cfg(not(target_os = "windows"))]
+        Err(poisoned) => {
+            poisoned.into_inner().take();
+            acct.session.clear_poison();
+            bump_vault_epoch();
+            tracing::warn!("the session mutex was poisoned; the runtime session was cleared anyway");
+        }
+    }
+    Ok(())
+}
+
+/// The one way an engine leaves its slot to be stopped (Task 9 fix round 1, item A; lead ruling
+/// T8-lockflag). The caller holds the engine slot and has already taken the handle out of it, so an
+/// unconfirmed stop leaves an EMPTY slot while the task may still run with the keys. This sets
+/// `engine_stop_unconfirmed` before it returns, so before the caller can release the slot, and every
+/// start refuses from then on. Repair and the respawn inside a start used to abort without recording it,
+/// and the next start (on a Mac, Repair's own follow-up check) spawned a second engine beside the first.
+/// `every_engine_stop_goes_through_the_one_helper_and_every_respawn_refuses_after_it` keeps it the only
+/// abort in the app.
+async fn stop_engine_in_slot(acct: &account::AccountRuntime, engine: EngineRunner) -> runner::AbortOutcome {
+    let outcome = engine.abort().await;
+    if !outcome.task_confirmed() {
+        acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+        tracing::error!(
+            "the sync engine's stop could not be confirmed; every engine start refuses until Beebeeb restarts"
+        );
+    }
+    outcome
+}
+
+/// Repair's warning when its engine stop is unconfirmed (the same advice as Lock's error).
+const REPAIR_ENGINE_UNCONFIRMED_WARNING: &str =
+    "The sync engine did not confirm it stopped. Restart Beebeeb before syncing again.";
+
+/// What Repair's engine stop did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepairEngineStop {
+    /// The stale IPC socket was there and is gone.
+    removed_socket: bool,
+    /// An engine stop on this account is unconfirmed after this one (see [`stop_engine_for_repair`]).
+    engine_stop_unconfirmed: bool,
+}
+
+/// Repair's engine stop (spec §5.3 (6)): stops the engine, and says so in `warnings` when the stop cannot
+/// be confirmed. On a Mac the reconciler then runs its follow-up check, which starts an engine again
+/// with the keys still in memory; the flag the helper sets is what makes that start refuse instead of
+/// running a second engine beside one that may still run. Reports that flag as it is AFTER this stop, so it
+/// covers this stop and an earlier one (a Lock, a Sign-out or a check) that left the slot empty: Repair
+/// reports it as `engine_stop_unconfirmed` (spec §5.6). The stale IPC socket is removed (`remove_socket`, which is
+/// `remove_stale_ipc_socket` in production) while the slot is still held: an engine that a waiting check starts as
+/// soon as the slot is free binds a fresh socket, and Repair must never delete that one.
+async fn stop_engine_for_repair(
+    acct: &account::AccountRuntime,
+    warnings: &mut Vec<String>,
+    remove_socket: impl FnOnce() -> Result<bool, String>,
+) -> RepairEngineStop {
+    let mut engine_slot = acct.engine.lock().await;
+    if let Some(prev) = engine_slot.take() {
+        // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical respawn guard.
+        let outcome = stop_engine_in_slot(acct, prev).await;
+        if outcome.is_stopped() {
+            tracing::info!("engine aborted for macOS integration reset");
+        } else {
+            tracing::warn!("engine did not confirm termination before macOS integration reset");
+            if !outcome.task_confirmed() {
+                warnings.push(REPAIR_ENGINE_UNCONFIRMED_WARNING.to_string());
+            }
+        }
+    }
+    let removed_socket = match remove_socket() {
+        Ok(removed) => removed,
+        Err(error) => {
+            warnings.push(error);
+            false
+        }
+    };
+    drop(engine_slot);
+    if let Ok(mut guard) = acct.engine_state.lock() {
+        *guard = "stopped".to_string();
+    }
+    RepairEngineStop {
+        removed_socket,
+        engine_stop_unconfirmed: acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+    }
+}
+
+/// Why an engine start has no keys to start with.
+#[derive(Debug, PartialEq, Eq)]
+enum EngineStartBlocked {
+    /// An engine stop was never confirmed (the sentence says to restart), or the session mutex is unusable.
+    Refused(String),
+    /// Nothing is signed in with keys in memory: locked, signed out, or a Lock that won the slot first.
+    NoSession,
+}
+
+/// Shown when a start finds the vault locked at the moment it holds the engine slot.
+const ENGINE_START_NO_SESSION: &str = "The vault is locked, so sync didn’t start.";
+
+impl std::fmt::Display for EngineStartBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(sentence) => f.write_str(sentence),
+            Self::NoSession => f.write_str(ENGINE_START_NO_SESSION),
+        }
+    }
+}
+
+/// The keys every engine start uses, and the identity of the session they belong to, read together UNDER
+/// the engine slot (lead rulings T8-⚠lock, T9-starts and T10-identity). Lock and Sign-out clear the session
+/// before they release the slot, so a start that was waiting for the slot finds nothing here instead of
+/// starting an engine with keys that were just cleared. No start receives keys from its caller, so there
+/// is nothing to read them from but this. The identity comes from the SAME `Session` (its own email, and
+/// the cached profile only when that profile has that exact email), never from separate fields that a
+/// sign-in updates at another moment. Refuses first while an earlier engine stop is unconfirmed. The
+/// copies are `Zeroizing`, so none outlives the engine start that takes them.
+fn keys_for_engine_start(
+    acct: &account::AccountRuntime,
+) -> Result<(EngineKeys, account_binding::Identity), EngineStartBlocked> {
+    engine_start_refusal(acct).map_err(EngineStartBlocked::Refused)?;
+    let (keys, email) = acct
+        .session
+        .lock()
+        .map_err(|_| EngineStartBlocked::Refused("session mutex poisoned".to_string()))?
+        .as_ref()
+        .map(|session| {
+            (
+                (
+                    zeroize::Zeroizing::new(session.token.clone()),
+                    zeroize::Zeroizing::new(session.master_key),
+                ),
+                session.email.clone(),
+            )
+        })
+        .ok_or(EngineStartBlocked::NoSession)?;
+    let profile = acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
+    Ok((keys, identity_of_session(email.as_deref(), profile.as_ref())))
+}
+
+/// The session token and master key an engine start hands to the engine, wiped when dropped.
+type EngineKeys = (zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>);
+
+/// What a bound engine start came to (see [`spawn_bound_engine`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineStart {
+    Started,
+    /// The vault was locked (or signed out) by the time this start held the engine slot, so no engine
+    /// was started and nothing was bound.
+    NoSession,
+    /// A Finder domain removal is owed (macOS): the previous account's domain is still registered, and no engine
+    /// may start until a removal is confirmed. Nothing was started; the reconciler removes the domain and its next
+    /// check starts the engine.
+    FinderRemovalOwed,
+}
+
+/// What [`authorize_engine_start`] decided. Only `Go` carries the keys.
+enum StartPermit {
+    Go(EngineKeys),
+    NoSession,
+    FinderRemovalOwed,
+}
+
+/// Never prints the keys (a failing assertion formats its operands).
+impl std::fmt::Debug for StartPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Go(_) => f.write_str("Go(<keys>)"),
+            Self::NoSession => f.write_str("NoSession"),
+            Self::FinderRemovalOwed => f.write_str("FinderRemovalOwed"),
+        }
+    }
+}
+
+const ENGINE_SLOT_OCCUPIED_ERROR: &str = "Could not start the sync engine: one is already running.";
+
+/// The reconciler's start found no keys under the slot (a Lock won it, or nothing is signed in).
+#[cfg(target_os = "macos")]
+const ENGINE_START_NO_SESSION_FOR_FINDER: &str = "Unlock the vault before adding Beebeeb to Finder.";
+
+/// A start that finds a Finder removal owed: shown to the reconciler's checks (which retry) and never to a person
+/// as a failure of their sign-in (`start_engine_if_possible` treats it as "deferred").
+#[cfg(target_os = "macos")]
+const FINDER_REMOVAL_OWED_ERROR: &str =
+    "Beebeeb is still removing the previous account from Finder. Sync starts when that is done.";
+
+/// R10 (spec 2026-10-06 §5.6): the binding's view of this computer's local data.
+struct StateDbLocalData {
+    db: state_db::StateDb,
+    sync_root: Option<PathBuf>,
+    /// Directories whose plaintext copies the reset sweeps as a whole (see `purge_local_state_files_in`).
+    staging_dirs: Vec<PathBuf>,
+}
+
+/// Where an engine start looks: the app-local state dir (`state.db`) and the sync root the engine will use.
+/// Production resolves the state dir from the process-wide setting; a test passes its own throwaway one.
+struct LocalDataPaths {
+    state_dir: PathBuf,
+    sync_root: PathBuf,
+    staging_dirs: Vec<PathBuf>,
+}
+
+impl LocalDataPaths {
+    fn production(sync_root: &Path) -> Result<Self, String> {
+        Ok(Self {
+            state_dir: state_paths::beebeeb_state_dir()?,
+            sync_root: sync_root.to_path_buf(),
+            staging_dirs: production_staging_dirs(),
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(state_dir: &Path, sync_root: &Path) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            sync_root: sync_root.to_path_buf(),
+            staging_dirs: Vec::new(),
+        }
+    }
+}
+
+impl StateDbLocalData {
+    /// Opens `state.db` the way the engine will, and creates it if needed, so the owner of a first engine
+    /// start is recorded before that engine writes anything. On a first start the state-dir migration runs
+    /// here first; the runner's own call then finds `state.db` and skips it.
+    fn for_engine_start(paths: &LocalDataPaths) -> Result<Self, String> {
+        let path = state_paths::state_db_path_from_state_dir(&paths.state_dir);
+        if !path.exists() {
+            state_paths::prepare_beebeeb_state_dir_at(&paths.sync_root, &paths.state_dir)?;
+        }
+        let db = state_db::StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?;
+        // An engine start shuts the upgrade's adoption window on every database it opens: one it creates (or
+        // migrates in from an older layout) was never the upgrade's, and an existing one has had its startup pass.
+        // Nothing is adopted into either afterwards.
+        db.close_adoption_window().map_err(|e| format!("mark state.db: {e}"))?;
+        Ok(Self {
+            db,
+            sync_root: Some(paths.sync_root.clone()),
+            staging_dirs: paths.staging_dirs.clone(),
+        })
+    }
+}
+
+impl account_binding::LocalData for StateDbLocalData {
+    fn owner(&self) -> Result<Option<account_binding::Identity>, String> {
+        self.db.owner().map_err(|e| format!("read the local data owner: {e}"))
+    }
+
+    fn has_account_data(&self) -> Result<bool, String> {
+        self.db
+            .has_account_data()
+            .map_err(|e| format!("inspect the local data: {e}"))
+    }
+
+    /// The sign-out purge (its one deletion gate, `is_disposable_cache_path`, never reaches the lifecycle
+    /// log directory), then every remaining row. An error from either means nothing may start.
+    fn reset(&self) -> Result<(), String> {
+        let summary = purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs)?;
+        tracing::info!(
+            queued_ops_purged = summary.queued_ops_purged,
+            files_removed = summary.files_removed,
+            files_skipped = summary.files_skipped,
+            "R10: local data reset before sync started"
+        );
+        // On a Mac the previous account's Finder domain is still registered: the debt is recorded in the same
+        // transaction that clears the rows, so no crash can leave the rows gone and the debt forgotten.
+        self.db
+            .clear_account_data(cfg!(target_os = "macos"))
+            .map_err(|e| format!("clear the local data: {e}"))
+    }
+
+    fn record_owner(&self, owner: &account_binding::Identity) -> Result<(), String> {
+        self.db
+            .set_owner(owner)
+            .map_err(|e| format!("record the local data owner: {e}"))
+    }
+
+    fn adopt_once(&self, candidate: Option<&account_binding::Identity>) -> Result<bool, String> {
+        self.db
+            .adopt_owner_once(candidate)
+            .map_err(|e| format!("adopt the local data owner: {e}"))
+    }
+}
+
+/// R10: who a session is, from the session's OWN email and, when the cached profile is that account's, its
+/// user id. The profile counts only when its email is exactly the session's, so a profile left over from
+/// another account is never taken for this one; a session with no email is unidentified (and an owner that
+/// cannot be compared with it refuses the start).
+fn identity_of_session(
+    email: Option<&str>,
+    profile: Option<&account_dto::AccountProfile>,
+) -> account_binding::Identity {
+    let email = email.map(str::trim).filter(|email| !email.is_empty());
+    let profile = profile.filter(|profile| email.is_some_and(|email| profile.email.trim() == email));
+    account_binding::Identity::new(profile.map(|profile| profile.user_id.as_str()), email)
+}
+
+/// R10: bind `data` to `session` before an engine starts. Another account's data is reset first
+/// (refused on Windows). An owner that cannot be compared stops the start and deletes nothing. Any
+/// error means: do not start the engine.
+fn bind_data_to_session(
+    state: &AppState,
+    data: &StateDbLocalData,
+    session: &account_binding::Identity,
+) -> Result<(), String> {
+    match account_binding::bind_before_engine_start(data, session, !cfg!(target_os = "windows"))? {
+        account_binding::Bound::Kept => {}
+        account_binding::Bound::Reset => {
+            tracing::warn!("R10: local data of another account was reset before sync started");
+            // Finder may still list what the reset removed. A Repair removes Beebeeb and adds it back.
+            // Never awaited: the reconciler itself starts engines through this function.
+            #[cfg(target_os = "macos")]
+            notify_finder(state, finder_setup::core::Trigger::Repair);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = state;
+    Ok(())
+}
+
+/// Whether the engine may start once the local data is bound.
+enum BoundData {
+    Ready,
+    /// A Finder domain removal is owed (see [`EngineStart::FinderRemovalOwed`]).
+    FinderRemovalOwed,
+}
+
+/// R10: bind this computer's local data to the session's account before an engine starts. A start refuses while a
+/// Finder domain removal is owed, before it binds anything; and a reset on a Mac, which leaves the previous
+/// account's domain registered, records that debt itself, so the engine waits for the removal Repair asks for.
+fn bind_local_data_to_session(
+    state: &AppState,
+    identity: &account_binding::Identity,
+    paths: &LocalDataPaths,
+) -> Result<BoundData, String> {
+    let data = StateDbLocalData::for_engine_start(paths)?;
+    if data
+        .db
+        .finder_removal_owed()
+        .map_err(|e| format!("read the Finder removal debt: {e}"))?
+    {
+        return Ok(BoundData::FinderRemovalOwed);
+    }
+    // A first start onto an UNOWNED, EMPTY database (R3, fix round 2) owes the removal too, as a reset does: the
+    // database may have been deleted, or never existed, while the previous account's Finder domain stayed
+    // registered. The reconciler's next check settles it (an Observe that finds no domain releases the debt).
+    // Not owed when a sign-out whose Finder removal was confirmed left the domain known gone.
+    let first_owner_here = cfg!(target_os = "macos")
+        && data
+            .db
+            .owner()
+            .map_err(|e| format!("read the local data owner: {e}"))?
+            .is_none()
+        && !data
+            .db
+            .has_account_data()
+            .map_err(|e| format!("inspect the local data: {e}"))?
+        && !data
+            .db
+            .finder_domain_gone()
+            .map_err(|e| format!("read the Finder domain mark: {e}"))?;
+    if first_owner_here {
+        data.db
+            .set_finder_removal_owed(true)
+            .map_err(|e| format!("record the Finder removal debt: {e}"))?;
+        // Ask for a check so the reconciler looks (it may have no reason to otherwise).
+        #[cfg(target_os = "macos")]
+        notify_finder(state, finder_setup::core::Trigger::KeysArrived);
+    }
+    bind_data_to_session(state, &data, identity)?;
+    if data
+        .db
+        .finder_removal_owed()
+        .map_err(|e| format!("read the Finder removal debt: {e}"))?
+    {
+        return Ok(BoundData::FinderRemovalOwed);
+    }
+    Ok(BoundData::Ready)
+}
+
+/// Everything an engine start needs decided before the engine exists, with the caller holding the
+/// engine slot (the guard is the proof, and its emptiness is checked). In this order: the keys and the
+/// identity of their session, read together under the slot; then the binding of the local data to that
+/// identity. `NoSession`: the vault is locked, so there is nothing to start. Any `Err` means: do not start
+/// the engine. A binding that failed is returned with `?` and nothing after it runs
+/// (`every_engine_start_is_bound_first`).
+fn authorize_engine_start(
+    state: &AppState,
+    acct: &account::AccountRuntime,
+    engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
+    paths: &LocalDataPaths,
+) -> Result<StartPermit, String> {
+    if engine_slot.is_some() {
+        return Err(ENGINE_SLOT_OCCUPIED_ERROR.to_string());
+    }
+    let (keys, identity) = match keys_for_engine_start(acct) {
+        Ok(read) => read,
+        Err(EngineStartBlocked::NoSession) => return Ok(StartPermit::NoSession),
+        Err(refused) => return Err(refused.to_string()),
+    };
+    // A session that does not know who it is (its sign-in could not fetch the account record) starts nothing and
+    // touches nothing: no database opened, no adoption, no purge, no Finder debt. The same message as an owner
+    // that cannot be compared: it tells the person to connect and open Beebeeb again.
+    if !identity.is_known() {
+        return Err(account_binding::IDENTITY_UNKNOWN.to_string());
+    }
+    let bound = bind_local_data_to_session(state, &identity, paths)?;
+    match bound {
+        BoundData::Ready => Ok(StartPermit::Go(keys)),
+        BoundData::FinderRemovalOwed => Ok(StartPermit::FinderRemovalOwed),
+    }
+}
+
+/// The start itself, with the engine's constructor passed in: authorize (keys and identity under the slot,
+/// then the binding), and only then call `spawn` and put what it returns in the slot. Production passes the
+/// one real constructor (see [`spawn_bound_engine`]); a test passes one that looks at the world at the exact
+/// moment an engine would start.
+fn start_engine_bound(
+    state: &AppState,
+    acct: &account::AccountRuntime,
+    engine_slot: &mut tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
+    paths: &LocalDataPaths,
+    spawn: impl FnOnce(PathBuf, zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>) -> EngineRunner,
+) -> Result<EngineStart, String> {
+    let turn = acct.session_generation();
+    let (token, key) = match authorize_engine_start(state, acct, &*engine_slot, paths)
+        .inspect_err(|error| record_engine_refusal(acct, turn, error))?
+    {
+        StartPermit::Go(keys) => keys,
+        StartPermit::NoSession => return Ok(EngineStart::NoSession),
+        StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed),
+    };
+    **engine_slot = Some(spawn(paths.sync_root.clone(), token, key));
+    *acct
+        .engine_refusal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(EngineStart::Started)
+}
+
+/// Ruling P (Task 12 fix round 2): a start refused by the binding leaves its closed code on the account, so
+/// `sync_status` can show the sentence instead of a stopped engine with no reason. Only the two binding refusals
+/// count ([`account_binding::Refusal::of`]); any other error records nothing. Recorded only while the session is still
+/// the one this start read (`turn`): a transition since then cleared the field and wins.
+fn record_engine_refusal(acct: &account::AccountRuntime, turn: account::SessionGeneration, error: &str) {
+    let Some(refusal) = account_binding::Refusal::of(error) else {
+        return;
+    };
+    let mut recorded = acct
+        .engine_refusal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if acct.session_unchanged_since(turn) {
+        *recorded = Some(refusal);
+    }
+}
+
+/// `sync_status.engine_refusal`: `{code, sentence}` for the last binding refusal of the current session, else null.
+fn engine_refusal_view(acct: &account::AccountRuntime) -> serde_json::Value {
+    match *acct
+        .engine_refusal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    {
+        Some(refusal) => serde_json::json!({ "code": refusal.code(), "sentence": refusal.sentence() }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// R10 (spec 2026-10-06 §5.6; lead ruling T9-starts): the ONLY place a sync engine starts. The caller
+/// holds the engine slot (it passes the guard) and has stopped any earlier engine in it. This reads the
+/// session and its keys under that slot, binds the local data to the session's account, and only then
+/// spawns, so:
+///  - there is no key or token parameter: a Lock that cleared the session before this start got the
+///    slot finds nothing to start with, and no engine exists after the Lock returned;
+///  - another account's local data is reset first, and any error (a failed reset, an owner that cannot
+///    be compared, Windows refusing) means no engine starts.
+///
+/// The keys reach the engine as `Zeroizing` values. `every_engine_start_is_bound_first` pins that this is
+/// the one start in production code and that the binding comes first.
+fn spawn_bound_engine(
+    app: tauri::AppHandle,
+    state: &AppState,
+    acct: &account::AccountRuntime,
+    engine_slot: &mut tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
+    sync_root: PathBuf,
+) -> Result<EngineStart, String> {
+    let paths = LocalDataPaths::production(&sync_root)?;
+    start_engine_bound(state, acct, engine_slot, &paths, |sync_root, token, key| {
+        EngineRunner::spawn(
+            app,
+            sync_root,
+            token,
+            key,
+            acct.sync_paused.clone(),
+            acct.auth_health.clone(),
+        )
+    })
+}
+
+/// Is a Finder domain removal owed before any engine may start? Read by the reconciler's facts. An unreadable
+/// database is not a debt it could act on (the engine start fails to open it too).
+#[cfg(target_os = "macos")]
+pub(crate) fn finder_removal_owed() -> bool {
+    state_paths::beebeeb_state_dir()
+        .ok()
+        .is_some_and(|dir| finder_removal_owed_in(&dir))
+}
+
+#[cfg(target_os = "macos")]
+fn finder_removal_owed_in(state_dir: &Path) -> bool {
+    matches!(state_db_from_state_dir(state_dir), Ok(Some(db)) if db.finder_removal_owed().unwrap_or(false))
+}
+
+/// The reconciler confirmed the domain gone (a removal worked, or an Observe found none): release the debt, which
+/// lets the next engine start through.
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_finder_removal_owed() {
+    if let Ok(dir) = state_paths::beebeeb_state_dir() {
+        clear_finder_removal_owed_in(&dir);
+    }
+}
+
+/// The reconciler registered the domain (`addDomain` succeeded): it is no longer known gone, so a later start onto
+/// an unowned, empty database owes a check again instead of trusting the mark a confirmed sign-out left.
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_finder_domain_gone() {
+    if let Ok(dir) = state_paths::beebeeb_state_dir() {
+        clear_finder_domain_gone_in(&dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_finder_domain_gone_in(state_dir: &Path) {
+    if let Ok(Some(db)) = state_db_from_state_dir(state_dir)
+        && let Err(error) = db.clear_finder_domain_gone()
+    {
+        tracing::warn!(%error, "could not clear the Finder domain mark; a later first start may skip its removal check");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_finder_removal_owed_in(state_dir: &Path) {
+    if let Ok(Some(db)) = state_db_from_state_dir(state_dir)
+        && let Err(error) = db.set_finder_removal_owed(false)
+    {
+        tracing::warn!(%error, "could not release the Finder removal debt; engine starts keep waiting for a removal");
+    }
+}
+
+/// R10, the upgrade path (fix round 1 of Task 10): local data from before the binding has no owner. On the first
+/// startup after the upgrade, and only then, the account whose VAULT KEY the Keychain holds (`candidate`; `None`
+/// when it holds a token without a key, or nothing) becomes the owner. Any other unowned data is an unknown
+/// owner and is reset (or refused on Windows) at the next engine start. The window shuts whatever this finds.
+/// Best-effort: an error here leaves the data unowned, which fails closed.
+fn adopt_unbound_local_data_at_startup(candidate: Option<&account_binding::Identity>) {
+    let Ok(state_dir) = state_paths::beebeeb_state_dir() else {
+        return;
+    };
+    adopt_unbound_local_data_in(&state_dir, candidate);
+}
+
+/// [`adopt_unbound_local_data_at_startup`] for a given state dir (a test points it at a throwaway one).
+fn adopt_unbound_local_data_in(state_dir: &Path, candidate: Option<&account_binding::Identity>) {
+    let Ok(Some(db)) = state_db_from_state_dir(state_dir) else {
+        return;
+    };
+    let data = StateDbLocalData {
+        db,
+        sync_root: None,
+        staging_dirs: Vec::new(),
+    };
+    match account_binding::adopt_unbound(&data, candidate) {
+        Ok(true) => tracing::info!("R10: existing local data recorded as this computer's signed-in account's"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "R10: could not record the owner of existing local data"),
+    }
+}
+
+/// The account to adopt unowned local data into at startup: only a session the Keychain gave back COMPLETE
+/// (token and wrapped vault key), and only by its email. A Keychain with a token but no key (a sign-in that
+/// stopped before the recovery-phrase step, or any failure to read) names nobody.
+fn startup_adoption_candidate(loaded: &Result<Option<Session>, String>) -> Option<account_binding::Identity> {
+    let session = loaded.as_ref().ok()?.as_ref()?;
+    let candidate = account_binding::Identity::new(None, session.email.as_deref());
+    candidate.is_known().then_some(candidate)
+}
+
+/// Sign-out (§5.3 (5)) and Repair (§5.3 (6)) on macOS: the reconciler cancels any check and removes
+/// the domain; this waits for that removal (bounded), so the caller's next step cannot race a check.
+/// `Err` when the reconciler is not running, did not answer in time, or the removal failed: the text
+/// is the OS error's domain and code at most (lead ruling T1-4), and callers that report it use a fixed
+/// sentence. There is no direct removal fallback: every bridge call goes through the gate (ruling 4).
+/// Task 1882: the removal keeps the files that never reached the server, and both answers carry what
+/// macOS kept (`kept_location` names the folder), so the caller can show it.
+#[cfg(target_os = "macos")]
+async fn finder_remove_for(
+    state: &AppState,
+    trigger: finder_setup::core::Trigger,
+) -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
+    match state.finder_setup.get() {
+        Some(handle) => handle.remove(trigger, finder_wait(FINDER_REMOVE_TIMEOUT)).await,
+        None => Err(FINDER_NOT_RUNNING.to_string().into()),
+    }
+}
+
+/// Lock (§5.3 (3)): the reconciler cancels any check and holds, and this waits for that
+/// acknowledgement (bounded), so it can stop the engine without a check starting another.
+#[cfg(target_os = "macos")]
+async fn finder_lock_for(state: &AppState) -> Result<(), String> {
+    match state.finder_setup.get() {
+        Some(handle) => handle.lock(finder_wait(FINDER_LOCK_TIMEOUT)).await,
+        None => Err(FINDER_NOT_RUNNING.to_string()),
+    }
+}
+
+/// Lead ruling T3-⚠2: a sign-out has told the reconciler to remove Finder. If it then stops short
+/// (any return before the keys are gone) and the keys are still in memory, the person is still
+/// signed in, so the reconciler is told keys are here and re-adds Finder. If the keys are gone the
+/// reconciler stays held. Runs on every way out of `clear_session_impl`, including `?`.
+#[cfg(target_os = "macos")]
+struct FinderRestoreOnAbort<'a> {
+    state: &'a AppState,
+    acct: &'a account::AccountRuntime,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for FinderRestoreOnAbort<'_> {
+    fn drop(&mut self) {
+        let keys_in_memory = self.acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
+        // Not while an engine stop is unconfirmed (Task 9 fix round 1, item E): every start refuses until a
+        // restart, so the check this would run could only fail, and the restart's `Launch` re-adds Finder.
+        let stop_unconfirmed = self.acct.engine_stop_unconfirmed.load(Ordering::SeqCst);
+        if keys_in_memory && !stop_unconfirmed {
+            notify_finder(self.state, finder_setup::core::Trigger::KeysArrived);
+        }
+    }
+}
+
+fn macos_version_string() -> String {
+    sysinfo::System::os_version().unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The names the lifecycle log scrubs from an NSError message: the same state.db source as the
+/// support bundle (task 1685). Empty when there is no state.db yet; the redaction's allow-list
+/// still removes every unknown word. It opens its own `StateDb`, takes no app lock, never
+/// panics, and never calls `lifecycle_log::event` or `tail` (lead ruling T5-a): the log calls it
+/// with no lock of its own held, but the caller of `event` may hold others.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn lifecycle_known_names() -> diagnostic_redaction::KnownNames {
+    let sync_root = DesktopConfig::load()
+        .ok()
+        .and_then(|cfg| cfg.sync_root)
+        .map(|p| p.to_string_lossy().into_owned());
+    match state_db_from_app_local_state_dir() {
+        Ok(Some(db)) => db
+            .known_names(&sync_root.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default(),
+        _ => diagnostic_redaction::KnownNames::new(),
+    }
+}
+
+/// Spec §5.5 step 5 (macOS): on `Ready`, save the sync folder and make sure the engine runs.
+/// Unlike `persist_sync_root_and_start_engine` it never restarts an engine that is already
+/// running: the reconciler started it before `addDomain` (plan "Spec issues" 7), or the
+/// relaunch's restore did.
+#[cfg(target_os = "macos")]
+async fn ensure_sync_root_and_engine(
+    app: tauri::AppHandle,
+    state: &State<'_, AppState>,
+    root: PathBuf,
+) -> Result<(), String> {
+    let mut cfg = DesktopConfig::load()?;
+    if cfg.sync_root.as_deref() != Some(root.as_path()) {
+        cfg.sync_root = Some(root.clone());
+        cfg.save()?;
+    }
+    let acct = state.active_account()?;
+    // The slot first, then the keys under it (lead rulings T8-⚠lock 2 and 3): Lock and Sign-out clear
+    // the session before they release the slot, so a check that waited for it finds no keys, and
+    // nothing starts beside an engine whose stop was never confirmed.
+    let mut engine_slot = acct.engine.lock().await;
+    engine_start_refusal(&acct)?;
+    if engine_slot.is_none() {
+        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        // The keys are read under the slot, and the local data is bound to the account, inside the start.
+        match spawn_bound_engine(app, state, &acct, &mut engine_slot, root)? {
+            EngineStart::Started => {}
+            EngineStart::NoSession => return Err(ENGINE_START_NO_SESSION_FOR_FINDER.to_string()),
+            EngineStart::FinderRemovalOwed => return Err(FINDER_REMOVAL_OWED_ERROR.to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// The one wait a time limit may cut off in a check's engine start or stop: the wait for the engine
+/// slot (lead ruling T7-1; Task 8 fix round 1). A cut-off here changes nothing: the engine is not yet
+/// spawned or taken, so it stays exactly where sign-out and lock look for it. A limit around the work
+/// that follows would orphan the engine (see `stop_check_engine`).
+#[cfg(target_os = "macos")]
+async fn lock_engine_slot(
+    acct: &account::AccountRuntime,
+    op: finder_setup::core::Op,
+    limit: std::time::Duration,
+) -> Result<tokio::sync::MutexGuard<'_, Option<EngineRunner>>, finder_setup::error::FpError> {
+    finder_setup::driver::within(op, limit, async { Ok(acct.engine.lock().await) }).await
+}
+
+/// Spec §5.5 step 2 (macOS): make sure the engine runs before `addDomain`, because the extension talks
+/// to the engine's socket. `Ok(true)`: this call started it, so the check must stop it if it fails;
+/// `Ok(false)`: one was already running.
+///
+/// Only the wait for the engine slot is under a time limit. Once the engine is spawned nothing may
+/// drop this future: the `started` answer would be lost and a failed check would never stop the
+/// engine it started. The socket wait after it has its own 3 s bound.
+#[cfg(target_os = "macos")]
+async fn start_check_engine(
+    app: tauri::AppHandle,
+    state: &AppState,
+    acct: &account::AccountRuntime,
+    root: PathBuf,
+    slot_limit: std::time::Duration,
+) -> Result<bool, finder_setup::error::FpError> {
+    use finder_setup::error::{FpError, app_code};
+    let (started, ipc_bind_error) = {
+        // The slot first, then the keys under it (lead rulings T8-⚠lock 2 and 3): Lock and Sign-out clear
+        // the session before they release the slot, so a check that waited for it finds no keys, and
+        // nothing starts beside an engine whose stop was never confirmed. The keys are read, and the local
+        // data bound to the account, inside `spawn_bound_engine`.
+        let mut engine_slot = lock_engine_slot(acct, finder_setup::core::Op::StartEngine, slot_limit).await?;
+        engine_start_refusal(acct).map_err(|error| FpError::app(app_code::ENGINE_START, error))?;
+        // Rehydrate the persisted pause state before spawning. Best-effort: an unreadable config means not paused.
+        acct.sync_paused.store(
+            DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false),
+            Ordering::Relaxed,
+        );
+        if let Some(existing) = engine_slot.as_ref() {
+            // Already running (a retry, or the restore started it): reuse its bind-status handle so a
+            // REAL bind error is still seen instead of a silent timeout.
+            (false, existing.ipc_bind_error_handle())
+        } else {
+            match spawn_bound_engine(app, state, acct, &mut engine_slot, root)
+                .map_err(|error| FpError::app(app_code::ENGINE_START, error))?
+            {
+                EngineStart::Started => {}
+                EngineStart::NoSession => {
+                    return Err(FpError::app(app_code::ENGINE_START, ENGINE_START_NO_SESSION_FOR_FINDER));
+                }
+                EngineStart::FinderRemovalOwed => {
+                    return Err(FpError::app(app_code::ENGINE_START, FINDER_REMOVAL_OWED_ERROR));
+                }
+            }
+            let bind_error = engine_slot
+                .as_ref()
+                .map(|runner| runner.ipc_bind_error_handle())
+                .ok_or_else(|| {
+                    FpError::app(
+                        app_code::ENGINE_START,
+                        "the sync engine is not in its slot after it started",
+                    )
+                })?;
+            (true, bind_error)
+        }
+    };
+
+    if let Err(error) = wait_for_file_provider_ipc_ready(ipc_bind_error).await {
+        if started && let Err(stop) = stop_check_engine(acct, slot_limit).await {
+            tracing::error!(%stop, "finder setup: could not stop the engine whose socket never came up");
+        }
+        return Err(FpError::app(app_code::ENGINE_START, error));
+    }
+    Ok(started)
+}
+
+/// Spec §5.5 (macOS): stop the engine a failed check started. `Err` when the slot could not be taken in
+/// time (the engine was not touched and is still tracked in its slot) or when `abort()` could not
+/// confirm the engine task ended; the core never claims a stop that did not happen.
+///
+/// Only the wait for the engine slot is under a time limit. Once the engine is out of its slot this
+/// future must run to the end: `abort()` gives up on its own after 5 s, but a future dropped inside it
+/// detaches the engine task, which would keep running untracked, still holding the session token and
+/// master key, while sign-out finds an empty slot and reports done.
+#[cfg(target_os = "macos")]
+async fn stop_check_engine(
+    acct: &account::AccountRuntime,
+    slot_limit: std::time::Duration,
+) -> Result<(), finder_setup::error::FpError> {
+    use finder_setup::error::{FpError, app_code};
+    let mut engine_slot = lock_engine_slot(acct, finder_setup::core::Op::StopEngine, slot_limit).await?;
+    let Some(engine) = engine_slot.take() else {
+        return Ok(());
+    };
+    if stop_engine_in_slot(acct, engine).await.task_confirmed() {
+        return Ok(());
+    }
+    // The consumed handle leaves an empty slot, so the Bug-A2 flag is what keeps sign-out refused (and
+    // says to restart) while the task may still be running; `stop_engine_in_slot` set it before the slot
+    // is released.
+    tracing::error!("finder setup: could not confirm the sync engine stopped; sign-out stays refused until a restart");
+    Err(FpError::app(
+        app_code::ENGINE_STOP_UNCONFIRMED,
+        "the sync engine did not confirm it stopped",
+    ))
+}
+
+const FINDER_SETUP_MACOS_ONLY: &str = "Finder setup is only available on macOS.";
+
+fn finder_setup_state_impl(state: &AppState) -> Result<finder_setup::driver::FinderSetupView, String> {
+    state
+        .finder_setup
+        .get()
+        .map(|handle| handle.view())
+        .ok_or_else(|| FINDER_SETUP_MACOS_ONLY.to_string())
+}
+
+/// What "Try again" says while the reconciler is held (after a sign-out or a Lock, until keys arrive): no check can add
+/// Beebeeb to Finder before then. The quiet `Missing` row's own sentence (spec §5.2).
+const FINDER_SETUP_HELD: &str = "Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.";
+
+/// "Try again" (§5.3 (4)). `Err` when there is no reconciler or it has stopped, which the frontend
+/// shows as its existing "couldn't retry" toast (lead ruling 3), and while the reconciler is held, when the retry
+/// could do nothing (area A M4): the sentence says what will add Beebeeb instead of a silent no-op.
+fn finder_setup_retry_impl(state: &AppState) -> Result<(), String> {
+    let handle = state
+        .finder_setup
+        .get()
+        .ok_or_else(|| FINDER_SETUP_MACOS_ONLY.to_string())?;
+    if handle.is_held() {
+        return Err(FINDER_SETUP_HELD.to_string());
+    }
+    handle.trigger(finder_setup::core::Trigger::TryAgain)
+}
+
+/// "Try again", against the server at `base_url` (lead ruling 5, Task 12): a session that has no email (so its engine
+/// start cannot tell whose it is) asks the server first, so the check this asks for can start the engine the session
+/// was refused. Then the reconciler's retry, whatever the answer was. A session with an email is already enough for the
+/// engine start (`Identity::is_known`), so its retry never waits on the network (area A M8): that is exactly when the
+/// network is slow or absent. An explicit action: not debounced, but never a second request while one is in flight
+/// (fix round 1, item 4).
+#[cfg(not(target_os = "windows"))]
+async fn finder_setup_try_again(state: &AppState, base_url: &str) -> Result<(), String> {
+    if session_in_memory_has_no_email(state) {
+        identify_unidentified_session(state, base_url, std::time::Instant::now(), IdentifyPace::Now).await;
+    }
+    finder_setup_retry_impl(state)
+}
+
+/// A session is in memory and has no email (its sign-in could not fetch the account record). No session, or a lock that
+/// cannot be read: `false` (there is nothing to name).
+#[cfg(not(target_os = "windows"))]
+fn session_in_memory_has_no_email(state: &AppState) -> bool {
+    let Ok(acct) = state.active_account() else {
+        return false;
+    };
+    acct.session
+        .lock()
+        .map(|guard| {
+            guard
+                .as_ref()
+                .is_some_and(|session| session.email.as_deref().is_none_or(|email| email.trim().is_empty()))
+        })
+        .unwrap_or(false)
+}
+
+/// App activation, against the server at `base_url`, at `now` (lead ruling 5, Task 12; fix round 1, item 4): a session
+/// that does not know its account's user id asks the server again, at most once a minute and never while a request is in
+/// flight (every window focus lands here). `true` when it is named now, so the caller starts the engine it was refused.
+#[cfg(not(target_os = "windows"))]
+async fn identify_on_app_activation(state: &AppState, base_url: &str, now: std::time::Instant) -> bool {
+    identify_unidentified_session(state, base_url, now, IdentifyPace::Debounced).await
+}
+
+/// How often app activation may ask the server who an unidentified session is.
+#[cfg(not(target_os = "windows"))]
+const IDENTIFY_ON_ACTIVATION_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether an identify request waits for [`IDENTIFY_ON_ACTIVATION_EVERY`] since the last one.
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentifyPace {
+    /// App activation.
+    Debounced,
+    /// "Try again" and the startup's second request: asked for once, so not debounced.
+    Now,
+}
+
+/// One identify request in flight for an account (fix round 1, item 4). While it lives no other starts; dropping it ends
+/// the flight.
+#[cfg(not(target_os = "windows"))]
+struct IdentifyTicket<'a> {
+    acct: &'a account::AccountRuntime,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl Drop for IdentifyTicket<'_> {
+    fn drop(&mut self) {
+        let mut flight = self
+            .acct
+            .identify_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        flight.in_flight = false;
+    }
+}
+
+/// A ticket for one identify request at `now`, or `None`: one is in flight already, or (`Debounced`) the last one
+/// started less than [`IDENTIFY_ON_ACTIVATION_EVERY`] ago.
+#[cfg(not(target_os = "windows"))]
+fn begin_identify(
+    acct: &account::AccountRuntime,
+    now: std::time::Instant,
+    pace: IdentifyPace,
+) -> Option<IdentifyTicket<'_>> {
+    let mut flight = acct
+        .identify_flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if flight.in_flight {
+        return None;
+    }
+    if pace == IdentifyPace::Debounced
+        && flight
+            .last_started
+            .is_some_and(|at| now.saturating_duration_since(at) < IDENTIFY_ON_ACTIVATION_EVERY)
+    {
+        return None;
+    }
+    flight.in_flight = true;
+    flight.last_started = Some(now);
+    Some(IdentifyTicket { acct })
+}
+
+/// The active account's session, if it is in memory and does not know its account's user id, asks the server who it is
+/// (see [`establish_session_identity`]), through the account's single flight (`pace`, see [`begin_identify`]). `true`
+/// when it is named now. A session that is identified asks nothing.
+#[cfg(not(target_os = "windows"))]
+async fn identify_unidentified_session(
+    state: &AppState,
+    base_url: &str,
+    now: std::time::Instant,
+    pace: IdentifyPace,
+) -> bool {
+    let Ok(acct) = state.active_account() else {
+        return false;
+    };
+    // Captured before the session is read, so the Keychain write below refuses if any transition (a sign-out, a
+    // lock, another sign-in) happened after this read.
+    let turn = acct.session_generation();
+    let email = match acct.session.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(session) => session.email.clone(),
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    if session_knows_its_user_id(&acct, email.as_deref()) {
+        // Task 12 fix round 2, item 3: an email the naming could not write to the Keychain is written now, in a checked
+        // turn (no request is needed: the session is named; the email is the one read from the session in memory
+        // after `turn` was captured, so a checked turn means no transition happened since).
+        if acct.keychain_email_pending.load(Ordering::SeqCst)
+            && let Some(email) = email.as_deref()
+            && let Ok(write) = check_session_turn(&acct, &turn)
+        {
+            write_session_email_to_keychain(&write, &acct, email);
+        }
+        return false;
+    }
+    let Some(_ticket) = begin_identify(&acct, now, pace) else {
+        return false;
+    };
+    establish_session_identity(state, &acct, base_url, owner_record_dir().as_deref()).await
+}
+
+/// Name an unidentified session in the running app (`pace`), and when that worked, run the engine start it was refused
+/// (the same start an unlock runs). Spawned, never awaited: app activation (debounced) and the startup restore's second
+/// request (fix round 1, item 7), which never holds up the start.
+#[cfg(not(target_os = "windows"))]
+async fn identify_then_start(app: tauri::AppHandle, pace: IdentifyPace) {
+    let state = app.state::<AppState>();
+    let named = match pace {
+        IdentifyPace::Debounced => {
+            identify_on_app_activation(&state, &runner::api_base_url(), std::time::Instant::now()).await
+        }
+        IdentifyPace::Now => {
+            identify_unidentified_session(&state, &runner::api_base_url(), std::time::Instant::now(), pace).await
+        }
+    };
+    if named {
+        if let Err(error) = start_engine_unless_running(app.clone(), &state).await {
+            tracing::warn!(%error, "the session was named after the fact, but the sync engine did not start");
+        }
+        // Area A M7: the reconciler may have failed this session's engine start before it was named, and it would show
+        // that failure until "Try again". Keys are here, so it checks again by itself (a Ready domain is only confirmed).
+        notify_finder(&state, finder_setup::core::Trigger::KeysArrived);
+    }
+}
+
+/// What a naming in the background did with the engine (Task 12 fix round 2, item 2).
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, PartialEq, Eq)]
+enum AfterNaming {
+    /// An engine was running: the naming only confirmed the account it runs for, so it keeps running.
+    KeptRunning,
+    /// The slot was empty (the start before was refused, for a session that did not know who it was): this start.
+    Started(EngineStart),
+    /// An engine was running, but the owner record of the local data and the named session both know a user id and
+    /// the ids differ (fix round 3, M1): it was stopped through the one stop helper, and this start went through the
+    /// binding.
+    Restarted(EngineStart),
+}
+
+/// A naming in the background never restarts a running engine of the same account: it named only the session it fetched
+/// for (the token is checked), so it confirmed the account that engine runs for. Only an empty slot gets a start, through
+/// `start`. The one exception, an owner record that names another account by user id, is checked first by
+/// [`keep_or_rebind_after_naming`].
+#[cfg(not(target_os = "windows"))]
+fn keep_or_start_after_naming<'g>(
+    engine_slot: &mut tokio::sync::MutexGuard<'g, Option<EngineRunner>>,
+    start: impl FnOnce(&mut tokio::sync::MutexGuard<'g, Option<EngineRunner>>) -> Result<EngineStart, String>,
+) -> Result<AfterNaming, String> {
+    if engine_slot.is_some() {
+        return Ok(AfterNaming::KeptRunning);
+    }
+    start(engine_slot).map(AfterNaming::Started)
+}
+
+/// Fix round 3, M1: the owner record of the local data and the named session both know a user id, and the ids differ.
+#[cfg(not(target_os = "windows"))]
+fn owner_is_another_account_by_id(
+    owner: Option<&account_binding::Identity>,
+    named: &account_binding::Identity,
+) -> bool {
+    matches!(
+        (owner.and_then(|owner| owner.user_id.as_deref()), named.user_id.as_deref()),
+        (Some(owner), Some(named)) if owner != named
+    )
+}
+
+/// The engine after a naming in the background (fix round 3, M1). A running engine is kept
+/// ([`keep_or_start_after_naming`]) unless the owner record of the local data and the named session both know a user
+/// id and the ids differ: then that engine runs over another account's data, so it is stopped through the one stop
+/// helper ([`stop_engine_in_slot`]; an unconfirmed stop makes `start` refuse) and `start` goes through the binding,
+/// which resets the data or refuses.
+#[cfg(not(target_os = "windows"))]
+async fn keep_or_rebind_after_naming<'g>(
+    acct: &account::AccountRuntime,
+    engine_slot: &mut tokio::sync::MutexGuard<'g, Option<EngineRunner>>,
+    owner: Option<&account_binding::Identity>,
+    named: &account_binding::Identity,
+    start: impl FnOnce(&mut tokio::sync::MutexGuard<'g, Option<EngineRunner>>) -> Result<EngineStart, String>,
+) -> Result<AfterNaming, String> {
+    if owner_is_another_account_by_id(owner, named)
+        && let Some(running) = engine_slot.take()
+    {
+        stop_engine_in_slot(acct, running).await;
+        return start(engine_slot).map(AfterNaming::Restarted);
+    }
+    keep_or_start_after_naming(engine_slot, start)
+}
+
+/// Who the session in memory is, from its email and the cached profile only (never its keys): what the naming named.
+/// Read by the start after a naming (M1); no start site reads the session itself.
+#[cfg(not(target_os = "windows"))]
+fn named_session_identity(acct: &account::AccountRuntime) -> account_binding::Identity {
+    let email = acct
+        .session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|session| session.email.clone()));
+    let profile = acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
+    identity_of_session(email.as_deref(), profile.as_ref())
+}
+
+/// The engine start after a naming in the background (see [`keep_or_rebind_after_naming`]): like
+/// `start_engine_if_possible`, but an engine of the same account that runs is kept, never stopped and respawned.
+#[cfg(not(target_os = "windows"))]
+async fn start_engine_unless_running(app: tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    let Ok(cfg) = DesktopConfig::load() else {
+        return Ok(());
+    };
+    let Some(root) = cfg.sync_root else {
+        return Ok(());
+    };
+    let Ok(acct) = state.active_account() else {
+        return Ok(());
+    };
+    let mut engine_slot = acct.engine.lock().await;
+    // M1: the owner record and the named session, read under the slot. An owner that cannot be read compares with
+    // nothing, so a running engine is kept, as before.
+    let owner = owner_record_dir()
+        .and_then(|dir| state_db_from_state_dir(&dir).ok().flatten())
+        .and_then(|db| db.owner().ok().flatten())
+        .filter(account_binding::Identity::is_known);
+    let named = named_session_identity(&acct);
+    let after = keep_or_rebind_after_naming(&acct, &mut engine_slot, owner.as_ref(), &named, |slot| {
+        engine_start_refusal(&acct)?;
+        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        spawn_bound_engine(app, state, &acct, slot, root)
+    })
+    .await?;
+    tracing::info!(?after, "after the naming in the background");
+    Ok(())
+}
+
+/// App activation in the running app ([`identify_then_start`], debounced). Spawned from the window-focus handler.
+#[cfg(not(target_os = "windows"))]
+async fn on_app_activated(app: tauri::AppHandle) {
+    identify_then_start(app, IdentifyPace::Debounced).await;
+}
+
+/// "Copy details" (§6.2): the one public `copy_details`, which reads the last 200 lifecycle-log
+/// lines itself (lead ruling T5-b).
+fn finder_setup_copy_details_impl(state: &AppState) -> Result<String, String> {
+    let view = finder_setup_state_impl(state)?;
+    Ok(finder_setup::driver::copy_details(
+        &view,
+        real_app_version(),
+        &macos_version_string(),
+    ))
+}
+
+/// Spec §9: the reconciler's published state (replaces `finder_location_state` on macOS).
+#[tauri::command]
+fn finder_setup_state(state: State<'_, AppState>) -> Result<finder_setup::driver::FinderSetupView, String> {
+    finder_setup_state_impl(&state)
+}
+
+/// "Try again" (§5.3 (4)): a fresh retry budget. On macOS and Linux an unidentified session asks the server first
+/// ([`finder_setup_try_again`]).
+#[tauri::command]
+async fn finder_setup_retry(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        finder_setup_try_again(&state, &runner::api_base_url()).await
+    }
+    #[cfg(target_os = "windows")]
+    {
+        finder_setup_retry_impl(&state)
+    }
+}
+
+/// "Copy details" (§6.2): the text the frontend puts on the pasteboard.
+#[tauri::command]
+fn finder_setup_copy_details(state: State<'_, AppState>) -> Result<String, String> {
+    finder_setup_copy_details_impl(&state)
+}
+
+/// "Show in Finder" for `not_in_applications` (plan "Spec issues" 9): reveal the running app so
+/// the person can drag it to Applications.
+#[tauri::command]
+fn finder_setup_show_app(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = finder_setup::launch_location::current_bundle_path()
+            .ok_or_else(|| "This copy of Beebeeb is not an app bundle.".to_string())?;
+        // The opener's own text can name the bundle's path: it goes to the log, never to the caller.
+        app.opener().reveal_item_in_dir(&bundle).map_err(|error| {
+            tracing::warn!(%error, "finder setup: could not reveal the app bundle");
+            "Could not show Beebeeb in Finder.".to_string()
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Only available on macOS.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -3085,55 +6593,7 @@ fn open_login_items_and_extensions_settings() -> Result<(), String> {
     }
 }
 
-/// Task 1693: the popover tests must not assert against the developer
-/// machine's REAL File Provider domain — `finder_location_state` asks the OS,
-/// a read no env-var isolation can fake. Tests install an override here (only
-/// compiled into test builds; production never writes it) and the snapshot's
-/// probe reads it through `popover_finder_probe_state`. Held behind a mutex
-/// because the tests run multi-threaded.
-///
-/// Injections are SCOPED: `inject_finder_state` returns a `FinderProbeGuard`
-/// that restores the value the injection replaced on drop (PR #102 review —
-/// an override that outlived its test leaked into later Finder-reading tests
-/// that install none, e.g. the `#[ignore]`d real-API test asserting `synced`).
-/// Bind the guard (`let _probe = ...`) for the duration of the assertions;
-/// `#[must_use]` makes a forgotten binding a compile warning.
-#[cfg(test)]
-static POPOVER_TEST_FINDER_PROBE: std::sync::Mutex<Option<Result<FinderInstallState, String>>> =
-    std::sync::Mutex::new(None);
-
-/// The popover snapshot's Finder probe: the injected state when a test has
-/// installed one (task 1693), otherwise the real `finder_location_state`.
-/// The spawn_blocking wrapper stays at the call site, so this changes only
-/// WHAT is asked, never WHERE (off the async executor).
-fn popover_finder_probe_state() -> Result<FinderInstallState, String> {
-    #[cfg(test)]
-    if let Some(injected) = POPOVER_TEST_FINDER_PROBE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        return injected;
-    }
-    finder_location_state()
-}
-
-/// Restores the probe override this injection replaced when dropped.
-/// Held behind the same mutex the static uses, because tests run
-/// multi-threaded and drops can interleave with other tests' injections.
-#[cfg(test)]
-struct FinderProbeGuard {
-    previous: Option<Result<FinderInstallState, String>>,
-}
-
-#[cfg(test)]
-impl Drop for FinderProbeGuard {
-    fn drop(&mut self) {
-        *POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()) =
-            self.previous.take();
-    }
-}
-
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn finder_location_state() -> Result<FinderInstallState, String> {
     let mut cfg = DesktopConfig::load()?;
@@ -3171,6 +6631,10 @@ fn finder_location_state() -> Result<FinderInstallState, String> {
 
 /// Persist the chosen sync root and start the daemon when possible, but do not
 /// claim Finder integration succeeded while the `.appex` is absent.
+///
+/// Windows and Linux only. On macOS Beebeeb adds itself to Finder (spec 2026-10-06, ruling R5);
+/// the macOS variant below only refuses.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn install_finder_location(
     app: tauri::AppHandle,
@@ -3185,14 +6649,9 @@ async fn install_finder_location(
         SESSION_COMMANDS.generation()?;
     }
 
-    #[cfg(target_os = "macos")]
-    let root = config::default_sync_root_suggestion();
-    #[cfg(not(target_os = "macos"))]
     let root = path
         .map(PathBuf::from)
         .unwrap_or_else(config::default_sync_root_suggestion);
-    #[cfg(target_os = "macos")]
-    let _ = path;
     if !root.is_absolute() {
         return Err(format!("Finder location must be absolute: {}", root.display()));
     }
@@ -3201,11 +6660,6 @@ async fn install_finder_location(
     let mut cfg = DesktopConfig::load()?;
     // Spec section 7: the previous attempt's saved failure is cleared when a new attempt starts.
     begin_finder_install_attempt(&mut cfg)?;
-    // State f1 ("Adding Beebeeb to Finder"): the popover snapshot reports it for exactly
-    // as long as this command runs, on every exit path.
-    let _adding = app
-        .try_state::<popover_data::PopoverRuntime>()
-        .map(|runtime| runtime.finder_adding_guard());
     let started_pending_engine = start_engine_for_pending_finder_install(
         app.clone(),
         &state,
@@ -3278,6 +6732,7 @@ async fn install_finder_location(
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn continue_without_finder_location(
     app: tauri::AppHandle,
@@ -3311,6 +6766,34 @@ async fn continue_without_finder_location(
     )
     .await?;
     Ok(finder_install_state_from_config(&cfg, false, None))
+}
+
+/// macOS: Beebeeb adds itself to Finder (spec 2026-10-06, ruling R5). Registered so the command
+/// table is the same on every platform; nothing on macOS calls it
+/// (tests/finderSetupSourceContract.test.ts).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn install_finder_location(path: Option<String>) -> Result<FinderInstallState, String> {
+    let _ = path;
+    Err("On macOS Beebeeb adds itself to Finder. Use finder_setup_retry.".to_string())
+}
+
+/// macOS: there is no "continue without Finder" (spec §4: Finder setup is automatic). Registered
+/// so the command table is the same on every platform; nothing on macOS calls it, and it never
+/// reads or writes the install-era state (lead ruling 1).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn continue_without_finder_location(path: Option<String>) -> Result<FinderInstallState, String> {
+    let _ = path;
+    Err("Finder setup is automatic on macOS".to_string())
+}
+
+/// macOS: the reconciler's published view is `finder_setup_state`. Registered so the command
+/// table is the same on every platform; nothing on macOS calls it.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn finder_location_state() -> Result<FinderInstallState, String> {
+    Err("On macOS use finder_setup_state.".to_string())
 }
 
 // ── Windows shell integration (Cloud Files) ───────────────────────────────────
@@ -3448,6 +6931,7 @@ async fn reset_macos_integration(
     }
 
     let mut warnings = Vec::new();
+    #[cfg_attr(target_os = "macos", allow(unused_mut))]
     let mut cfg = DesktopConfig::load()?;
     let sync_root_preserved = cfg.sync_root.as_ref().map(|path| path.to_string_lossy().into_owned());
 
@@ -3517,20 +7001,10 @@ async fn reset_macos_integration(
     // The engine + its status string are per-account (decision 0800); the
     // `cfg`/`sync_root` reads in this handler stay on `DesktopConfig` (Group D).
     let acct = state.active_account()?;
-    let mut engine_slot = acct.engine.lock().await;
-    if let Some(prev) = engine_slot.take() {
-        // Task 1538 Codex P1 — see `start_engine_if_possible`'s identical
-        // respawn guard.
-        if !prev.abort().await.is_stopped() {
-            tracing::warn!("engine did not confirm termination before macOS integration reset");
-        } else {
-            tracing::info!("engine aborted for macOS integration reset");
-        }
-    }
-    drop(engine_slot);
-    if let Ok(mut guard) = acct.engine_state.lock() {
-        *guard = "stopped".to_string();
-    }
+    let RepairEngineStop {
+        removed_socket,
+        engine_stop_unconfirmed,
+    } = stop_engine_for_repair(&acct, &mut warnings, remove_stale_ipc_socket).await;
 
     // Windows: strip the Explorer SHELL registration (nav-pane entry, Status
     // column, overlays) as part of a full integration reset — the analogue of
@@ -3549,20 +7023,23 @@ async fn reset_macos_integration(
         }
     }
 
-    let removed_socket = match remove_stale_ipc_socket() {
-        Ok(removed) => removed,
-        Err(error) => {
-            warnings.push(error);
-            false
-        }
-    };
-
+    // Spec §5.3 (6): Repair removes through the reconciler, which then runs one fresh check by itself,
+    // so a signed-in Mac ends with Beebeeb back in Finder. The engine was stopped above, before the
+    // reconciler is told: the fresh check starts it again with the keys still in memory.
+    #[cfg(target_os = "macos")]
+    let removal = finder_remove_for(&state, finder_setup::core::Trigger::Repair).await;
+    #[cfg(not(target_os = "macos"))]
+    let removal = remove_file_provider_domain_blocking().await;
     // Task 1882: the removal keeps un-synced files; their folder rides the
-    // result to the Sync tab's note (spec 2026-10-09 §5).
-    let (removed_file_provider_domain, preserved_location) =
-        finder_removal::repair_removal(remove_file_provider_domain_blocking().await, &mut warnings);
-    // Review I2: saved for the Settings › Sync row, into the config this command saves below.
+    // result to the Sync tab (spec 2026-10-09 §5). A failed removal is one warning, as before.
+    let (removed_file_provider_domain, preserved_location) = finder_removal::repair_removal(removal, &mut warnings);
+    // Review I2: saved for the Settings › Sync row. On macOS this command saves no config (the reconciler owns
+    // the Finder state), so the folder is saved on its own, under the config-write lock; Windows and Linux
+    // record it into the config this command saves below.
     if let Some(location) = preserved_location.as_deref() {
+        #[cfg(target_os = "macos")]
+        remember_kept_folder(location);
+        #[cfg(not(target_os = "macos"))]
         finder_removal::record_kept_folder(&mut cfg, location);
     }
 
@@ -3581,7 +7058,10 @@ async fn reset_macos_integration(
         }
     };
 
-    // Re-review P1: the removal above cannot be undone, so a failed save still shows the folder.
+    // Windows and Linux only: on macOS the reconciler owns the Finder state and nothing writes the
+    // install-era keys (spec 2026-10-06 §6.1). Re-review P1 (task 1882): the removal above cannot be
+    // undone, so a failed save still shows the folder.
+    #[cfg(not(target_os = "macos"))]
     finish_repair_after_removal(
         &mut cfg,
         preserved_location.as_deref(),
@@ -3599,6 +7079,7 @@ async fn reset_macos_integration(
         skipped_cache_files,
         pending_operations_preserved,
         sync_root_preserved,
+        engine_stop_unconfirmed,
         warnings,
     })
 }
@@ -3635,7 +7116,10 @@ mod open_folder_tests {
     #[test]
     fn open_folder_preserves_explicit_root() {
         let root = "D:\\Private files\\資料\\Sync";
-        assert_eq!(require_open_folder_root(Some(root.to_string())), Ok(PathBuf::from(root)));
+        assert_eq!(
+            require_open_folder_root(Some(root.to_string())),
+            Ok(PathBuf::from(root))
+        );
     }
 }
 
@@ -3654,7 +7138,7 @@ fn open_finder_location(path: Option<String>) -> Result<(), String> {
     {
         let _ = path;
         let visible = file_provider_visible_location()?
-            .ok_or_else(|| "Install the Beebeeb Finder location before opening it.".to_string())?;
+            .ok_or_else(|| "Beebeeb isn’t in Finder right now, so there is nothing to open there.".to_string())?;
         std::process::Command::new("open")
             .arg(&visible)
             .spawn()
@@ -4231,6 +7715,8 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         "engine_running": engine_running,
         "vault_unlocked": vault_unlocked,
         "engine": engine,
+        // Why sync did not start, when the local-data binding refused it (ruling P): `{code, sentence}` or null.
+        "engine_refusal": engine_refusal_view(&acct),
         "syncing": counts.0,
         "cloud_only": counts.1,
         "conflicts": counts.2,
@@ -4348,7 +7834,7 @@ async fn popover_snapshot(
     // Windows admission: the snapshot reads the session token, so it leases like every
     // credential command (tests/windows_session_wiring.rs guards this).
     session_command!(async {
-        use popover_data::{SnapshotInputs, cached_storage, fetch_storage_usage, finder_setup_for};
+        use popover_data::{SnapshotInputs, cached_storage, fetch_storage_usage};
 
         let now = now_unix_seconds();
         let acct = state.active_account()?;
@@ -4366,22 +7852,14 @@ async fn popover_snapshot(
         let paused = acct.sync_paused.load(std::sync::atomic::Ordering::Relaxed);
         let email = session_email.or_else(|| acct.auth_email.lock().ok().and_then(|guard| guard.clone()));
 
-        // Finder. Only macOS has one, and only matters once the phases above it are clear.
-        let adding = runtime.finder_adding.load(std::sync::atomic::Ordering::SeqCst);
-        let is_macos = cfg!(target_os = "macos");
-        let (finder, finder_reason) = if is_macos && logged_in && vault_unlocked && !adding {
-            // The probe asks the OS about the File Provider domain: keep it off the executor.
-            // (Test builds may have injected a state at this boundary — task 1693.)
-            let install = tokio::task::spawn_blocking(popover_finder_probe_state)
-                .await
-                .map_err(|e| format!("finder state task failed: {e}"))?
-                .or_else(|_| DesktopConfig::load().map(|cfg| finder_install_state_from_config(&cfg, false, None)))?;
-            (
-                finder_setup_for(true, &install.status, install.reason_category.as_deref(), false),
-                install.reason_category,
-            )
+        // Finder: the reconciler's published view (spec 2026-10-06). It never asks the OS here.
+        let (finder, finder_reason) = if cfg!(target_os = "macos") {
+            match state.finder_setup.get().map(|handle| handle.view()) {
+                Some(view) => (view.setup, view.reason),
+                None => (crate::surfaces::phase::FinderSetup::Missing, None),
+            }
         } else {
-            (finder_setup_for(is_macos, "missing", None, adding), None)
+            (crate::surfaces::phase::FinderSetup::Ready, None)
         };
 
         let storage = match token {
@@ -4442,7 +7920,6 @@ async fn popover_snapshot(
         }))
     })
 }
-
 
 // `pub(crate)` so `free_up_space_blocking` (also `pub(crate)`, reused by the
 // Windows shell status-flyout command) can name it as its return type.
@@ -4729,13 +8206,27 @@ const DIAGNOSTICS_FORMAT: u32 = 2;
 #[tauri::command(async)]
 fn export_diagnostics() -> Result<serde_json::Value, String> {
     let cfg = DesktopConfig::load()?;
-    match cfg.sync_root {
-        None => export_diagnostics_from(None, Path::new("")),
+    let bundle = match cfg.sync_root {
+        None => export_diagnostics_from(None, Path::new(""))?,
         Some(root) => {
             let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-            export_diagnostics_from(Some(&root), &db_path)
+            export_diagnostics_from(Some(&root), &db_path)?
         }
+    };
+    Ok(with_lifecycle_tail(
+        bundle,
+        lifecycle_log::tail(lifecycle_log::TAIL_LINES),
+    ))
+}
+
+/// Spec 2026-10-06 §8: the support bundle carries the lifecycle log's last 200 lines (already
+/// redacted when written). An additive key: `diagnostics_format` is unchanged. Empty on Windows
+/// and Linux, where nothing writes the log.
+fn with_lifecycle_tail(mut bundle: serde_json::Value, tail: Vec<String>) -> serde_json::Value {
+    if let Some(map) = bundle.as_object_mut() {
+        map.insert("lifecycle_log".to_string(), serde_json::json!(tail));
     }
+    bundle
 }
 
 /// Builds the support-bundle JSON. Separate from the command so the real export
@@ -4830,7 +8321,16 @@ mod diagnostics_export_tests {
         );
         let bundle = export_diagnostics_from(Some(root), &db_path).unwrap();
         let text = serde_json::to_string_pretty(&bundle).unwrap();
-        for leaked in ["guus", "Users", "CloudStorage", "Beebeeb-Drive", "Tax 2025", "Tax", "aangifte", "abc.def.ghi"] {
+        for leaked in [
+            "guus",
+            "Users",
+            "CloudStorage",
+            "Beebeeb-Drive",
+            "Tax 2025",
+            "Tax",
+            "aangifte",
+            "abc.def.ghi",
+        ] {
             assert!(!text.contains(leaked), "{leaked:?} leaked into the bundle:\n{text}");
         }
         assert_eq!(bundle["diagnostics_format"], 2);
@@ -4896,12 +8396,18 @@ mod diagnostics_export_tests {
         let failed = problem_report_outcome(path, Err::<(), _>("no mail handler registered"));
         assert_eq!(
             failed,
-            ProblemReport { path: "/tmp/beebeeb-diagnostics-7.json".into(), email_opened: false }
+            ProblemReport {
+                path: "/tmp/beebeeb-diagnostics-7.json".into(),
+                email_opened: false
+            }
         );
         let opened = problem_report_outcome(path, Ok::<(), String>(()));
         assert_eq!(
             opened,
-            ProblemReport { path: "/tmp/beebeeb-diagnostics-7.json".into(), email_opened: true }
+            ProblemReport {
+                path: "/tmp/beebeeb-diagnostics-7.json".into(),
+                email_opened: true
+            }
         );
         let json = serde_json::to_value(&failed).unwrap();
         assert_eq!(json["path"], "/tmp/beebeeb-diagnostics-7.json");
@@ -4919,8 +8425,16 @@ mod diagnostics_export_tests {
             let needle = format!("fn {name}(");
             let at = src.find(&needle).unwrap_or_else(|| panic!("{name} not found"));
             let head = &src[..at];
-            let attr = head.lines().rev().find(|l| l.trim_start().starts_with("#[tauri::command")).unwrap();
-            assert_eq!(attr.trim(), "#[tauri::command(async)]", "{name} must not run on the main thread");
+            let attr = head
+                .lines()
+                .rev()
+                .find(|l| l.trim_start().starts_with("#[tauri::command"))
+                .unwrap();
+            assert_eq!(
+                attr.trim(),
+                "#[tauri::command(async)]",
+                "{name} must not run on the main thread"
+            );
         }
         // The native menu path must not call the blocking impl inline either.
         assert!(
@@ -4935,8 +8449,7 @@ mod diagnostics_export_tests {
         assert_eq!(none["diagnostics_format"], 2);
         assert_eq!(none["sync_root_configured"], false);
         let dir = tempfile::tempdir().unwrap();
-        let missing =
-            export_diagnostics_from(Some(Path::new("/x")), &dir.path().join("absent.db")).unwrap();
+        let missing = export_diagnostics_from(Some(Path::new("/x")), &dir.path().join("absent.db")).unwrap();
         assert_eq!(missing["state_db_exists"], false);
         assert!(missing["queue"].is_null());
     }
@@ -5125,21 +8638,15 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
         //  here instead.)
         // session / engine / sync_paused are per-account (decision 0800).
         let acct = state.active_account()?;
-        let session = acct
-            .session
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| (s.token.clone(), s.master_key)));
-        if let Some((token, key)) = session {
+        {
             // Rehydrate the persisted pause state before spawning.
             acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
-            let pause_flag = acct.sync_paused.clone();
-            let auth_health = acct.auth_health.clone();
             let mut engine_slot = acct.engine.lock().await;
+            engine_start_refusal(&acct)?;
             if let Some(prev) = engine_slot.take() {
                 // Task 1538 Codex P1 — see `start_engine_if_possible`'s
                 // identical respawn guard.
-                if !prev.abort().await.is_stopped() {
+                if !stop_engine_in_slot(&acct, prev).await.is_stopped() {
                     #[cfg(target_os = "windows")]
                     return Err(
                         "Could not stop the previous sync engine; retry locking before restarting sync.".into(),
@@ -5147,19 +8654,16 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
                     tracing::warn!("previous engine did not confirm termination before respawning a new one");
                 }
             }
+            // Fix round 1: an unconfirmed stop of the old engine has set the flag; refuse the new one.
+            engine_start_refusal(&acct)?;
             #[cfg(target_os = "windows")]
             {
                 windows_cf::ensure_reactivation_allowed()?;
                 SESSION_COMMANDS.validate_start(generation)?;
             }
-            *engine_slot = Some(EngineRunner::spawn(
-                app,
-                path.clone(),
-                token,
-                key,
-                pause_flag,
-                auth_health,
-            ));
+            // No session means nothing to start (the folder is saved either way); the keys are read under
+            // the slot, so a Lock that got there first leaves nothing to start with.
+            spawn_bound_engine(app, &state, &acct, &mut engine_slot, path.clone())?;
         }
 
         Ok(Some(path.to_string_lossy().into_owned()))
@@ -5189,7 +8693,11 @@ fn desktop_capabilities(app: tauri::AppHandle) -> desktop_capabilities::DesktopC
         Some(BundleType::Rpm) => InstallFormat::Rpm,
         _ => InstallFormat::Unknown,
     };
-    desktop_capabilities::snapshot(desktop_capabilities::host_os(), format, app.tray_by_id("tray").is_some())
+    desktop_capabilities::snapshot(
+        desktop_capabilities::host_os(),
+        format,
+        app.tray_by_id("tray").is_some(),
+    )
 }
 
 #[tauri::command]
@@ -6317,13 +9825,14 @@ fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collections::HashSet
             continue;
         }
         if let Some(parent) = row.parent_id.as_ref()
-            && let Some(folder) = folders.get_mut(parent) {
-                folder.direct_size = folder.direct_size.saturating_add(row.size_bytes.max(0));
-                folder.direct_count = folder.direct_count.saturating_add(1);
-                if row.on_disk {
-                    folder.direct_on_disk = folder.direct_on_disk.saturating_add(row.size_bytes.max(0));
-                }
+            && let Some(folder) = folders.get_mut(parent)
+        {
+            folder.direct_size = folder.direct_size.saturating_add(row.size_bytes.max(0));
+            folder.direct_count = folder.direct_count.saturating_add(1);
+            if row.on_disk {
+                folder.direct_on_disk = folder.direct_on_disk.saturating_add(row.size_bytes.max(0));
             }
+        }
     }
 
     // 3 + 4. Materialize recursively with a cycle guard.
@@ -6520,24 +10029,25 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
 
         // Primary path: build from the local, already-nested state DB.
         if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))
-            && let Ok(entries) = db.list_files() {
-                let rows: Vec<VaultEntryRow> = entries
-                    .iter()
-                    .map(|e| VaultEntryRow {
-                        id: e.file_id.clone(),
-                        parent_id: e.parent_id.clone(),
-                        is_folder: e.item_kind == state_db::ItemKind::Folder,
-                        name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
-                        size_bytes: e.size_bytes,
-                        on_disk: e.status == state_db::FileStatus::Local,
-                    })
-                    .collect();
-                let tree = build_vault_tree(&rows, &excluded);
-                if !tree.is_empty() {
-                    return Ok(tree);
-                }
-                // DB present but no folders yet — fall through to the API stopgap.
+            && let Ok(entries) = db.list_files()
+        {
+            let rows: Vec<VaultEntryRow> = entries
+                .iter()
+                .map(|e| VaultEntryRow {
+                    id: e.file_id.clone(),
+                    parent_id: e.parent_id.clone(),
+                    is_folder: e.item_kind == state_db::ItemKind::Folder,
+                    name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
+                    size_bytes: e.size_bytes,
+                    on_disk: e.status == state_db::FileStatus::Local,
+                })
+                .collect();
+            let tree = build_vault_tree(&rows, &excluded);
+            if !tree.is_empty() {
+                return Ok(tree);
             }
+            // DB present but no folders yet — fall through to the API stopgap.
+        }
 
         // Fallback: top-level API folders, FLAT, zeroed aggregates. Only used
         // until the first sync populates the local DB.
@@ -6707,13 +10217,36 @@ async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::Acco
                 return Ok(profile.clone());
             }
         }
+        // Captured before the fetch (Task 12 fix round 1, item 6): a Lock or a Sign-out that completes while it is in
+        // flight clears the cached profile, and this answer must not put it back.
+        let turn = acct.session_generation();
         let api = api_client_from_session(&state)?;
         let profile = api.account_profile().await.map_err(|e| e.to_string())?;
-        if let Ok(mut guard) = acct.cached_profile.lock() {
-            *guard = Some(profile.clone());
-        }
+        cache_profile_in_turn(&acct, &turn, profile.clone());
         Ok(profile)
     })
+}
+
+/// The `account_profile` command's cache (Task 12 fix round 1, item 6): written only while no session transition
+/// happened since the fetch began (`turn`), checked under the session-write lock. The cached profile IS an input to a
+/// sign-in's decision (`credentials_identity`, the `cached_profile` trace), but this one is the session's OWN record,
+/// fetched with its own token, so it only makes what is known about the same account more precise; it names no session
+/// and does not move the generation on. `true` when it cached.
+fn cache_profile_in_turn(
+    acct: &account::AccountRuntime,
+    turn: &account::SessionGeneration,
+    profile: account_dto::AccountProfile,
+) -> bool {
+    let Ok(_write) = check_session_turn(acct, turn) else {
+        return false;
+    };
+    match acct.cached_profile.lock() {
+        Ok(mut guard) => {
+            *guard = Some(profile);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// `GET /api/v1/billing/subscription` — plan + quota + lifecycle.
@@ -8386,6 +11919,10 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     match update {
         Some(u) => {
             tracing::info!(version = %u.version, channel = %channel.as_str(), "downloading update");
+            // Spec §8: the update's from and to versions go to the lifecycle log.
+            let from_version = real_app_version().to_string();
+            let to_version = u.version.to_string();
+            let versions = (from_version.clone(), to_version.clone());
 
             u.download_and_install(
                 |downloaded, total| {
@@ -8396,12 +11933,20 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
                         .unwrap_or(0);
                     tracing::debug!("update download progress: {pct}%");
                 },
-                || {
+                move || {
                     tracing::info!("update installed — relaunching");
+                    lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateDownloaded {
+                        from: versions.0,
+                        to: versions.1,
+                    });
                 },
             )
             .await
             .map_err(|e| e.to_string())?;
+            lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateInstalled {
+                from: from_version,
+                to: to_version,
+            });
 
             record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
             app.restart();
@@ -8452,6 +11997,10 @@ async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Re
         channel = %channel.as_str(),
         "downloading downgrade"
     );
+    // Spec §8: the downgrade's from and to versions go to the lifecycle log.
+    let from_version = real_app_version().to_string();
+    let to_version = u.version.to_string();
+    let versions = (from_version.clone(), to_version.clone());
 
     u.download_and_install(
         |downloaded, total| {
@@ -8460,12 +12009,20 @@ async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Re
                 .unwrap_or(0);
             tracing::debug!("downgrade download progress: {pct}%");
         },
-        || {
+        move || {
             tracing::info!("downgrade installed — relaunching");
+            lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateDownloaded {
+                from: versions.0,
+                to: versions.1,
+            });
         },
     )
     .await
     .map_err(|e| e.to_string())?;
+    lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateInstalled {
+        from: from_version,
+        to: to_version,
+    });
 
     record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
     app.restart()
@@ -8635,7 +12192,12 @@ fn macos_monitor_containing_physical_point(app: &tauri::AppHandle, x: f64, y: f6
         .map(|m| {
             let position = m.position();
             let size = m.size();
-            (position.x as f64, position.y as f64, size.width as f64, size.height as f64)
+            (
+                position.x as f64,
+                position.y as f64,
+                size.width as f64,
+                size.height as f64,
+            )
         })
         .collect();
     let index = physical_point_monitor_index(&bounds, x, y)?;
@@ -8673,7 +12235,11 @@ fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri
     let provisional = rect.position.to_physical::<f64>(1.0);
     let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
 
-    let scale_factor = match monitor.as_ref().map(|m| m.scale_factor()).filter(|s| s.is_finite() && *s > 0.0) {
+    let scale_factor = match monitor
+        .as_ref()
+        .map(|m| m.scale_factor())
+        .filter(|s| s.is_finite() && *s > 0.0)
+    {
         Some(scale_factor) => scale_factor,
         None => {
             // Should be rare now that the lookup above compares physical
@@ -8854,7 +12420,11 @@ fn macos_settings_anchor(app: &tauri::AppHandle) -> Option<tauri::PhysicalPositi
     let provisional = rect.position.to_physical::<f64>(1.0);
     let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
 
-    let scale_factor = match monitor.as_ref().map(|m| m.scale_factor()).filter(|s| s.is_finite() && *s > 0.0) {
+    let scale_factor = match monitor
+        .as_ref()
+        .map(|m| m.scale_factor())
+        .filter(|s| s.is_finite() && *s > 0.0)
+    {
         Some(scale_factor) => scale_factor,
         None => {
             let primary_scale = app
@@ -9035,6 +12605,12 @@ pub fn run() {
             finder_location_state,
             kept_unsynced_folder,
             dismiss_kept_unsynced_folder,
+            // Spec 2026-10-06: the macOS Finder reconciler's commands (registered on every
+            // platform; without a reconciler they say so).
+            finder_setup_state,
+            finder_setup_retry,
+            finder_setup_copy_details,
+            finder_setup_show_app,
             install_finder_location,
             continue_without_finder_location,
             // Task 1524 Issue 4 — user-disabled File Provider domain detection
@@ -9105,6 +12681,7 @@ pub fn run() {
             // Browser-based device-code login handoff (Windows primary path)
             browser_login::start_browser_login,
             open_onboarding_window,
+            open_reauth_window,
             // PKG-SHELL — open the Windows main app window
             show_main_app_window,
             show_main_app_settings,
@@ -9194,6 +12771,30 @@ pub fn run() {
                 }
             }
 
+            // Spec 2026-10-06: the macOS Finder reconciler. One task for the app's life, created
+            // before the restore below so the launch trigger always finds it.
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(dir) = lifecycle_log::default_dir() {
+                    lifecycle_log::init(dir, lifecycle_known_names);
+                }
+                let launch = finder_setup::launch_location::current();
+                lifecycle_log::event(lifecycle_log::LifecycleEvent::Launch {
+                    app_version: real_app_version().to_string(),
+                    macos_version: macos_version_string(),
+                    launch_location: launch,
+                });
+                let persisted = DesktopConfig::load().ok().and_then(|cfg| cfg.finder_last_failure);
+                let handle = finder_setup::driver::spawn(
+                    finder_setup::macos_ports::MacosPorts::new(app.handle().clone()),
+                    finder_setup::driver::SystemClock,
+                    launch,
+                    persisted,
+                    finder_setup::policy::RetryPolicy::default(),
+                );
+                let _ = app.state::<AppState>().finder_setup.set(handle);
+            }
+
             // Resume a fully unlocked session from the OS credential store.
             // When the per-user credential vault still holds the session token
             // AND the (DPAPI/Keychain-protected) raw master key, this loads the
@@ -9206,6 +12807,9 @@ pub fn run() {
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     restore_session_on_startup(&h).await;
+                    // §5.3 (1): the launch check runs once the restore finished, whichever way it
+                    // went, so it sees the keys the restore installed.
+                    notify_finder(&h.state::<AppState>(), finder_setup::core::Trigger::Launch);
                 });
             }
 
@@ -9221,7 +12825,8 @@ pub fn run() {
             {
                 let alert_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    match cleanup_stale_domains_blocking().await {
+                    // Through the bridge gate like every other bridge call (lead ruling T8-gate-all).
+                    match crate::finder_setup::macos_ports::cleanup_stale_domains().await {
                         Ok(cleanup) => {
                             if cleanup.removed_count() > 0 || !cleanup.skipped.is_empty() || !cleanup.ours_present {
                                 tracing::info!(
@@ -9302,6 +12907,17 @@ pub fn run() {
         // are destroyed) by flipping `MACOS_LABEL_AWARE_CLOSE`, not by editing
         // this closure.
         .on_window_event(|window, event| {
+            // Spec §7: one read-only userEnabled check when the app becomes active.
+            if let tauri::WindowEvent::Focused(true) = event
+                && let Some(handle) = window.state::<AppState>().finder_setup.get()
+            {
+                handle.app_activated();
+            }
+            // Lead ruling 5 (Task 12): an unidentified session asks the server again when the app becomes active.
+            #[cfg(not(target_os = "windows"))]
+            if let tauri::WindowEvent::Focused(true) = event {
+                tauri::async_runtime::spawn(on_app_activated(window.app_handle().clone()));
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if surfaces::policy::close_policy(surfaces::policy::Platform::current(), window.label())
                     == surfaces::registry::ClosePolicy::Hide
@@ -9843,32 +13459,46 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             let app = app.clone();
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
-                let result = clear_session_impl(&state).await;
+                let result = clear_session_impl(&state, false).await;
                 // Task 1882: the menu's sign-out names the folder of kept
                 // Finder files in the same alert as the `clear_session` command,
                 // also when it failed after the removal (review I1), and saves it for
                 // the Settings › Sync row (review I2).
                 surface_kept_folder(&app, sign_out_kept_folder(&result));
-                #[cfg(target_os = "windows")]
+                // FB-24 (M6): on every platform the person sees a sign-out that stopped (its error) and one that
+                // happened with a step it could not confirm (its warning); before, only Windows showed either.
                 match &result {
+                    Err(error) => {
+                        app.dialog()
+                            .message(error.message.clone())
+                            .title("Sign-out paused")
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                            .show(|_| {});
+                    }
+                    Ok(SignedOut {
+                        warning: Some(warning), ..
+                    }) => {
+                        app.dialog()
+                            .message(warning.sentence())
+                            .title("Signed out")
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                            .show(|_| {});
+                    }
                     // Nothing to tear down — tell the user instead of running
-                    // (and possibly failing) the full teardown (Bug B).
-                    Ok(SignOutReport {
+                    // (and possibly failing) the full teardown (Bug B). Windows only, as before.
+                    #[cfg(target_os = "windows")]
+                    Ok(SignedOut {
                         outcome: SignOutOutcome::NotSignedIn,
+                        warning: None,
                         ..
                     }) => {
-                        app.dialog().message("You are not signed in on this device.")
+                        app.dialog()
+                            .message("You are not signed in on this device.")
                             .title("Sign out")
-                            .kind(tauri_plugin_dialog::MessageDialogKind::Info).show(|_| {});
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                            .show(|_| {});
                     }
-                    Ok(SignOutReport {
-                        outcome: SignOutOutcome::Completed,
-                        ..
-                    }) => {}
-                    Err(error) => {
-                        app.dialog().message(error.message.clone()).title("Sign-out paused")
-                            .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
-                    }
+                    Ok(_) => {}
                 }
                 result.map(|_| ()).map_err(|failure| failure.message)
             });
@@ -10105,9 +13735,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
             let new_state = !currently;
             if let Some(tray) = app.tray_by_id("tray")
-                && let Ok(menu) = build_tray_menu(app, new_state) {
-                    let _ = tray.set_menu(Some(menu));
-                }
+                && let Ok(menu) = build_tray_menu(app, new_state)
+            {
+                let _ = tray.set_menu(Some(menu));
+            }
             tracing::info!(enabled = new_state, "autostart toggled via tray");
         }
         _ => {}
@@ -10435,25 +14066,29 @@ fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    // The install-era Finder helpers exist on Windows and Linux only (spec 2026-10-06 §6.1); the
+    // tests that call them run there, as the Windows/Linux proof of their unchanged behaviour.
     use super::{
-        AppState, DesktopMenuAction, DesktopMenuView, FINDER_USER_DISABLED_MESSAGE, MENU_CHECK_UPDATES_ID,
-        MENU_HELP_DOCS_ID, MENU_HELP_REPORT_ID,
+        AppState, DesktopMenuAction, DesktopMenuView, MENU_CHECK_UPDATES_ID, MENU_HELP_DOCS_ID, MENU_HELP_REPORT_ID,
         MENU_HELP_SHORTCUTS_ID, MENU_HELP_STATUS_ID, MENU_NEW_FOLDER_ID, MENU_OPEN_FOLDER_ID, MENU_OPEN_WEB_APP_ID,
         MENU_PREFERENCES_ID, MENU_QUIT_ID, MENU_SETTINGS_ID, MENU_SIGN_OUT_ID, MENU_TOGGLE_SYNC_ID,
         MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
         MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
-        UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
-        classify_finder_install_error, clear_cached_profile, compact_menu_page_for_view,
-        desktop_manifest_path_for_channel, desktop_menu_specs, disposable_cache_roots, finder_install_state_from_config,
-        clear_finder_install_failure, finder_install_failure_state, folder_leaf_name, free_up_space_allowed_roots,
+        UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree, clear_cached_profile,
+        compact_menu_page_for_view, desktop_manifest_path_for_channel, desktop_menu_specs, disposable_cache_roots,
+        file_versions_payload_for_frontend, folder_leaf_name, free_up_space_allowed_roots,
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
-        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target,
-        file_versions_payload_for_frontend, newly_excluded_ids, next_menu_zoom_scale,
-        normalize_recovery_phrase_input, now_unix_seconds, purge_local_state_files, queued_restore_version_response,
-        real_app_version, record_finder_install_result, resolve_purge_placeholder_paths, state_db_from_state_dir,
-        release_channel_from_version, release_notes_url_for_version, shared_roots_from_db,
-        should_offer_channel_update, should_show_conflict_notification, should_show_quota_warning_notification,
-        should_show_sync_complete_notification, subtree_file_ids, unused_child_path,
+        manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
+        next_menu_zoom_scale, normalize_recovery_phrase_input, now_unix_seconds, purge_local_state_files,
+        queued_restore_version_response, real_app_version, release_channel_from_version, release_notes_url_for_version,
+        resolve_purge_placeholder_paths, shared_roots_from_db, should_offer_channel_update,
+        should_show_conflict_notification, should_show_quota_warning_notification,
+        should_show_sync_complete_notification, state_db_from_state_dir, subtree_file_ids, unused_child_path,
+    };
+    #[cfg(not(target_os = "macos"))]
+    use super::{
+        FINDER_USER_DISABLED_MESSAGE, classify_finder_install_error, clear_finder_install_failure,
+        finder_install_failure_state, finder_install_state_from_config, record_finder_install_result,
     };
     use crate::account_dto::AccountProfile;
     use crate::config::DesktopConfig;
@@ -10577,11 +14212,170 @@ mod tests {
             "both the staged payload and the cache file are removed"
         );
         assert_eq!(summary.files_skipped, 0);
-        assert!(!payload_path.exists(), "staged plaintext payload must be deleted from disk");
+        assert!(
+            !payload_path.exists(),
+            "staged plaintext payload must be deleted from disk"
+        );
         assert!(!cache_path.exists(), "decrypted cache file must be deleted from disk");
         assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
 
         std::fs::remove_dir_all(&staging_root).ok();
+    }
+
+    /// F4 (fix round 1 of Task 10): a file the purge cannot remove is a purge failure, not a warning. The purge
+    /// stops with an error, removes no row (so a retry finds everything still there), and the retry succeeds once
+    /// the file can go. A directory standing where a payload should be is a removal that fails on every platform
+    /// and for every user, root included.
+    #[test]
+    fn a_file_that_cannot_be_removed_fails_the_purge_and_keeps_every_row() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+        let root = std::env::temp_dir().join(format!("bb-test-1834-f4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let removable = root.join("removable-payload.bin");
+        let stuck = root.join("stuck-payload.bin");
+        std::fs::write(&removable, b"plaintext a").unwrap();
+        std::fs::create_dir(&stuck).unwrap(); // `remove_file` on a directory fails
+        for (n, path) in [&removable, &stuck].into_iter().enumerate() {
+            db.enqueue_operation(&crate::state_db::PendingOperation {
+                op_id: format!("op-{n}"),
+                kind: crate::state_db::OperationKind::UploadVersion,
+                file_id: None,
+                parent_id: None,
+                target_path: Some(format!("/{n}.txt")),
+                metadata_json: None,
+                payload_path: Some(path.to_str().unwrap().to_string()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        }
+        db.set_owner(&crate::account_binding::Identity::new(Some("u-a"), None))
+            .unwrap();
+
+        let Err(error) = super::purge_local_state_files_in(&db, None, &[]) else {
+            panic!("a file that cannot go fails the purge");
+        };
+        assert!(error.contains("could not be removed"), "{error}");
+        assert!(
+            !error.contains(root.to_str().unwrap()),
+            "the message names no path: {error}"
+        );
+        assert_eq!(
+            db.list_due_operations(i64::MAX).unwrap().len(),
+            2,
+            "no row was removed: a retry finds everything"
+        );
+        assert_eq!(
+            db.owner().unwrap(),
+            Some(crate::account_binding::Identity::new(Some("u-a"), None))
+        );
+
+        std::fs::remove_dir(&stuck).unwrap(); // the obstacle goes away
+        let summary = super::purge_local_state_files_in(&db, None, &[]).expect("the retry succeeds");
+        assert_eq!(summary.queued_ops_purged, 2);
+        assert!(!removable.exists());
+        assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// F4: the purge also removes orphan staged files, plaintext copies no row points at any more,
+    /// from the staging directory as a whole, still only behind `is_disposable_cache_path`. Nested files go too.
+    #[test]
+    fn the_purge_sweeps_orphan_staged_files_behind_the_gate() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+        let root = std::env::temp_dir().join(format!("bb-test-1834-f4-sweep-{}", uuid::Uuid::new_v4()));
+        let staging = root.join("beebeeb").join("finder-writes");
+        let nested = staging.join("op-9");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (orphan, deep) = (staging.join("orphan.bin"), nested.join("deep.bin"));
+        std::fs::write(&orphan, b"plaintext with no row").unwrap();
+        std::fs::write(&deep, b"nested plaintext").unwrap();
+        let outside = root.join("not-staging.bin");
+        std::fs::write(&outside, b"not in the staging dir").unwrap();
+
+        let summary =
+            super::purge_local_state_files_in(&db, None, std::slice::from_ref(&staging)).expect("purge succeeds");
+
+        assert_eq!(summary.files_removed, 2, "both orphans are removed");
+        assert!(!orphan.exists() && !deep.exists(), "no orphan survives");
+        assert!(outside.exists(), "nothing outside the staging directory is touched");
+        // A staging directory that does not exist is nothing to sweep, not an error.
+        super::purge_local_state_files_in(&db, None, &[root.join("missing")]).expect("a missing directory is fine");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// R5 (fix round 2): the sweep enters only staging directories THIS user owns, so on a shared `/tmp` another
+    /// local user's `beebeeb/finder-writes` can neither be read nor block a sign-out or a reset. A directory that is a
+    /// link, or that sits under a link, is not entered either (following one could leave the staging directory).
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_enters_only_staging_directories_this_user_owns() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let root = std::env::temp_dir().join(format!("bb-test-r5-{}", uuid::Uuid::new_v4()));
+        let staging = root.join("beebeeb").join("finder-writes");
+        std::fs::create_dir_all(&staging).unwrap();
+        let orphan = staging.join("orphan.bin");
+        std::fs::write(&orphan, b"plaintext").unwrap();
+        let me = std::fs::metadata(&staging).unwrap().uid();
+
+        assert_eq!(
+            super::orphan_staged_files(std::slice::from_ref(&staging), Some(me)),
+            vec![orphan.clone()],
+            "ours: swept"
+        );
+        assert!(
+            super::orphan_staged_files(std::slice::from_ref(&staging), Some(me + 1)).is_empty(),
+            "another user's: not entered"
+        );
+
+        let link_to_dir = root.join("link-to-staging");
+        symlink(&staging, &link_to_dir).unwrap();
+        assert!(
+            super::orphan_staged_files(&[link_to_dir], Some(me)).is_empty(),
+            "a link to a directory is not followed"
+        );
+        let linked_parent = root.join("beebeeb-link");
+        symlink(root.join("beebeeb"), &linked_parent).unwrap();
+        assert!(
+            super::orphan_staged_files(&[linked_parent.join("finder-writes")], Some(me)).is_empty(),
+            "a staging directory under a linked parent is not entered"
+        );
+        assert!(orphan.exists(), "nothing was deleted by looking");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// R5, through the purge: a staging directory that is not ours is left alone and does not make the purge fail.
+    #[cfg(unix)]
+    #[test]
+    fn another_users_staging_directory_is_left_alone_and_never_fails_a_purge() {
+        use std::os::unix::fs::MetadataExt;
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(db_dir.path().join("state.db")).unwrap();
+        let root = std::env::temp_dir().join(format!("bb-test-r5-purge-{}", uuid::Uuid::new_v4()));
+        let staging = root.join("beebeeb").join("finder-writes");
+        std::fs::create_dir_all(&staging).unwrap();
+        let foreign_file = staging.join("someone-elses.bin");
+        std::fs::write(&foreign_file, b"not ours").unwrap();
+        let me = std::fs::metadata(&staging).unwrap().uid();
+
+        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me + 1))
+            .expect("the purge succeeds");
+        assert_eq!((summary.files_removed, summary.files_skipped), (0, 0));
+        assert!(foreign_file.exists(), "a directory that is not ours is not swept");
+        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me))
+            .expect("the purge succeeds");
+        assert_eq!(summary.files_removed, 1, "ours is");
+        assert!(!foreign_file.exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A path outside the known cache/staging roots is refused, not deleted —
@@ -10666,6 +14460,22 @@ mod tests {
         let result = state_db_from_state_dir(dir.path());
 
         assert!(matches!(result, Ok(None)));
+    }
+
+    /// Lead ruling 13 (Task 12): a stat that fails is not "no database yet". The state dir here is a FILE, so the stat
+    /// of `<file>/state.db` fails with "not a directory": that is an error the caller must fail closed on.
+    #[test]
+    fn state_db_from_state_dir_reads_a_failed_stat_as_unreadable_never_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_directory = dir.path().join("state-dir-is-a-file");
+        std::fs::write(&not_a_directory, b"not a directory").unwrap();
+        let stat = not_a_directory.join(crate::state_paths::STATE_DB_FILENAME).try_exists();
+        assert!(stat.is_err(), "the premise: the stat itself fails ({stat:?})");
+
+        let result = state_db_from_state_dir(&not_a_directory);
+
+        let error = result.err().expect("a failed stat is an error, never Ok(None)");
+        assert!(error.starts_with("read state.db: "), "{error}");
     }
 
     // ── Task 1538 Codex P1 (PR #49, state_db.rs:1785 thread): Windows
@@ -10833,6 +14643,7 @@ mod tests {
         assert_eq!(error, "Recovery phrase must contain exactly 12 words.");
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn classifies_file_provider_setup_errors() {
         assert_eq!(
@@ -10849,14 +14660,19 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn classifies_user_disabled_domain_distinctly_from_the_generic_disabled_case() {
         // Task 1524 Issue 4: the crafted "turned off in System Settings" copy must
         // classify as "user_disabled", never falling through to the older generic
         // "disabled" NSError-code branch (which stays keyed on "-2011"/"disabled").
-        assert_eq!(classify_finder_install_error(FINDER_USER_DISABLED_MESSAGE), "user_disabled");
+        assert_eq!(
+            classify_finder_install_error(FINDER_USER_DISABLED_MESSAGE),
+            "user_disabled"
+        );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn maps_persisted_file_provider_error_into_state() {
         let cfg = DesktopConfig {
@@ -10876,6 +14692,7 @@ mod tests {
         assert_eq!(state.reason_category.as_deref(), Some("timeout"));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn failed_finder_install_is_returned_as_the_saved_state_not_as_an_error() {
         // Task 1683 slice 5 / decision D1 (screenshot 1): the failure used to be saved AND
@@ -10900,6 +14717,7 @@ mod tests {
         assert_eq!(read_back.last_attempt_at, returned.last_attempt_at);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_later_successful_finder_install_clears_the_saved_failure() {
         let mut cfg = DesktopConfig::default();
@@ -10939,12 +14757,22 @@ mod tests {
         // return `Err` by hand, and the only hand-written save of a failure is the user-disabled
         // state, which is returned as `Ok`.
         let body = install_finder_location_source();
-        let after_load = &body[body.find("DesktopConfig::load()").expect("the command loads the config")..];
+        let after_load = &body[body
+            .find("DesktopConfig::load()")
+            .expect("the command loads the config")..];
 
         // 1. No hand-written Err after the config is loaded: neither `return Err(..)` nor an
         //    `=> Err(..)` match arm. (`?` before the load is fine: nothing was saved yet.)
-        assert_eq!(after_load.matches("return Err(").count(), 0, "a failure after the load must not be returned as Err");
-        assert_eq!(after_load.matches("=> Err(").count(), 0, "a match arm must not evaluate to Err after the load");
+        assert_eq!(
+            after_load.matches("return Err(").count(),
+            0,
+            "a failure after the load must not be returned as Err"
+        );
+        assert_eq!(
+            after_load.matches("=> Err(").count(),
+            0,
+            "a match arm must not evaluate to Err after the load"
+        );
 
         // 2. Every failure goes through the D1 helper, and always as the returned value.
         let helper_calls = after_load.matches("finder_install_failed(").count();
@@ -10956,7 +14784,9 @@ mod tests {
         );
 
         // 3. The only hand-written failure save is the user-disabled state, and its result is an Ok.
-        let hand_saves = after_load.matches("persist_finder_install_result(&mut cfg, false").count();
+        let hand_saves = after_load
+            .matches("persist_finder_install_result(&mut cfg, false")
+            .count();
         assert_eq!(
             after_load
                 .matches("persist_finder_install_result(&mut cfg, false, Some(FINDER_USER_DISABLED_MESSAGE.to_string()))?;\n            return Ok(")
@@ -10975,7 +14805,9 @@ mod tests {
         // page and the popover never show the last attempt's error as the current one while the
         // new attempt waits on the File Provider domain. Order matters, so assert the ORDER.
         let body = install_finder_location_source();
-        let clear = body.find("begin_finder_install_attempt(&mut cfg)?").expect("the attempt clears the old failure");
+        let clear = body
+            .find("begin_finder_install_attempt(&mut cfg)?")
+            .expect("the attempt clears the old failure");
         let load = body.find("DesktopConfig::load()").expect("loads the config");
         let engine = body
             .find("start_engine_for_pending_finder_install(")
@@ -10989,6 +14821,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn starting_an_attempt_clears_the_saved_failure_but_not_an_installed_state() {
         let mut cfg = DesktopConfig::default();
@@ -11001,8 +14834,14 @@ mod tests {
         assert_eq!(state.status, "missing");
         assert_eq!(state.last_error, None);
         assert_eq!(state.reason_category, None);
-        assert!(state.last_attempt_at.is_some(), "the previous attempt time is history, not an error");
-        assert!(!clear_finder_install_failure(&mut cfg), "nothing left to clear: no change, no write");
+        assert!(
+            state.last_attempt_at.is_some(),
+            "the previous attempt time is history, not an error"
+        );
+        assert!(
+            !clear_finder_install_failure(&mut cfg),
+            "nothing left to clear: no change, no write"
+        );
 
         let mut installed = DesktopConfig::default();
         record_finder_install_result(&mut installed, true, None);
@@ -11010,6 +14849,7 @@ mod tests {
         assert_eq!(installed.finder_install_status.as_deref(), Some("installed"));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn fresh_user_disabled_runtime_result_beats_a_stale_persisted_timeout() {
         // Task 1524 Issue 4, status-path leg (PR #63 Codex review, Onboarding.tsx:488):
@@ -11019,7 +14859,9 @@ mod tests {
         // runtime_error must win.
         let cfg = DesktopConfig {
             finder_install_status: Some("error".to_string()),
-            finder_install_last_error: Some("Timed out waiting for the Beebeeb File Provider domain to become available".to_string()),
+            finder_install_last_error: Some(
+                "Timed out waiting for the Beebeeb File Provider domain to become available".to_string(),
+            ),
             finder_install_last_attempt_at: Some(1),
             finder_install_reason_category: Some("timeout".to_string()),
             ..DesktopConfig::default()
@@ -11032,6 +14874,7 @@ mod tests {
         assert_eq!(state.last_error.as_deref(), Some(FINDER_USER_DISABLED_MESSAGE));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn fresh_genuine_timeout_beats_a_stale_persisted_user_disabled_state() {
         // Reverse of the above: once the user has re-enabled the domain in System
@@ -11428,9 +15271,69 @@ mod tests {
         std::fs::write(&temp_file, b"cache").unwrap();
         assert!(is_disposable_cache_path(&temp_file));
         let _ = std::fs::remove_file(&temp_file);
+    }
 
-        let config_path = DesktopConfig::path().unwrap();
-        assert!(!is_disposable_cache_path(&config_path));
+    use std::path::{Path, PathBuf};
+
+    /// The disposable roots that would hold `config`, ignoring any root that is an ancestor of (or
+    /// equal to) `home`: such a root contains the whole home directory, so every home-relative
+    /// path is "under" it by construction and it says nothing about the config. That never
+    /// happens for a real user, but it does for a test run whose `HOME` is a scratch directory
+    /// under the OS temp dir. Plain `Path::starts_with`, no filesystem access.
+    fn disposable_roots_holding(config: &Path, home: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
+        roots
+            .iter()
+            .filter(|root| !home.starts_with(root) && config.starts_with(root))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_disposable_root_above_home_is_ignored_but_one_inside_home_is_not() {
+        let config = Path::new("/t/h/Library/Application Support/beebeeb/desktop.toml");
+        let home = Path::new("/t/h");
+        // HOME is a scratch dir under the temp dir: the temp dir itself says nothing.
+        assert!(disposable_roots_holding(config, home, &[PathBuf::from("/t")]).is_empty());
+        // ... and neither does a root that IS the home dir.
+        assert!(disposable_roots_holding(config, home, &[PathBuf::from("/t/h")]).is_empty());
+        // A root inside the home that holds the config is the real finding.
+        let config_dir = PathBuf::from("/t/h/Library/Application Support");
+        assert_eq!(
+            disposable_roots_holding(config, home, std::slice::from_ref(&config_dir)),
+            vec![config_dir]
+        );
+        // A root elsewhere that holds the config (config dir outside HOME, for example by
+        // `XDG_CONFIG_HOME`) is still a finding.
+        let config = Path::new("/c/beebeeb/desktop.toml");
+        assert_eq!(
+            disposable_roots_holding(config, home, &[PathBuf::from("/c")]),
+            vec![PathBuf::from("/c")]
+        );
+        // A root that does not hold the config is not.
+        assert!(disposable_roots_holding(config, home, &[PathBuf::from("/other")]).is_empty());
+    }
+
+    /// The sign-out purge deletes anything under a disposable root, so the person's REAL
+    /// `desktop.toml` must never sit under one. Built by hand and compared with plain
+    /// `Path::starts_with`, with no filesystem access, because neither helper can carry this:
+    /// `DesktopConfig::path()` resolves a test sandbox in a test build (so it is independent of
+    /// where `CARGO_TARGET_DIR` points), and `is_disposable_cache_path` canonicalizes and answers
+    /// `false` whenever the parent directory is missing, which would pass this vacuously. A root
+    /// that contains the whole home directory is skipped (see `disposable_roots_holding`), so a
+    /// scratch `HOME` under the temp dir does not turn it red.
+    #[test]
+    fn the_real_config_path_is_never_under_a_disposable_cache_root() {
+        let real_config = dirs::config_dir()
+            .expect("a user config dir exists on a dev machine or CI runner")
+            .join("beebeeb/desktop.toml");
+        let home = dirs::home_dir().expect("a home dir exists on a dev machine or CI runner");
+        let roots = disposable_cache_roots();
+        assert!(!roots.is_empty(), "the roots under test must exist");
+        let holding = disposable_roots_holding(&real_config, &home, &roots);
+        assert!(
+            holding.is_empty(),
+            "the real config {real_config:?} is under the disposable root(s) {holding:?}: a sign-out purge would delete it"
+        );
     }
 
     /// Task 1670 round 2, Codex P1 (PR #75): a macOS hydrate-cache
@@ -12213,7 +16116,9 @@ mod popover_snapshot_command_tests {
                             stream.set_nonblocking(false).unwrap();
                             let mut buf = [0u8; 8192];
                             let n = stream.read(&mut buf).unwrap_or(0);
-                            seen.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                            seen.lock()
+                                .unwrap()
+                                .push(String::from_utf8_lossy(&buf[..n]).into_owned());
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -12246,9 +16151,58 @@ mod popover_snapshot_command_tests {
         }
     }
 
+    /// Holds [`super::EPOCH_GATE`] exclusively for as long as it lives, and marks this thread as the holder so the
+    /// real `lock_vault` these tests run (on this thread's own runtime) can bump the epoch without waiting for itself.
+    struct EpochGate(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
+
+    impl EpochGate {
+        fn hold() -> Self {
+            let guard = super::EPOCH_GATE.write().unwrap_or_else(|e| e.into_inner());
+            super::HOLDS_EPOCH_GATE.with(|held| held.set(true));
+            Self(guard)
+        }
+    }
+
+    impl Drop for EpochGate {
+        fn drop(&mut self) {
+            super::HOLDS_EPOCH_GATE.with(|held| held.set(false));
+        }
+    }
+
+    /// The test gate itself: while a test holds the epoch gate, another thread's `bump_vault_epoch()` waits, so the
+    /// epoch a popover test reads cannot move under it; when the gate is released the bump goes through.
+    #[test]
+    fn a_test_that_holds_the_epoch_gate_is_not_moved_by_a_bump_on_another_thread() {
+        use std::sync::atomic::Ordering;
+        let gate = EpochGate::hold();
+        let before = super::VAULT_EPOCH.load(Ordering::SeqCst);
+        let bumper = std::thread::spawn(super::bump_vault_epoch);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(
+            super::VAULT_EPOCH.load(Ordering::SeqCst),
+            before,
+            "the epoch did not move while the gate was held"
+        );
+        assert!(
+            !bumper.is_finished(),
+            "the bump on the other thread is waiting for the gate"
+        );
+        // The holder's own bump (the real `lock_vault` these tests run) does not wait for itself.
+        super::bump_vault_epoch();
+        assert_eq!(super::VAULT_EPOCH.load(Ordering::SeqCst), before + 1);
+        drop(gate);
+        bumper.join().unwrap();
+        // (At least: once the gate is released, other tests' waiting bumps go through as well.)
+        assert!(
+            super::VAULT_EPOCH.load(Ordering::SeqCst) >= before + 2,
+            "released: the waiting bump went through"
+        );
+    }
+
     /// Point the command at `api` and at an empty config directory for the duration of `f`.
     fn with_isolated_env<T>(api_base: &str, f: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _epoch = EpochGate::hold();
         let config_home = tempfile::tempdir().unwrap();
         let saved: Vec<(&str, Option<std::ffi::OsString>)> = ["BB_API_BASE", "XDG_CONFIG_HOME", "HOME"]
             .iter()
@@ -12292,7 +16246,10 @@ mod popover_snapshot_command_tests {
     }
 
     fn run_command(app: &tauri::App<tauri::test::MockRuntime>) -> Result<serde_json::Value, String> {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime
             .block_on(popover_snapshot(
                 app.state::<AppState>(),
@@ -12304,40 +16261,37 @@ mod popover_snapshot_command_tests {
 
     const USAGE: &str = "{\"used_bytes\":84300000000,\"quota_bytes\":200000000000}";
 
-    /// Task 1693: `finder_location_state` asks the OS about the machine's REAL
-    /// File Provider domain — a read env-var isolation cannot fake, so the tests
-    /// below would assert live-machine state (at 0409f1b on this Mac they saw
-    /// `finder_failed` where CI's clean Linux runner sees `synced`). Inject a
-    /// state at the probe boundary instead. Call it inside a
-    /// `with_isolated_env` block so installs and snapshots serialize on
-    /// `ENV_LOCK`, and bind the returned `FinderProbeGuard` (`let _probe = …`)
-    /// for the duration of the assertions — on drop the value this call
-    /// REPLACED is restored, so nothing leaks into a later test (PR #102
-    /// review; `#[must_use]` makes a forgotten binding a compile warning).
-    #[must_use = "bind the returned guard (`let _probe = …`) or the injection is undone immediately"]
-    fn inject_finder_state(status: &str, reason_category: Option<&str>) -> FinderProbeGuard {
-        let mut slot = POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = slot.take();
-        *slot = Some(Ok(FinderInstallState {
-            installed: status == "installed",
-            path: None,
-            status: status.to_string(),
-            last_error: reason_category.map(|_| "injected".to_string()),
-            last_attempt_at: None,
-            reason_category: reason_category.map(str::to_string),
-        }));
-        FinderProbeGuard { previous }
+    /// Spec 2026-10-06: the snapshot reads the reconciler's published view from its own app's
+    /// `AppState` and never asks the OS, so a test installs the view it wants on the mock app.
+    /// Each app has its own, so nothing leaks between tests (the old probe was a process-wide
+    /// static that needed scoped guards).
+    fn set_finder_view(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        setup: crate::surfaces::phase::FinderSetup,
+        reason: Option<crate::surfaces::phase::FinderFailureReason>,
+    ) {
+        let view = finder_setup::driver::FinderSetupView {
+            setup,
+            reason,
+            ..finder_setup::driver::FinderSetupView::initial(
+                finder_setup::launch_location::LaunchLocation::Applications,
+            )
+        };
+        let _ = app
+            .state::<AppState>()
+            .finder_setup
+            .set(finder_setup::driver::FinderSetupHandle::fixed(view));
     }
 
     #[test]
     fn the_real_command_reads_the_session_the_engine_status_and_the_storage_api() {
         let api = LoopbackApi::start("200 OK", USAGE);
         with_isolated_env(&api.base, || {
-            // Task 1693: the probe boundary is injected, so the Finder leg below
-            // is deterministic on every machine; the assertions still exercise
-            // the real `finder_setup_for` mapping and phase assembly.
-            let _probe = inject_finder_state("installed", None);
+            // The Finder leg is the reconciler's view, installed on the mock app, so it is
+            // deterministic on every machine; the assertions still exercise the real phase
+            // assembly.
             let app = mock_app_with_account(true, true);
+            set_finder_view(&app, crate::surfaces::phase::FinderSetup::Ready, None);
 
             let first = run_command(&app).expect("the command runs");
             assert_eq!(first["phase"], "synced");
@@ -12346,7 +16300,10 @@ mod popover_snapshot_command_tests {
             assert_eq!(first["storage"]["used_bytes"], 84_300_000_000_i64);
             assert_eq!(first["storage"]["quota_bytes"], 200_000_000_000_i64);
             assert_eq!(first["storage"]["stale"], false);
-            assert_eq!(first["finder"]["setup"], "ready", "an installed Finder state reads as ready");
+            assert_eq!(
+                first["finder"]["setup"], "ready",
+                "an installed Finder state reads as ready"
+            );
             // The same shape the TypeScript side validates.
             let shared: serde_json::Value =
                 serde_json::from_str(include_str!("../../tests/fixtures/popover-snapshot.synced.json")).unwrap();
@@ -12374,12 +16331,19 @@ mod popover_snapshot_command_tests {
             }));
             let offline = run_command(&app).unwrap();
             assert_eq!(offline["phase"], "offline");
-            assert_eq!(offline["reason"], serde_json::json!({ "code": "connect", "detail": null }));
+            assert_eq!(
+                offline["reason"],
+                serde_json::json!({ "code": "connect", "detail": null })
+            );
             assert_eq!(offline["engine"]["last_tick_ok_at"], 4242);
 
             // The user pauses: pause outranks offline.
             let state = app.state::<AppState>();
-            state.active_account().unwrap().sync_paused.store(true, Ordering::Relaxed);
+            state
+                .active_account()
+                .unwrap()
+                .sync_paused
+                .store(true, Ordering::Relaxed);
             assert_eq!(run_command(&app).unwrap()["phase"], "paused");
 
             // A session change (unlock, sign-in) refetches even inside the TTL.
@@ -12396,25 +16360,45 @@ mod popover_snapshot_command_tests {
         // snapshot command between them. Nothing bumps the epoch by hand.
         let api = LoopbackApi::start("200 OK", USAGE);
         with_isolated_env(&api.base, || {
-            // Task 1693: injected Finder state — the real probe reads the
-            // machine's live domain and would leak it into the phase below.
-            let _probe = inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
+            // A reconciler stand-in that confirms the lock: on a Mac a lock it cannot confirm is not a
+            // success (Task 9). Its view is the same one `set_finder_view` installs.
+            let (handle, finder_events) =
+                finder_setup::driver::FinderSetupHandle::for_test(finder_setup::driver::FinderSetupView {
+                    setup: crate::surfaces::phase::FinderSetup::Ready,
+                    ..finder_setup::driver::FinderSetupView::initial(
+                        finder_setup::launch_location::LaunchLocation::Applications,
+                    )
+                });
+            let _ = app.state::<AppState>().finder_setup.set(handle);
             assert_eq!(run_command(&app).unwrap()["storage"]["used_bytes"], 84_300_000_000_i64);
             assert_eq!(run_command(&app).unwrap()["phase"], "synced");
             assert_eq!(api.requests().len(), 1, "two snapshots inside the TTL, 1 fetch");
 
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            runtime.block_on(lock_vault(app.state::<AppState>())).expect("the real lock runs");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(async {
+                    tokio::spawn(super::confirm_every_finder_event(finder_events));
+                    lock_vault(app.state::<AppState>()).await
+                })
+                .expect("the real lock runs");
             let locked = run_command(&app).unwrap();
             // (Not the phase: after a lock `auth_present` follows the real credential store, which
             // is empty on a Linux runner and the developer's own on a Mac.)
             assert_eq!(locked["account"]["vault_unlocked"], false);
-            assert_eq!(locked["storage"], serde_json::Value::Null, "no storage figure while locked");
+            assert_eq!(
+                locked["storage"],
+                serde_json::Value::Null,
+                "no storage figure while locked"
+            );
             assert_eq!(api.requests().len(), 1, "a locked snapshot calls nothing");
 
             let acct = app.state::<AppState>().active_account().unwrap();
             install_unlocked_session(
+                &SessionWrite::for_test(),
                 &acct,
                 Session {
                     token: "tok-abc".into(),
@@ -12446,7 +16430,11 @@ mod popover_snapshot_command_tests {
             let l = run_command(&locked).unwrap();
             assert_eq!(l["phase"], "locked");
             assert_eq!(l["storage"], serde_json::Value::Null);
-            assert_eq!(l["activity"], serde_json::json!([]), "no file names while the vault is locked");
+            assert_eq!(
+                l["activity"],
+                serde_json::json!([]),
+                "no file names while the vault is locked"
+            );
 
             assert_eq!(api.requests().len(), 0, "0 API calls without an unlocked session");
         });
@@ -12456,10 +16444,8 @@ mod popover_snapshot_command_tests {
     fn the_real_command_survives_a_storage_api_that_answers_500() {
         let api = LoopbackApi::start("500 Internal Server Error", "{}");
         with_isolated_env(&api.base, || {
-            // Task 1693: injected Finder state — without it the phase below is
-            // whatever the machine's live File Provider domain happens to be.
-            let _probe = inject_finder_state("installed", None);
             let app = mock_app_with_account(true, true);
+            set_finder_view(&app, crate::surfaces::phase::FinderSetup::Ready, None);
             let snapshot = run_command(&app).expect("a failing usage call must not fail the whole snapshot");
             assert_eq!(snapshot["phase"], "synced");
             assert_eq!(snapshot["storage"], serde_json::Value::Null, "no number is invented");
@@ -12467,74 +16453,42 @@ mod popover_snapshot_command_tests {
         });
     }
 
-    /// Task 1693: a FAILED Finder state reaches the snapshot through the same
-    /// injection boundary, so the finder-failed phase mapping is asserted against
-    /// the REAL command, not only `popover_data::assemble` unit tests — and the
-    /// injected reason category is a marker no production error path can
-    /// classify into (`classify_finder_install_error` only emits fixed codes), so
-    /// if the probe ever bypasses the seam and reads the machine's real domain,
-    /// this test fails loudly on any machine, domain mounted or not.
-    ///
-    /// macOS-only by construction: the command reaches the probe only inside
-    /// `is_macos && logged_in && vault_unlocked` — on Linux the injected state is
-    /// unreachable through the real command (the else branch forces `missing`),
-    /// so an un-gated copy of this test would fail on the Linux CI gate.
-    #[cfg(target_os = "macos")]
     #[test]
-    fn an_injected_finder_failure_reaches_the_snapshot_not_the_real_domain() {
+    fn without_a_reconciler_macos_reports_missing_and_other_platforms_ready() {
         let api = LoopbackApi::start("200 OK", USAGE);
         with_isolated_env(&api.base, || {
-            let _probe = inject_finder_state("error", Some("task-1693-injected"));
             let app = mock_app_with_account(true, true);
             let snapshot = run_command(&app).expect("the command runs");
-            assert_eq!(snapshot["phase"], "finder_failed");
-            assert_eq!(snapshot["finder"]["setup"], "failed");
-            assert_eq!(
-                snapshot["finder"]["reason_line"], "reason: task-1693-injected",
-                "the injected marker must survive to the reason line — a live probe cannot produce it"
-            );
-            assert_eq!(snapshot["finder"]["reason"], "task-1693-injected");
-            assert_eq!(snapshot["storage"]["used_bytes"], 84_300_000_000_i64, "finder failure does not hide the storage figure");
+            let expected = if cfg!(target_os = "macos") { "missing" } else { "ready" };
+            assert_eq!(snapshot["finder"]["setup"], expected);
         });
     }
 
-    /// Injections are scoped to their guards (PR #102 review): a statement-call
-/// self-neutralizes (the temporary guard drops at once); a held guard
-/// restores the value it REPLACED on drop, not a blanket None. Serialized on
-/// `ENV_LOCK` like the popover tests — this test touches the same static
-/// they hold guards over, and unsynchronized access interleaves.
-#[test]
-    fn finder_probe_injections_are_scoped_to_their_guards() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Statement-call: the temporary guard is dropped at the end of the
-        // statement, so nothing is left installed.
-        #[allow(unused_must_use)] // the statement-call IS the subject here
-        inject_finder_state("error", Some("task-1693-review-red"));
-        assert!(
-            POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
-            "a statement-call injection must not leave state behind"
-        );
-
-        // Held guards unwind to the value each injection replaced.
-        let outer = inject_finder_state("installed", None);
-        {
-            let inner = inject_finder_state("error", Some("task-1693-review-red"));
-            let now = POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            assert_eq!(now.unwrap().unwrap().status, "error", "the inner injection is live");
-            drop(inner);
-        }
-        let after_inner = POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(
-            after_inner.unwrap().unwrap().status,
-            "installed",
-            "dropping the inner guard restores the outer injection"
-        );
-        drop(outer);
-        assert!(
-            POPOVER_TEST_FINDER_PROBE.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
-            "dropping the outer guard restores the empty static"
-        );
+    /// A FAILED Finder view reaches the snapshot, with its typed reason, through the real
+    /// command: the phase mapping is asserted against the REAL command, not only
+    /// `popover_data::assemble` unit tests. macOS-only by construction: off macOS the snapshot
+    /// forces `ready` whatever any view says.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_view_reaches_the_snapshot_with_its_reason() {
+        let api = LoopbackApi::start("200 OK", USAGE);
+        with_isolated_env(&api.base, || {
+            let app = mock_app_with_account(true, true);
+            set_finder_view(
+                &app,
+                crate::surfaces::phase::FinderSetup::Failed,
+                Some(crate::surfaces::phase::FinderFailureReason::FolderTaken),
+            );
+            let snapshot = run_command(&app).expect("the command runs");
+            assert_eq!(snapshot["phase"], "finder_failed");
+            assert_eq!(snapshot["finder"]["setup"], "failed");
+            assert_eq!(snapshot["finder"]["reason"], "folder_taken");
+            assert_eq!(snapshot["finder"]["reason_line"], "reason: folder_taken");
+            assert_eq!(
+                snapshot["storage"]["used_bytes"], 84_300_000_000_i64,
+                "a Finder failure does not hide the storage figure"
+            );
+        });
     }
 
     #[test]
@@ -12583,10 +16537,16 @@ mod popover_snapshot_command_tests {
         assert_eq!(engine_status::sync_status_engine(&engine(&state)), "running");
 
         // The pause toggle sends a bare `{state}`: it is its own legacy value.
-        app.handle().emit("engine-status", serde_json::json!({ "state": "paused" })).unwrap();
+        app.handle()
+            .emit("engine-status", serde_json::json!({ "state": "paused" }))
+            .unwrap();
         assert_eq!(engine(&state), "paused");
         assert_eq!(runtime.status.lock().unwrap().state, "paused");
-        assert_eq!(runtime.status.lock().unwrap().last_tick_ok_at, Some(1234), "a pause keeps the last check");
+        assert_eq!(
+            runtime.status.lock().unwrap().last_tick_ok_at,
+            Some(1234),
+            "a pause keeps the last check"
+        );
     }
 
     /// The same command and the same engine HTTP client, against a REAL local API. Ignored by
@@ -12606,12 +16566,27 @@ mod popover_snapshot_command_tests {
             let app = mock_app_with_account(true, true);
             // Swap in the real session token.
             let state = app.state::<AppState>();
-            state.active_account().unwrap().session.lock().unwrap().as_mut().unwrap().token = token.clone();
+            state
+                .active_account()
+                .unwrap()
+                .session
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .token = token.clone();
             let snapshot = run_command(&app).expect("the command runs against the real API");
-            println!("real API snapshot: {}", serde_json::to_string_pretty(&snapshot).unwrap());
+            println!(
+                "real API snapshot: {}",
+                serde_json::to_string_pretty(&snapshot).unwrap()
+            );
             assert_eq!(snapshot["phase"], "synced");
-            let used = snapshot["storage"]["used_bytes"].as_i64().expect("used_bytes from the real API");
-            let quota = snapshot["storage"]["quota_bytes"].as_i64().expect("quota_bytes from the real API");
+            let used = snapshot["storage"]["used_bytes"]
+                .as_i64()
+                .expect("used_bytes from the real API");
+            let quota = snapshot["storage"]["quota_bytes"]
+                .as_i64()
+                .expect("quota_bytes from the real API");
             assert!(used >= 0, "used {used}");
             assert!(quota >= 0, "quota {quota}");
             assert_eq!(snapshot["storage"]["stale"], false);
@@ -12622,23 +16597,39 @@ mod popover_snapshot_command_tests {
             // Bound first so the assignment below carries no string literal for the
             // repo's secret scanner to flag (a fixture, not a credential; value unchanged).
             let unrecognised = "not-a-real-token";
-            bad_state.active_account().unwrap().session.lock().unwrap().as_mut().unwrap().token = unrecognised.into();
+            bad_state
+                .active_account()
+                .unwrap()
+                .session
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .token = unrecognised.into();
             let refused = run_command(&bad).expect("a 401 must not fail the snapshot");
             assert_eq!(refused["storage"], serde_json::Value::Null);
 
             // The engine's own HTTP client: a real `GET /sync/ops` is an answer, so the link
             // monitor records a check and no failure; a 401 is also an answer, not a link failure.
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             let good = api_client::ApiClient::new(base.clone(), token.clone(), [0u8; 32]);
             let monitor = good.link();
             let ops = runtime.block_on(good.sync_ops(0));
-            println!("real GET /sync/ops: {:?}", ops.as_ref().map(|o| o.ops.len()).map_err(|e| e.to_string()));
+            println!(
+                "real GET /sync/ops: {:?}",
+                ops.as_ref().map(|o| o.ops.len()).map_err(|e| e.to_string())
+            );
             let seen = monitor.snapshot();
             assert!(seen.last_ok_at.is_some(), "a real answer records a check: {ops:?}");
             assert_eq!(seen.failure, None);
             let unauthorised = api_client::ApiClient::new(base.clone(), "not-a-real-token".into(), [0u8; 32]);
             let monitor = unauthorised.link();
-            let err = runtime.block_on(unauthorised.sync_ops(0)).expect_err("a wrong token is refused");
+            let err = runtime
+                .block_on(unauthorised.sync_ops(0))
+                .expect_err("a wrong token is refused");
             println!("real GET /sync/ops with a wrong token: {err}");
             assert!(err.to_string().contains("401"), "{err}");
             assert_eq!(monitor.snapshot().failure, None, "a 401 is the server answering");
@@ -12668,13 +16659,20 @@ mod popover_snapshot_command_tests {
         // between ticks, so it notices the server closing it (a runtime that is only ever
         // driven inside `block_on` would write the next request to a dead socket and get a
         // reset instead of a refused connection).
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
         let now = || now_unix_seconds();
 
         // Phase 1: the server is up. The first tick bootstraps from `GET /sync/snapshot`.
         let started = now();
         let first = runtime.block_on(engine_bridge::sync_tick(&bridge, dir.path()));
-        println!("tick 1 (server up): {:?}", first.as_ref().map(|c| c.len()).map_err(|e| e.to_string()));
+        println!(
+            "tick 1 (server up): {:?}",
+            first.as_ref().map(|c| c.len()).map_err(|e| e.to_string())
+        );
         let outcome = tick_outcome(first.as_ref().map(|_| ()).map_err(|e| e), &link.snapshot(), started);
         println!("tick 1 outcome: {outcome:?}; link: {:?}", link.snapshot());
         assert_eq!(outcome, Outcome::Synced);
@@ -12685,18 +16683,30 @@ mod popover_snapshot_command_tests {
         let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(60);
         println!("WAITING FOR THE API AT {addr} TO STOP");
         while std::net::TcpStream::connect(&addr).is_ok() {
-            assert!(std::time::Instant::now() < gone_by, "the operator never stopped the API");
+            assert!(
+                std::time::Instant::now() < gone_by,
+                "the operator never stopped the API"
+            );
             runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
         }
         // Let the runtime see the pooled connection close, as the engine's does between ticks.
         runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(500)).await });
         let started = now();
         let second = runtime.block_on(engine_bridge::sync_tick(&bridge, dir.path()));
-        println!("tick 2 (server gone): {:?}", second.as_ref().map(|c| c.len()).map_err(|e| e.to_string()));
+        println!(
+            "tick 2 (server gone): {:?}",
+            second.as_ref().map(|c| c.len()).map_err(|e| e.to_string())
+        );
         let outcome = tick_outcome(second.as_ref().map(|_| ()).map_err(|e| e), &link.snapshot(), started);
         println!("tick 2 outcome: {outcome:?}; link: {:?}", link.snapshot());
         assert!(
-            matches!(outcome, Outcome::Down { down: Down::Offline(_), .. }),
+            matches!(
+                outcome,
+                Outcome::Down {
+                    down: Down::Offline(_),
+                    ..
+                }
+            ),
             "a tick that could not reach the server must be offline, got {outcome:?}"
         );
     }
@@ -12729,25 +16739,766 @@ mod popover_wiring_tests {
         let full = include_str!("lib.rs").replace("\r\n", "\n");
         // Everything before this test module: the mock-app helpers below also call `manage`.
         let source = &full[..full.find("mod popover_snapshot_command_tests {").unwrap()];
-        assert_eq!(source.matches(".manage(popover_data::PopoverRuntime::default())").count(), 1);
-        assert_eq!(source.matches("            popover_snapshot,\n").count(), 1, "in generate_handler!");
+        assert_eq!(
+            source
+                .matches(".manage(popover_data::PopoverRuntime::default())")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source.matches("            popover_snapshot,\n").count(),
+            1,
+            "in generate_handler!"
+        );
         // `sync_status` reads the mirrored state through the shared mapping.
         let start = source.find("async fn sync_status(").expect("sync_status exists");
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
         assert!(body.contains("engine_status::sync_status_engine(raw.as_str())"));
         // The storage cache is keyed by the vault epoch, and the epoch moves at every place the
-        // session is installed (2) or cleared (2): sign-in, unlock, lock, sign-out.
-        assert_eq!(source.matches("bump_vault_epoch();\n").count(), 4);
+        // session is installed (2: sign-in, recovery-phrase unlock) or cleared. Lock and Sign-out clear it in
+        // ONE function (`clear_session_holding_slot`, fix round 1 of Task 10), which bumps in its normal and
+        // its poisoned-mutex branch; the sign-out's last turn (Task 12 fix round 1) bumps when it clears a session
+        // that was put in memory while the sign-out ran; and a re-sign-in whose kept key the server no longer accepts
+        // bumps when it ended a session in memory (spec §5.6).
+        assert_eq!(source.matches("bump_vault_epoch();\n").count(), 6);
         assert!(source.contains("VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                    || async move { fetch_storage_usage"));
-        // The Finder install marks the popover's f1 state for as long as it runs.
-        let install = {
-            let at = source.find("async fn install_finder_location(").unwrap();
-            &source[at..at + source[at..].find("async fn continue_without_finder_location(").unwrap()]
+        // Spec 2026-10-06: the snapshot reads the reconciler's view and never probes the OS.
+        let snapshot = {
+            let at = source.find("async fn popover_snapshot(").unwrap();
+            &source[at..at + source[at..].find("\n}\n").unwrap()]
         };
-        let clear = install.find("begin_finder_install_attempt(&mut cfg)?").unwrap();
-        let adding = install.find("finder_adding_guard()").expect("the install marks the attempt for the popover");
-        let slow = install.find("install_file_provider_domain_blocking().await").unwrap();
-        assert!(clear < adding && adding < slow, "the marker is set before the slow File Provider work");
+        assert!(snapshot.contains("state.finder_setup.get()"));
+        assert!(
+            !snapshot.contains("finder_location_state")
+                && !snapshot.contains("spawn_blocking(popover_finder_probe_state)")
+        );
+    }
+}
+
+/// The macOS Finder reconciler's commands and wiring (spec 2026-10-06, plan Task 8). The
+/// reconciler needs the OS, so the wiring is asserted on the source (like the popover's) and the
+/// commands on a handle that has no reconciler behind it.
+#[cfg(test)]
+mod finder_setup_command_tests {
+    use super::*;
+    use finder_setup::core::Trigger;
+    use finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+    use finder_setup::launch_location::LaunchLocation;
+
+    #[test]
+    fn finder_setup_state_reads_the_reconcilers_view_and_says_so_when_there_is_none() {
+        let state = AppState::default();
+        assert_eq!(
+            finder_setup_state_impl(&state),
+            Err("Finder setup is only available on macOS.".to_string())
+        );
+        let view = FinderSetupView::initial(LaunchLocation::DiskImage);
+        let _ = state.finder_setup.set(FinderSetupHandle::fixed(view.clone()));
+        assert_eq!(finder_setup_state_impl(&state), Ok(view));
+    }
+
+    #[test]
+    fn try_again_sends_exactly_one_try_again_trigger() {
+        let state = AppState::default();
+        let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+        let _ = state.finder_setup.set(handle);
+        finder_setup_retry_impl(&state).expect("sent");
+        assert!(matches!(rx.try_recv(), Ok(Event::Trigger(Trigger::TryAgain))));
+        assert!(rx.try_recv().is_err(), "exactly one");
+    }
+
+    /// Area A M4: while the reconciler is held (after a sign-out or a Lock), "Try again" could do nothing. It says so,
+    /// in the quiet `Missing` sentence, and sends nothing; once keys arrived it works again.
+    #[test]
+    fn try_again_while_held_says_what_adds_beebeeb_and_sends_nothing() {
+        let state = AppState::default();
+        let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+        handle.set_held_for_test(true);
+        let _ = state.finder_setup.set(handle.clone());
+        assert_eq!(
+            finder_setup_retry_impl(&state),
+            Err("Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.".to_string())
+        );
+        assert!(rx.try_recv().is_err(), "nothing is sent while held");
+        handle.set_held_for_test(false);
+        finder_setup_retry_impl(&state).expect("sent once keys are here");
+        assert!(matches!(rx.try_recv(), Ok(Event::Trigger(Trigger::TryAgain))));
+    }
+
+    #[test]
+    fn the_launch_trigger_follows_the_startup_restore() {
+        // §5.3 (1): the launch check runs once the restore finished, so it sees the restored keys.
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let restore = source
+            .find("restore_session_on_startup(&h).await;\n")
+            .expect("the restore task");
+        let launch = source[restore..]
+            .find("finder_setup::core::Trigger::Launch")
+            .expect("a launch trigger after it");
+        assert!(
+            launch < 400,
+            "the launch trigger sits right after the restore, in the same task"
+        );
+        let driver = source
+            .find("finder_setup::driver::spawn(")
+            .expect("setup spawns the reconciler");
+        assert!(
+            driver < restore,
+            "the reconciler exists before the restore task can trigger it"
+        );
+    }
+
+    // ---- lead ruling T7-4 (rulings file item 3): a trigger that cannot be delivered is not silent ----
+
+    #[test]
+    fn try_again_without_a_reconciler_or_with_a_stopped_one_is_an_error_the_frontend_can_toast() {
+        // No reconciler at all (Windows, Linux).
+        let none = AppState::default();
+        assert_eq!(
+            finder_setup_retry_impl(&none),
+            Err("Finder setup is only available on macOS.".to_string())
+        );
+        // One that stopped (it panicked): the receiving end is gone, `trigger` says so, and the
+        // command turns that into the `Err` the frontend shows as "couldn't retry".
+        let state = AppState::default();
+        let (handle, rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+        drop(rx);
+        let _ = state.finder_setup.set(handle);
+        let error = finder_setup_retry_impl(&state).unwrap_err();
+        assert!(error.contains("not running"), "{error}");
+        assert!(
+            !error.contains('/') && !error.contains("NS"),
+            "no path and no OS text: {error}"
+        );
+    }
+
+    #[test]
+    fn notify_finder_reaches_a_running_reconciler_and_survives_a_stopped_or_a_missing_one() {
+        // Missing (Windows, Linux, tests): a no-op.
+        notify_finder(&AppState::default(), Trigger::KeysArrived);
+        // Running: exactly the trigger asked for.
+        let state = AppState::default();
+        let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+        let _ = state.finder_setup.set(handle);
+        notify_finder(&state, Trigger::KeysArrived);
+        assert!(matches!(rx.try_recv(), Ok(Event::Trigger(Trigger::KeysArrived))));
+        assert!(rx.try_recv().is_err());
+        // Stopped: logged, never a panic and never a lost `#[must_use]`.
+        let stopped = AppState::default();
+        let (handle, rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+        drop(rx);
+        let _ = stopped.finder_setup.set(handle);
+        notify_finder(&stopped, Trigger::KeysArrived);
+        let production = production_source();
+        let body = body_between(&production, "fn notify_finder(", "\n}\n");
+        assert!(
+            body.contains("tracing::warn!"),
+            "a trigger that could not be delivered is logged:\n{body}"
+        );
+        assert!(
+            !body.contains("let _ ="),
+            "the Result of `trigger` is handled, not discarded:\n{body}"
+        );
+    }
+
+    #[test]
+    fn copy_details_is_the_public_driver_function_with_the_view_and_the_lifecycle_tail() {
+        let state = AppState::default();
+        assert_eq!(
+            finder_setup_copy_details_impl(&state),
+            Err("Finder setup is only available on macOS.".to_string())
+        );
+        let view = FinderSetupView {
+            setup: crate::surfaces::phase::FinderSetup::Failed,
+            reason: Some(crate::surfaces::phase::FinderFailureReason::FolderTaken),
+            last_failure: Some(finder_setup::error::FailureRecord {
+                reason: crate::surfaces::phase::FinderFailureReason::FolderTaken,
+                domain: "NSCocoaErrorDomain".into(),
+                code: 516,
+                at: 1_791_291_909,
+            }),
+            ..FinderSetupView::initial(LaunchLocation::Applications)
+        };
+        let _ = state.finder_setup.set(FinderSetupHandle::fixed(view));
+        let text = finder_setup_copy_details_impl(&state).expect("details");
+        for line in [
+            "Finder setup: failed",
+            "Reason: folder_taken",
+            "Error: NSCocoaErrorDomain 516",
+            "Launched from: applications",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line:?} missing:\n{text}");
+        }
+        assert!(text.starts_with("Beebeeb "), "{text}");
+        assert!(
+            text.contains("Lifecycle log (last 0 lines):"),
+            "no test initialises the real log, so its tail is empty:\n{text}"
+        );
+        // The command goes through the one public `copy_details`, which reads the tail itself.
+        let production = production_source();
+        let body = body_between(&production, "fn finder_setup_copy_details_impl(", "\n}\n");
+        assert!(body.contains("finder_setup::driver::copy_details("), "{body}");
+        assert!(
+            !production.contains("copy_details_text("),
+            "the private formatter is not called from lib.rs"
+        );
+    }
+
+    // ---- lead ruling T14-c3: the contract with the built TypeScript ----
+
+    #[test]
+    fn the_frontends_five_commands_are_registered_and_so_are_the_four_windows_and_linux_ones() {
+        let production = production_source();
+        let run = body_between(&production, "pub fn run() {", "\n}\n");
+        let handler = &run[run.find("tauri::generate_handler![").expect("the handler list")..];
+        let handler = &handler[..handler.find("])").expect("the handler list ends")];
+        for command in [
+            // Exactly what `src/finderSetup.ts` invokes (read from the Lane T worktree, 2026-10-07).
+            "finder_setup_state",
+            "finder_setup_retry",
+            "finder_setup_copy_details",
+            "finder_setup_show_app",
+            "open_login_items_and_extensions_settings",
+            // Windows and Linux keep these registered and working; a Mac registers them too, and
+            // they refuse there (spec §4, §9).
+            "install_finder_location",
+            "continue_without_finder_location",
+            "finder_location_state",
+            "finder_domain_user_enabled",
+        ] {
+            let listed = handler.lines().filter(|l| l.trim() == format!("{command},")).count();
+            assert_eq!(listed, 1, "{command} is registered exactly once");
+        }
+    }
+
+    // ---- lead ruling T17-⚠1 and T6-⚠2: a Mac never installs through the old path ----
+
+    /// Run on synthetic text so a bug in the helper is a red test, not a census that sees nothing.
+    #[test]
+    fn the_macos_census_helper_drops_exactly_what_a_mac_does_not_compile() {
+        let synthetic = "fn kept() {\n    finder_location_state();\n}\n\
+            #[cfg(not(target_os = \"macos\"))]\nfn gone() {\n    finder_location_state();\n}\n\
+            #[cfg(test)]\nmod tests {\n    fn t() {\n        finder_location_state();\n    }\n}\n\
+            #[cfg(target_os = \"windows\")]\n#[tauri::command]\nasync fn windows_only() {\n    finder_location_state();\n}\n\
+            #[cfg(not(target_os = \"macos\"))]\nconst GONE: &str = \"a \\\n    b\";\n\
+            #[cfg(target_os = \"macos\")]\nfn mac_only() {\n    finder_location_state();\n}\n";
+        let mac = macos_compiled(synthetic);
+        assert_eq!(
+            call_sites(&mac, "finder_location_state").len(),
+            2,
+            "kept() and mac_only():\n{mac}"
+        );
+        for dropped in ["fn gone", "mod tests", "windows_only", "GONE"] {
+            assert!(!mac.contains(dropped), "{dropped} is not compiled on a Mac:\n{mac}");
+        }
+        for kept in ["fn kept", "fn mac_only"] {
+            assert!(mac.contains(kept), "{kept} is compiled on a Mac:\n{mac}");
+        }
+
+        // The same inside a function body: statements, blocks and arguments that a cfg removes on
+        // a Mac go, and what a Mac compiles stays (indentation is the only thing that differs).
+        let inside = "fn run() {\n\
+            \x20   before();\n\
+            \x20   #[cfg(not(target_os = \"macos\"))]\n\
+            \x20   persist(\n\
+            \x20       &mut cfg,\n\
+            \x20   )?;\n\
+            \x20   #[cfg(target_os = \"windows\")]\n\
+            \x20   {\n\
+            \x20       if let Some(root) = x {\n\
+            \x20           windows_only_call();\n\
+            \x20       } else {\n\
+            \x20           windows_only_else();\n\
+            \x20       }\n\
+            \x20   }\n\
+            \x20   call(\n\
+            \x20       a,\n\
+            \x20       #[cfg(target_os = \"windows\")]\n\
+            \x20       &_transition,\n\
+            \x20   )\n\
+            \x20   .await?;\n\
+            \x20   #[cfg(target_os = \"macos\")]\n\
+            \x20   mac_call();\n\
+            \x20   after();\n\
+            }\n";
+        let body = macos_compiled(inside);
+        for gone in ["persist(", "windows_only_call", "windows_only_else", "_transition"] {
+            assert!(!body.contains(gone), "{gone} is not compiled on a Mac:\n{body}");
+        }
+        for stays in ["before();", "call(", ".await?;", "mac_call();", "after();", "a,"] {
+            assert!(body.contains(stays), "{stays} is compiled on a Mac:\n{body}");
+        }
+        // A parameter attribute that shares its line with the parameter is not an item attribute.
+        let param = "async fn f(\n    app: A,\n    #[cfg(target_os = \"windows\")] _transition: &T,\n) -> R {\n    body();\n}\n";
+        assert_eq!(macos_compiled(param), param, "nothing is dropped");
+
+        // A name that merely ends with another one is not a call of it.
+        assert!(call_sites("    my_finder_location_state();\n", "finder_location_state").is_empty());
+        assert!(call_sites("    // finder_location_state();\n", "finder_location_state").is_empty());
+        assert!(
+            call_sites("fn finder_location_state() {\n", "finder_location_state").is_empty(),
+            "a definition is not a call"
+        );
+    }
+
+    #[test]
+    fn no_macos_compiled_path_calls_the_install_era_commands_and_the_macos_variants_exist() {
+        let mac = macos_compiled(&include_str!("lib.rs").replace("\r\n", "\n"));
+        for name in [
+            "install_finder_location",
+            "continue_without_finder_location",
+            "finder_location_state",
+            "finder_domain_user_enabled",
+        ] {
+            let calls = call_sites(&mac, name);
+            assert!(calls.is_empty(), "{name} is called by code a Mac compiles: {calls:?}");
+            assert!(
+                mac.contains(&format!("fn {name}(")),
+                "{name} is still defined on macOS (the command table is the same everywhere)"
+            );
+        }
+        // The three that Windows and Linux really run exist twice: the real body (not macOS) and
+        // the refusal (macOS).
+        let production = production_source();
+        for name in [
+            "install_finder_location",
+            "continue_without_finder_location",
+            "finder_location_state",
+        ] {
+            assert_eq!(
+                production.matches(&format!("fn {name}(")).count(),
+                2,
+                "{name}: one body for Windows/Linux, one refusal for macOS"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_a_mac_compiles_writes_the_old_finder_install_keys() {
+        let mac = macos_compiled(&include_str!("lib.rs").replace("\r\n", "\n"));
+        for key in [
+            "finder_install_status",
+            "finder_install_last_error",
+            "finder_install_reason_category",
+            "finder_install_last_attempt_at",
+        ] {
+            let writes: Vec<&str> = mac
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with("//") && line.contains(&format!("{key} = ")))
+                .collect();
+            assert!(writes.is_empty(), "macOS-compiled code writes {key}: {writes:?}");
+        }
+        for helper in [
+            "persist_finder_install_result(",
+            "record_finder_install_result(",
+            "begin_finder_install_attempt(",
+            "finder_install_failed(",
+        ] {
+            assert!(
+                call_sites(&mac, helper.trim_end_matches('(')).is_empty(),
+                "{helper} is reachable on macOS"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_install_era_commands_refuse_on_macos() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(install_finder_location(Some("/Users/sam/Secret".into())))
+                .unwrap_err(),
+            "On macOS Beebeeb adds itself to Finder. Use finder_setup_retry."
+        );
+        assert_eq!(
+            runtime
+                .block_on(continue_without_finder_location(Some("/Users/sam/Secret".into())))
+                .unwrap_err(),
+            "Finder setup is automatic on macOS"
+        );
+        assert_eq!(finder_location_state().unwrap_err(), "On macOS use finder_setup_state.");
+    }
+
+    // ---- lead rulings T5-⚠a and T5-⚠e: the lifecycle log is initialised once, from setup() ----
+
+    #[test]
+    fn setup_initialises_the_lifecycle_log_once_with_a_names_function_that_takes_no_app_lock() {
+        let production = production_source();
+        let init = concat!("lifecycle_log::", "init(");
+        assert_eq!(
+            production.matches(init).count(),
+            1,
+            "exactly one call of the real init, outside every test"
+        );
+        let setup = &production[production.find(".setup(|app| {").expect("setup()")..];
+        let at = setup.find(init).expect("init is called from setup()");
+        let attribute = &setup[setup[..at].rfind("#[cfg(").expect("a cfg attribute above the init")..];
+        assert!(
+            attribute.starts_with("#[cfg(target_os = \"macos\")]"),
+            "and on macOS only, in the block the nearest cfg guards:\n{attribute}"
+        );
+        assert!(
+            setup[at..].starts_with(&format!("{init}dir, lifecycle_known_names)")),
+            "with its own names function"
+        );
+        let names = body_between(&production, "fn lifecycle_known_names()", "\n}\n");
+        for forbidden in [
+            ".lock(",
+            "lifecycle_log::event",
+            "lifecycle_log::tail",
+            ".unwrap()",
+            ".expect(",
+            "panic!",
+            "AppState",
+            "state::<",
+            "block_on",
+        ] {
+            assert!(
+                !names.contains(forbidden),
+                "the names function must not use {forbidden}:\n{names}"
+            );
+        }
+        assert!(
+            names.contains("state_db_from_app_local_state_dir()"),
+            "it opens its own StateDb, as the support bundle does"
+        );
+    }
+
+    #[test]
+    fn the_names_function_never_panics_without_a_state_db_and_never_touches_the_real_log() {
+        // A test process has no app-local state dir: the support-bundle pattern's `Err` arm.
+        let _ = lifecycle_known_names();
+        assert!(
+            lifecycle_log::tail(lifecycle_log::TAIL_LINES).is_empty(),
+            "no test initialises the real log"
+        );
+    }
+
+    // ---- lead ruling T5-b: the support bundle carries the lifecycle tail ----
+
+    #[test]
+    fn the_support_bundle_carries_the_lifecycle_tail_without_changing_its_format() {
+        let bundle = super::with_lifecycle_tail(
+            serde_json::json!({ "diagnostics_format": 2 }),
+            vec!["2026-10-06T13:05:09Z signed_in".to_string()],
+        );
+        assert_eq!(
+            bundle["lifecycle_log"],
+            serde_json::json!(["2026-10-06T13:05:09Z signed_in"])
+        );
+        assert_eq!(
+            bundle["diagnostics_format"], 2,
+            "additive key: the format number is unchanged"
+        );
+        let production = production_source();
+        let command = body_between(&production, "fn export_diagnostics()", "\n}\n");
+        assert!(command.contains("with_lifecycle_tail("), "{command}");
+        assert!(
+            command.contains("lifecycle_log::tail(lifecycle_log::TAIL_LINES)"),
+            "the last 200 lines: {command}"
+        );
+    }
+
+    // ---- Task 8 fix round 1: a check's engine start and stop are cut off only while they wait ----
+
+    /// A future dropped after it spawned an engine loses the `started` answer, and one dropped after it
+    /// took the engine out of its slot detaches the engine task: it keeps running untracked, holding
+    /// the session token and master key, while sign-out finds an empty slot and reports done. So the
+    /// limit covers the wait for the slot and nothing after it.
+    #[test]
+    fn a_check_start_and_stop_are_cut_off_only_while_they_wait_for_the_engine_slot() {
+        let production = production_source();
+        let start = body_between(&production, concat!("async fn ", "start_check_engine("), "\n}\n");
+        let lock = start
+            .find("lock_engine_slot(")
+            .expect("the slot is taken under a limit");
+        let spawn = start
+            .find("spawn_bound_engine(")
+            .expect("it starts through the one gate");
+        let ready = start
+            .find("wait_for_file_provider_ipc_ready(")
+            .expect("it waits for the socket");
+        assert!(
+            lock < spawn && spawn < ready,
+            "limit, then spawn, then the self-bounded socket wait:\n{start}"
+        );
+        assert_eq!(
+            start.matches("within(").count(),
+            0,
+            "no cut-off once the engine exists:\n{start}"
+        );
+
+        let stop = body_between(&production, "async fn stop_check_engine(", "\n}\n");
+        let lock = stop.find("lock_engine_slot(").expect("the slot is taken under a limit");
+        let take = stop.find(".take()").expect("the engine leaves its slot");
+        let abort = stop
+            .find("stop_engine_in_slot(")
+            .expect("and is stopped through the one helper");
+        assert!(
+            lock < take && take < abort,
+            "limit, then take, then an uncancelled abort:\n{stop}"
+        );
+        assert_eq!(
+            stop.matches("within(").count(),
+            0,
+            "no cut-off once the engine is out of its slot:\n{stop}"
+        );
+        assert!(
+            stop.contains("stop_engine_in_slot("),
+            "an unconfirmed stop closes the sign-out gate, in the one helper:\n{stop}"
+        );
+
+        let helper = body_between(&production, "async fn lock_engine_slot(", "\n}\n");
+        assert!(
+            helper.contains("within(") && helper.contains("acct.engine.lock().await"),
+            "{helper}"
+        );
+
+        // FinishReady is cut off as a whole; that is safe only while the slot is its one await.
+        let ensure = body_between(
+            &production,
+            concat!("async fn ", "ensure_sync_root_and_engine("),
+            "\n}\n",
+        );
+        assert_eq!(
+            ensure.matches(".await").count(),
+            1,
+            "a second await could be cut off after the spawn:\n{ensure}"
+        );
+        assert!(ensure.contains("engine.lock().await"), "{ensure}");
+    }
+
+    // ---- helpers ----
+
+    /// The text from `start` to the first `end` after it.
+    pub(super) fn body_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source.find(start).unwrap_or_else(|| panic!("{start} exists"));
+        let to = from
+            + source[from..]
+                .find(end)
+                .unwrap_or_else(|| panic!("{start} ends with {end:?}"));
+        &source[from..to]
+    }
+
+    /// `source` without the items, blocks and statements whose `cfg` attribute stands alone on its
+    /// line and starts with one of `attrs` (at any indentation). What an attribute covers ends at
+    /// the first line that ends with `;`, or, when a line ending with `{` comes first, at the `}`
+    /// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
+    /// on an argument or field (the next line ends with `,`) covers that one line.
+    pub(super) fn without_items(source: &str, attrs: &[&str]) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut kept = String::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let trimmed = lines[i].trim_start();
+            if attrs
+                .iter()
+                .any(|attr| trimmed.starts_with(attr) && trimmed.trim_end().ends_with(']'))
+            {
+                let indent = &lines[i][..lines[i].len() - trimmed.len()];
+                let mut j = i + 1;
+                while j < lines.len()
+                    && (lines[j].trim_start().starts_with("#[") || lines[j].trim_start().starts_with("///"))
+                {
+                    j += 1;
+                }
+                if lines.get(j).is_some_and(|line| line.trim_end().ends_with(',')) {
+                    i = j + 1;
+                    continue;
+                }
+                let mut k = j;
+                while k < lines.len() {
+                    let line = lines[k].trim_end();
+                    if line.ends_with(';') {
+                        break;
+                    }
+                    if line.ends_with('{') {
+                        let close = format!("{indent}}}");
+                        while k < lines.len()
+                            && lines[k].trim_end() != close
+                            && lines[k].trim_end() != format!("{close};")
+                        {
+                            k += 1;
+                        }
+                        break;
+                    }
+                    k += 1;
+                }
+                i = k + 1;
+                continue;
+            }
+            kept.push_str(lines[i]);
+            kept.push('\n');
+            i += 1;
+        }
+        kept
+    }
+
+    /// `lib.rs` without its test modules, for the tests that read production code.
+    pub(super) fn production_source() -> String {
+        without_items(
+            &include_str!("lib.rs").replace("\r\n", "\n"),
+            &["#[cfg(test)]", "#[cfg(all(test"],
+        )
+    }
+
+    /// `source` as the macOS build compiles it: without the test modules and without what is
+    /// Windows, Linux or "not macOS" only, so a census of call sites sees only code a Mac can run.
+    pub(super) fn macos_compiled(source: &str) -> String {
+        without_items(
+            source,
+            &[
+                "#[cfg(test)]",
+                "#[cfg(all(test",
+                "#[cfg(any(target_os = \"windows\", test))]",
+                "#[cfg(not(target_os = \"macos\"))]",
+                "#[cfg(target_os = \"windows\")]",
+                "#[cfg(target_os = \"linux\")]",
+                "#[cfg(not(unix))]",
+            ],
+        )
+    }
+
+    /// The lines that call `name(`, not defining it and not comments. A longer name that ends
+    /// with `name` is not a call of it.
+    fn call_sites(source: &str, name: &str) -> Vec<String> {
+        let needle = format!("{name}(");
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && !line.contains(&format!("fn {needle}")))
+            .filter(|line| {
+                line.match_indices(&needle).any(|(at, _)| {
+                    !line[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+            })
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// A check's engine stop (spec 2026-10-06 §5.5; Task 8 fix round 1), on a real `AccountRuntime` and a
+/// real `EngineRunner` wrapped around a test task. macOS only: `stop_check_engine` is.
+#[cfg(all(test, target_os = "macos"))]
+mod finder_engine_tests {
+    use super::*;
+    use crate::account::{AccountId, AccountRuntime};
+    use crate::finder_setup::error::{APP_DOMAIN, app_code};
+    use crate::runner::EngineRunner;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    fn account() -> Arc<AccountRuntime> {
+        Arc::new(AccountRuntime::new(AccountId("finder-engine-test".to_string())))
+    }
+
+    /// An engine task that never looks at its cancel signal, as one stuck mid-call would: `abort()`
+    /// waits out its 3 s graceful window, then forces the task down. Slower than any limit below.
+    fn stubborn_engine(ticks: Arc<AtomicUsize>) -> EngineRunner {
+        let task = tokio::spawn(async move {
+            loop {
+                ticks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        EngineRunner::for_test_with_task(task)
+    }
+
+    /// The finding: the limit once wrapped the whole stop, so a stop that had already taken the
+    /// engine out of its slot was dropped mid-`abort()`, and the engine task kept running with no
+    /// handle and no slot. The limit now covers the wait for the slot only.
+    #[tokio::test]
+    async fn a_stop_that_has_taken_the_engine_runs_to_completion_past_the_limit_and_the_engine_does_not_survive() {
+        let acct = account();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        *acct.engine.lock().await = Some(stubborn_engine(ticks.clone()));
+        let started = Instant::now();
+
+        let stopped = stop_check_engine(&acct, Duration::from_millis(50)).await;
+
+        assert_eq!(
+            stopped,
+            Ok(()),
+            "a limit of 50 ms must not cut a stop short once it holds the engine"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(3),
+            "abort() waited out its graceful window: {:?}",
+            started.elapsed()
+        );
+        assert!(acct.engine.lock().await.is_none(), "the engine left its slot");
+        assert!(!acct.engine_stop_unconfirmed.load(Ordering::SeqCst));
+        let after = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            after,
+            "the engine task is gone: nothing is still ticking"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_with_no_engine_in_the_slot_is_a_stop() {
+        assert_eq!(stop_check_engine(&account(), Duration::from_millis(50)).await, Ok(()));
+    }
+
+    /// The one thing the limit does cut off: the wait for the slot. The engine is not touched, so it
+    /// is still where sign-out and lock look for it.
+    #[tokio::test]
+    async fn a_stop_that_cannot_take_the_slot_reports_it_and_leaves_the_engine_tracked() {
+        let acct = account();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        *acct.engine.lock().await = Some(stubborn_engine(ticks.clone()));
+        let held = acct.engine.lock().await; // somebody else is starting, locking or signing out
+        let error = stop_check_engine(&acct, Duration::from_millis(50))
+            .await
+            .expect_err("the slot is held");
+        assert_eq!((error.domain.as_str(), error.code), (APP_DOMAIN, app_code::OP_TIMEOUT));
+        assert!(held.is_some(), "the engine was not touched");
+        drop(held);
+        assert!(
+            !acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+            "nothing was lost, so the gate stays open"
+        );
+        // The engine is still tracked: dropping its runner (as sign-out's abort would) ends the task.
+        drop(acct.engine.lock().await.take());
+    }
+
+    /// `abort()` that cannot confirm the task ended: it leaves an empty slot, so the Bug-A2 flag is the
+    /// only thing that keeps sign-out refused. The reconciler sets it and says so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_that_cannot_confirm_the_engine_is_gone_closes_the_sign_out_gate_and_says_so() {
+        let acct = account();
+        // No await point: tokio cannot force-abort it. A wall-clock deadline ends the thread.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let task = tokio::task::spawn_blocking(move || {
+            while Instant::now() < deadline {
+                std::hint::black_box(());
+            }
+        });
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+
+        let error = stop_check_engine(&acct, Duration::from_secs(1))
+            .await
+            .expect_err("the stop cannot be confirmed");
+
+        assert_eq!(
+            (error.domain.as_str(), error.code),
+            (APP_DOMAIN, app_code::ENGINE_STOP_UNCONFIRMED)
+        );
+        assert!(
+            acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+            "sign-out must stay refused until a restart"
+        );
+        assert!(acct.engine.lock().await.is_none());
     }
 }
 
@@ -12760,7 +17511,11 @@ mod popover_wiring_tests {
 /// exactly the cross-platform control flow, not OS integration.
 #[cfg(test)]
 mod signout_teardown_tests {
+    use super::finder_setup_command_tests::{body_between, production_source};
     use super::{AppState, clear_session_impl, set_auth_email, set_auth_present};
+    // Only the macOS/Linux assertion in the already-signed-out test names it; on Windows the import would be unused.
+    #[cfg(not(target_os = "windows"))]
+    use super::UNCONFIRMED_ENGINE_STOP_ERROR;
     use crate::account::{AccountId, synthesize_single_account};
     use crate::runner::EngineRunner;
     use std::sync::Arc;
@@ -12777,14 +17532,29 @@ mod signout_teardown_tests {
     /// attempt the engine stop (a live engine in the slot must still be
     /// running afterwards), must not consume the engine slot, and must not
     /// fail on the (Linux-stub) keychain clear.
+    ///
+    /// Superseded on macOS and Linux by Task 12 fix round 2, item 1 (lead ruling): the already-signed-out path takes
+    /// the slot before its purge and STOPS an engine it finds there (one a sign-in that completed during the
+    /// sign-out started), so no engine runs on after `Ok`. It still succeeds. Windows keeps the Bug B behaviour
+    /// asserted here.
     #[tokio::test]
     async fn clear_session_when_already_signed_out_skips_the_engine_and_succeeds() {
-        // Windows runs the local-state purge on this path too, which needs the
-        // process-wide state dir the real app sets at startup.
-        #[cfg(target_os = "windows")]
+        // Every platform runs the local-state purge on this path, and a purge that cannot run stops
+        // the sign-out (R10), so it needs the process-wide state dir the real app sets at startup.
         crate::state_paths::init_for_test();
         let state = AppState::default();
         let acct = test_account(&state, "signout-noop-acct");
+        // A Mac's sign-out waits for the reconciler's removal and reports one it cannot confirm.
+        #[cfg(target_os = "macos")]
+        {
+            let (handle, rx) = crate::finder_setup::driver::FinderSetupHandle::for_test(
+                crate::finder_setup::driver::FinderSetupView::initial(
+                    crate::finder_setup::launch_location::LaunchLocation::Applications,
+                ),
+            );
+            let _ = state.finder_setup.set(handle);
+            tokio::spawn(super::confirm_every_finder_event(rx));
+        }
         set_auth_present(&state, false);
         assert!(acct.session.lock().unwrap().is_none());
 
@@ -12800,22 +17570,106 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let result = clear_session_impl(&state).await;
+        let result = clear_session_impl(&state, false).await;
 
         assert!(
             result.is_ok(),
             "signing out while already signed out must succeed, got {result:?}"
         );
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(
+                acct.engine.lock().await.is_none(),
+                "macOS/Linux: the engine it found is stopped (fix round 2, item 1)"
+            );
+            let after = ticks.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            assert_eq!(ticks.load(Ordering::SeqCst), after, "and it no longer runs");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(
+                acct.engine.lock().await.is_some(),
+                "the no-op path must not consume the engine slot"
+            );
+            let before = ticks.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            assert!(
+                ticks.load(Ordering::SeqCst) > before,
+                "the engine task must still be running — the already-signed-out path \
+                 must not attempt an engine abort"
+            );
+        }
+    }
+
+    /// Fix round 3, M2 (re-review): an already-signed-out sign-out after an engine stop that was never confirmed. On
+    /// macOS and Linux this path takes the engine slot through the one helper, so it refuses with the same sentence as
+    /// the signed-in path (the stop it would need cannot be trusted; a restart clears the flag). Windows keeps its
+    /// already-signed-out path, which takes no slot and succeeds.
+    #[tokio::test]
+    async fn an_already_signed_out_sign_out_after_an_unconfirmed_engine_stop_refuses_on_macos_and_linux() {
+        crate::state_paths::init_for_test();
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-unconfirmed-acct");
+        #[cfg(target_os = "macos")]
+        {
+            let (handle, rx) = crate::finder_setup::driver::FinderSetupHandle::for_test(
+                crate::finder_setup::driver::FinderSetupView::initial(
+                    crate::finder_setup::launch_location::LaunchLocation::Applications,
+                ),
+            );
+            let _ = state.finder_setup.set(handle);
+            tokio::spawn(super::confirm_every_finder_event(rx));
+        }
+        set_auth_present(&state, false);
         assert!(
-            acct.engine.lock().await.is_some(),
-            "the no-op path must not consume the engine slot"
+            acct.session.lock().unwrap().is_none(),
+            "the premise: already signed out"
         );
-        let before = ticks.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+        let result = clear_session_impl(&state, false).await;
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            result,
+            Err(UNCONFIRMED_ENGINE_STOP_ERROR.into()),
+            "macOS/Linux: refused"
+        );
+        #[cfg(target_os = "windows")]
+        assert!(result.is_ok(), "Windows: unchanged, {result:?}");
         assert!(
-            ticks.load(Ordering::SeqCst) > before,
-            "the engine task must still be running — the already-signed-out path \
-             must not attempt an engine abort"
+            acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+            "the flag stays until a restart"
+        );
+    }
+
+    /// Fix round 3, M3: the already-signed-out path's log line and comments say what each platform does now.
+    #[test]
+    fn the_already_signed_out_sign_out_says_what_each_platform_does() {
+        let production = production_source();
+        let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        let windows = clear
+            .find("#[cfg(target_os = \"windows\")]\n        tracing::info!(\"sign-out requested while already signed out; skipping engine stop and Cloud Files teardown\");")
+            .expect("Windows says it skips the engine stop");
+        let elsewhere = clear
+            .find("#[cfg(not(target_os = \"windows\"))]\n        tracing::info!(\"sign-out requested while already signed out; stopping any engine still in the slot\");")
+            .expect("macOS and Linux say they stop any engine");
+        assert!(windows < elsewhere, "{clear}");
+        assert_eq!(
+            clear.matches("skipping engine stop").count(),
+            1,
+            "only Windows says it skips the stop:\n{clear}"
+        );
+        assert!(
+            !clear.contains("stopped nothing and holds none, so it takes the slot here"),
+            "the stale comment is gone"
+        );
+        assert!(
+            clear.contains("except the Windows\n    // already-signed-out path, which stopped nothing and holds none"),
+            "{clear}"
+        );
+        assert!(
+            !clear.contains("→ skip the engine stop and the Cloud"),
+            "the Bug B comment no longer says every platform skips the stop"
         );
     }
 
@@ -12912,7 +17766,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let first = clear_session_impl(&state)
+        let first = clear_session_impl(&state, false)
             .await
             .expect_err("the first attempt must fail while the engine stop is unconfirmed");
         assert!(
@@ -12920,7 +17774,7 @@ mod signout_teardown_tests {
             "first attempt must be the unconfirmed-stop refusal, got: {first}"
         );
 
-        let second = clear_session_impl(&state)
+        let second = clear_session_impl(&state, false)
             .await
             .expect_err("the retry must also be refused, not silently proceed past the stop gate");
         assert!(
@@ -12938,21 +17792,25 @@ mod signout_teardown_tests {
 #[cfg(test)]
 mod startup_session_tests {
     use super::{
-        AppState, StartupSessionCheck, discard_unusable_startup_session, probe_startup_session,
-        set_auth_email, set_auth_present,
+        AppState, StartupSessionCheck, discard_unusable_startup_session, probe_startup_session, set_auth_email,
+        set_auth_present,
     };
     use crate::account::{AccountId, synthesize_single_account};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
     /// Minimal loop-accepting HTTP/1.1 mock that answers EVERY request with
-    /// one fixed status line and an empty JSON object.
+    /// one fixed status line and one fixed JSON body.
     struct AuthMeMockServer {
         base_url: String,
     }
 
     impl AuthMeMockServer {
         fn start(status_line: &'static str) -> Self {
+            Self::start_with_body(status_line, "{}")
+        }
+
+        fn start_with_body(status_line: &'static str, body: &'static str) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             std::thread::spawn(move || {
@@ -12960,7 +17818,6 @@ mod startup_session_tests {
                     let Ok(mut stream) = stream else { return };
                     let mut buf = [0u8; 4096];
                     let _ = stream.read(&mut buf);
-                    let body = "{}";
                     let response = format!(
                         "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -12987,7 +17844,7 @@ mod startup_session_tests {
         let server = AuthMeMockServer::start("200 OK");
         assert_eq!(
             probe_startup_session(&server.base_url, "stored-token").await,
-            StartupSessionCheck::Authorized,
+            StartupSessionCheck::Authorized { profile: None },
             "a healthy token must classify as Authorized and restore normally"
         );
     }
@@ -13033,6 +17890,9 @@ mod startup_session_tests {
 
         // None: no session email to preserve — also proves the helper makes
         // no config write when it has nothing to remember.
+        #[cfg(not(target_os = "windows"))]
+        discard_unusable_startup_session(&state, &acct, None, &mut acct.session_generation());
+        #[cfg(target_os = "windows")]
         discard_unusable_startup_session(&state, &acct, None);
 
         assert!(
@@ -13047,6 +17907,10891 @@ mod startup_session_tests {
             acct.auth_email.lock().unwrap().is_none(),
             "the mirrored signed-in email must be cleared"
         );
+    }
+
+    #[test]
+    fn a_startup_401_drops_only_the_token_on_macos_and_linux_and_everything_on_windows() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let non_windows = production
+            .find("#[cfg(not(target_os = \"windows\"))]\nfn discard_unusable_startup_session(")
+            .expect("a non-Windows discard");
+        let body = &production[non_windows..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.contains("clear_keychain_session_token("),
+            "R8: only the token goes"
+        );
+        assert!(!body.contains("clear_keychain_session("), "the keys and email stay");
+        let windows = production
+            .find("#[cfg(target_os = \"windows\")]\nfn discard_unusable_startup_session(")
+            .expect("Windows keeps its discard");
+        let body = &production[windows..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.contains("clear_keychain_session(acct.id.as_str())"),
+            "Windows is unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_authorized_probe_returns_the_account_profile() {
+        let server = AuthMeMockServer::start_with_body(
+            "200 OK",
+            r#"{"user_id":"u-1","email":"sam@beebeeb.io","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#,
+        );
+        match probe_startup_session(&server.base_url, "stored-token").await {
+            StartupSessionCheck::Authorized { profile: Some(profile) } => assert_eq!(profile.user_id, "u-1"),
+            other => panic!("expected an authorized probe with a profile, got {other:?}"),
+        }
+        let unparseable = AuthMeMockServer::start_with_body("200 OK", "{}");
+        assert_eq!(
+            probe_startup_session(&unparseable.base_url, "stored-token").await,
+            StartupSessionCheck::Authorized { profile: None },
+            "an unreadable body still means authorized; only the profile is missing"
+        );
+    }
+
+    /// "Already signed out" can still hold the vault key and the email (R9). Both sign-out branches verify that nothing
+    /// of the account is left before they report success.
+    #[test]
+    fn a_switch_after_a_revoked_token_leaves_no_vault_key_behind() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let clear = &production[production.find("async fn clear_session_impl(").unwrap()..];
+        let clear = &clear[..clear.find("\n}\n").unwrap()];
+        let already = &clear[clear
+            .find("if already_signed_out {\n        // Already signed out")
+            .expect("the already-signed-out branch")..];
+        let already = &already[..already.find("outcome: SignOutOutcome::NotSignedIn,").unwrap()];
+        // Task 12 fix round 1, item 2: the Keychain clear and its check run in the sign-out's last turn on macOS/Linux.
+        assert!(
+            already.contains("finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;"),
+            "the already-signed-out branch verifies"
+        );
+        let tail = &clear[clear.rfind("if already_signed_out {").unwrap()..];
+        let tail = &tail[tail.find("outcome: SignOutOutcome::NotSignedIn,").unwrap()..];
+        assert!(
+            tail.contains("finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;"),
+            "the signed-in branch verifies"
+        );
+        let last = &production[production.find("fn finish_sign_out_turn(").unwrap()..];
+        let last = &last[..last.find("\n}\n").unwrap()];
+        let cleared = last
+            .find("clear_keychain_session_holding(&write, acct.id.as_str())")
+            .expect("the Keychain clear");
+        let checked = last
+            .find("ensure_keychain_holds_no_account(acct.id.as_str())")
+            .expect("the check");
+        let moved = last
+            .find("acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::SignOut);")
+            .expect("the move");
+        let released = last.find("drop(write);").expect("the turn ends");
+        assert!(
+            cleared < checked && checked < moved && moved < released,
+            "clear, check, then move the generation, then release:\n{last}"
+        );
+    }
+
+    /// Spec §5.6: the server's answer to the key proof. A `400` decides only with one of two codes, each matched
+    /// EXACTLY: `invalid_recovery_phrase` is a mismatch, `recovery_check_missing` is "no check on file". Any other
+    /// `400` (another code, a near miss, a longer code, no code, no JSON, a body the server's extractor rejected, an
+    /// intermediary's page) says nothing about the key: it is an error, like a `5xx`, never a mismatch. The
+    /// recovery-phrase unlock reads "no check on file" as "not this account's", as before, and any other `400` as "could
+    /// not verify".
+    #[tokio::test]
+    async fn the_key_proof_decides_only_on_the_two_exact_codes_and_any_other_400_cannot_verify() {
+        let key = beebeeb_core::kdf::MasterKey::from_bytes([6u8; 32]);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let answer = |status, body| {
+            let server = AuthMeMockServer::start_with_body(status, body);
+            let client = client.clone();
+            let key = &key;
+            async move { super::recovery_check_answer(&client, &server.base_url, "tok", key).await }
+        };
+        use super::RecoveryCheckAnswer::{Matches, Mismatch, NoCheckOnFile};
+        let answers: [(&'static str, &'static str, super::RecoveryCheckAnswer); 3] = [
+            (
+                "400 Bad Request",
+                r#"{"error":"recovery_check_missing"}"#,
+                NoCheckOnFile,
+            ),
+            ("400 Bad Request", r#"{"error":"invalid_recovery_phrase"}"#, Mismatch),
+            ("200 OK", r#"{"valid":true}"#, Matches),
+        ];
+        for (status, body, expected) in answers {
+            assert_eq!(answer(status, body).await, Ok(expected), "{status} {body}");
+        }
+        let not_an_answer: [&'static str; 11] = [
+            r#"{"error":"recovery_check_missing_or_other"}"#,
+            r#"{"error":"Recovery_Check_Missing"}"#,
+            r#"{"error":"Invalid_Recovery_Phrase"}"#,
+            r#"{"error":"invalid_recovery_phrase "}"#,
+            r#"{"error":"bad_request"}"#,
+            r#"{"error":42}"#,
+            r#"{}"#,
+            "not json",
+            "",
+            "Failed to deserialize the JSON body into the target type: missing field `recovery_check`",
+            "<html><body><h1>400 Bad Request</h1></body></html>",
+        ];
+        for body in not_an_answer {
+            assert!(
+                answer("400 Bad Request", body).await.is_err(),
+                "a 400 without one of the two codes cannot verify, never a mismatch: {body:?}"
+            );
+        }
+        let missing = AuthMeMockServer::start_with_body("400 Bad Request", r#"{"error":"recovery_check_missing"}"#);
+        assert_eq!(
+            super::recovered_key_matches_account(&client, &missing.base_url, "tok", &key).await,
+            Ok(false),
+            "the unlock: no check on file proves nothing, so the phrase is not accepted"
+        );
+        let mismatch = AuthMeMockServer::start_with_body("400 Bad Request", r#"{"error":"invalid_recovery_phrase"}"#);
+        assert_eq!(
+            super::recovered_key_matches_account(&client, &mismatch.base_url, "tok", &key).await,
+            Ok(false),
+            "the unlock: a key that is not the account's is not accepted"
+        );
+        let other = AuthMeMockServer::start_with_body("400 Bad Request", "not json");
+        assert!(
+            super::recovered_key_matches_account(&client, &other.base_url, "tok", &key)
+                .await
+                .is_err(),
+            "the unlock: any other 400 cannot verify, so it is not called a wrong phrase"
+        );
+    }
+
+    /// The production part of `lib.rs` (the test modules start at `mod tests`).
+    fn production() -> String {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        source[..source.find("#[cfg(test)]\nmod tests {").unwrap()].to_string()
+    }
+
+    /// The body of the function whose signature starts with `signature`.
+    fn body_of(production: &str, signature: &str) -> String {
+        let at = production
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} exists"));
+        let body = &production[at..];
+        body[..body.find("\n}\n").unwrap()].to_string()
+    }
+
+    /// Fix round 1, item 3 (review M1): the 2FA challenge store's generation check is macOS and Linux only (Windows
+    /// orders that step with its transition lock and attempt fence, as before), and it comes before the challenge is
+    /// stored.
+    #[test]
+    fn the_2fa_challenge_check_is_macos_and_linux_only_and_comes_before_the_store() {
+        let login = body_of(&production(), "async fn desktop_login(");
+        let check = login.find("if !acct.session_unchanged_since(turn) {\n                    return Err(SessionChanged::of(&acct).into());").expect("the check");
+        let block = login[..check]
+            .rfind("#[cfg(not(target_os = \"windows\"))]\n            {")
+            .expect("a macOS/Linux block");
+        assert!(
+            login[block..check].lines().count() <= 4,
+            "the check sits in that block:\n{}",
+            &login[block..check]
+        );
+        assert!(
+            check < login.find("*guard = Some(Pending2fa {").expect("the store"),
+            "checked before it is stored"
+        );
+    }
+
+    /// Fix round 1, item 6 (review M5): the `account_profile` command's cache is written only while no session
+    /// transition happened since its fetch began, and the command captures before it fetches.
+    #[test]
+    fn the_account_profile_cache_is_written_only_in_its_turn() {
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId("t12f1-profile-cache".to_string()));
+        let acct = state.active_account().unwrap();
+        let profile: crate::account_dto::AccountProfile = serde_json::from_str(
+            r#"{"user_id":"u-1","email":"sam@beebeeb.io","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let turn = acct.session_generation();
+        drop(super::end_sessions_in_flight(
+            &acct,
+            crate::account::SessionTransition::SignOut,
+        ));
+        assert!(
+            !super::cache_profile_in_turn(&acct, &turn, profile.clone()),
+            "a sign-out landed while the fetch ran"
+        );
+        assert!(
+            acct.cached_profile.lock().unwrap().is_none(),
+            "nothing is cached for the old session"
+        );
+        let turn = acct.session_generation();
+        assert!(super::cache_profile_in_turn(&acct, &turn, profile.clone()));
+        assert_eq!(
+            acct.cached_profile
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|p| p.user_id.clone())
+                .as_deref(),
+            Some("u-1")
+        );
+        assert!(acct.session_unchanged_since(turn), "caching moves no generation");
+        let command = body_of(&production(), "async fn account_profile(");
+        let captured = command.find("let turn = acct.session_generation();").expect("captured");
+        assert!(
+            captured < command.find("api.account_profile().await").unwrap(),
+            "before the fetch:\n{command}"
+        );
+        assert!(
+            command.contains("cache_profile_in_turn(&acct, &turn, profile.clone());"),
+            "{command}"
+        );
+        assert!(
+            !command.contains("acct.cached_profile.lock() {"),
+            "no unchecked write:\n{command}"
+        );
+    }
+
+    /// Fix round 1, item 8 (review M7): every refusal says what fits its path, each in its own sentence.
+    #[test]
+    fn every_refusal_names_its_path_in_its_own_sentence() {
+        use super::{
+            KEYCHAIN_UNLOCK_INTERRUPTED, RECOVERY_UNLOCK_LOCKED_MEANWHILE, SESSION_CHANGED_WHILE_WAITING,
+            SIGN_IN_LOCKED_MEANWHILE, SessionChanged, UNLOCK_ACCOUNT_CHANGED,
+        };
+        assert_eq!(
+            SESSION_CHANGED_WHILE_WAITING,
+            "Something changed on this computer while Beebeeb was working; nothing was saved. Try again."
+        );
+        assert_eq!(
+            SIGN_IN_LOCKED_MEANWHILE,
+            "Beebeeb was locked while signing in. Sign in again."
+        );
+        assert_eq!(
+            RECOVERY_UNLOCK_LOCKED_MEANWHILE,
+            "Beebeeb was locked while the recovery phrase was being checked, so nothing was saved. Enter the phrase once more."
+        );
+        assert_eq!(
+            KEYCHAIN_UNLOCK_INTERRUPTED,
+            "Beebeeb was signed out or locked while unlocking. Try again."
+        );
+        assert_eq!(
+            UNLOCK_ACCOUNT_CHANGED,
+            "You were signed out, or another account signed in, while Beebeeb was unlocking. Try again."
+        );
+        let (other, lock) = (SessionChanged { by_lock: false }, SessionChanged { by_lock: true });
+        assert_eq!(
+            (other.sign_in_sentence(), lock.sign_in_sentence()),
+            (SESSION_CHANGED_WHILE_WAITING, SIGN_IN_LOCKED_MEANWHILE)
+        );
+        assert_eq!(
+            (other.recovery_unlock_sentence(), lock.recovery_unlock_sentence()),
+            (UNLOCK_ACCOUNT_CHANGED, RECOVERY_UNLOCK_LOCKED_MEANWHILE)
+        );
+        assert_eq!(
+            (other.keychain_unlock_sentence(), lock.keychain_unlock_sentence()),
+            (KEYCHAIN_UNLOCK_INTERRUPTED, KEYCHAIN_UNLOCK_INTERRUPTED)
+        );
+        assert_eq!(
+            String::from(lock),
+            SIGN_IN_LOCKED_MEANWHILE,
+            "a sign-in's refusal by default"
+        );
+        let all = [
+            SESSION_CHANGED_WHILE_WAITING,
+            SIGN_IN_LOCKED_MEANWHILE,
+            RECOVERY_UNLOCK_LOCKED_MEANWHILE,
+            KEYCHAIN_UNLOCK_INTERRUPTED,
+            UNLOCK_ACCOUNT_CHANGED,
+        ];
+        assert_eq!(
+            all.iter().collect::<std::collections::HashSet<_>>().len(),
+            all.len(),
+            "one distinct sentence per path"
+        );
+        // What moved the generation last decides.
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId("t12f1-what-moved".to_string()));
+        let acct = state.active_account().unwrap();
+        for (by, by_lock) in [
+            (crate::account::SessionTransition::Lock, true),
+            (crate::account::SessionTransition::SignOut, false),
+            (crate::account::SessionTransition::Write, false),
+        ] {
+            drop(super::end_sessions_in_flight(&acct, by));
+            assert_eq!(SessionChanged::of(&acct), SessionChanged { by_lock }, "{by:?}");
+        }
+    }
+
+    /// Fix round 1, item 9 (review M9): each command reaches the seam its behaviour is tested at, and the window focus and
+    /// "Try again" ask an unidentified session again (the report of round 0 claimed these pins; now they exist).
+    #[test]
+    fn every_command_reaches_its_tested_seam() {
+        let production = production();
+        for (command, seam) in [
+            (
+                "async fn unlock_vault(",
+                "install_keychain_session(&state, &acct, &mut turn, session)?;",
+            ),
+            (
+                "async fn desktop_unlock_with_recovery_phrase(",
+                "install_recovered_session(&state, &acct, &mut turn, &token, email, &verified_key)?;",
+            ),
+            (
+                "pub(crate) async fn apply_session(",
+                "install_new_session_or_revoke(state, &acct, turn, &token, master_key, email, profile, &runner::api_base_url()).await?;",
+            ),
+            (
+                "async fn settle_sign_in(",
+                "decide_sign_in_in_turn(state, &acct, &sources, profile, token, &runner::api_base_url(), turn).await?",
+            ),
+            (
+                "async fn restore_session_inner(",
+                "if !restore_stored_session(&state, &acct, &runner::api_base_url()).await {",
+            ),
+            (
+                "async fn account_profile(",
+                "cache_profile_in_turn(&acct, &turn, profile.clone());",
+            ),
+            (
+                "async fn on_app_activated(",
+                "identify_then_start(app, IdentifyPace::Debounced).await;",
+            ),
+            (
+                "async fn finder_setup_retry(",
+                "finder_setup_try_again(&state, &runner::api_base_url()).await",
+            ),
+            // Fix round 2, item 2: a naming in the background starts only an empty slot.
+            (
+                "async fn identify_then_start(",
+                "start_engine_unless_running(app.clone(), &state).await",
+            ),
+            (
+                "async fn start_engine_unless_running(",
+                "keep_or_rebind_after_naming(&acct, &mut engine_slot, owner.as_ref(), &named, |slot| {",
+            ),
+            (
+                "async fn keep_or_rebind_after_naming<",
+                "keep_or_start_after_naming(engine_slot, start)",
+            ),
+        ] {
+            // Read through `squeeze`: rustfmt wraps the longer of these calls over lines.
+            assert!(
+                crate::source_pin::squeeze(&body_of(&production, command)).contains(&crate::source_pin::squeeze(seam)),
+                "{command} reaches {seam}"
+            );
+        }
+        let try_again = body_of(&production, "async fn finder_setup_try_again(");
+        let only_without_an_email = try_again
+            .find("if session_in_memory_has_no_email(state) {")
+            .expect("Try again asks only for a session with no email (area A M8)");
+        let asked = try_again
+            .find("identify_unidentified_session(state, base_url, std::time::Instant::now(), IdentifyPace::Now).await;")
+            .expect("Try again asks first, not debounced");
+        assert!(
+            only_without_an_email < asked
+                && asked < try_again.find("finder_setup_retry_impl(state)").expect("then retries"),
+            "{try_again}"
+        );
+        let then_start = crate::source_pin::squeeze(&body_of(&production, "async fn identify_then_start("));
+        let started = then_start
+            .find(&crate::source_pin::squeeze(
+                "start_engine_unless_running(app.clone(), &state).await",
+            ))
+            .expect("a naming starts the engine");
+        let notified = then_start
+            .find(&crate::source_pin::squeeze(
+                "notify_finder(&state, finder_setup::core::Trigger::KeysArrived);",
+            ))
+            .expect("and tells the reconciler keys are here (area A M7)");
+        assert!(
+            then_start.find("ifnamed{").is_some_and(|named| named < started) && started < notified,
+            "{then_start}"
+        );
+        let activation = body_of(&production, "async fn identify_on_app_activation(");
+        assert!(
+            activation.contains("identify_unidentified_session(state, base_url, now, IdentifyPace::Debounced).await"),
+            "{activation}"
+        );
+        let then_start = body_of(&production, "async fn identify_then_start(");
+        assert!(
+            crate::source_pin::squeeze(&then_start).contains(&crate::source_pin::squeeze(
+                "IdentifyPace::Debounced => { identify_on_app_activation(&state, &runner::api_base_url(), std::time::Instant::now()).await }"
+            )),
+            "{then_start}"
+        );
+        let run = body_of(&production, "pub fn run(");
+        let focus = run.find("#[cfg(not(target_os = \"windows\"))]\n            if let tauri::WindowEvent::Focused(true) = event {\n                tauri::async_runtime::spawn(on_app_activated(window.app_handle().clone()));").expect("the window focus asks again");
+        assert!(
+            focus > run.find("handle.app_activated();").unwrap(),
+            "after the reconciler's own activation check"
+        );
+    }
+
+    /// Fix round 2, item 6: the `account_profile` cache's doc says what is true: the cached profile IS a sign-in input.
+    #[test]
+    fn the_profile_cache_doc_says_the_profile_is_a_sign_in_input() {
+        let production = production();
+        let at = production.find("fn cache_profile_in_turn(").expect("the cache");
+        let doc = &production[production[..at]
+            .rfind("/// The `account_profile` command's cache")
+            .expect("its doc")..at];
+        assert!(
+            doc.contains("The cached profile IS an input to a\n/// sign-in's decision"),
+            "{doc}"
+        );
+        assert!(
+            !doc.contains("changes\n/// nothing a sign-in decides on"),
+            "the old claim is gone:\n{doc}"
+        );
+    }
+
+    /// Fix round 1, item 10 (P3-C, part): the two older copies of the key and of its check are wiped.
+    #[test]
+    fn the_older_key_and_check_copies_are_wiped() {
+        let production = production();
+        let load = body_of(&production, "fn load_session_from_vault<");
+        assert!(
+            load.contains("let mut master_key = zeroize::Zeroizing::new([0u8; 32]);"),
+            "{load}"
+        );
+        assert!(
+            load.contains("master_key: *master_key,"),
+            "the session's copy is the only one that outlives it:\n{load}"
+        );
+        let check = body_of(&production, "async fn recovery_check_answer(");
+        assert!(
+            check.contains("let recovery_check = zeroize::Zeroizing::new(encode_base64("),
+            "{check}"
+        );
+        assert!(
+            crate::source_pin::squeeze(&check).contains(&crate::source_pin::squeeze(
+                ".json(&RecoveryCheckBody { recovery_check: &recovery_check })"
+            )),
+            "{check}"
+        );
+        assert!(
+            !check.contains("serde_json::json!({ \"recovery_check\""),
+            "no second copy in a JSON value:\n{check}"
+        );
+    }
+
+    /// Lead ruling 13 (Task 12): the Keychain writers borrow the vault key; none takes it by value (a by-value argument
+    /// is a copy in a frame nobody wipes).
+    #[test]
+    fn the_keychain_writers_borrow_the_vault_key() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        for signature in [
+            "fn persist_vault_key_to_keychain(",
+            "fn persist_session_to_keychain(",
+            "fn install_new_session(",
+            "fn install_recovered_session(",
+            "fn store_recovered_vault_key(",
+        ] {
+            let function = &production[production.find(signature).unwrap_or_else(|| panic!("{signature}"))..];
+            let parameters = &function[..function.find(") ->").unwrap()];
+            assert!(
+                parameters.contains(": &[u8; 32]"),
+                "{signature} borrows the key:\n{parameters}"
+            );
+            assert!(
+                !parameters.contains(": [u8; 32]"),
+                "{signature} takes no key by value:\n{parameters}"
+            );
+        }
+        assert!(
+            !production.contains("SecretBytes::new_master_key(*"),
+            "no caller copies the key out to build the stored one"
+        );
+    }
+
+    /// Lead ruling 12 (Task 12): unreadable local account data at sign-in has its own outcome and its own sentence (the
+    /// one Lane T renders), never the "connect to the internet" one; nothing is stored, so the new session is revoked.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unreadable_local_account_data_has_its_own_sentence() {
+        assert_eq!(
+            super::SIGN_IN_LOCAL_DATA_UNREADABLE,
+            "Beebeeb couldn’t read this Mac’s account data. Try again."
+        );
+        assert_ne!(super::SIGN_IN_LOCAL_DATA_UNREADABLE, super::SIGN_IN_ACCOUNT_UNKNOWN);
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let settle = &production[production.find("async fn settle_sign_in(").unwrap()..];
+        let settle = &settle[..settle.find("\n}\n").unwrap()];
+        assert!(
+            settle.contains("reauth::SignInKind::LocalDataUnreadable => Err(ReauthError::before_store(SIGN_IN_LOCAL_DATA_UNREADABLE)),"),
+            "its own sentence, and nothing stored:\n{settle}"
+        );
+    }
+}
+
+/// Lead ruling 4 (Task 12): the owner record of the local data, completed with the account's user id and the server's
+/// spelling of its email while the session still works. Only an owner that is this account is completed.
+#[cfg(test)]
+mod owner_backfill_tests {
+    use super::*;
+    use crate::account_binding::Identity;
+
+    fn profile(user_id: &str, email: &str) -> account_dto::AccountProfile {
+        serde_json::from_str(&format!(
+            r#"{{"user_id":"{user_id}","email":"{email}","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}}"#
+        ))
+        .unwrap()
+    }
+
+    /// The owner after a backfill from `profile`, starting from `owner` (`None`: no owner recorded), and what it returned.
+    fn backfilled(
+        owner: Option<Identity>,
+        profile: &account_dto::AccountProfile,
+    ) -> (Result<bool, String>, Option<Identity>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        if let Some(owner) = &owner {
+            db.set_owner(owner).unwrap();
+        }
+        let result = backfill_local_data_owner(&SessionWrite::for_test(), dir.path(), profile);
+        (result, db.owner().unwrap())
+    }
+
+    #[test]
+    fn a_legacy_email_only_owner_gains_the_user_id_and_the_servers_spelling() {
+        let sam = profile("u-1", "sam@beebeeb.io");
+        let complete = Identity::new(Some("u-1"), Some("sam@beebeeb.io"));
+        assert_eq!(
+            backfilled(Some(Identity::new(None, Some("sam@beebeeb.io"))), &sam),
+            (Ok(true), Some(complete.clone())),
+            "the same spelling"
+        );
+        assert_eq!(
+            backfilled(Some(Identity::new(None, Some("Sam@Beebeeb.IO"))), &sam),
+            (Ok(true), Some(complete.clone())),
+            "another letter case (ASCII)"
+        );
+        assert_eq!(
+            backfilled(Some(Identity::new(Some("u-1"), Some("Sam@Beebeeb.IO"))), &sam),
+            (Ok(true), Some(complete.clone())),
+            "its own id: the server's spelling"
+        );
+        assert_eq!(
+            backfilled(Some(complete.clone()), &sam),
+            (Ok(false), Some(complete)),
+            "already complete: nothing written"
+        );
+    }
+
+    #[test]
+    fn an_owner_that_is_not_this_account_is_left_to_the_binding() {
+        let sam = profile("u-1", "sam@beebeeb.io");
+        for owner in [
+            Identity::new(Some("u-2"), Some("sam@beebeeb.io")),
+            Identity::new(None, Some("kim@beebeeb.io")),
+            Identity::new(None, Some("sám@beebeeb.io")),
+            Identity::new(Some("u-2"), None),
+        ] {
+            assert_eq!(
+                backfilled(Some(owner.clone()), &sam),
+                (Ok(false), Some(owner.clone())),
+                "{owner:?}"
+            );
+        }
+        assert_eq!(backfilled(None, &sam), (Ok(false), None), "no owner: nothing invented");
+        assert_eq!(
+            backfilled(
+                Some(Identity::new(None, Some("sam@beebeeb.io"))),
+                &profile(" ", "sam@beebeeb.io")
+            )
+            .1,
+            Some(Identity::new(None, Some("sam@beebeeb.io"))),
+            "a profile without an id completes nothing"
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            backfill_local_data_owner(&SessionWrite::for_test(), empty.path(), &sam),
+            Ok(false),
+            "no database yet"
+        );
+        assert!(!empty.path().join("state.db").exists(), "and none is created");
+    }
+}
+
+/// Lead ruling T1-4: the OS's message never reaches a Tauri command's return value, a saved config
+/// or a toast. `FpError::redacted()` is tested in `finder_setup::error`; these pin the two
+/// `lib.rs` shims that hand a bridge error to those places.
+#[cfg(all(test, target_os = "macos"))]
+mod finder_error_redaction_tests {
+    use super::*;
+    use crate::finder_setup::error::{COCOA_DOMAIN, FpError, POSIX_DOMAIN};
+
+    const PATH_MESSAGE: &str = "The folder \u{201c}/Users/sam/Secret Folder\u{201d} already exists.";
+
+    fn shim_body(signature: &str) -> String {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let marker = format!("#[cfg(target_os = \"macos\")]\n{signature} {{\n");
+        let start = source.find(&marker).unwrap_or_else(|| panic!("{signature} exists")) + marker.len();
+        let end = start + source[start..].find("\n}\n").expect("the shim ends");
+        source[start..end].to_string()
+    }
+
+    #[test]
+    fn the_bridge_error_text_a_person_can_see_is_redacted() {
+        let error = || FpError::new(COCOA_DOMAIN, 516, PATH_MESSAGE).with_underlying(POSIX_DOMAIN, 17);
+        let removed = user_facing_fp::<()>(Err(error())).unwrap_err();
+        let located = user_facing_fp::<Option<String>>(Err(error())).unwrap_err();
+        for text in [&removed, &located] {
+            assert_eq!(text, "NSCocoaErrorDomain 516 (underlying NSPOSIXErrorDomain 17)");
+            assert!(
+                !text.contains("Secret Folder") && !text.contains("/Users/sam"),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            user_facing_fp(Ok::<_, FpError>(Some("/p".to_string()))),
+            Ok(Some("/p".to_string()))
+        );
+    }
+
+    /// Lead ruling T1-4 / 11 (task 8): `finder_domain_user_enabled` returns this to the frontend.
+    /// The plan's snippet used `FpError`'s `Display` here, which carries the OS's message.
+    #[test]
+    fn the_domain_user_enabled_read_goes_through_the_redacting_conversion() {
+        let body = shim_body("fn file_provider_domain_user_enabled() -> Result<Option<bool>, String>");
+        assert!(
+            body.contains("user_facing_fp(finder_setup::macos_ports::domain_state())"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("to_string") && !body.contains("{e}") && !body.contains("{error}"),
+            "builds text from Display: {body}"
+        );
+    }
+
+    /// Lead ruling T8-gate-all (4) moved the removal into the reconciler and the other two reads
+    /// behind the gate: no macOS `remove_file_provider_domain` is left to redact, and the visible-URL
+    /// read goes through the gated wrapper and the one redacting conversion.
+    #[test]
+    fn the_visible_location_goes_through_the_gate_and_the_one_redacting_conversion() {
+        let body = shim_body("fn file_provider_visible_location() -> Result<Option<String>, String>");
+        assert_eq!(body.trim(), "user_facing_fp(finder_setup::macos_ports::visible_url())");
+        assert!(!body.contains("to_string"), "builds text from Display: {body}");
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        assert!(
+            !source.contains("#[cfg(target_os = \"macos\")]\nfn remove_file_provider_domain()"),
+            "a Mac has no direct removal: the reconciler owns it"
+        );
+    }
+}
+
+/// Task 9 fix round 1 (item D): no unit test of the lib reaches the developer's real Keychain. The
+/// sign-out tests used to: a sign-out ends in `clear_keychain_session`, which also clears the legacy
+/// flat Keychain items. In a macOS test build `keychain::PlatformKeychainStore` is an in-memory store
+/// (`keychain::TestKeychainStore`), and no source file but `keychain.rs` can name the real one.
+#[cfg(all(test, target_os = "macos"))]
+mod keychain_isolation_tests {
+    use super::finder_setup_command_tests::without_items;
+    use super::keychain::{self, AuthSecretStore, SessionToken};
+
+    fn type_of<T>(_: &T) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    #[test]
+    fn no_lib_test_can_resolve_the_real_macos_keychain_store() {
+        let segmented = keychain::platform_keychain_store_for("keychain-isolation-guard");
+        let legacy = keychain::legacy_platform_keychain_store();
+        let names = [
+            ("platform_keychain_store_for(id)", type_of(&segmented)),
+            ("legacy_platform_keychain_store()", type_of(&legacy)),
+            (
+                "keychain::PlatformKeychainStore",
+                std::any::type_name::<keychain::PlatformKeychainStore>(),
+            ),
+        ];
+        for (constructor, name) in names {
+            println!("keychain store type a lib test gets from {constructor}: {name}");
+            // Asserted BEFORE anything is saved, so a red guard has not touched the real Keychain.
+            assert!(
+                name.ends_with("::TestKeychainStore"),
+                "{constructor} resolves {name}, not the in-memory test store"
+            );
+            assert!(
+                !name.contains("MacOsKeychainStore"),
+                "{constructor} resolves the real Keychain store: {name}"
+            );
+        }
+        // It behaves like a store: a save is readable, the legacy layout is a separate namespace, and a
+        // delete clears it. All of it in memory.
+        let token = SessionToken::new("tok-isolation-guard".to_string()).unwrap();
+        segmented.save_session_token(&token).unwrap();
+        assert_eq!(
+            segmented
+                .load_session_token()
+                .unwrap()
+                .map(|t| t.expose_for_request().to_string()),
+            Some("tok-isolation-guard".into())
+        );
+        assert!(
+            legacy.load_session_token().unwrap().is_none(),
+            "the legacy flat layout is a separate namespace"
+        );
+        segmented.delete_session_token().unwrap();
+        assert!(segmented.load_session_token().unwrap().is_none());
+        assert!(keychain::test_store_touched(Some("keychain-isolation-guard")));
+    }
+
+    /// The real store is only reachable through `PlatformKeychainStore`: no file but `keychain.rs`
+    /// names it or its FFI module, and every vault in the app's production code is built from one of the
+    /// two constructors (so a sign-out or lock test, which can only run production code, gets the
+    /// in-memory store).
+    #[test]
+    fn the_real_store_is_named_nowhere_but_keychain_rs_and_every_vault_uses_the_two_constructors() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read the source dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        let mut vaults = 0;
+        for file in files {
+            let name = file.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            let text = std::fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
+            let production = without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]);
+            let code: String = production
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if name != "keychain.rs" {
+                for real in ["MacOsKeychainStore", "macos_keychain"] {
+                    assert!(!code.contains(real), "{name} names the real Keychain store ({real})");
+                }
+            }
+            if name == "lib.rs" {
+                for (at, _) in code.match_indices("AuthVault::new(") {
+                    let argument = &code[at + "AuthVault::new(".len()..];
+                    assert!(
+                        argument.starts_with("platform_keychain_store_for(")
+                            || argument.starts_with("keychain::legacy_platform_keychain_store()"),
+                        "a vault built from something else: {}",
+                        &code[at..(at + 80).min(code.len())]
+                    );
+                    vaults += 1;
+                }
+            }
+        }
+        assert!(vaults >= 8, "the census saw the app's vaults: {vaults}");
+    }
+}
+
+/// A stand-in for the Finder reconciler that confirms every Lock and every removal and ignores the
+/// rest. On a Mac, Lock and Sign-out wait for the reconciler and report one they cannot confirm
+/// (Task 9), so a test that runs the real command and expects success installs this.
+#[cfg(test)]
+async fn confirm_every_finder_event(mut rx: tokio::sync::mpsc::UnboundedReceiver<finder_setup::driver::Event>) {
+    while let Some(event) = rx.recv().await {
+        match event {
+            finder_setup::driver::Event::Remove { ack, .. } => {
+                let _ = ack.send((Ok(()), finder_removal::KeptFolder::default()));
+            }
+            finder_setup::driver::Event::Lock { ack } => {
+                let _ = ack.send(());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Task 9 of plan 1834 (spec 2026-10-06 §5.3 and §8) and the lead's rulings on it: every trigger
+/// reaches the reconciler, and the order of Lock and Sign-out against the reconciler, the engine and
+/// the keys is pinned. The wiring is asserted on the source (like the other wiring tests: `run()`
+/// needs a real window system); the behaviour is in `finder_lock_and_sign_out_tests`.
+#[cfg(test)]
+mod finder_setup_wiring_tests {
+    use super::finder_setup_command_tests::{body_between, macos_compiled, production_source, without_items};
+
+    /// The name of the top-level function that contains byte `at`.
+    fn enclosing_fn(source: &str, at: usize) -> String {
+        let head = &source[..at];
+        let start = [
+            "\nfn ",
+            "\nasync fn ",
+            "\npub(crate) async fn ",
+            "\npub(crate) fn ",
+            "\npub fn ",
+            "\npub async fn ",
+        ]
+        .iter()
+        .filter_map(|prefix| head.rfind(prefix).map(|i| i + prefix.len()))
+        .max()
+        .expect("inside a function");
+        source[start..].split('(').next().unwrap().trim().to_string()
+    }
+
+    /// Spec §5.3 (2), corrected by plan "Spec issues" 3: keys arrive in exactly these functions.
+    #[test]
+    fn every_function_that_installs_keys_tells_the_finder_reconciler() {
+        let production = production_source();
+        let mut installers: Vec<String> = Vec::new();
+        for marker in ["*guard = Some(Session {", "*guard = Some(session)"] {
+            let mut from = 0;
+            while let Some(found) = production[from..].find(marker) {
+                installers.push(enclosing_fn(&production, from + found));
+                from += found + marker.len();
+            }
+        }
+        installers.sort();
+        installers.dedup();
+        assert_eq!(
+            installers,
+            vec![
+                "install_new_session",
+                "install_recovered_session",
+                "install_unlocked_session",
+                "restore_stored_session"
+            ],
+            "a new place that puts keys in memory must tell the Finder reconciler (and be added here)"
+        );
+        // The checked installs (Task 12) have one production caller each, which tells the reconciler (below).
+        assert_eq!(
+            production.matches("install_new_session(").count() - 1,
+            1,
+            "install_new_session_or_revoke alone calls it"
+        );
+        assert!(
+            body_between(&production, "async fn install_new_session_or_revoke(", "\n}\n")
+                .contains("install_new_session(")
+        );
+        assert_eq!(
+            production.matches("install_new_session_or_revoke(").count() - 1,
+            1,
+            "apply_session alone calls the revoking install"
+        );
+        assert!(
+            body_between(&production, "pub(crate) async fn apply_session(", "\n}\n")
+                .contains("install_new_session_or_revoke(")
+        );
+        assert_eq!(
+            production.matches("install_recovered_session(").count() - 1,
+            1,
+            "the recovery-phrase unlock alone calls it"
+        );
+        assert!(
+            body_between(&production, "async fn desktop_unlock_with_recovery_phrase(", "\n}\n")
+                .contains("install_recovered_session(")
+        );
+        // install_unlocked_session's production callers: unlock_vault and reauth_swap_token (R8), which
+        // reauth_in_place calls before its own engine start and keys_arrived.
+        assert_eq!(
+            production.matches("install_unlocked_session(").count() - 1,
+            2,
+            "callers, not counting its definition"
+        );
+        for (signature, engine_starts) in [
+            ("pub(crate) async fn apply_session(", 1),
+            ("async fn desktop_unlock_with_recovery_phrase(", 2),
+            ("async fn unlock_vault(", 2),
+            ("async fn reauth_in_place(", 1),
+        ] {
+            let body = body_between(&production, signature, "\n}\n");
+            assert_eq!(
+                body.matches("start_engine_if_possible(").count(),
+                engine_starts,
+                "{signature}"
+            );
+            assert_eq!(
+                body.matches("keys_arrived(").count(),
+                engine_starts,
+                "{signature}: every keys-arrive branch tells the reconciler"
+            );
+        }
+        // The startup restore is covered by the launch trigger (Task 8's test pins its order).
+        // The two login commands store only a token: they never install keys.
+        for signature in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let body = body_between(&production, signature, "\n}\n");
+            assert!(
+                !body.contains("Some(Session {") && !body.contains("master_key"),
+                "{signature} installs keys now: wire keys_arrived"
+            );
+        }
+    }
+
+    /// Spec §8 logs "sign-in completed", not an unlock after a Lock (area A M11): the Keychain unlock tells the
+    /// reconciler keys are here and writes no `signed_in` line; every sign-in path still does.
+    #[test]
+    fn only_a_sign_in_writes_signed_in_to_the_lifecycle_log() {
+        let production = production_source();
+        let arrived = body_between(&production, "fn keys_arrived(", "\n}\n");
+        let logged = arrived
+            .find("lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedIn);")
+            .expect("a sign-in is logged");
+        assert!(
+            arrived[..logged].contains("if from == KeysFrom::SignIn {"),
+            "only a sign-in:\n{arrived}"
+        );
+        let unlock = body_between(&production, "async fn unlock_vault(", "\n}\n");
+        assert_eq!(
+            unlock.matches("keys_arrived(&state, KeysFrom::Unlock)").count(),
+            2,
+            "{unlock}"
+        );
+        for signature in [
+            "pub(crate) async fn apply_session(",
+            "async fn desktop_unlock_with_recovery_phrase(",
+            "async fn reauth_in_place(",
+        ] {
+            let body = body_between(&production, signature, "\n}\n");
+            assert!(
+                !body.contains("KeysFrom::Unlock") && body.contains("KeysFrom::SignIn"),
+                "{signature} is a sign-in"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_out_lock_and_repair_reach_the_reconciler_before_the_engine_stops() {
+        let production = production_source();
+        let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        let remove = clear
+            .find("finder_remove_for(state, finder_setup::core::Trigger::SignOut)")
+            .expect("sign-out tells the reconciler");
+        // The first engine stop in the body (the already-signed-out path's): the signed-in path's comes later.
+        let engine = clear
+            .find("take_slot_and_stop_engine_for_sign_out(&acct)")
+            .expect("sign-out stops the engine");
+        assert!(remove < engine, "the reconciler is told before the engine stops");
+        assert!(
+            !clear.contains("remove_file_provider_domain()"),
+            "no second, direct removal"
+        );
+        let lock = body_between(&production, "async fn lock_vault(", "\n}\n");
+        assert!(
+            lock.find("finder_lock_for(&state)").expect("lock tells the reconciler")
+                < lock.find("acct.engine.lock().await").unwrap(),
+            "the reconciler holds before the engine stops"
+        );
+        let repair = body_between(&production, "async fn reset_macos_integration(", "\n}\n");
+        assert!(repair.contains("finder_remove_for(&state, finder_setup::core::Trigger::Repair)"));
+        assert!(
+            !macos_compiled(repair).contains("remove_file_provider_domain("),
+            "Repair removes through the reconciler on a Mac"
+        );
+    }
+
+    /// Lead rulings T8-⚠lock (2) and T10-lockorder: the session is cleared BEFORE the engine slot is released, and
+    /// the clear is a function that needs the slot guard, so the other order does not compile. Source pins for the
+    /// shape (the compile-fail mutations are in the fix-round report): the helper takes the guard, it holds the only
+    /// clear, and Lock and Sign-out call it before their one release.
+    #[test]
+    fn lock_and_sign_out_clear_the_session_only_through_the_helper_that_needs_the_slot() {
+        let production = production_source();
+        let helper = body_between(&production, "fn clear_session_holding_slot(", "\n}\n");
+        assert!(
+            helper.contains("MutexGuard<'_, Option<EngineRunner>>"),
+            "the helper needs the slot guard:\n{helper}"
+        );
+        assert!(
+            helper.contains("guard.take();") && helper.contains("poisoned.into_inner().take();"),
+            "{helper}"
+        );
+
+        let lock = body_between(&production, "async fn lock_vault(", "\n}\n");
+        assert_eq!(
+            lock.matches("clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::Lock)?;")
+                .count(),
+            1,
+            "lock clears through the helper:\n{lock}"
+        );
+        assert!(
+            !lock.contains("guard.take();") && !lock.contains(".into_inner().take()"),
+            "no second way to clear:\n{lock}"
+        );
+        assert_eq!(
+            lock.matches("drop(engine_slot)").count(),
+            1,
+            "one release of the slot:\n{lock}"
+        );
+        assert!(
+            lock.find("clear_session_holding_slot(").unwrap() < lock.find("drop(engine_slot)").unwrap(),
+            "the slot is released after the session is cleared:\n{lock}"
+        );
+
+        let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        assert_eq!(
+            clear
+                .matches(
+                    "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
+                )
+                .count(),
+            1,
+            "sign-out clears through the helper:\n{clear}"
+        );
+        assert!(
+            !clear.contains("guard.take();") && !clear.contains(".into_inner().take()"),
+            "no second way to clear:\n{clear}"
+        );
+        // Releases of a slot named `engine_slot`: Windows' release after the clear; and (Task 12 fix round 1) on macOS and
+        // Linux one in each branch AFTER the sign-out's last turn (`finish_sign_out_turn`, which clears memory once more).
+        // The refusal for an unconfirmed earlier stop is the stop helper's (fix round 2, item 1).
+        assert_eq!(clear.matches("drop(engine_slot)").count(), 3, "{clear}");
+        for after_the_last_turn in [
+            "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
+        ] {
+            let at = clear
+                .find(after_the_last_turn)
+                .unwrap_or_else(|| panic!("{after_the_last_turn}:\n{clear}"));
+            let next_code = clear[at + after_the_last_turn.len()..]
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("//"))
+                .unwrap_or_default();
+            assert_eq!(
+                next_code, "drop(engine_slot);",
+                "the slot is released right after the last turn:\n{clear}"
+            );
+        }
+        let stop = body_between(&production, "async fn take_slot_and_stop_engine_for_sign_out(", "\n}\n");
+        let refusal = &stop[stop.find("drop(engine_slot)").expect("the refusal releases the slot")..];
+        assert!(
+            refusal[..refusal.find("return Err(").expect("the refusal returns")]
+                .lines()
+                .count()
+                < 8,
+            "the first release is the refusal, which returns at once:\n{refusal}"
+        );
+        assert_eq!(
+            stop.matches("drop(engine_slot)").count(),
+            1,
+            "the helper releases the slot only to refuse:\n{stop}"
+        );
+        // Both paths hold the slot from before the purge (fix round 2, item 1).
+        let purge = clear.find("purge_local_data_for_sign_out(").expect("the purge");
+        // (Task 1882 rebase: the call now ends `.map_err(&kept_with)?`, over several lines; both are found.)
+        let takes: Vec<usize> = clear
+            .match_indices("take_slot_and_stop_engine_for_sign_out(&acct)")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(takes.len(), 2, "both paths:\n{clear}");
+        for at in takes {
+            assert!(at < purge, "the slot is taken before the purge:\n{clear}");
+        }
+        assert!(
+            clear.rfind("drop(engine_slot)").unwrap() > clear.find("clear_session_holding_slot(").unwrap(),
+            "the slot is released after the session is cleared:\n{clear}"
+        );
+        // Declared from the stop helper's slot on either path, then taken for the clear: any other use could release it
+        // early. (Comments may name it.)
+        let code: String = clear
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code.matches("held_engine_slot").count(),
+            2,
+            "the held slot is touched in two places only:\n{clear}"
+        );
+    }
+
+    /// Fix round 1 (item C): a poisoned session mutex still guards the master key. The one clear recovers the
+    /// guard, clears the session and clears the poison; neither Lock nor Sign-out skips it and returns `Ok`.
+    #[test]
+    fn a_poisoned_session_mutex_is_recovered_and_cleared_by_lock_and_sign_out() {
+        let production = production_source();
+        let helper = body_between(&production, "fn clear_session_holding_slot(", "\n}\n");
+        assert!(
+            helper.contains("poisoned.into_inner().take();"),
+            "the helper does not clear a poisoned session"
+        );
+        assert!(
+            helper.contains("acct.session.clear_poison();"),
+            "the helper leaves the mutex poisoned"
+        );
+        assert!(
+            !helper.contains("session mutex poisoned during"),
+            "the helper only warns:\n{helper}"
+        );
+        for signature in ["async fn lock_vault(", "async fn clear_session_impl("] {
+            let body = body_between(&production, signature, "\n}\n");
+            assert!(
+                body.contains("clear_session_holding_slot("),
+                "{signature} does not clear through the helper"
+            );
+        }
+    }
+
+    /// Lead ruling T8-lockflag (3): every place that puts an engine in the slot refuses while an
+    /// earlier stop is unconfirmed, so two engines never run at once. Since R10 (ruling T9-starts) every
+    /// start goes through `spawn_bound_engine`, so the sites are the functions that call it; each takes
+    /// the slot, then refuses, then starts. The gate reads the keys through `keys_for_engine_start`, which
+    /// refuses first as well.
+    #[test]
+    fn every_engine_start_refuses_while_a_stop_is_unconfirmed() {
+        let production = production_source();
+        let gate_call = "spawn_bound_engine(";
+        let mut sites: Vec<String> = production
+            .match_indices(gate_call)
+            .filter(|(at, _)| {
+                let line = production[..*at].rsplit('\n').next().unwrap_or("");
+                let line_start = line.trim_start();
+                !line_start.starts_with("//") && !line_start.contains("fn ")
+            })
+            .map(|(at, _)| enclosing_fn(&production, at))
+            .collect();
+        sites.sort();
+        sites.dedup();
+        assert_eq!(
+            sites,
+            vec![
+                "ensure_sync_root_and_engine",
+                "persist_sync_root_and_start_engine",
+                "pick_sync_root",
+                "start_check_engine",
+                "start_engine_for_pending_finder_install",
+                "start_engine_if_possible",
+                "start_engine_unless_running",
+            ],
+            "a new engine start must refuse while an earlier stop is unconfirmed (and be added here)"
+        );
+        for name in &sites {
+            let body = body_between(&production, &format!("fn {name}("), "\n}\n");
+            let guarded = body
+                .find("engine_start_refusal(")
+                .unwrap_or_else(|| panic!("{name} does not call engine_start_refusal("));
+            let slot = ["engine.lock().await", "lock_engine_slot("]
+                .iter()
+                .filter_map(|take| body.find(take))
+                .min()
+                .unwrap_or_else(|| panic!("{name} takes the engine slot"));
+            let spawned = body.find(gate_call).expect("it starts through the gate");
+            assert!(
+                slot < guarded && guarded < spawned,
+                "{name}: slot, then the refusal, then the start:\n{body}"
+            );
+        }
+        let refusal = body_between(&production, "fn keys_for_engine_start(", "\n}\n");
+        let flag = refusal
+            .find("engine_start_refusal(")
+            .expect("the gate's key read refuses first");
+        assert!(
+            flag < refusal.find(".lock()").expect("and then reads the keys"),
+            "{refusal}"
+        );
+    }
+
+    /// Lead ruling T8-gate-all (4): every File Provider bridge call goes through the one gate. The
+    /// bridge module itself and the gate's own file are the only places that name a bridge function;
+    /// everything else calls a gated wrapper in `macos_ports`.
+    #[test]
+    fn no_file_provider_bridge_call_is_made_outside_the_bridge_gate() {
+        const BRIDGE: [&str; 7] = [
+            "remove",
+            "add_domain",
+            "domain_state",
+            "wait_for_domain_ready",
+            "visible_url",
+            "cleanup_stale_domains",
+            "signal_working_set",
+        ];
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read the source dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        assert!(
+            files.len() > 20,
+            "the census sees the source tree: {} files",
+            files.len()
+        );
+        let (mut gated, mut checked_lines) = (0, 0);
+        for file in files {
+            let name = file.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            if name == "macos_file_provider.rs" {
+                continue; // the bridge itself
+            }
+            let text = std::fs::read_to_string(&file)
+                .expect("read a source file")
+                .replace("\r\n", "\n");
+            let production = without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]);
+            for (number, line) in production.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                checked_lines += 1;
+                for (at, _) in line.match_indices("macos_file_provider::") {
+                    let ident: String = line[at + "macos_file_provider::".len()..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !BRIDGE.contains(&ident.as_str()) {
+                        continue;
+                    }
+                    assert!(
+                        name == "finder_setup/macos_ports.rs",
+                        "{name}:{}: calls the bridge outside the gate: {line}",
+                        number + 1
+                    );
+                    assert!(
+                        line.contains(".run(") || line.contains(".run_sync(") || line.contains(".run_waiting("),
+                        "{name}:{}: a bridge call that does not take the gate: {line}",
+                        number + 1
+                    );
+                    gated += 1;
+                }
+            }
+        }
+        assert!(
+            checked_lines > 10_000,
+            "the census read the production code: {checked_lines} lines"
+        );
+        assert_eq!(
+            gated, 9,
+            "the gate's callers: the reconciler's five bridge operations and the four wrappers for everyone else"
+        );
+    }
+
+    #[test]
+    fn becoming_active_and_updates_reach_the_reconciler_and_the_log() {
+        let production = production_source();
+        let run = body_between(&production, "pub fn run() {", "\n}\n");
+        assert!(run.contains("tauri::WindowEvent::Focused(true) = event") && run.contains("handle.app_activated()"));
+        for signature in ["async fn install_update(", "async fn install_channel_downgrade("] {
+            let body = body_between(&production, signature, "\n}\n");
+            assert!(body.contains("LifecycleEvent::UpdateDownloaded"), "{signature}");
+            assert!(body.contains("LifecycleEvent::UpdateInstalled"), "{signature}");
+        }
+    }
+
+    /// Lead ruling T8-t9 (10): the support bundle's lifecycle tail was done in Task 8
+    /// (`the_support_bundle_carries_the_lifecycle_tail_without_changing_its_format`), so Task 9 adds
+    /// nothing for it. This only pins that it is still one call.
+    #[test]
+    fn the_support_bundle_still_carries_the_lifecycle_tail() {
+        let production = production_source();
+        assert_eq!(
+            production.matches("with_lifecycle_tail(").count(),
+            2,
+            "its definition and the one call"
+        );
+    }
+
+    /// Lead ruling T8-⚠lock (1): the waits are longer than the longest operation the reconciler can
+    /// be inside when the event arrives, or a slow-but-working check would make Lock and Sign-out fail.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_acknowledgement_timeouts_outlast_the_longest_operation_they_can_wait_behind() {
+        use super::finder_setup::core::Op;
+        use super::finder_setup::driver::op_limit;
+        use std::time::Duration;
+        // The reconciler answers only between operations. The longest one: a StartEngine whose
+        // socket never comes up. It waits for the engine slot (its limit), the socket (3 s), then
+        // stops the engine it started: the slot again (the stop's limit) and abort()'s own 3 s + 2 s.
+        let s = Duration::from_secs;
+        let start_that_fails = op_limit(Op::StartEngine) + s(3) + op_limit(Op::StopEngine) + s(5);
+        for op in [
+            Op::Observe,
+            Op::ReadDomain,
+            Op::AddDomain,
+            Op::FinishReady,
+            Op::RemoveDomain,
+            Op::WaitStable(s(10)),
+        ] {
+            assert!(
+                op_limit(op) + s(0) <= start_that_fails,
+                "{op:?} is not the longest operation"
+            );
+        }
+        assert_eq!(start_that_fails, s(38));
+        assert!(super::FINDER_LOCK_TIMEOUT >= s(45), "ruling 1: at least 45 s");
+        assert!(
+            super::FINDER_LOCK_TIMEOUT > start_that_fails,
+            "Lock waits behind one operation"
+        );
+        assert!(super::FINDER_REMOVE_TIMEOUT >= s(45), "ruling 1: at least 45 s");
+        assert!(
+            super::FINDER_REMOVE_TIMEOUT > start_that_fails + op_limit(Op::RemoveDomain),
+            "a removal waits behind one operation and then runs its own"
+        );
+    }
+
+    /// Lead ruling T5-⚠c (9): the lifecycle log survives sign-out. The purge's one gate for a file
+    /// to delete is `is_disposable_cache_path`; the OS temp dir is a root it allows, so the log is
+    /// placed under it and only the Logs/Beebeeb rule stands between it and removal. The same gate
+    /// protects Repair's cache cleanup, and Task 10's reset must keep using it.
+    #[test]
+    fn a_sign_out_purge_never_deletes_the_lifecycle_log() {
+        use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(db_dir.path().join("state.db")).unwrap();
+        let root = std::env::temp_dir().join(format!("bb-test-1834-t9-{}", uuid::Uuid::new_v4()));
+        let logs = root.join("Library").join("Logs").join("Beebeeb");
+        let container_logs = root
+            .join("Library")
+            .join("Containers")
+            .join("io.beebeeb.app")
+            .join("Data")
+            .join("Library")
+            .join("Logs")
+            .join("Beebeeb");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::create_dir_all(&container_logs).unwrap();
+        let ordinary = root.join("ordinary-cache.bin");
+        let log = logs.join("lifecycle.log");
+        let rotated = container_logs.join("lifecycle.log.1");
+        for path in [&ordinary, &log, &rotated] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        // The gate itself: a log path is never disposable, wherever it is.
+        assert!(
+            super::is_disposable_cache_path(&ordinary),
+            "the OS temp dir is an allowed root (the test's premise)"
+        );
+        assert!(!super::is_disposable_cache_path(&log) && !super::is_disposable_cache_path(&rotated));
+        assert!(!super::is_disposable_cache_path(&logs) && !super::is_disposable_cache_path(&container_logs));
+
+        // And the purge: a state.db row that points at a log (a corrupt or unexpected one) removes
+        // the ordinary cache file and leaves both logs.
+        db.upsert_file(&FileEntry {
+            file_id: "file-a".into(),
+            path: "/A.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-a", ordinary.to_str().unwrap(), 1, 10).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "file-b".into(),
+            path: "/B.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-b", log.to_str().unwrap(), 1, 10).unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("file-a".into()),
+            parent_id: None,
+            target_path: Some("/A.txt".into()),
+            metadata_json: None,
+            payload_path: Some(rotated.to_str().unwrap().to_string()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        let summary = super::purge_local_state_files(&db, None).expect("the purge runs");
+        let survived = (log.exists(), rotated.exists(), ordinary.exists());
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            survived,
+            (true, true, false),
+            "both logs survive the purge; the ordinary cache file does not"
+        );
+        assert_eq!((summary.files_removed, summary.files_skipped), (1, 2));
+    }
+
+    /// Fix round 1 (item A): there is ONE way an engine is stopped, and it records an unconfirmed stop.
+    /// Repair and the respawn inside a start used to consume the handle, leave the slot empty and not set
+    /// the flag, so the next start (Repair's own follow-up check on a Mac) spawned a second engine beside
+    /// one that might still run, holding the keys.
+    #[test]
+    fn every_engine_stop_goes_through_the_one_helper_and_every_respawn_refuses_after_it() {
+        let production = production_source();
+        let abort = concat!(".abort()", ".await");
+        // Every production abort of an engine: exactly one, inside the helper.
+        assert_eq!(
+            production.matches(abort).count(),
+            1,
+            "an engine is aborted outside `stop_engine_in_slot`"
+        );
+        let helper = body_between(&production, "async fn stop_engine_in_slot(", "\n}\n");
+        assert!(
+            helper.contains(abort) && helper.contains("engine_stop_unconfirmed.store(true"),
+            "{helper}"
+        );
+        assert!(
+            helper.contains("task_confirmed()"),
+            "the flag follows `task_confirmed`: {helper}"
+        );
+        for site in [
+            "start_engine_if_possible",
+            "persist_sync_root_and_start_engine",
+            "pick_sync_root",
+            "stop_pending_finder_install_engine",
+            "lock_vault",
+            "take_slot_and_stop_engine_for_sign_out",
+            "stop_engine_for_repair",
+            "stop_check_engine",
+        ] {
+            let body = body_between(&production, &format!("fn {site}("), "\n}\n");
+            assert!(
+                body.contains("stop_engine_in_slot("),
+                "{site} stops an engine without the helper"
+            );
+        }
+        // Sign-out stops through its helper on both paths (Task 12 fix round 2, item 1).
+        let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        assert_eq!(
+            crate::source_pin::squeeze(clear)
+                .matches(&crate::source_pin::squeeze(
+                    "take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?"
+                ))
+                .count(),
+            2,
+            "{clear}"
+        );
+        // A start that replaces a running engine checks the flag again between the stop and the spawn.
+        let spawn = "spawn_bound_engine(";
+        for site in [
+            "start_engine_if_possible",
+            "persist_sync_root_and_start_engine",
+            "pick_sync_root",
+        ] {
+            let body = body_between(&production, &format!("fn {site}("), "\n}\n");
+            let stopped = body
+                .find("stop_engine_in_slot(")
+                .unwrap_or_else(|| panic!("{site} stops the old engine"));
+            let spawned = body.find(spawn).expect("it starts through the gate");
+            assert!(
+                body[stopped..spawned].contains("engine_start_refusal("),
+                "{site}: an unconfirmed stop of the old engine must refuse the new one:\n{}",
+                &body[stopped..spawned]
+            );
+        }
+    }
+
+    /// The helper itself, on a real `EngineRunner`: an engine that cannot be stopped closes the gate for
+    /// every start; one that stops does not.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn the_stop_helper_records_an_unconfirmed_stop_and_only_that() {
+        use crate::account::{AccountId, AccountRuntime};
+        use crate::runner::EngineRunner;
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let acct = AccountRuntime::new(AccountId("stop-helper".into()));
+            // A stopped engine: no flag.
+            let done = tokio::spawn(async {});
+            tokio::task::yield_now().await;
+            let outcome = super::stop_engine_in_slot(&acct, EngineRunner::for_test_with_task(done)).await;
+            assert!(outcome.is_stopped());
+            assert!(
+                !acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "a confirmed stop leaves the gate open"
+            );
+            assert_eq!(super::engine_start_refusal(&acct), Ok(()));
+            // An engine with no await point: tokio cannot force-abort it, so the stop cannot be confirmed.
+            let deadline = Instant::now() + Duration::from_secs(7);
+            let stuck = tokio::task::spawn_blocking(move || {
+                while Instant::now() < deadline {
+                    std::hint::black_box(());
+                }
+            });
+            let outcome = super::stop_engine_in_slot(&acct, EngineRunner::for_test_with_task(stuck)).await;
+            assert!(!outcome.task_confirmed());
+            assert!(
+                acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "an unconfirmed stop closes the gate by itself"
+            );
+            assert!(super::engine_start_refusal(&acct).is_err());
+        });
+    }
+
+    #[test]
+    fn an_engine_start_refuses_while_an_earlier_stop_is_unconfirmed() {
+        let acct = crate::account::AccountRuntime::new(crate::account::AccountId("refusal-test".into()));
+        assert_eq!(super::engine_start_refusal(&acct), Ok(()));
+        acct.engine_stop_unconfirmed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let refused = super::engine_start_refusal(&acct).expect_err("the flag closes every start");
+        assert!(refused.contains("Restart Beebeeb"), "{refused}");
+        assert!(
+            !refused.contains('/') && !refused.contains("NS"),
+            "no path and no OS text: {refused}"
+        );
+    }
+
+    /// Spec §5.6: a start refused on an unconfirmed engine stop leaves its own code and sentence on
+    /// `sync_status.engine_refusal` (so a surface says to quit and reopen, not "Try again"), and it is cleared like the
+    /// binding refusals, by every session transition; the next refused start records it again.
+    #[test]
+    fn a_start_refused_on_an_unconfirmed_stop_shows_its_own_refusal_until_a_transition_clears_it() {
+        use crate::account::SessionTransition;
+        let acct = crate::account::AccountRuntime::new(crate::account::AccountId("refusal-shown".into()));
+        assert!(super::engine_start_refusal(&acct).is_ok());
+        assert_eq!(
+            super::engine_refusal_view(&acct),
+            serde_json::Value::Null,
+            "nothing refused yet"
+        );
+        acct.engine_stop_unconfirmed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(super::engine_start_refusal(&acct).is_err());
+        assert_eq!(
+            super::engine_refusal_view(&acct),
+            serde_json::json!({
+                "code": "engine_stop_unconfirmed",
+                "sentence": "Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.",
+            })
+        );
+        for by in [
+            SessionTransition::Write,
+            SessionTransition::Lock,
+            SessionTransition::SignOut,
+        ] {
+            {
+                let _turn = super::SessionWrite::for_test();
+                acct.advance_session_generation_holding_session_write_lock(by);
+            }
+            assert_eq!(
+                super::engine_refusal_view(&acct),
+                serde_json::Value::Null,
+                "{by:?} cleared it"
+            );
+            assert!(super::engine_start_refusal(&acct).is_err(), "the flag still refuses");
+            assert_eq!(
+                super::engine_refusal_view(&acct)["code"],
+                "engine_stop_unconfirmed",
+                "and the next refused start records it again"
+            );
+        }
+    }
+
+    /// FA-I3 (spec §5.6): Repair reports an unconfirmed engine stop as a field, read from the account AFTER its own
+    /// stop, so it covers an earlier unconfirmed stop that left the slot empty as well as its own. A clean stop is
+    /// `false`. The warning string stays.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn repairs_engine_stop_reports_an_unconfirmed_stop_whoever_made_it() {
+        use crate::account::{AccountId, AccountRuntime};
+        use crate::runner::EngineRunner;
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // A clean stop.
+            let acct = AccountRuntime::new(AccountId("repair-clean".into()));
+            let done = tokio::spawn(async {});
+            tokio::task::yield_now().await;
+            *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(done));
+            let mut warnings = Vec::new();
+            assert!(
+                !super::stop_engine_for_repair(&acct, &mut warnings, || Ok(false))
+                    .await
+                    .engine_stop_unconfirmed,
+                "a clean stop"
+            );
+            assert!(warnings.is_empty());
+            // An earlier stop (a Lock, a Sign-out or a check) was never confirmed and left the slot empty.
+            let acct = AccountRuntime::new(AccountId("repair-earlier".into()));
+            acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+            let mut warnings = Vec::new();
+            assert!(
+                super::stop_engine_for_repair(&acct, &mut warnings, || Ok(false))
+                    .await
+                    .engine_stop_unconfirmed,
+                "an earlier unconfirmed stop is reported too"
+            );
+            // Repair's own stop cannot be confirmed (an engine with no await point cannot be force-aborted).
+            let acct = AccountRuntime::new(AccountId("repair-own".into()));
+            let deadline = Instant::now() + Duration::from_secs(7);
+            let stuck = tokio::task::spawn_blocking(move || {
+                while Instant::now() < deadline {
+                    std::hint::black_box(());
+                }
+            });
+            *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(stuck));
+            let mut warnings = Vec::new();
+            assert!(
+                super::stop_engine_for_repair(&acct, &mut warnings, || Ok(false))
+                    .await
+                    .engine_stop_unconfirmed,
+                "its own unconfirmed stop"
+            );
+            assert_eq!(
+                warnings,
+                vec![super::REPAIR_ENGINE_UNCONFIRMED_WARNING.to_string()],
+                "the warning stays"
+            );
+        });
+    }
+
+    /// FB-24: `clear_session` and `lock_vault` answer `Ok` when the action happened, with `warning` always on the wire
+    /// (`null` when every step was confirmed), and the closed vocabulary `{code, sentence}` for what was not. One shape
+    /// per code, pinned exactly.
+    #[test]
+    fn session_action_outcome_json_is_the_frontends_contract() {
+        use super::{ActionWarning, SessionActionOutcome};
+        let json = |outcome: SessionActionOutcome| serde_json::to_value(outcome).unwrap();
+        assert_eq!(
+            json(SessionActionOutcome { warning: None }),
+            serde_json::json!({ "warning": null }),
+            "every step confirmed"
+        );
+        let cases = [
+            (
+                ActionWarning::FinderRemovalUnconfirmed,
+                "finder_removal_unconfirmed",
+                "You are signed out, but Beebeeb could not confirm that it was removed from Finder. If it still shows there, restart Beebeeb and sign out again.",
+            ),
+            (
+                ActionWarning::FinderLockUnconfirmed,
+                "finder_lock_unconfirmed",
+                "The vault is locked, but Beebeeb could not confirm that its Finder setup stopped. Restart Beebeeb to be sure.",
+            ),
+            (
+                ActionWarning::EngineStopUnconfirmed,
+                "engine_stop_unconfirmed",
+                "The vault is locked, but the sync engine did not confirm it stopped. Restart Beebeeb before unlocking again.",
+            ),
+        ];
+        for (warning, code, sentence) in cases {
+            assert_eq!(
+                json(SessionActionOutcome { warning: Some(warning) }),
+                serde_json::json!({ "warning": { "code": code, "sentence": sentence } }),
+                "{code}"
+            );
+        }
+        // Both commands answer with this shape, and an `Err` from them keeps meaning "it did not happen".
+        let production = production_source();
+        for (command, signature) in [
+            ("clear_session", "async fn clear_session("),
+            ("lock_vault", "async fn lock_vault("),
+        ] {
+            let head = crate::source_pin::squeeze(body_between(&production, signature, "{\n"));
+            assert!(
+                head.contains("->Result<SessionActionOutcome,String>"),
+                "{command} answers SessionActionOutcome:\n{head}"
+            );
+        }
+        for body in [
+            body_between(&production, "async fn clear_session_impl(", "\n}\n"),
+            body_between(&production, "async fn lock_vault(", "\n}\n"),
+        ] {
+            for warning in [
+                "FINDER_SIGN_OUT_UNCONFIRMED_WARNING",
+                "FINDER_LOCK_UNCONFIRMED_WARNING",
+                "LOCK_ENGINE_UNCONFIRMED_WARNING",
+            ] {
+                assert!(
+                    !body.contains(warning),
+                    "a warning is never an error string ({warning})"
+                );
+            }
+        }
+    }
+
+    /// FB-24 (M6): the native menu's Sign out shows, on every platform, the error of a sign-out that stopped and the
+    /// warning of one that happened with a step it could not confirm. Only "you are not signed in" stays Windows-only.
+    #[test]
+    fn the_native_menus_sign_out_shows_errors_and_warnings_on_every_platform() {
+        let production = production_source();
+        let at = production
+            .find("DesktopMenuAction::SignOut => {")
+            .expect("the menu's Sign out");
+        let arm = &production[at..at + production[at..].find("DesktopMenuAction::Quit").expect("the next arm")];
+        let matched = arm.find("match &result {").expect("the result is shown");
+        assert!(!arm[..matched].contains("#[cfg("), "not behind a platform cfg:\n{arm}");
+        let squeezed = crate::source_pin::squeeze(arm);
+        for needle in [
+            "Err(error)=>{app.dialog().message(error.message.clone())",
+            "Ok(SignedOut{warning:Some(warning),..})=>{app.dialog().message(warning.sentence())",
+        ] {
+            assert!(squeezed.contains(needle), "{needle}:\n{arm}");
+        }
+        let windows_only = arm
+            .find("#[cfg(target_os = \"windows\")]")
+            .expect("the one Windows-only dialog");
+        assert!(
+            arm[windows_only..].contains("You are not signed in on this device."),
+            "{arm}"
+        );
+    }
+
+    /// Area A M2: Repair removes the stale IPC socket while it still holds the engine slot, so an engine that a waiting
+    /// check starts the moment the slot is free (with its fresh socket) is never the one whose socket is removed. The
+    /// remover is passed in: production passes `remove_stale_ipc_socket`, and this test one that records whether the
+    /// slot was held when it ran (it never touches the real socket path). A remover that fails is a warning.
+    #[test]
+    fn repair_removes_the_socket_while_it_still_holds_the_engine_slot() {
+        use crate::account::{AccountId, AccountRuntime};
+        use crate::runner::EngineRunner;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let acct = AccountRuntime::new(AccountId("repair-socket".into()));
+            let done = tokio::spawn(async {});
+            tokio::task::yield_now().await;
+            *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(done));
+            let held = AtomicBool::new(false);
+            let mut warnings = Vec::new();
+            let stop = super::stop_engine_for_repair(&acct, &mut warnings, || {
+                held.store(acct.engine.try_lock().is_err(), Ordering::SeqCst);
+                Ok(true)
+            })
+            .await;
+            assert!(
+                held.load(Ordering::SeqCst),
+                "the socket goes while the slot is still held"
+            );
+            assert!(stop.removed_socket);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            let mut warnings = Vec::new();
+            let stop =
+                super::stop_engine_for_repair(&acct, &mut warnings, || Err("remove IPC socket: denied".into())).await;
+            assert!(!stop.removed_socket);
+            assert_eq!(warnings, vec!["remove IPC socket: denied".to_string()]);
+        });
+        let production = production_source();
+        let repair = body_between(&production, "async fn reset_macos_integration(", "\n}\n");
+        assert_eq!(
+            repair.matches("remove_stale_ipc_socket").count(),
+            1,
+            "Repair removes the socket only through its engine stop:\n{repair}"
+        );
+    }
+
+    /// The Repair result carries the flag on the wire, always (Lane T renders one fixed sentence for it), and
+    /// `reset_macos_integration` fills it from the stop above.
+    #[test]
+    fn the_repair_result_carries_engine_stop_unconfirmed() {
+        let result = super::MacosIntegrationResetResult {
+            removed_file_provider_domain: true,
+            preserved_location: None,
+            disabled_autostart: false,
+            removed_socket: true,
+            removed_cache_files: 0,
+            skipped_cache_files: 0,
+            pending_operations_preserved: 0,
+            sync_root_preserved: None,
+            engine_stop_unconfirmed: true,
+            warnings: Vec::new(),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["engine_stop_unconfirmed"], serde_json::json!(true));
+        let clean = super::MacosIntegrationResetResult {
+            engine_stop_unconfirmed: false,
+            ..result
+        };
+        assert_eq!(
+            serde_json::to_value(&clean).unwrap()["engine_stop_unconfirmed"],
+            serde_json::json!(false),
+            "sent when false too"
+        );
+        let production = production_source();
+        let repair =
+            crate::source_pin::squeeze(body_between(&production, "async fn reset_macos_integration(", "\n}\n"));
+        let stop = repair
+            .find(&crate::source_pin::squeeze(
+                "let RepairEngineStop { removed_socket, engine_stop_unconfirmed } = stop_engine_for_repair(&acct, &mut warnings, remove_stale_ipc_socket).await;",
+            ))
+            .expect("read from the stop's own answer");
+        let field = repair
+            .find(&crate::source_pin::squeeze(
+                "sync_root_preserved,\n        engine_stop_unconfirmed,",
+            ))
+            .expect("into the result");
+        assert!(stop < field, "{repair}");
+    }
+}
+
+/// Lock and Sign-out against a stand-in for the Finder reconciler (Task 9; lead rulings 1, 2, 3, 5
+/// and 7). macOS only: nothing else consults the reconciler. They drive the REAL `lock_vault` and
+/// `clear_session_impl` on a mock app; a stand-in answers (or does not answer) the events, and
+/// records what the engine slot held when it handled each one, which is how the order shows.
+///
+/// Sign-out is driven only as far as it can go without touching the platform credential store: the
+/// already-signed-out path, and the refusals that return before the Keychain clear (a full sign-out
+/// ends in `clear_keychain_session`, which also clears the legacy flat Keychain items of the
+/// developer running the tests).
+#[cfg(all(test, target_os = "macos"))]
+mod finder_lock_and_sign_out_tests {
+    use super::*;
+    use crate::account::{AccountId, AccountRuntime, synthesize_single_account};
+    use crate::finder_setup::error::FpError;
+    use crate::runner::EngineRunner;
+    use finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+    use finder_setup::launch_location::LaunchLocation;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    type Seen = Arc<Mutex<Vec<String>>>;
+
+    /// Long enough for the stand-in to answer, short enough for a test: the override of the
+    /// production waits (45 s and 60 s) for the tests that need a wait to run out.
+    const SHORT_WAIT: Duration = Duration::from_millis(150);
+
+    #[derive(Clone, Copy)]
+    enum Reconciler {
+        /// Acknowledges every Lock and removes successfully.
+        Answers,
+        /// Receives events and never answers them (a check stuck in a bridge call).
+        Silent,
+        /// Receives a Lock or Remove and drops its acknowledgement unanswered (the task died mid-event).
+        DropsTheAck,
+        /// Acknowledges a Lock; the removal fails with an OS error whose message names a path.
+        RemovalFails,
+        /// Task 1882: acknowledges a Lock; the removal works and macOS kept files that had not reached the
+        /// server, in `KEPT_FOLDER`.
+        KeepsFiles,
+        /// Task 1882 review M2: the removal fails and macOS kept files all the same.
+        KeepsFilesAndFails,
+    }
+
+    /// Task 1882: where the stand-in says macOS kept the files that had not reached the server.
+    const KEPT_FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+
+    fn kept_folder() -> finder_removal::KeptFolder {
+        finder_removal::KeptFolder::Kept {
+            path: KEPT_FOLDER.to_string(),
+            contents_checked: true,
+            empty: false,
+        }
+    }
+
+    struct Fixture {
+        app: tauri::App<tauri::test::MockRuntime>,
+        acct: Arc<AccountRuntime>,
+        seen: Seen,
+        task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Fixture {
+        fn new(id: &str) -> Self {
+            // A sign-out that completes runs the local-data purge, which resolves the state dir (a throwaway one).
+            crate::state_paths::init_for_test();
+            let app = tauri::test::mock_app();
+            app.manage(AppState::default());
+            let state = app.state::<AppState>();
+            synthesize_single_account(&state, AccountId(id.to_string()));
+            let acct = state.active_account().unwrap();
+            Self {
+                app,
+                acct,
+                seen: Arc::default(),
+                task: None,
+            }
+        }
+
+        fn state(&self) -> tauri::State<'_, AppState> {
+            self.app.state::<AppState>()
+        }
+
+        /// Install the stand-in. `None` is a reconciler that has stopped: the receiving end is gone.
+        /// Call it inside the runtime that runs the test.
+        fn reconciler(&mut self, mode: Option<Reconciler>) {
+            let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+            let _ = self.state().finder_setup.set(handle);
+            let Some(mode) = mode else {
+                drop(rx);
+                return;
+            };
+            let (acct, seen) = (self.acct.clone(), self.seen.clone());
+            self.task = Some(tokio::spawn(async move {
+                let (mut held_removals, mut held_locks) = (Vec::new(), Vec::new());
+                while let Some(event) = rx.recv().await {
+                    // Where the engine is when the reconciler handles the event: it must still be
+                    // tracked, because Lock and Sign-out tell the reconciler BEFORE they stop it.
+                    let engine = match acct.engine.try_lock() {
+                        Ok(slot) if slot.is_some() => "engine_tracked",
+                        Ok(_) => "no_engine",
+                        Err(_) => "slot_busy",
+                    };
+                    match event {
+                        Event::Remove { trigger, ack } => {
+                            seen.lock()
+                                .unwrap()
+                                .push(format!("remove:{}:{engine}", trigger.as_str()));
+                            match mode {
+                                Reconciler::Answers => {
+                                    let _ = ack.send((Ok(()), finder_removal::KeptFolder::default()));
+                                }
+                                Reconciler::Silent => held_removals.push(ack),
+                                Reconciler::DropsTheAck => drop(ack),
+                                Reconciler::RemovalFails => {
+                                    let message = "The folder \u{201c}/Users/sam/Secret Folder\u{201d} already exists.";
+                                    let _ = ack.send((
+                                        Err(FpError::new("NSCocoaErrorDomain", 516, message)),
+                                        finder_removal::KeptFolder::default(),
+                                    ));
+                                }
+                                Reconciler::KeepsFiles => {
+                                    let _ = ack.send((Ok(()), kept_folder()));
+                                }
+                                Reconciler::KeepsFilesAndFails => {
+                                    let _ = ack.send((
+                                        Err(FpError::new("NSFileProviderErrorDomain", -1001, "busy")),
+                                        kept_folder(),
+                                    ));
+                                }
+                            }
+                        }
+                        Event::Lock { ack } => {
+                            seen.lock().unwrap().push(format!("lock:{engine}"));
+                            match mode {
+                                Reconciler::Answers
+                                | Reconciler::RemovalFails
+                                | Reconciler::KeepsFiles
+                                | Reconciler::KeepsFilesAndFails => {
+                                    let _ = ack.send(());
+                                }
+                                Reconciler::Silent => held_locks.push(ack),
+                                Reconciler::DropsTheAck => drop(ack),
+                            }
+                        }
+                        Event::Trigger(trigger) => seen.lock().unwrap().push(format!("trigger:{}", trigger.as_str())),
+                        Event::AppActivated => seen.lock().unwrap().push("app_activated".to_string()),
+                    }
+                }
+            }));
+        }
+
+        fn install_keys(&self) {
+            *self.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-abc".into(),
+                master_key: [9u8; 32],
+                email: Some("sam.keys@beebeeb.io".into()),
+            });
+            set_auth_present(&self.state(), true);
+        }
+
+        /// An engine whose task has already ended: stops at once.
+        async fn install_finished_engine(&self) {
+            let task = tokio::spawn(async {});
+            tokio::task::yield_now().await;
+            *self.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+        }
+
+        /// An engine that ticks until it is stopped. It ignores the cancel signal, so `abort()`
+        /// waits out its 3 s graceful window and then forces it down.
+        async fn install_ticking_engine(&self) -> Arc<AtomicUsize> {
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let counter = ticks.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+            *self.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+            ticks
+        }
+
+        /// What the stand-in saw, once it has handled everything sent before this call.
+        async fn finish(self) -> Vec<String> {
+            let Fixture {
+                app,
+                acct: _,
+                seen,
+                task,
+            } = self;
+            drop(app);
+            if let Some(mut task) = task
+                && tokio::time::timeout(Duration::from_secs(3), &mut task).await.is_err()
+            {
+                task.abort();
+            }
+            seen.lock().unwrap().clone()
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn multi_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    // ---- Lock ----
+
+    #[test]
+    fn lock_is_acknowledged_before_the_engine_stops_and_then_clears_the_keys_and_the_engine() {
+        let mut fx = Fixture::new("finder-lock-answers");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            let ticks = fx.install_ticking_engine().await;
+            lock_vault(fx.state())
+                .await
+                .expect("a lock the reconciler acknowledged succeeds");
+            assert!(fx.acct.session.lock().unwrap().is_none(), "the keys are cleared");
+            assert!(fx.acct.engine.lock().await.is_none(), "the engine is out of its slot");
+            let after = ticks.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(ticks.load(Ordering::SeqCst), after, "and it is stopped");
+            assert!(!fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst));
+            // Item D: this lock read the credential store through the in-memory test store.
+            assert!(
+                keychain::test_store_touched(Some("finder-lock-answers")),
+                "the lock went through the in-memory Keychain store"
+            );
+            assert_eq!(
+                fx.finish().await,
+                vec!["lock:engine_tracked"],
+                "the reconciler held while the engine still ran"
+            );
+        });
+    }
+
+    /// Lead ruling 1, the timeout path: no acknowledgement within the wait is not a plain success, and the
+    /// lock still clears what it can (ruling 2): the keys and the engine. The lock happened, so it is `Ok`, with a
+    /// warning that says what is unconfirmed (FB-24).
+    #[test]
+    fn lock_the_reconciler_never_acknowledges_clears_everything_and_warns_it_is_unconfirmed() {
+        let mut fx = Fixture::new("finder-lock-silent");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Silent));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            let started = Instant::now();
+            let outcome = FINDER_WAIT_OVERRIDE
+                .scope(SHORT_WAIT, lock_vault(fx.state()))
+                .await
+                .expect("the lock happened");
+            assert!(started.elapsed() >= SHORT_WAIT, "it waited for the acknowledgement");
+            assert_eq!(
+                outcome.warning,
+                Some(ActionWarning::FinderLockUnconfirmed),
+                "a lock nobody acknowledged is not a plain success"
+            );
+            assert!(
+                fx.acct.session.lock().unwrap().is_none(),
+                "the keys are cleared all the same"
+            );
+            assert!(fx.acct.engine.lock().await.is_none(), "and the engine is stopped");
+            assert_eq!(fx.finish().await, vec!["lock:engine_tracked"]);
+        });
+    }
+
+    /// Lead rulings 1 and 5, the error paths: a reconciler that has stopped, and one that dies
+    /// holding the acknowledgement. Both complete the lock's own work and report it, as a warning (FB-24).
+    #[test]
+    fn lock_with_a_dead_reconciler_or_a_dropped_acknowledgement_clears_everything_but_reports_it() {
+        for (id, mode) in [
+            ("finder-lock-dead", None),
+            ("finder-lock-dropped", Some(Reconciler::DropsTheAck)),
+        ] {
+            let mut fx = Fixture::new(id);
+            runtime().block_on(async {
+                fx.reconciler(mode);
+                fx.install_keys();
+                fx.install_finished_engine().await;
+                let outcome = lock_vault(fx.state()).await.expect("the lock happened");
+                assert_eq!(
+                    outcome.warning,
+                    Some(ActionWarning::FinderLockUnconfirmed),
+                    "{id}: a lock the reconciler cannot confirm is not a plain success"
+                );
+                assert!(fx.acct.session.lock().unwrap().is_none(), "{id}: the keys are cleared");
+                assert!(fx.acct.engine.lock().await.is_none(), "{id}: the engine is stopped");
+                let sentence = ActionWarning::FinderLockUnconfirmed.sentence();
+                assert!(!sentence.contains('/') && !sentence.contains("NS"), "{id}: {sentence}");
+                fx.finish().await;
+            });
+        }
+    }
+
+    /// Lead ruling 3: lock honours `engine_stop_unconfirmed` after taking the slot, as sign-out does.
+    #[test]
+    fn lock_after_an_unconfirmed_engine_stop_clears_the_keys_and_says_to_restart() {
+        let mut fx = Fixture::new("finder-lock-flagged");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+            let outcome = lock_vault(fx.state()).await.expect("the lock happened");
+            assert_eq!(
+                outcome.warning,
+                Some(ActionWarning::EngineStopUnconfirmed),
+                "never plain success"
+            );
+            let sentence = ActionWarning::EngineStopUnconfirmed.sentence();
+            assert!(sentence.contains("Restart Beebeeb"), "{sentence}");
+            assert!(
+                fx.acct.session.lock().unwrap().is_none(),
+                "the keys are cleared all the same"
+            );
+            fx.finish().await;
+        });
+    }
+
+    /// Lead ruling 3: a lock whose own stop cannot be confirmed closes the gate for every start.
+    #[test]
+    fn lock_whose_own_engine_stop_cannot_be_confirmed_closes_the_gate_and_says_to_restart() {
+        let mut fx = Fixture::new("finder-lock-unconfirmed");
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            // No await point: tokio cannot force-abort it. A wall-clock deadline ends the thread.
+            let deadline = Instant::now() + Duration::from_secs(7);
+            let task = tokio::task::spawn_blocking(move || {
+                while Instant::now() < deadline {
+                    std::hint::black_box(());
+                }
+            });
+            *fx.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+
+            let outcome = lock_vault(fx.state()).await.expect("the lock happened");
+            assert_eq!(
+                outcome.warning,
+                Some(ActionWarning::EngineStopUnconfirmed),
+                "an engine that may still run is not a plain success"
+            );
+            assert!(
+                fx.acct.session.lock().unwrap().is_none(),
+                "the keys are cleared in memory all the same"
+            );
+            assert!(
+                fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "no start may run beside it"
+            );
+            assert!(fx.acct.engine.lock().await.is_none());
+            // The gate is closed for the reconciler's starts too, even with the keys back.
+            fx.install_keys();
+            let refused = keys_for_engine_start(&fx.acct).expect_err("a start refuses while the stop is unconfirmed");
+            assert!(refused.to_string().contains("Restart Beebeeb"), "{refused}");
+            fx.finish().await;
+        });
+    }
+
+    /// Lead ruling 2, behaviourally and deterministically: the lock is frozen at the moment it is about
+    /// to clear the session (this thread holds the session mutex, and the lock runs on its own), and the
+    /// engine slot must still be held then. A lock that released the slot first would let a start that
+    /// was waiting for it read the keys the lock is about to clear.
+    #[test]
+    fn lock_holds_the_engine_slot_until_the_session_is_cleared() {
+        let mut fx = Fixture::new("finder-lock-freeze");
+        let rt = multi_thread_runtime();
+        rt.block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            // An engine that ends by itself after 300 ms, so the lock holds the slot for that long
+            // while it waits for it, and then goes on to clear the session.
+            let task = tokio::spawn(tokio::time::sleep(Duration::from_millis(300)));
+            *fx.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+        });
+        let acct = fx.acct.clone();
+        let state = fx.state();
+        let (slot_held_at_the_freeze, session_still_there) = std::thread::scope(|scope| {
+            let freeze = acct.session.lock().unwrap(); // the lock cannot clear the session while this is held
+            let locking = scope.spawn(move || runtime().block_on(lock_vault(state)));
+            // The lock takes the slot (the engine is still stopping); then it stops the engine, which ends
+            // the slot's 300 ms of work, and blocks on the session mutex.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while acct.engine.try_lock().is_ok() {
+                assert!(Instant::now() < deadline, "the lock never took the engine slot");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(1000)); // well past the engine's end
+            let held = acct.engine.try_lock().is_err();
+            let kept = freeze.is_some();
+            drop(freeze);
+            locking
+                .join()
+                .unwrap()
+                .expect("the lock succeeds once the session mutex is free");
+            (held, kept)
+        });
+        assert!(session_still_there, "the freeze held: the session was not cleared yet");
+        assert!(
+            slot_held_at_the_freeze,
+            "the engine slot was released before the session was cleared"
+        );
+        assert!(
+            acct.session.lock().unwrap().is_none(),
+            "and then the session is cleared"
+        );
+        assert!(acct.engine.try_lock().is_ok(), "and the slot is free again");
+        rt.block_on(fx.finish());
+    }
+
+    /// The same ordering as a race, end to end: starts that are waiting for the engine slot while a
+    /// lock holds it find no keys when they get it. This is a smoke test, not the pin: it catches an
+    /// early release most of the time on an idle machine and can miss it under load (a start has to
+    /// wake inside the few microseconds between the release and the clear). The pins are the freeze
+    /// test above and `lock_and_sign_out_clear_the_session_before_the_engine_slot_is_released`.
+    #[test]
+    fn a_start_queued_behind_a_lock_finds_no_keys() {
+        let mut fx = Fixture::new("finder-lock-race");
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_ticking_engine().await; // abort() holds the slot for its 3 s window
+            let queued = async {
+                while fx.acct.engine.try_lock().is_ok() {
+                    tokio::time::sleep(Duration::from_millis(2)).await; // until the lock holds the slot
+                }
+                (0..8)
+                    .map(|_| {
+                        let acct = fx.acct.clone();
+                        tokio::spawn(async move {
+                            let slot = acct.engine.lock().await;
+                            let keys = keys_for_engine_start(&acct);
+                            drop(slot);
+                            keys.is_err()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (locked, starts) = tokio::join!(lock_vault(fx.state()), queued);
+            locked.expect("the lock succeeds");
+            for start in starts {
+                assert!(
+                    start.await.unwrap(),
+                    "a start that got the slot after the lock found the keys"
+                );
+            }
+            fx.finish().await;
+        });
+    }
+
+    /// Lead ruling T9-starts, behaviourally and through the real gate (`authorize_engine_start` is everything
+    /// `spawn_bound_engine` does before its one spawn): starts that queued for the engine slot while a lock held
+    /// it get no keys when they get it, so no engine is spawned after the lock's clear, and nothing is bound
+    /// (no `state.db` is even created) for a vault that is locked. A start after the lock returned finds the same.
+    /// The pins for the lock's own order are the freeze test above and the source tests; this is the start's side.
+    #[test]
+    fn an_unlock_racing_a_lock_spawns_no_engine_after_the_locks_clear() {
+        let mut fx = Fixture::new("finder-lock-race-gate");
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().to_path_buf();
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_ticking_engine().await; // abort() holds the slot for its 3 s window
+            let handle = fx.app.handle().clone();
+            let queued = async {
+                while fx.acct.engine.try_lock().is_ok() {
+                    tokio::time::sleep(Duration::from_millis(2)).await; // until the lock holds the slot
+                }
+                (0..8)
+                    .map(|_| {
+                        let (acct, handle, state_dir) = (fx.acct.clone(), handle.clone(), state_dir.clone());
+                        tokio::spawn(async move {
+                            let slot = acct.engine.lock().await;
+                            let state = handle.state::<AppState>();
+                            let outcome = authorize_engine_start(
+                                &state,
+                                &acct,
+                                &slot,
+                                &LocalDataPaths::for_test(&state_dir, &state_dir),
+                            );
+                            (
+                                outcome.map(|permit| matches!(permit, StartPermit::Go(_))),
+                                slot.is_none(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (locked, starts) = tokio::join!(lock_vault(fx.state()), queued);
+            locked.expect("the lock succeeds");
+            for start in starts {
+                assert_eq!(
+                    start.await.unwrap(),
+                    (Ok(false), true),
+                    "a start that got the slot after the lock found no keys to start with"
+                );
+            }
+            // And a start from a caller that waited for nothing, after the lock has returned.
+            let slot = fx.acct.engine.lock().await;
+            let state = fx.state();
+            assert_eq!(
+                authorize_engine_start(
+                    &state,
+                    &fx.acct,
+                    &slot,
+                    &LocalDataPaths::for_test(&state_dir, &state_dir)
+                )
+                .map(|permit| matches!(permit, StartPermit::Go(_))),
+                Ok(false)
+            );
+            drop(slot);
+            assert!(
+                !state_dir.join("state.db").exists(),
+                "nothing was bound for a vault that is locked"
+            );
+            fx.finish().await;
+        });
+    }
+
+    // ---- A poisoned session mutex (fix round 1, item C) ----
+
+    /// Poison `acct.session`: a thread panics while holding it. The key is still inside.
+    fn poison_session(acct: &Arc<AccountRuntime>) {
+        let held = acct.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = held.session.lock().unwrap();
+            panic!("poisoning the session mutex on purpose (a test)");
+        })
+        .join();
+        assert!(acct.session.is_poisoned(), "the premise: the mutex is poisoned");
+    }
+
+    #[test]
+    fn lock_clears_the_session_behind_a_poisoned_mutex() {
+        let mut fx = Fixture::new("finder-lock-poisoned");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            poison_session(&fx.acct);
+            lock_vault(fx.state())
+                .await
+                .expect("the lock cleared the key, so it may say so");
+            // (Reading through the poison, so a key that was left behind shows as a failed assertion here.)
+            assert!(
+                fx.acct.session.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+                "the key is NOT left in memory behind the poison"
+            );
+            assert!(
+                !fx.acct.session.is_poisoned(),
+                "and the poison is cleared, so the next unlock works"
+            );
+            fx.finish().await;
+        });
+    }
+
+    /// FB-24: a signed-in sign-out whose Finder removal fails still happens (keys, engine and credentials are cleared),
+    /// so it is `Ok(Completed)` with the `finder_removal_unconfirmed` warning, not an error.
+    #[test]
+    fn a_signed_in_sign_out_whose_removal_fails_completes_with_a_warning() {
+        let mut fx = Fixture::new("finder-signout-completed-warning");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::RemovalFails));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            let done = clear_session_impl(&fx.state(), false)
+                .await
+                .expect("the sign-out happened");
+            assert_eq!(
+                done,
+                SignedOut {
+                    outcome: SignOutOutcome::Completed,
+                    warning: Some(ActionWarning::FinderRemovalUnconfirmed),
+                    preserved_location: None,
+                }
+            );
+            assert!(fx.acct.session.lock().unwrap().is_none(), "the keys are cleared");
+            assert!(fx.acct.engine.lock().await.is_none(), "the engine is stopped");
+            assert!(!*fx.state().auth_present.lock().unwrap(), "signed out");
+            fx.finish().await;
+        });
+    }
+
+    /// The full sign-out (it is safe now: its Keychain clear goes to the in-memory test store).
+    #[test]
+    fn sign_out_clears_the_session_behind_a_poisoned_mutex() {
+        let mut fx = Fixture::new("finder-signout-poisoned");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            poison_session(&fx.acct);
+            let outcome = clear_session_impl(&fx.state(), false)
+                .await
+                .expect("a sign-out that cleared the key");
+            assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
+            assert!(
+                fx.acct.session.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+                "the key is NOT left in memory behind the poison"
+            );
+            assert!(!fx.acct.session.is_poisoned(), "and the poison is cleared");
+            assert!(
+                keychain::test_store_touched(Some("finder-signout-poisoned")),
+                "its Keychain clear went to the in-memory store"
+            );
+            fx.finish().await;
+        });
+    }
+
+    /// Ruling P (Task 12 fix round 2): a sign-out ends the session an engine-start refusal was found for, so
+    /// `sync_status` no longer shows it.
+    #[test]
+    fn a_sign_out_clears_the_engine_refusal() {
+        let mut fx = Fixture::new("t12f2p-sign-out-clears-the-refusal");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            *fx.acct.engine_refusal.lock().unwrap() = Some(crate::account_binding::Refusal::IdentityUnknown);
+            fx.acct.keychain_email_pending.store(true, Ordering::SeqCst);
+            assert_ne!(
+                engine_refusal_view(&fx.acct),
+                serde_json::Value::Null,
+                "the premise: a refusal is shown"
+            );
+            let outcome = clear_session_impl(&fx.state(), false)
+                .await
+                .expect("the sign-out completes");
+            assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
+            assert_eq!(
+                engine_refusal_view(&fx.acct),
+                serde_json::Value::Null,
+                "the sign-out cleared it"
+            );
+            assert!(
+                !fx.acct.keychain_email_pending.load(Ordering::SeqCst),
+                "and the Keychain email write still owed (M5)"
+            );
+            fx.finish().await;
+        });
+    }
+
+    /// F2 (fix round 1 of Task 10): a deliberate sign-out leaves no account row and no owner behind, through the
+    /// real full sign-out. The state dir here is the throwaway one the sign-out tests share (`init_for_test`):
+    /// a `files` row and a sync cursor are rows the old purge left, so only the new clear removes them, whatever
+    /// order the tests that share the directory run in.
+    #[test]
+    fn a_sign_out_leaves_no_account_row_and_no_owner() {
+        let mut fx = Fixture::new("finder-signout-clears-rows");
+        // The seed, the sign-out and the checks all work in the scratch state directory that every sign-out test shares,
+        // so they hold its gate for the whole test (the sign-out inside knows it, and does not wait for it).
+        runtime().block_on(with_the_shared_state_dir(async {
+            let dir = crate::state_paths::init_for_test();
+            let db = crate::state_db::StateDb::open(dir.join("state.db")).unwrap();
+            db.upsert_file(&crate::state_db::FileEntry {
+                file_id: "file-left-behind".into(),
+                path: "/Left.txt".into(),
+                status: crate::state_db::FileStatus::CloudOnly,
+                size_bytes: 1,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: crate::state_db::ItemKind::File,
+            })
+            .unwrap();
+            rusqlite::Connection::open(dir.join("state.db"))
+                .unwrap()
+                .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '7')", [])
+                .unwrap();
+            db.set_owner(&crate::account_binding::Identity::new(
+                Some("u-a"),
+                Some("a@beebeeb.io"),
+            ))
+            .unwrap();
+            assert!(
+                db.has_account_data().unwrap(),
+                "the premise: rows of an account are there"
+            );
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false))
+                .await
+                .expect("the sign-out does not wait for the gate its own test holds")
+                .expect("the sign-out completes");
+            assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
+            fx.finish().await;
+            assert!(!db.has_account_data().unwrap(), "no account row survives a sign-out");
+            assert_eq!(db.owner().unwrap(), None, "and nobody owns what is left");
+        }));
+    }
+
+    // ---- Repair ----
+
+    /// Fix round 1 (item A): Repair stops the engine, and the reconciler's follow-up check then starts one
+    /// again with the keys still in memory. When Repair's stop cannot be confirmed, the gate must close, or
+    /// that check starts a SECOND engine beside the one that may still run.
+    #[test]
+    fn a_repair_whose_engine_stop_cannot_be_confirmed_closes_the_gate_and_says_to_restart() {
+        let mut fx = Fixture::new("finder-repair-unconfirmed");
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            // No await point: tokio cannot force-abort it. A wall-clock deadline ends the thread.
+            let deadline = Instant::now() + Duration::from_secs(7);
+            let task = tokio::task::spawn_blocking(move || {
+                while Instant::now() < deadline {
+                    std::hint::black_box(());
+                }
+            });
+            *fx.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+            assert!(
+                keys_for_engine_start(&fx.acct).is_ok(),
+                "before Repair the keys are in memory and a start is allowed"
+            );
+
+            let mut warnings = Vec::new();
+            stop_engine_for_repair(&fx.acct, &mut warnings, || Ok(false)).await;
+
+            assert!(
+                fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "Repair's unconfirmed stop closes the gate"
+            );
+            assert_eq!(warnings, vec![REPAIR_ENGINE_UNCONFIRMED_WARNING.to_string()]);
+            assert!(REPAIR_ENGINE_UNCONFIRMED_WARNING.contains("Restart Beebeeb"));
+            assert!(
+                fx.acct.engine.lock().await.is_none(),
+                "the slot is empty: the flag is all that stands between the follow-up check and a second engine"
+            );
+            let refused = keys_for_engine_start(&fx.acct).expect_err("the follow-up check's start must refuse");
+            assert!(refused.to_string().contains("Restart Beebeeb"), "{refused}");
+            fx.finish().await;
+        });
+    }
+
+    /// A Repair whose stop is confirmed says nothing and leaves the gate open.
+    #[test]
+    fn a_repair_whose_engine_stops_leaves_the_gate_open() {
+        let mut fx = Fixture::new("finder-repair-confirmed");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            fx.install_finished_engine().await;
+            let mut warnings = Vec::new();
+            stop_engine_for_repair(&fx.acct, &mut warnings, || Ok(false)).await;
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert!(!fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst));
+            assert!(fx.acct.engine.lock().await.is_none());
+            assert!(
+                keys_for_engine_start(&fx.acct).is_ok(),
+                "the follow-up check may start its engine"
+            );
+            fx.finish().await;
+        });
+    }
+
+    // ---- Sign-out ----
+
+    /// Lead rulings T1-4 (12) and T7-1 (6): what a failed removal hands to Repair's warnings and to
+    /// every other caller of `finder_remove_for` is the OS error's domain and code, never its message.
+    #[test]
+    fn a_failed_removal_reaches_the_caller_as_a_domain_and_a_code_only() {
+        let mut fx = Fixture::new("finder-remove-redacted");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::RemovalFails));
+            let error = finder_remove_for(&fx.state(), finder_setup::core::Trigger::Repair)
+                .await
+                .expect_err("the removal failed");
+            assert_eq!(error.message, "NSCocoaErrorDomain 516");
+            assert_eq!(
+                fx.finish().await,
+                vec!["remove:repair:no_engine"],
+                "Repair goes through the reconciler as `repair`"
+            );
+        });
+    }
+
+    #[test]
+    fn sign_out_waits_for_the_reconciler_removal() {
+        let mut fx = Fixture::new("finder-signout");
+        runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            let outcome = clear_session_impl(&fx.state(), false)
+                .await
+                .expect("a removal the reconciler confirmed");
+            assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::NotSignedIn));
+            // Item D: this sign-out cleared its credentials (`clear_keychain_session`, the real store's
+            // legacy flat items included) in the in-memory test store, never in the real Keychain.
+            assert!(
+                keychain::test_store_touched(Some("finder-signout")),
+                "the sign-out went through the in-memory Keychain store"
+            );
+            assert!(
+                keychain::test_store_touched(None),
+                "and so did its clear of the legacy flat layout"
+            );
+            assert_eq!(
+                fx.finish().await,
+                vec!["remove:sign_out:no_engine"],
+                "sign-out waited for the reconciler's removal"
+            );
+        });
+    }
+
+    /// Review I1 (task 1882 round 2), on spec A's sign-out: the reconciler's removal comes first, so a sign-out
+    /// that stops after it (here: an earlier engine stop was never confirmed) must still name the folder macOS
+    /// kept. The error carries it, and the alert text is produced from it, before the error is returned. A removal
+    /// that failed but kept files (review M2) names it too; one that kept nothing names nothing.
+    #[test]
+    fn test_1882_r2_a_sign_out_that_fails_after_the_removal_still_names_the_kept_folder() {
+        for (id, mode, expected) in [
+            ("signout-i1-kept", Reconciler::KeepsFiles, Some(KEPT_FOLDER)),
+            (
+                "signout-i1-kept-failed",
+                Reconciler::KeepsFilesAndFails,
+                Some(KEPT_FOLDER),
+            ),
+            ("signout-i1-none", Reconciler::Answers, None),
+        ] {
+            let mut fx = Fixture::new(id);
+            runtime().block_on(async {
+                fx.reconciler(Some(mode));
+                fx.install_keys();
+                fx.install_finished_engine().await;
+                fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+                let result = clear_session_impl(&fx.state(), false).await;
+                let failure = result.as_ref().expect_err("sign-out refuses after the removal");
+                assert_eq!(failure.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
+                assert_eq!(
+                    sign_out_kept_folder(&result),
+                    expected,
+                    "{id}: the error carries the kept folder"
+                );
+                // The alert text the command and the menu raise before they return the error.
+                assert_eq!(
+                    finder_removal::kept_folder_alert(sign_out_kept_folder(&result)).map(|(_, body)| body),
+                    expected.map(|folder| format!("{}\n\n{folder}", finder_removal::PRESERVED_FILES_SENTENCE)),
+                    "{id}"
+                );
+                fx.finish().await;
+            });
+        }
+    }
+
+    /// Task 1882 on spec A's sign-out: a sign-out that completes carries the folder its removal kept to the
+    /// result the command and the menu raise the alert from, and nothing when nothing was kept.
+    #[test]
+    fn test_1882_r2_the_post_removal_step_carries_the_folder_on_success_and_nothing_when_nothing_was_kept() {
+        for (id, mode, folder, warning) in [
+            ("signout-kept-ok", Reconciler::KeepsFiles, Some(KEPT_FOLDER), None),
+            (
+                "signout-kept-ok-failed",
+                Reconciler::KeepsFilesAndFails,
+                Some(KEPT_FOLDER),
+                Some(ActionWarning::FinderRemovalUnconfirmed),
+            ),
+            ("signout-none-ok", Reconciler::Answers, None, None),
+        ] {
+            let mut fx = Fixture::new(id);
+            runtime().block_on(async {
+                fx.reconciler(Some(mode));
+                let result = clear_session_impl(&fx.state(), false).await;
+                let done = result.as_ref().expect("the sign-out happened");
+                assert_eq!(done.outcome, SignOutOutcome::NotSignedIn, "{id}");
+                assert_eq!(done.warning, warning, "{id}");
+                assert_eq!(sign_out_kept_folder(&result), folder, "{id}");
+                fx.finish().await;
+            });
+        }
+    }
+
+    /// Lead ruling 1 (timeout path) and ruling 5 (a reconciler that is not running): sign-out
+    /// completes its own work and says Finder cleanup could not be confirmed. Never plain success: it happened, so it
+    /// is `Ok`, with the warning (FB-24).
+    #[test]
+    fn sign_out_the_reconciler_cannot_confirm_happens_and_warns_it_is_unconfirmed() {
+        for (id, mode) in [
+            ("finder-signout-silent", Some(Reconciler::Silent)),
+            ("finder-signout-dead", None),
+            ("finder-signout-dropped", Some(Reconciler::DropsTheAck)),
+            ("finder-signout-fails", Some(Reconciler::RemovalFails)),
+        ] {
+            let mut fx = Fixture::new(id);
+            runtime().block_on(async {
+                fx.reconciler(mode);
+                let started = Instant::now();
+                let done = FINDER_WAIT_OVERRIDE
+                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false))
+                    .await
+                    .expect("the sign-out happened");
+                assert_eq!(
+                    done,
+                    SignedOut {
+                        outcome: SignOutOutcome::NotSignedIn,
+                        warning: Some(ActionWarning::FinderRemovalUnconfirmed),
+                        preserved_location: None,
+                    },
+                    "{id}: a removal nobody confirmed is not a plain success"
+                );
+                if matches!(mode, Some(Reconciler::Silent)) {
+                    assert!(started.elapsed() >= SHORT_WAIT, "it waited for the removal");
+                }
+                // Ruling 12: nothing the OS said reaches the caller.
+                let sentence = ActionWarning::FinderRemovalUnconfirmed.sentence();
+                assert!(
+                    !sentence.contains("/Users") && !sentence.contains("Secret") && !sentence.contains("516"),
+                    "{id}: {sentence}"
+                );
+                fx.finish().await;
+            });
+        }
+    }
+
+    /// Lead ruling 7, the order: the removal reaches the reconciler while the engine is still tracked. A
+    /// sign-out that refuses afterwards because an earlier engine stop was never confirmed (the only way
+    /// this Mac's sign-out can stop short with its keys still in memory) does NOT ask the reconciler to put
+    /// Finder back (fix round 1, item E): every start refuses until a restart, and the restart's Launch
+    /// re-adds Finder, so a re-check would only show a Finder failure next to the restart message.
+    #[test]
+    fn a_sign_out_that_refuses_on_an_unconfirmed_stop_does_not_ask_for_a_finder_re_add() {
+        for (id, keys_in_memory) in [
+            ("finder-signout-short-keys", true),
+            ("finder-signout-short-nokeys", false),
+        ] {
+            let mut fx = Fixture::new(id);
+            runtime().block_on(async {
+                fx.reconciler(Some(Reconciler::Answers));
+                if keys_in_memory {
+                    fx.install_keys();
+                } else {
+                    set_auth_present(&fx.state(), true); // signed in on this Mac, no keys in memory
+                }
+                fx.install_finished_engine().await;
+                // An earlier stop that was never confirmed: sign-out refuses AFTER the removal.
+                fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+                let error = clear_session_impl(&fx.state(), false)
+                    .await
+                    .expect_err("sign-out refuses");
+                assert_eq!(error.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
+                assert_eq!(
+                    fx.acct.session.lock().unwrap().is_some(),
+                    keys_in_memory,
+                    "{id}: the keys are untouched"
+                );
+                assert!(
+                    fx.acct.engine.lock().await.is_some(),
+                    "{id}: the refusal did not touch the engine"
+                );
+                // Let the stand-in handle what was sent, then read what it saw.
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    fx.finish().await,
+                    vec!["remove:sign_out:engine_tracked"],
+                    "{id}: the removal, and no re-add request"
+                );
+            });
+        }
+    }
+
+    /// Lead ruling T3-⚠2 and item E, on the guard itself (no abort path of a Mac's sign-out leaves the keys
+    /// in memory without the flag set yet, so Task 10's failed reset is the first real one): it asks for
+    /// Finder back only when the keys are still in memory AND no engine stop is unconfirmed.
+    #[test]
+    fn the_restore_guard_asks_for_finder_back_only_with_keys_in_memory_and_no_unconfirmed_stop() {
+        for (id, keys_in_memory, stop_unconfirmed, expected) in [
+            ("finder-guard-keys", true, false, vec!["trigger:keys_arrived"]),
+            ("finder-guard-keys-flag", true, true, vec![]),
+            ("finder-guard-nokeys", false, false, vec![]),
+            ("finder-guard-nokeys-flag", false, true, vec![]),
+        ] {
+            let mut fx = Fixture::new(id);
+            runtime().block_on(async {
+                fx.reconciler(Some(Reconciler::Answers));
+                if keys_in_memory {
+                    fx.install_keys();
+                }
+                fx.acct
+                    .engine_stop_unconfirmed
+                    .store(stop_unconfirmed, Ordering::SeqCst);
+                {
+                    let state = fx.state();
+                    let _guard = FinderRestoreOnAbort {
+                        state: &state,
+                        acct: &fx.acct,
+                    };
+                }
+                tokio::task::yield_now().await;
+                assert_eq!(fx.finish().await, expected, "{id}");
+            });
+        }
+    }
+
+    // ---- Session transitions take turns (Task 12, lead ruling 1) ----
+
+    /// A loopback stand-in for the API whose FIRST request is held: the test learns that it arrived, and it is
+    /// answered only when the test releases it. Every later request is answered at once. Every answer is
+    /// `status_line` with `body`.
+    struct HeldServer {
+        base_url: String,
+        arrived: tokio::sync::mpsc::Receiver<String>,
+        release: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl HeldServer {
+        fn start(status_line: &'static str, body: &'static str) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (arrived_tx, arrived) = tokio::sync::mpsc::channel(8);
+            let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
+            std::thread::spawn(move || {
+                let mut release_rx = Some(release_rx);
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut buf = [0u8; 8192];
+                    let read = stream.read(&mut buf).unwrap_or(0);
+                    let request_line = String::from_utf8_lossy(&buf[..read])
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let _ = arrived_tx.blocking_send(request_line);
+                    if let Some(release_rx) = release_rx.take() {
+                        let _ = release_rx.blocking_recv();
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self {
+                base_url,
+                arrived,
+                release: Some(release),
+            }
+        }
+
+        /// The request line of the next request that reached the server.
+        async fn next_request(&mut self) -> String {
+            tokio::time::timeout(Duration::from_secs(20), self.arrived.recv())
+                .await
+                .expect("a request reaches the stand-in")
+                .expect("the stand-in is running")
+        }
+
+        fn release(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    const T12_PROFILE: &str =
+        r#"{"user_id":"u-t12","email":"t12@beebeeb.io","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#;
+
+    /// What the Keychain (the in-memory test store) holds for `id`: (token, vault key, email).
+    fn keychain_holds(id: &str) -> (bool, bool, bool) {
+        let store = keychain::platform_keychain_store_for(id);
+        (
+            keychain::holds_session_token(&store),
+            keychain::holds_vault_key(&store),
+            keychain::holds_account_email(&store),
+        )
+    }
+
+    /// Lead ruling 1 (Task 12): a Sign-out that has completed is never followed by an older startup restore. The
+    /// restore is held at its probe (the server has the request and has not answered); the Sign-out runs to `Ok`; then
+    /// the server answers "this token works" (and names the account). Afterwards nothing is in memory, nothing is
+    /// written to the Keychain, and no engine start follows.
+    #[test]
+    fn a_sign_out_while_the_startup_restore_waits_for_the_server_is_never_followed_by_the_restore() {
+        // The sign-out below reads the sandboxed config; its first read in a test process can take seconds, longer than
+        // the probe's own 5 s timeout. Done first, so the probe is answered, not timed out.
+        let _ = DesktopConfig::load();
+        let mut fx = Fixture::new("t12-restore-held-probe");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            // A complete stored session with no email: after the probe the restore asks the server to name it.
+            persist_session_to_keychain(&SessionWrite::for_test(), &id, "tok-stored", &[4u8; 32], None).unwrap();
+            set_auth_present(&fx.state(), true); // `setup()` seeds it from the Keychain
+            let mut server = HeldServer::start("200 OK", T12_PROFILE);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let restore = restore_stored_session(&state, &fx.acct, &base_url);
+            let sign_out_then_answer = async {
+                let probe = server.next_request().await;
+                let signed_out = clear_session_impl(&state, false).await;
+                server.release();
+                (probe, signed_out)
+            };
+            let (restored, (probe, signed_out)) = tokio::join!(restore, sign_out_then_answer);
+            assert!(probe.starts_with("GET /api/v1/auth/me"), "the restore was held at its probe: {probe}");
+            assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::Completed)), "the premise: the sign-out completed before the probe was answered");
+            let session_in_memory = fx.acct.session.lock().unwrap().is_some();
+            let auth_present = *state.auth_present.lock().unwrap();
+            let (token, key, email) = keychain_holds(&id);
+            assert_eq!(
+                (restored, session_in_memory, auth_present, token, key, email),
+                (false, false, false, false, false, false),
+                "(an engine start follows, a session in memory, auth_present, a Keychain token, a Keychain vault key, a Keychain email)"
+            );
+            assert_eq!(keys_for_engine_start(&fx.acct).err(), Some(EngineStartBlocked::NoSession), "no engine could start with anything");
+            assert_eq!(fx.acct.auth_email.lock().unwrap().clone(), None);
+            fx.finish().await;
+        }));
+    }
+
+    fn t12_profile(user_id: &str, email: &str) -> account_dto::AccountProfile {
+        serde_json::from_str(&format!(
+            r#"{{"user_id":"{user_id}","email":"{email}","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}}"#
+        ))
+        .unwrap()
+    }
+
+    fn stored_token_of(id: &str) -> Option<String> {
+        load_session_token_from_keychain(id).unwrap()
+    }
+
+    /// R8 on a Mac, through the real restore: the server rejects the stored token (401), so the restore drops ONLY that
+    /// token, keeps the vault key and the email, and boots signed out. A later sign-out (the switch) then leaves neither.
+    #[test]
+    fn a_startup_401_on_a_mac_drops_only_the_token_and_a_later_sign_out_leaves_nothing() {
+        let mut fx = Fixture::new("t12-startup-401");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-revoked",
+                &[4u8; 32],
+                Some("t12@beebeeb.io"),
+            )
+            .unwrap();
+            set_auth_present(&fx.state(), true);
+            set_auth_email(&fx.state(), Some("t12@beebeeb.io".into()));
+            let mut server = HeldServer::start("401 Unauthorized", "{}");
+            server.release();
+            let state = fx.state();
+            assert!(
+                !restore_stored_session(&state, &fx.acct, &server.base_url).await,
+                "no engine start follows a rejected token"
+            );
+            assert_eq!(
+                keychain_holds(&id),
+                (false, true, true),
+                "(token, vault key, email): only the token is gone (R8, R9)"
+            );
+            assert!(fx.acct.session.lock().unwrap().is_none(), "nothing in memory");
+            assert!(
+                !*state.auth_present.lock().unwrap() && fx.acct.auth_email.lock().unwrap().is_none(),
+                "booted signed out"
+            );
+            // "Sign out and switch" from here: the already-signed-out path, which must leave no key and no email.
+            assert_eq!(
+                clear_session_impl(&state, false).await,
+                Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn))
+            );
+            assert_eq!(
+                keychain_holds(&id),
+                (false, false, false),
+                "nothing of the account is left for the next one"
+            );
+            fx.finish().await;
+        }));
+    }
+
+    /// Lead ruling 1: a startup 401 never removes a token that a sign-in stored while the probe waited. The restore read
+    /// the old token and is held at its probe; the same account signs in again (a new token); then the server rejects
+    /// the OLD token. The new session is left exactly as the sign-in made it.
+    #[test]
+    fn a_startup_401_never_removes_a_token_a_sign_in_stored_while_the_probe_waited() {
+        let mut fx = Fixture::new("t12-401-after-resign-in");
+        let id = fx.acct.id.as_str().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-old",
+                &[4u8; 32],
+                Some("t12@beebeeb.io"),
+            )
+            .unwrap();
+            set_auth_present(&fx.state(), true);
+            let mut server = HeldServer::start("401 Unauthorized", "{}");
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let restore = restore_stored_session(&state, &fx.acct, &base_url);
+            let sign_in_then_answer = async {
+                let probe = server.next_request().await;
+                let sources = LocalSources::for_test(dir.path());
+                let signed_in = reauth_swap_token(
+                    &state,
+                    &fx.acct,
+                    &sources,
+                    "tok-new",
+                    &t12_profile("u-t12", "t12@beebeeb.io"),
+                    &mut fx.acct.session_generation(),
+                );
+                server.release();
+                (probe, signed_in.map_err(|e| e.message))
+            };
+            let (restored, (probe, signed_in)) = tokio::join!(restore, sign_in_then_answer);
+            assert!(probe.starts_with("GET /api/v1/auth/me"), "{probe}");
+            assert_eq!(
+                signed_in,
+                Ok(true),
+                "the premise: the sign-in stored its token and unlocked with the stored key"
+            );
+            assert!(!restored);
+            assert_eq!(
+                stored_token_of(&id).as_deref(),
+                Some("tok-new"),
+                "the new token is still stored"
+            );
+            assert_eq!(keychain_holds(&id), (true, true, true));
+            assert_eq!(
+                fx.acct
+                    .session
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|session| session.token.clone())
+                    .as_deref(),
+                Some("tok-new"),
+                "and in memory"
+            );
+            assert!(*state.auth_present.lock().unwrap(), "still signed in");
+            fx.finish().await;
+        }));
+    }
+
+    /// Lead ruling 3 (Task 12), through the Keychain seam: a sign-out clears the session BEFORE it releases the engine
+    /// slot. The test freezes the sign-out at the session clear by holding the session-write lock (the Keychain
+    /// writers' lock, which the clear takes first) once the sign-out holds the slot: at that moment the slot must still
+    /// be held and the keys still in memory; released, the sign-out clears them and only then frees the slot.
+    #[test]
+    fn sign_out_holds_the_engine_slot_until_the_session_is_cleared() {
+        // Fix round 2, item 4 (re-review N2): explicit signals, no timing sample. (1) The engine ignores the cancel, so
+        // the sign-out holds the slot for at least `abort()`'s 3 s graceful window: the slot is seen taken. (2) This
+        // thread then holds the session mutex, and waits for the sign-out's next generation move: the one
+        // `clear_session_holding_slot` makes right before it takes the session mutex to clear it. At that point the
+        // sign-out is at its clear, blocked on this thread; the slot must still be held.
+        let _ = DesktopConfig::load();
+        let mut fx = Fixture::new("t12-signout-freeze");
+        let rt = multi_thread_runtime();
+        rt.block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                fx.acct.id.as_str(),
+                "tok-abc",
+                &[9u8; 32],
+                Some("sam.keys@beebeeb.io"),
+            )
+            .unwrap();
+            fx.install_ticking_engine().await;
+        });
+        let acct = fx.acct.clone();
+        let state = fx.state();
+        let (slot_held_at_the_clear, signed_out) = std::thread::scope(|scope| {
+            let signing_out =
+                scope.spawn(move || runtime().block_on(with_the_shared_state_dir(clear_session_impl(&state, false))));
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while acct.engine.try_lock().is_ok() {
+                assert!(Instant::now() < deadline, "the sign-out never took the engine slot");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            // The sign-out's start already moved the generation (before it took the slot); its next move is the clear's.
+            let before_the_clear = acct.session_generation();
+            let freeze = acct.session.lock().unwrap();
+            while acct.session_unchanged_since(before_the_clear) {
+                assert!(Instant::now() < deadline, "the sign-out never reached its clear");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            // The clear's move happened while the slot was held (an early release would have come before it), and the
+            // clear itself now waits for the session mutex this thread holds.
+            let held = acct.engine.try_lock().is_err();
+            assert!(
+                freeze.is_some(),
+                "the keys are still there: the clear is waiting for this thread"
+            );
+            drop(freeze);
+            (held, signing_out.join().unwrap())
+        });
+        assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::Completed)));
+        assert!(
+            slot_held_at_the_clear,
+            "the engine slot was released before the session was cleared"
+        );
+        assert!(
+            acct.session.lock().unwrap().is_none(),
+            "and then the session is cleared"
+        );
+        assert!(acct.engine.try_lock().is_ok(), "and the slot is free again");
+        rt.block_on(fx.finish());
+    }
+
+    /// Lead rulings 1 and 6 (Task 12): a Lock that completes while the recovery phrase is being checked is never undone
+    /// by the unlock. The unlock's own re-check (Task 11) compares the stored token, the identity and the empty memory,
+    /// and a Lock changes none of them; the unlock's turn is what stops it. The unlock runs as the command runs it: its
+    /// turn captured before it reads the Keychain, the server check, then the one checked install.
+    #[test]
+    fn a_lock_while_the_recovery_phrase_is_checked_is_never_undone_by_the_unlock() {
+        let mut fx = Fixture::new("t12-unlock-held-lock");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            // Signed in on this Mac, no vault key yet: what a sign-in leaves before the recovery phrase.
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-signed-in", Some("t12@beebeeb.io"))
+                .unwrap();
+            set_auth_present(&fx.state(), true);
+            set_auth_email(&fx.state(), Some("t12@beebeeb.io".into()));
+            let (phrase, _) = beebeeb_core::recovery::generate_recovery_phrase().unwrap();
+            let mut server = HeldServer::start("200 OK", r#"{"valid":true}"#);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let mut turn = fx.acct.session_generation();
+            let token = load_session_token_from_keychain(&id)
+                .unwrap()
+                .expect("the premise: a stored token");
+            let email = fx.acct.auth_email.lock().unwrap().clone();
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .unwrap();
+            let unlock = async {
+                let key = verify_vault_key_from_phrase(&client, &base_url, &token, &phrase).await?;
+                install_recovered_session(&state, &fx.acct, &mut turn, &token, email, &key)
+            };
+            let lock_then_answer = async {
+                let check = server.next_request().await;
+                let locked = lock_vault(fx.state()).await;
+                server.release();
+                (check, locked)
+            };
+            let (unlocked, (check, locked)) = tokio::join!(unlock, lock_then_answer);
+            assert!(
+                check.starts_with("POST /api/v1/auth/verify-recovery-check"),
+                "the unlock was held at its server check: {check}"
+            );
+            assert_eq!(
+                locked,
+                Ok(SessionActionOutcome { warning: None }),
+                "the premise: the Lock completed first"
+            );
+            let session_in_memory = fx.acct.session.lock().unwrap().is_some();
+            let (_, key_written, _) = keychain_holds(&id);
+            assert_eq!(
+                (unlocked, session_in_memory, key_written),
+                (Err(RECOVERY_UNLOCK_LOCKED_MEANWHILE.to_string()), false, false),
+                "(the unlock's result, keys in memory after the Lock, a vault key written after the Lock)"
+            );
+            assert_eq!(
+                stored_token_of(&id).as_deref(),
+                Some("tok-signed-in"),
+                "the Lock keeps the session's token"
+            );
+            fx.finish().await;
+        });
+    }
+
+    /// A Mac whose owner record names sam by email only and that stores a vault key: a sign-in as sam needs the server's
+    /// key proof (`NeedsKeyProof`). Returns the throwaway state dir that holds the owner record.
+    fn legacy_owner_with_a_stored_key(fx: &Fixture, session_in_memory: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state_db::StateDb::open(dir.path().join("state.db"))
+            .unwrap()
+            .set_owner(&crate::account_binding::Identity::new(None, Some("sam@beebeeb.io")))
+            .unwrap();
+        persist_session_to_keychain(
+            &SessionWrite::for_test(),
+            fx.acct.id.as_str(),
+            "tok-old",
+            &[5u8; 32],
+            Some("sam@beebeeb.io"),
+        )
+        .unwrap();
+        set_auth_present(&fx.state(), true);
+        set_auth_email(&fx.state(), Some("sam@beebeeb.io".into()));
+        if session_in_memory {
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-old".into(),
+                master_key: [5u8; 32],
+                email: Some("sam@beebeeb.io".into()),
+            });
+        }
+        dir
+    }
+
+    /// Lead ruling 6 (re-check N1): the key proof waits for the server (up to 15 s). A Sign-out that completes
+    /// during that wait is never followed by the re-sign-in: nothing is decided, and nothing is written.
+    #[test]
+    fn a_sign_out_during_a_held_key_proof_is_never_followed_by_the_re_sign_in() {
+        // As in the restore test: the sign-out's first config read must not outlast the proof's 15 s timeout.
+        let _ = DesktopConfig::load();
+        let mut fx = Fixture::new("t12-keyproof-signout");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            let dir = legacy_owner_with_a_stored_key(&fx, false);
+            let sources = LocalSources::for_test(dir.path());
+            let sam = t12_profile("u-1", "sam@beebeeb.io");
+            let mut server = HeldServer::start("200 OK", r#"{"valid":true}"#);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let mut turn = fx.acct.session_generation();
+            let (kind, _) = classify_sign_in(&state, &fx.acct, &sources, &sam);
+            assert_eq!(
+                kind,
+                reauth::SignInKind::NeedsKeyProof,
+                "the premise: the server's proof decides"
+            );
+            let decide = decide_sign_in_in_turn(&state, &fx.acct, &sources, &sam, "tok-new", &base_url, &turn);
+            let sign_out_then_answer = async {
+                let proof = server.next_request().await;
+                let signed_out = clear_session_impl(&state, false).await;
+                server.release();
+                (proof, signed_out)
+            };
+            let (decided, (proof, signed_out)) = tokio::join!(decide, sign_out_then_answer);
+            assert!(
+                proof.starts_with("POST /api/v1/auth/verify-recovery-check"),
+                "held at the key proof: {proof}"
+            );
+            assert_eq!(
+                signed_out,
+                Ok(SignedOut::confirmed(SignOutOutcome::Completed)),
+                "the premise: the sign-out completed during the proof"
+            );
+            let decided = decided.map_err(|e| (e.message, e.token_stored));
+            assert_eq!(
+                decided,
+                Err((SESSION_CHANGED_WHILE_WAITING.to_string(), false)),
+                "nothing decided, nothing stored (the caller revokes)"
+            );
+            // And a swap that would run on the old decision anyway is refused before it writes.
+            let swapped = reauth_swap_token(&state, &fx.acct, &sources, "tok-new", &sam, &mut turn)
+                .map_err(|e| (e.message, e.token_stored));
+            assert_eq!(swapped, Err((SESSION_CHANGED_WHILE_WAITING.to_string(), false)));
+            assert_eq!(
+                keychain_holds(&id),
+                (false, false, false),
+                "nothing written after the sign-out"
+            );
+            assert!(fx.acct.session.lock().unwrap().is_none() && !*state.auth_present.lock().unwrap());
+            let owner = crate::state_db::StateDb::open(dir.path().join("state.db"))
+                .unwrap()
+                .owner()
+                .unwrap();
+            assert_eq!(
+                owner,
+                Some(crate::account_binding::Identity::new(None, Some("sam@beebeeb.io"))),
+                "the owner record is not rewritten"
+            );
+            fx.finish().await;
+        }));
+    }
+
+    /// Lead ruling 6 (security P3): a re-sign-in in flight never undoes a Lock that completes in the middle of it. Held
+    /// at its key proof, the Lock runs to `Ok`; afterwards the vault is still locked and the stored token unchanged.
+    #[test]
+    fn a_lock_during_a_held_re_sign_in_is_never_undone() {
+        let mut fx = Fixture::new("t12-resign-in-lock");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            let dir = legacy_owner_with_a_stored_key(&fx, true);
+            let sources = LocalSources::for_test(dir.path());
+            let sam = t12_profile("u-1", "sam@beebeeb.io");
+            let mut server = HeldServer::start("200 OK", r#"{"valid":true}"#);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let mut turn = fx.acct.session_generation();
+            let decide = decide_sign_in_in_turn(&state, &fx.acct, &sources, &sam, "tok-new", &base_url, &turn);
+            let lock_then_answer = async {
+                let proof = server.next_request().await;
+                let locked = lock_vault(fx.state()).await;
+                server.release();
+                (proof, locked)
+            };
+            let (decided, (proof, locked)) = tokio::join!(decide, lock_then_answer);
+            assert!(proof.starts_with("POST /api/v1/auth/verify-recovery-check"), "{proof}");
+            assert_eq!(locked, Ok(SessionActionOutcome { warning: None }));
+            let decided = decided.map_err(|e| (e.message, e.token_stored));
+            let swapped = reauth_swap_token(&state, &fx.acct, &sources, "tok-new", &sam, &mut turn)
+                .map_err(|e| (e.message, e.token_stored));
+            let session_in_memory = fx.acct.session.lock().unwrap().is_some();
+            assert_eq!(
+                (decided, swapped, session_in_memory, stored_token_of(&id)),
+                (
+                    Err((SIGN_IN_LOCKED_MEANWHILE.to_string(), false)),
+                    Err((SIGN_IN_LOCKED_MEANWHILE.to_string(), false)),
+                    false,
+                    Some("tok-old".to_string())
+                ),
+                "(the decision, a swap on it anyway, keys in memory after the Lock, the stored token)"
+            );
+            fx.finish().await;
+        });
+    }
+
+    /// Lead ruling 6 (P3): two sign-ins of DIFFERENT accounts that began together (both captured the same
+    /// generation before either wrote) never leave one account's token beside the other's key or email: the first to
+    /// write wins, the other is refused before it writes anything. In both orders, and then with the two sign-ins on
+    /// separate threads.
+    #[test]
+    fn two_sign_ins_that_began_together_never_leave_one_accounts_token_beside_the_others_key() {
+        let sam = || t12_profile("u-sam", "sam@beebeeb.io");
+        let kim = || t12_profile("u-kim", "kim@beebeeb.io");
+        // sam signs in by password (a token), kim through the browser (a token and a vault key).
+        let fx = Fixture::new("t12-two-sign-ins-a");
+        let (mut by_password, mut by_browser) = (fx.acct.session_generation(), fx.acct.session_generation());
+        assert_eq!(
+            store_first_sign_in(
+                &fx.state(),
+                &fx.acct,
+                &mut by_password,
+                "tok-sam",
+                "sam@beebeeb.io",
+                sam()
+            ),
+            Ok(())
+        );
+        let browser = install_new_session(
+            &fx.state(),
+            &fx.acct,
+            &mut by_browser,
+            "tok-kim",
+            &[2u8; 32],
+            Some("kim@beebeeb.io".into()),
+            Some(kim()),
+        );
+        assert_eq!(
+            browser,
+            Ok(NewSession::Refused(SESSION_CHANGED_WHILE_WAITING.to_string()))
+        );
+        assert_eq!(
+            (
+                stored_token_of(fx.acct.id.as_str()).as_deref(),
+                keychain_holds(fx.acct.id.as_str())
+            ),
+            (Some("tok-sam"), (true, false, true))
+        );
+        assert_eq!(
+            keychain_account_email(fx.acct.id.as_str()).as_deref(),
+            Some("sam@beebeeb.io")
+        );
+        assert!(
+            fx.acct.session.lock().unwrap().is_none(),
+            "kim's keys never reach memory"
+        );
+        // The other order.
+        let fx = Fixture::new("t12-two-sign-ins-b");
+        let (mut by_password, mut by_browser) = (fx.acct.session_generation(), fx.acct.session_generation());
+        assert_eq!(
+            install_new_session(
+                &fx.state(),
+                &fx.acct,
+                &mut by_browser,
+                "tok-kim",
+                &[2u8; 32],
+                Some("kim@beebeeb.io".into()),
+                Some(kim())
+            ),
+            Ok(NewSession::Installed)
+        );
+        assert_eq!(
+            store_first_sign_in(
+                &fx.state(),
+                &fx.acct,
+                &mut by_password,
+                "tok-sam",
+                "sam@beebeeb.io",
+                sam()
+            ),
+            Err(SESSION_CHANGED_WHILE_WAITING.to_string())
+        );
+        assert_eq!(
+            stored_token_of(fx.acct.id.as_str()).as_deref(),
+            Some("tok-kim"),
+            "kim's session is whole: sam's token did not replace kim's"
+        );
+        assert_eq!(
+            keychain_account_email(fx.acct.id.as_str()).as_deref(),
+            Some("kim@beebeeb.io")
+        );
+        // As a race between threads, many times: whoever wins, the Keychain holds ONE account's token, key and email.
+        for round in 0..100 {
+            let fx = Fixture::new(&format!("t12-two-sign-ins-race-{round}"));
+            let id = fx.acct.id.as_str().to_string();
+            let (mut by_password, mut by_browser) = (fx.acct.session_generation(), fx.acct.session_generation());
+            let barrier = std::sync::Barrier::new(2);
+            let (state_a, state_b, acct) = (fx.state(), fx.state(), fx.acct.clone());
+            let (password, browser) = std::thread::scope(|scope| {
+                let password = scope.spawn(|| {
+                    barrier.wait();
+                    store_first_sign_in(&state_a, &acct, &mut by_password, "tok-sam", "sam@beebeeb.io", sam())
+                });
+                let browser = scope.spawn(|| {
+                    barrier.wait();
+                    install_new_session(
+                        &state_b,
+                        &acct,
+                        &mut by_browser,
+                        "tok-kim",
+                        &[2u8; 32],
+                        Some("kim@beebeeb.io".into()),
+                        Some(kim()),
+                    )
+                });
+                (password.join().unwrap(), browser.join().unwrap())
+            });
+            let stored = (stored_token_of(&id), keychain_holds(&id).1, keychain_account_email(&id));
+            match (password, browser) {
+                (Ok(()), Ok(NewSession::Refused(_))) => {
+                    assert_eq!(
+                        stored,
+                        (Some("tok-sam".into()), false, Some("sam@beebeeb.io".into())),
+                        "round {round}: sam's alone"
+                    );
+                }
+                (Err(_), Ok(NewSession::Installed)) => {
+                    assert_eq!(
+                        stored,
+                        (Some("tok-kim".into()), true, Some("kim@beebeeb.io".into())),
+                        "round {round}: kim's alone"
+                    );
+                }
+                other => panic!("round {round}: exactly one sign-in may write, got {other:?}"),
+            }
+        }
+    }
+
+    /// Lead rulings 4 and 5 (Task 12), the startup probe: while the session still works, the probe's own answer names
+    /// it (no second request), caches the profile (so its user id is known), and completes an owner record written
+    /// before ids were known, here with another letter case, so the next engine start compares ids and keeps the data.
+    #[test]
+    fn the_startup_probe_names_the_session_and_completes_a_legacy_owner_record() {
+        let mut fx = Fixture::new("t12-probe-names");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            let dir = crate::state_paths::init_for_test();
+            let db = crate::state_db::StateDb::open(dir.join("state.db")).unwrap();
+            let legacy = crate::account_binding::Identity::new(None, Some("T12@Beebeeb.io"));
+            db.set_owner(&legacy).unwrap();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-stored",
+                &[4u8; 32],
+                Some("T12@Beebeeb.io"),
+            )
+            .unwrap();
+            set_auth_present(&fx.state(), true);
+            let mut server = HeldServer::start("200 OK", T12_PROFILE);
+            server.release();
+            let state = fx.state();
+            assert!(
+                restore_stored_session(&state, &fx.acct, &server.base_url).await,
+                "an engine start follows"
+            );
+            let mut requests = Vec::new();
+            while let Ok(request) = server.arrived.try_recv() {
+                requests.push(request);
+            }
+            assert_eq!(
+                requests.len(),
+                1,
+                "the probe's own answer named the session: {requests:?}"
+            );
+            assert_eq!(
+                fx.acct
+                    .cached_profile
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|p| p.user_id.clone())
+                    .as_deref(),
+                Some("u-t12"),
+                "the profile is cached"
+            );
+            let email = fx
+                .acct
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|session| session.email.clone());
+            assert_eq!(
+                email.as_deref(),
+                Some("t12@beebeeb.io"),
+                "the session is known by the server's spelling"
+            );
+            assert_eq!(keychain_account_email(&id).as_deref(), Some("t12@beebeeb.io"));
+            let owner = db.owner().unwrap();
+            assert_eq!(
+                owner,
+                Some(crate::account_binding::Identity::new(
+                    Some("u-t12"),
+                    Some("t12@beebeeb.io")
+                )),
+                "the legacy owner gained its id"
+            );
+            let session = identity_of_session(email.as_deref(), fx.acct.cached_profile.lock().unwrap().as_ref());
+            assert_eq!(
+                crate::account_binding::same_account(owner.as_ref().unwrap(), &session),
+                Some(true),
+                "so the engine start keeps the data"
+            );
+            // Leave the shared directory as the other sign-out tests expect it.
+            db.clear_account_data(false).unwrap();
+            fx.finish().await;
+        }));
+    }
+
+    /// Lead ruling 5 (Task 12), "Try again": a session that has no email (it cannot be identified at all) asks the
+    /// server FIRST, and only then asks the reconciler to retry, so the check it starts can start the engine.
+    #[test]
+    fn try_again_names_an_unidentified_session_before_it_asks_for_the_retry() {
+        let mut fx = Fixture::new("t12-try-again");
+        // The naming completes an owner record in the shared scratch state dir, so it takes its turn there.
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-t12".into(),
+                master_key: [3u8; 32],
+                email: None,
+            });
+            let mut server = HeldServer::start("200 OK", T12_PROFILE);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let seen = fx.seen.clone();
+            let retry = finder_setup_try_again(&state, &base_url);
+            let watch = async {
+                let request = server.next_request().await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let triggers_before_the_answer = seen.lock().unwrap().clone();
+                server.release();
+                (request, triggers_before_the_answer)
+            };
+            let (retried, (request, before)) = tokio::join!(retry, watch);
+            assert!(request.starts_with("GET /api/v1/auth/me"), "{request}");
+            assert_eq!(retried, Ok(()));
+            assert!(
+                before.is_empty(),
+                "no retry was asked for before the server answered: {before:?}"
+            );
+            assert_eq!(
+                fx.acct
+                    .cached_profile
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|p| p.user_id.clone())
+                    .as_deref(),
+                Some("u-t12"),
+                "named"
+            );
+            tokio::task::yield_now().await;
+            assert_eq!(fx.finish().await, vec!["trigger:try_again"]);
+        }));
+    }
+
+    /// Area A M8: a session that has an email can already start its engine, so "Try again" asks the reconciler at once
+    /// and never waits on the network (here: a server that would hold the request forever, and is never asked).
+    #[test]
+    fn try_again_for_a_session_with_an_email_retries_at_once_and_asks_the_server_nothing() {
+        let mut fx = Fixture::new("t12-try-again-email");
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-t12".into(),
+                master_key: [3u8; 32],
+                email: Some("t12@beebeeb.io".into()),
+            });
+            let mut server = HeldServer::start("200 OK", T12_PROFILE);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let retried = tokio::time::timeout(Duration::from_secs(5), finder_setup_try_again(&state, &base_url))
+                .await
+                .expect("it does not wait on the network");
+            assert_eq!(retried, Ok(()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), server.next_request())
+                    .await
+                    .is_err(),
+                "the server was not asked"
+            );
+            server.release();
+            tokio::task::yield_now().await;
+            assert_eq!(fx.finish().await, vec!["trigger:try_again"]);
+        });
+    }
+
+    /// Lead ruling 5 (Task 12), app activation: a session that does not know its user id asks the server again (and the
+    /// caller then starts the engine); one that does, or no session at all, asks nothing.
+    #[test]
+    fn app_activation_names_an_unidentified_session_and_asks_nothing_otherwise() {
+        let fx = Fixture::new("t12-activation");
+        runtime().block_on(with_the_shared_state_dir(async {
+            let state = fx.state();
+            let mut server = HeldServer::start("200 OK", T12_PROFILE);
+            server.release();
+            assert!(
+                !identify_on_app_activation(&state, &server.base_url, std::time::Instant::now()).await,
+                "no session: nothing to name"
+            );
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-t12".into(),
+                master_key: [3u8; 32],
+                email: Some("t12@beebeeb.io".into()),
+            });
+            assert!(
+                identify_on_app_activation(&state, &server.base_url, std::time::Instant::now()).await,
+                "an email but no user id: asked and named"
+            );
+            assert_eq!(
+                fx.acct
+                    .cached_profile
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|p| p.user_id.clone())
+                    .as_deref(),
+                Some("u-t12")
+            );
+            assert!(
+                !identify_on_app_activation(&state, &server.base_url, std::time::Instant::now()).await,
+                "identified now: nothing more to ask"
+            );
+            let mut requests = 0;
+            while server.arrived.try_recv().is_ok() {
+                requests += 1;
+            }
+            assert_eq!(requests, 1, "exactly one request, for the unidentified session");
+        }));
+    }
+
+    /// The check a sign-out ends with: any item of the account left in the Keychain (token, vault key or email) is a
+    /// sign-out that has not finished.
+    #[test]
+    fn a_sign_out_verifies_that_no_item_of_the_account_is_left() {
+        use crate::keychain::AuthSecretStore as _;
+        let id = "t12-ensure-empty";
+        assert_eq!(ensure_keychain_holds_no_account(id), Ok(()));
+        let store = keychain::platform_keychain_store_for(id);
+        let leave = |what: &str| match what {
+            "token" => store
+                .save_session_token(&SessionToken::new("tok-left").unwrap())
+                .unwrap(),
+            "key" => store
+                .save_wrapped_master_key(SecretBytes::new_master_key(&[1u8; 32]))
+                .unwrap(),
+            _ => store.save_account_email("left@beebeeb.io").unwrap(),
+        };
+        for what in ["token", "key", "email"] {
+            leave(what);
+            assert_eq!(
+                ensure_keychain_holds_no_account(id),
+                Err(SIGN_OUT_KEYCHAIN_NOT_CLEARED.to_string()),
+                "{what} left behind"
+            );
+            clear_keychain_session(id).unwrap();
+            assert_eq!(ensure_keychain_holds_no_account(id), Ok(()), "{what} cleared");
+        }
+    }
+
+    // ---- Task 12 fix round 1 ----
+
+    /// Fix round 1, item 2 (P2-A): a Keychain Unlock that read the stored session while a sign-out was between its
+    /// memory clear and its Keychain clear never installs that session after the sign-out completed. The test freezes
+    /// the sign-out between the two (it clears the 2FA challenge there, and this test holds that mutex); the Unlock
+    /// runs as `unlock_vault` runs it: its turn, the Keychain read, then the checked install.
+    #[test]
+    fn an_unlock_that_read_the_keychain_during_a_sign_out_never_installs_after_it() {
+        // The sign-out reads the sandboxed config; its first read in a test process can take seconds.
+        let _ = DesktopConfig::load();
+        let mut fx = Fixture::new("t12f1-unlock-in-the-gap");
+        let id = fx.acct.id.as_str().to_string();
+        let rt = multi_thread_runtime();
+        rt.block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-abc",
+                &[9u8; 32],
+                Some("sam.keys@beebeeb.io"),
+            )
+            .unwrap();
+        });
+        let acct = fx.acct.clone();
+        let (signing_out_state, gap_state) = (fx.state(), fx.state());
+        let (mut turn, read, signed_out) = std::thread::scope(|scope| {
+            let frozen = gap_state.pending_2fa.lock().unwrap();
+            let signing_out = scope.spawn(move || {
+                runtime().block_on(with_the_shared_state_dir(clear_session_impl(&signing_out_state, false)))
+            });
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while acct.session.lock().unwrap().is_some() {
+                assert!(Instant::now() < deadline, "the sign-out never cleared memory");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(200)); // it is now waiting on the 2FA challenge, before its Keychain clear
+            assert!(
+                !signing_out.is_finished(),
+                "the premise: the sign-out is frozen in the gap"
+            );
+            let turn = acct.session_generation();
+            let email = acct.auth_email.lock().unwrap().clone();
+            let read = load_session_from_keychain(acct.id.as_str(), email).unwrap();
+            drop(frozen);
+            (turn, read, signing_out.join().unwrap())
+        });
+        assert_eq!(
+            signed_out,
+            Ok(SignedOut::confirmed(SignOutOutcome::Completed)),
+            "the premise: the sign-out completed"
+        );
+        let session = read.expect("the premise: the Unlock read the stored session before the Keychain clear");
+        let state = fx.state();
+        let unlocked = install_keychain_session(&state, &fx.acct, &mut turn, session);
+        let session_in_memory = fx.acct.session.lock().unwrap().is_some();
+        let auth_present = *state.auth_present.lock().unwrap();
+        assert_eq!(
+            (unlocked.is_ok(), session_in_memory, auth_present),
+            (false, false, false),
+            "(the Unlock installed, keys in memory after the sign-out returned Ok, auth_present)"
+        );
+        assert_eq!(
+            keys_for_engine_start(&fx.acct).err(),
+            Some(EngineStartBlocked::NoSession),
+            "no engine could start with anything"
+        );
+        rt.block_on(fx.finish());
+    }
+
+    /// Fix round 1, item 2, the other order: the Unlock runs WHOLLY in the gap (it reads, claims and installs while the
+    /// sign-out is between its memory clear and its Keychain clear). The sign-out's last turn clears memory once more, so
+    /// once it has returned `Ok` no keys are in memory and no engine start can find any.
+    #[test]
+    fn an_unlock_wholly_inside_a_sign_out_is_cleared_by_its_last_turn() {
+        let _ = DesktopConfig::load();
+        let mut fx = Fixture::new("t12f1-unlock-wholly-in-the-gap");
+        let id = fx.acct.id.as_str().to_string();
+        let rt = multi_thread_runtime();
+        rt.block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            fx.install_keys();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-abc",
+                &[9u8; 32],
+                Some("sam.keys@beebeeb.io"),
+            )
+            .unwrap();
+        });
+        let acct = fx.acct.clone();
+        let (signing_out_state, gap_state, unlock_state) = (fx.state(), fx.state(), fx.state());
+        let (unlocked, signed_out) = std::thread::scope(|scope| {
+            let frozen = gap_state.pending_2fa.lock().unwrap();
+            let signing_out = scope.spawn(move || {
+                runtime().block_on(with_the_shared_state_dir(clear_session_impl(&signing_out_state, false)))
+            });
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while acct.session.lock().unwrap().is_some() {
+                assert!(Instant::now() < deadline, "the sign-out never cleared memory");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(
+                !signing_out.is_finished(),
+                "the premise: the sign-out is frozen in the gap"
+            );
+            let mut turn = acct.session_generation();
+            let email = acct.auth_email.lock().unwrap().clone();
+            let session = load_session_from_keychain(acct.id.as_str(), email)
+                .unwrap()
+                .expect("the premise: still stored");
+            let unlocked = install_keychain_session(&unlock_state, &acct, &mut turn, session);
+            drop(frozen);
+            (unlocked, signing_out.join().unwrap())
+        });
+        assert_eq!(
+            unlocked,
+            Ok(()),
+            "the premise: the Unlock installed while the sign-out was frozen"
+        );
+        assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::Completed)));
+        assert!(
+            fx.acct.session.lock().unwrap().is_none(),
+            "the sign-out's last turn cleared it"
+        );
+        assert_eq!(
+            keys_for_engine_start(&fx.acct).err(),
+            Some(EngineStartBlocked::NoSession)
+        );
+        assert_eq!(keychain_holds(&id), (false, false, false));
+        rt.block_on(fx.finish());
+    }
+
+    // ---- Task 12 fix round 2 ----
+
+    /// The state a startup 401 leaves (R9): the vault key and the email in the Keychain, no token, nothing in memory.
+    fn after_a_rejected_token(fx: &Fixture) {
+        let store = keychain::platform_keychain_store_for(fx.acct.id.as_str());
+        use crate::keychain::AuthSecretStore as _;
+        store
+            .save_wrapped_master_key(SecretBytes::new_master_key(&[5u8; 32]))
+            .unwrap();
+        store.save_account_email("sam@beebeeb.io").unwrap();
+        set_auth_present(&fx.state(), false);
+    }
+
+    /// An engine stand-in that runs until it is stopped.
+    fn a_running_engine() -> EngineRunner {
+        EngineRunner::for_test_with_task(tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }))
+    }
+
+    /// Fix round 2, item 1 (re-check N1): a sign-in that completes during an already-signed-out sign-out leaves no
+    /// engine running. The sign-out takes the engine slot BEFORE its purge, so a same-account sign-in that completes
+    /// while the purge runs (it began after the sign-out, so its turn is current) starts no engine before the sign-out
+    /// is done; once the sign-out returned `Ok` no engine runs and no keys are in memory. The test holds the purge's
+    /// gate to keep the sign-out inside its purge.
+    #[test]
+    fn a_sign_in_that_completes_during_an_already_signed_out_sign_out_leaves_no_engine() {
+        let _ = DesktopConfig::load();
+        let mut fx = Fixture::new("t12f2-sign-in-during-signed-out-sign-out");
+        let dir = tempfile::tempdir().unwrap();
+        crate::state_db::StateDb::open(dir.path().join("state.db"))
+            .unwrap()
+            .set_owner(&crate::account_binding::Identity::new(
+                Some("u-1"),
+                Some("sam@beebeeb.io"),
+            ))
+            .unwrap();
+        multi_thread_runtime().block_on(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            after_a_rejected_token(&fx);
+            let gate = SIGN_OUT_TEST_PURGE_GATE.lock().await; // the sign-out waits here, inside its purge
+            let state = fx.state();
+            let sam = t12_profile("u-1", "sam@beebeeb.io");
+            let sign_out = clear_session_impl(&state, false);
+            let sign_in = async {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !fx
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.starts_with("remove:sign_out"))
+                {
+                    assert!(Instant::now() < deadline, "the sign-out never began");
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                // Fix round 3, M4: a signal, not a sleep. The sign-out holds the engine slot from here (it took it before
+                // its purge, where it now waits for the gate this test holds).
+                while fx.acct.engine.try_lock().is_ok() {
+                    assert!(Instant::now() < deadline, "the sign-out never held the engine slot");
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let mut turn = fx.acct.session_generation();
+                let signed_in = reauth_swap_token(
+                    &state,
+                    &fx.acct,
+                    &LocalSources::for_test(dir.path()),
+                    "tok-new",
+                    &sam,
+                    &mut turn,
+                )
+                .map_err(|e| e.message);
+                drop(gate);
+                let mut slot = fx.acct.engine.lock().await;
+                let started = start_engine_bound(
+                    &state,
+                    &fx.acct,
+                    &mut slot,
+                    &LocalDataPaths::for_test(dir.path(), dir.path()),
+                    |_root, _token, _key| a_running_engine(),
+                );
+                drop(slot);
+                (signed_in, started)
+            };
+            let (signed_out, (signed_in, started)) = tokio::join!(sign_out, sign_in);
+            assert_eq!(
+                signed_in,
+                Ok(true),
+                "the premise: the same account signed in again and its keys were loaded"
+            );
+            assert_eq!(
+                signed_out,
+                Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn)),
+                "the premise: the sign-out returned Ok"
+            );
+            let engine_running = fx.acct.engine.lock().await.is_some();
+            let keys_in_memory = fx.acct.session.lock().unwrap().is_some();
+            assert_eq!(
+                (started, engine_running, keys_in_memory),
+                (Ok(EngineStart::NoSession), false, false),
+                "(the sign-in's engine start, an engine after the sign-out returned Ok, keys in memory)"
+            );
+            assert_eq!(keychain_holds(fx.acct.id.as_str()), (false, false, false));
+            fx.finish().await;
+        });
+    }
+
+    /// Fix round 2, item 1: the already-signed-out path stops an engine it finds in the slot, through the one stop
+    /// helper, as the signed-in path does.
+    #[test]
+    fn an_already_signed_out_sign_out_stops_an_engine_it_finds() {
+        let mut fx = Fixture::new("t12f2-signed-out-engine-found");
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            fx.reconciler(Some(Reconciler::Answers));
+            after_a_rejected_token(&fx);
+            *fx.acct.engine.lock().await = Some(a_running_engine());
+            let signed_out = clear_session_impl(&fx.state(), false).await;
+            assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn)));
+            assert!(fx.acct.engine.lock().await.is_none(), "the engine it found is stopped");
+            assert!(
+                !fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "and its stop was confirmed"
+            );
+            fx.finish().await;
+        }));
+    }
+
+    /// Fix round 2, item 2 (re-review N1): an inconclusive startup probe, the start by the session's email, then the
+    /// background naming confirms the same account. The running engine is neither stopped nor restarted; only an empty
+    /// slot would get a start.
+    #[test]
+    fn background_naming_never_restarts_the_running_engine_of_the_same_account() {
+        let fx = Fixture::new("t12f2-naming-keeps-the-engine");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-stored",
+                &[4u8; 32],
+                Some("t12@beebeeb.io"),
+            )
+            .unwrap();
+            let mut inconclusive = HeldServer::start("503 Service Unavailable", "{}");
+            inconclusive.release();
+            let state = fx.state();
+            assert!(
+                restore_stored_session(&state, &fx.acct, &inconclusive.base_url).await,
+                "the premise: restored, by its email"
+            );
+            assert!(
+                fx.acct.cached_profile.lock().unwrap().is_none(),
+                "the premise: the probe named nothing"
+            );
+            // The start by email (what `start_engine_if_possible` put in the slot), ticking.
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let counter = ticks.clone();
+            *fx.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(tokio::spawn(async move {
+                loop {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })));
+            // The background request now succeeds and names the same account.
+            let mut naming = HeldServer::start("200 OK", T12_PROFILE);
+            naming.release();
+            assert!(
+                identify_unidentified_session(&state, &naming.base_url, std::time::Instant::now(), IdentifyPace::Now)
+                    .await
+            );
+            let after = {
+                let mut slot = fx.acct.engine.lock().await;
+                keep_or_start_after_naming(&mut slot, |_| {
+                    panic!("a running engine of the same account is not restarted")
+                })
+            };
+            assert_eq!(after, Ok(AfterNaming::KeptRunning));
+            let before = ticks.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                ticks.load(Ordering::SeqCst) > before,
+                "the engine is still the one that ran, and still running"
+            );
+            // An empty slot (a start that was refused before the naming) is where a start happens.
+            let empty_slot = tokio::sync::Mutex::new(None::<EngineRunner>);
+            let mut guard = empty_slot.lock().await;
+            assert_eq!(
+                keep_or_start_after_naming(&mut guard, |_| Ok(EngineStart::Started)),
+                Ok(AfterNaming::Started(EngineStart::Started))
+            );
+        }));
+    }
+
+    /// Fix round 3, M1 (re-review): a naming keeps a running engine only when nothing says it runs for another account.
+    /// When the owner record of the local data and the named session both know a user id and the ids differ, the
+    /// engine is stopped through the one stop helper and the start goes through the binding (here a stand-in that
+    /// counts). The same id, an owner with no id, or a named session with no id: the engine is kept, never restarted.
+    #[test]
+    fn a_naming_that_finds_another_accounts_owner_by_id_stops_the_engine_and_starts_through_the_binding() {
+        use crate::account_binding::Identity;
+        let fx = Fixture::new("t12f3-m1-another-owner");
+        multi_thread_runtime().block_on(async {
+            let named = Identity::new(Some("u-1"), Some("sam@beebeeb.io"));
+            let mut slot = fx.acct.engine.lock().await;
+            *slot = Some(a_running_engine());
+            let starts = AtomicUsize::new(0);
+            let another = Identity::new(Some("u-other"), Some("sam@beebeeb.io"));
+            let after = keep_or_rebind_after_naming(&fx.acct, &mut slot, Some(&another), &named, |slot| {
+                starts.fetch_add(1, Ordering::SeqCst);
+                assert!(slot.is_none(), "the old engine left the slot before the start");
+                **slot = Some(a_running_engine());
+                Ok(EngineStart::Started)
+            })
+            .await;
+            assert_eq!(
+                after,
+                Ok(AfterNaming::Restarted(EngineStart::Started)),
+                "another owner by id: stopped and started through the binding"
+            );
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert!(
+                !fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "through the one stop helper, confirmed"
+            );
+            for (name, owner, session) in [
+                (
+                    "the same id",
+                    Identity::new(Some("u-1"), Some("old@beebeeb.io")),
+                    named.clone(),
+                ),
+                (
+                    "an owner with no id",
+                    Identity::new(None, Some("sam@beebeeb.io")),
+                    named.clone(),
+                ),
+                (
+                    "a named session with no id",
+                    another.clone(),
+                    Identity::new(None, Some("sam@beebeeb.io")),
+                ),
+            ] {
+                let after = keep_or_rebind_after_naming(&fx.acct, &mut slot, Some(&owner), &session, |_| {
+                    panic!("{name}: not restarted")
+                })
+                .await;
+                assert_eq!(after, Ok(AfterNaming::KeptRunning), "{name}");
+                assert!(slot.is_some(), "{name}: the engine still runs");
+            }
+            let after =
+                keep_or_rebind_after_naming(&fx.acct, &mut slot, None, &named, |_| panic!("no owner: not restarted"))
+                    .await;
+            assert_eq!(after, Ok(AfterNaming::KeptRunning), "no owner record");
+            if let Some(engine) = slot.take() {
+                stop_engine_in_slot(&fx.acct, engine).await;
+            }
+        });
+    }
+
+    /// Fix round 3, M1, the branch the test above leaves out: the owner record names another account by user id and the
+    /// engine is stopped, but the stop is NOT confirmed (its task cannot be aborted, so it may still run with the
+    /// keys). Nothing may start in its place and the result says so: the start refuses with the restart sentence, the
+    /// slot stays empty, and the gate stays closed for every later start.
+    #[test]
+    fn a_naming_that_cannot_confirm_the_stop_of_another_accounts_engine_starts_nothing_and_says_so() {
+        use crate::account_binding::Identity;
+        let fx = Fixture::new("t12f3-m1-unconfirmed-stop");
+        multi_thread_runtime().block_on(async {
+            let named = Identity::new(Some("u-1"), Some("sam@beebeeb.io"));
+            let another = Identity::new(Some("u-other"), Some("sam@beebeeb.io"));
+            let mut slot = fx.acct.engine.lock().await;
+            // An engine with no await point: tokio cannot force-abort it, so its stop cannot be confirmed. It gives up
+            // by itself at a deadline, so no thread keeps spinning into the rest of the run.
+            let deadline = Instant::now() + Duration::from_secs(8);
+            *slot = Some(EngineRunner::for_test_with_task(tokio::task::spawn_blocking(
+                move || {
+                    while Instant::now() < deadline {
+                        std::hint::black_box(());
+                    }
+                },
+            )));
+            let starts = AtomicUsize::new(0);
+            // The start the production site passes: the one start gate first, and only then a spawn.
+            let after = keep_or_rebind_after_naming(&fx.acct, &mut slot, Some(&another), &named, |slot| {
+                engine_start_refusal(&fx.acct)?;
+                starts.fetch_add(1, Ordering::SeqCst);
+                **slot = Some(a_running_engine());
+                Ok(EngineStart::Started)
+            })
+            .await;
+            assert_eq!(
+                after,
+                Err(ENGINE_START_REFUSED_ERROR.to_string()),
+                "the stop was not confirmed: no restart, and the result says to restart Beebeeb"
+            );
+            assert_eq!(starts.load(Ordering::SeqCst), 0, "nothing was spawned");
+            assert!(slot.is_none(), "the old engine left the slot, and no new one took it");
+            assert!(
+                fx.acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
+                "the one stop helper recorded the unconfirmed stop"
+            );
+            assert_eq!(
+                engine_start_refusal(&fx.acct),
+                Err(ENGINE_START_REFUSED_ERROR.to_string()),
+                "and every later start refuses too"
+            );
+        });
+    }
+
+    /// Fix round 2, item 3, first half (re-check N2): the naming's Keychain email write failed (a locked
+    /// Keychain, here the test store refusing it) after the owner backfill succeeded. It is not ignored: it is marked,
+    /// and the next naming trigger writes it again (no request: the session is named), and clears the mark.
+    #[test]
+    fn a_failed_keychain_email_write_is_written_again_at_the_next_naming() {
+        let fx = Fixture::new("t12f2-email-write-fails");
+        let id = fx.acct.id.as_str().to_string();
+        runtime().block_on(with_the_shared_state_dir(async {
+            let dir = tempfile::tempdir().unwrap();
+            crate::state_db::StateDb::open(dir.path().join("state.db"))
+                .unwrap()
+                .set_owner(&crate::account_binding::Identity::new(None, Some("T12@Beebeeb.io")))
+                .unwrap();
+            AuthVault::new(keychain::platform_keychain_store_for(&id))
+                .store_account_email("T12@Beebeeb.io")
+                .unwrap();
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-t12".into(),
+                master_key: [3u8; 32],
+                email: Some("T12@Beebeeb.io".into()),
+            });
+            let state = fx.state();
+            keychain::test_fail_account_email_writes(Some(&id), true);
+            let named = name_session_after_profile(
+                &SessionWrite::for_test(),
+                &state,
+                &fx.acct,
+                "tok-t12",
+                &t12_profile("u-t12", "t12@beebeeb.io"),
+                Some(dir.path()),
+            );
+            keychain::test_fail_account_email_writes(Some(&id), false);
+            assert!(named, "the backfill succeeded, so the session is named");
+            assert_eq!(
+                keychain_account_email(&id).as_deref(),
+                Some("T12@Beebeeb.io"),
+                "the premise: the Keychain write failed"
+            );
+            assert!(
+                fx.acct.keychain_email_pending.load(Ordering::SeqCst),
+                "and it is marked, not ignored"
+            );
+            // The next naming trigger: the session is named already, so no request is made (nothing listens here).
+            let nobody = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let url = format!("http://{}", l.local_addr().unwrap());
+                drop(l);
+                url
+            };
+            assert!(
+                !identify_unidentified_session(&state, &nobody, std::time::Instant::now(), IdentifyPace::Now).await
+            );
+            assert_eq!(
+                keychain_account_email(&id).as_deref(),
+                Some("t12@beebeeb.io"),
+                "written again"
+            );
+            assert!(
+                !fx.acct.keychain_email_pending.load(Ordering::SeqCst),
+                "and the mark is cleared"
+            );
+        }));
+    }
+
+    /// An unidentified session in memory: an email, no profile naming it.
+    fn unidentified(fx: &Fixture) {
+        *fx.acct.session.lock().unwrap() = Some(Session {
+            token: "tok-t12".into(),
+            master_key: [3u8; 32],
+            email: Some("t12@beebeeb.io".into()),
+        });
+    }
+
+    fn requests_seen(server: &mut HeldServer) -> usize {
+        let mut seen = 0;
+        while server.arrived.try_recv().is_ok() {
+            seen += 1;
+        }
+        seen
+    }
+
+    /// Fix round 1, item 4 (review M2), with an injected clock: app activation asks at most once a minute per account;
+    /// "Try again" is not debounced. The server answers 503, so the session stays unidentified and every allowed call
+    /// asks.
+    #[test]
+    fn app_activation_asks_at_most_once_a_minute_and_try_again_is_not_debounced() {
+        let fx = Fixture::new("t12f1-identify-debounce");
+        runtime().block_on(with_the_shared_state_dir(async {
+            unidentified(&fx);
+            let mut server = HeldServer::start("503 Service Unavailable", "{}");
+            server.release();
+            let state = fx.state();
+            let t0 = std::time::Instant::now();
+            let at = |seconds| t0 + Duration::from_secs(seconds);
+            assert!(!identify_on_app_activation(&state, &server.base_url, at(0)).await);
+            assert_eq!(requests_seen(&mut server), 1, "the first activation asks");
+            assert!(!identify_on_app_activation(&state, &server.base_url, at(30)).await);
+            assert_eq!(requests_seen(&mut server), 0, "30 s later: debounced");
+            assert!(!identify_on_app_activation(&state, &server.base_url, at(61)).await);
+            assert_eq!(requests_seen(&mut server), 1, "61 s later: asks again");
+            assert!(!identify_unidentified_session(&state, &server.base_url, at(62), IdentifyPace::Now).await);
+            assert_eq!(requests_seen(&mut server), 1, "Try again 1 s later: not debounced");
+        }));
+    }
+
+    /// Fix round 1, item 4: at most one identify request in flight per account. While one is held at the server, another
+    /// activation (past the debounce) and a "Try again" ask nothing and return at once.
+    #[test]
+    fn only_one_identify_request_is_in_flight_per_account() {
+        let fx = Fixture::new("t12f1-identify-single-flight");
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            unidentified(&fx);
+            let mut server = HeldServer::start("503 Service Unavailable", "{}");
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let t0 = std::time::Instant::now();
+            let first = identify_on_app_activation(&state, &base_url, t0);
+            let others = async {
+                let held = server.next_request().await;
+                let later = identify_on_app_activation(&state, &base_url, t0 + Duration::from_secs(120));
+                let again =
+                    identify_unidentified_session(&state, &base_url, t0 + Duration::from_secs(121), IdentifyPace::Now);
+                let (later, again) = tokio::time::timeout(Duration::from_secs(5), async { (later.await, again.await) })
+                    .await
+                    .expect("neither waits for the request in flight");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let asked_meanwhile = requests_seen(&mut server);
+                server.release();
+                (held, later, again, asked_meanwhile)
+            };
+            let (first, (held, later, again, asked_meanwhile)) = tokio::join!(first, others);
+            assert!(held.starts_with("GET /api/v1/auth/me"), "{held}");
+            assert_eq!(
+                (first, later, again, asked_meanwhile),
+                (false, false, false, 0),
+                "(first, later activation, Try again, requests while one was in flight)"
+            );
+            assert!(
+                !fx.acct.identify_flight.lock().unwrap().in_flight,
+                "the flight ended with its request"
+            );
+        }));
+    }
+
+    /// Fix round 1, item 5 (review M3): a fetch that names nothing (the server knows the session's token under another
+    /// address) moves no generation, so a sign-in in flight is not refused by it; one that names the session moves it.
+    #[test]
+    fn an_identify_that_names_nothing_moves_no_generation() {
+        let fx = Fixture::new("t12f1-identify-no-op");
+        runtime().block_on(with_the_shared_state_dir(async {
+            unidentified(&fx);
+            let state = fx.state();
+            let in_flight = fx.acct.session_generation();
+            let mut elsewhere = HeldServer::start("200 OK", r#"{"user_id":"u-k","email":"kim@beebeeb.io","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#);
+            elsewhere.release();
+            assert!(!establish_session_identity(&state, &fx.acct, &elsewhere.base_url, None).await, "another address names nothing");
+            assert!(fx.acct.session_unchanged_since(in_flight), "and moves no generation");
+            let mut naming = HeldServer::start("200 OK", T12_PROFILE);
+            naming.release();
+            assert!(establish_session_identity(&state, &fx.acct, &naming.base_url, None).await, "the same address names it");
+            assert!(!fx.acct.session_unchanged_since(in_flight), "which moves the generation");
+        }));
+    }
+
+    /// Fix round 1, item 9 (review M9): the identify's own generation check. A transition that leaves the session in
+    /// memory as it is (so the token check alone would pass) but happens while the fetch is in flight: nothing is named.
+    #[test]
+    fn an_identify_whose_turn_moved_while_it_waited_names_nothing() {
+        let fx = Fixture::new("t12f1-identify-turn-moved");
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            unidentified(&fx);
+            let mut server = HeldServer::start("200 OK", T12_PROFILE);
+            let base_url = server.base_url.clone();
+            let state = fx.state();
+            let identify = establish_session_identity(&state, &fx.acct, &base_url, None);
+            let transition_then_answer = async {
+                server.next_request().await;
+                drop(end_sessions_in_flight(&fx.acct, account::SessionTransition::Write));
+                server.release();
+            };
+            let (named, ()) = tokio::join!(identify, transition_then_answer);
+            assert!(!named, "nothing is named after the turn moved");
+            assert!(fx.acct.cached_profile.lock().unwrap().is_none());
+            assert_eq!(
+                fx.acct
+                    .session
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|s| s.email.clone())
+                    .as_deref(),
+                Some("t12@beebeeb.io")
+            );
+        }));
+    }
+
+    /// Fix round 1, item 7 (review M6): the startup restore asks the server once (its probe) and never waits for a
+    /// second request: the probe here is inconclusive (503) and any later request would hang, yet the restore returns at
+    /// once with the session installed (its second request runs in the background, see `restore_session_inner`).
+    #[test]
+    fn the_startup_restore_never_waits_for_a_second_request() {
+        let fx = Fixture::new("t12f1-restore-no-second-wait");
+        let id = fx.acct.id.as_str().to_string();
+        multi_thread_runtime().block_on(with_the_shared_state_dir(async {
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-stored",
+                &[4u8; 32],
+                Some("t12@beebeeb.io"),
+            )
+            .unwrap();
+            // The first request is answered 503 at once; every later one is held until the test ends.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let seen = Arc::new(AtomicUsize::new(0));
+            let counter = seen.clone();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let mut held = Vec::new();
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut buf = [0u8; 8192];
+                    let _ = stream.read(&mut buf);
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                    } else {
+                        held.push(stream);
+                    }
+                }
+            });
+            let state = fx.state();
+            let restored = tokio::time::timeout(
+                Duration::from_secs(4),
+                restore_stored_session(&state, &fx.acct, &base_url),
+            )
+            .await
+            .expect("the restore does not wait for a second request");
+            assert!(restored, "the session is installed and an engine start follows");
+            assert_eq!(seen.load(Ordering::SeqCst), 1, "one request: the probe");
+            assert!(fx.acct.session.lock().unwrap().is_some());
+        }));
+    }
+
+    /// Fix round 1, item 9 (review M9): the browser sign-in's install, refused because its turn moved, revokes the
+    /// session it would have stored; an install that goes through revokes nothing.
+    #[test]
+    fn a_refused_browser_install_revokes_the_session_it_would_have_stored() {
+        let fx = Fixture::new("t12f1-browser-revoke");
+        multi_thread_runtime().block_on(async {
+            let mut server = HeldServer::start("200 OK", "{}");
+            server.release();
+            let state = fx.state();
+            let mut stale = fx.acct.session_generation();
+            drop(end_sessions_in_flight(&fx.acct, account::SessionTransition::SignOut));
+            let refused = install_new_session_or_revoke(
+                &state,
+                &fx.acct,
+                &mut stale,
+                "tok-refused",
+                &[2u8; 32],
+                Some("t12@beebeeb.io".into()),
+                None,
+                &server.base_url,
+            )
+            .await;
+            assert_eq!(refused, Err(SESSION_CHANGED_WHILE_WAITING.to_string()));
+            let revoked = server.next_request().await;
+            assert!(
+                revoked.starts_with("POST /api/v1/auth/logout"),
+                "the refused session is revoked: {revoked}"
+            );
+            assert!(
+                fx.acct.session.lock().unwrap().is_none()
+                    && keychain_holds(fx.acct.id.as_str()) == (false, false, false),
+                "nothing stored"
+            );
+            let mut current = fx.acct.session_generation();
+            let installed = install_new_session_or_revoke(
+                &state,
+                &fx.acct,
+                &mut current,
+                "tok-ok",
+                &[2u8; 32],
+                Some("t12@beebeeb.io".into()),
+                None,
+                &server.base_url,
+            )
+            .await;
+            assert_eq!(installed, Ok(()));
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                requests_seen(&mut server),
+                0,
+                "an install that went through revokes nothing"
+            );
+        });
+    }
+}
+
+/// R10 (spec 2026-10-06 §5.6): local data is bound to the account that created it.
+#[cfg(test)]
+mod account_binding_tests {
+    use super::finder_setup_command_tests::{body_between, production_source};
+    use super::*;
+    use crate::account_binding::{Bound, Identity, bind_before_engine_start};
+
+    const RESET_ALLOWED: bool = !cfg!(target_os = "windows");
+
+    fn alice() -> Identity {
+        Identity::new(Some("u-a"), Some("a@beebeeb.io"))
+    }
+
+    fn bob() -> Identity {
+        Identity::new(Some("u-b"), Some("b@beebeeb.io"))
+    }
+
+    /// The code of a function without its comment lines.
+    fn code_of(production: &str, signature: &str) -> String {
+        body_between(production, signature, "\n}\n")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // ---- the census: one start, bound first ----
+
+    /// Ruling P: `sync_status` exposes the refusal on every platform (no cfg around it), and the one bound start
+    /// records it from its authorization's error and clears it when it starts an engine.
+    #[test]
+    fn sync_status_exposes_the_engine_refusal_and_the_bound_start_keeps_it_current() {
+        let production = production_source();
+        let status = body_between(&production, "async fn sync_status(", "\n}\n");
+        let field = status
+            .find("\"engine_refusal\": engine_refusal_view(&acct),")
+            .expect("sync_status exposes it");
+        // Inside the one `json!` literal it returns (whose entries cannot carry a cfg), so on every platform.
+        let literal = status.rfind("Ok(serde_json::json!({").expect("its one answer");
+        assert!(
+            literal < field && status[literal..].matches("Ok(serde_json::json!({").count() == 1,
+            "on every platform:\n{status}"
+        );
+        let bound_text = body_between(&production, "fn start_engine_bound(", "\n}\n");
+        // Positions are read in the squeezed text, so the order does not depend on how rustfmt wraps a line.
+        let bound = crate::source_pin::squeeze(bound_text);
+        let at = |snippet: &str| bound.find(&crate::source_pin::squeeze(snippet));
+        let turn = at("let turn = acct.session_generation();").expect("the start reads its turn first");
+        let recorded =
+            at(".inspect_err(|error| record_engine_refusal(acct, turn, error))?").expect("it records a refusal");
+        let spawned = at("spawn(paths.sync_root.clone()").unwrap();
+        let cleared = at("*acct.engine_refusal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;")
+            .expect("a start clears it");
+        assert!(
+            turn < recorded && recorded < spawned && spawned < cleared,
+            "{bound_text}"
+        );
+    }
+
+    /// Every engine start binds the local data to the session's account first, and a failed
+    /// binding returns before any engine exists. Every start site goes through the one function.
+    #[test]
+    fn every_engine_start_is_bound_first() {
+        let production = production_source();
+        let spawn = concat!("EngineRunner::", "spawn(");
+        assert_eq!(
+            production.matches(spawn).count(),
+            1,
+            "every engine start goes through spawn_bound_engine"
+        );
+        let gate = body_between(&production, "fn spawn_bound_engine(", "\n}\n");
+        let signature = &gate[..gate.find(") -> ").expect("its return type")];
+        for key_material in ["token", "master_key", "[u8; 32]", "String,"] {
+            assert!(
+                !signature.contains(key_material),
+                "the gate takes no key or token ({key_material}):\n{signature}"
+            );
+        }
+        assert!(
+            signature.contains("MutexGuard<'_, Option<EngineRunner>>"),
+            "it needs the engine slot held:\n{signature}"
+        );
+        assert!(gate.contains(spawn), "the one spawn is the gate's own constructor");
+        assert!(
+            gate.contains("start_engine_bound("),
+            "the gate starts through the bound start"
+        );
+
+        let bound = body_between(&production, "fn start_engine_bound(", "\n}\n");
+        assert!(
+            !bound.contains(spawn),
+            "the bound start only calls the constructor it is given"
+        );
+        let authorize = bound.find("authorize_engine_start(").expect("it authorizes");
+        let spawned = bound
+            .find("spawn(paths.sync_root.clone()")
+            .expect("then calls the constructor");
+        assert!(authorize < spawned, "the authorization runs before the engine exists");
+        assert!(
+            bound[authorize..spawned].contains(")?"),
+            "a failed authorization returns before the spawn"
+        );
+
+        let authorize = body_between(&production, "fn authorize_engine_start(", "\n}\n");
+        let occupied = authorize
+            .find("engine_slot.is_some()")
+            .expect("it refuses an occupied slot");
+        let keys = authorize
+            .find("keys_for_engine_start(acct)")
+            .expect("it reads the keys under the slot");
+        let bind = authorize.find("bind_local_data_to_session(").expect("it binds");
+        assert!(
+            occupied < keys && keys < bind,
+            "slot, then keys, then the binding:\n{authorize}"
+        );
+        assert!(
+            authorize[bind..].contains(")?;"),
+            "a failed binding returns before the keys are handed out"
+        );
+        assert!(
+            authorize[bind..].contains("Ok(StartPermit::Go(keys))"),
+            "the keys leave only after the binding"
+        );
+        let keys_code = body_between(&production, "fn keys_for_engine_start(", "\n}\n");
+        assert!(
+            keys_code.contains("identity_of_session(email.as_deref(), profile.as_ref())")
+                && keys_code.contains("session.email.clone()"),
+            "the identity is built from the session the keys come from:\n{keys_code}"
+        );
+    }
+
+    /// The six starts of the app, and the two paths the reconciler and the startup restore reach them
+    /// through, all end in the one gate; none of them reads the session or holds a key itself. The one read of the
+    /// session a start site delegates to (`named_session_identity`, for the start after a naming) takes the session's
+    /// email and the cached profile and no key material.
+    #[test]
+    fn every_start_site_takes_the_slot_first_and_reads_no_keys_itself() {
+        let production = production_source();
+        let sites = [
+            "start_engine_if_possible",
+            "persist_sync_root_and_start_engine",
+            "start_engine_for_pending_finder_install",
+            "pick_sync_root",
+            "ensure_sync_root_and_engine",
+            "start_check_engine",
+            // Task 12 fix round 2, item 2: the start after a naming in the background, which keeps a running engine.
+            "start_engine_unless_running",
+        ];
+        let calls: Vec<&str> = production
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                !line.starts_with("//")
+                    && line.contains("spawn_bound_engine(")
+                    && !line.contains("fn spawn_bound_engine(")
+            })
+            .collect();
+        assert_eq!(
+            calls.len(),
+            sites.len(),
+            "one call per start site, and nothing else calls the gate: {calls:?}"
+        );
+        for name in sites {
+            let code = code_of(&production, &format!("fn {name}("));
+            let gate = code
+                .find("spawn_bound_engine(")
+                .unwrap_or_else(|| panic!("{name} does not start through the gate"));
+            let slot = ["engine.lock().await", "lock_engine_slot("]
+                .iter()
+                .filter_map(|take| code.find(take))
+                .min()
+                .unwrap_or_else(|| panic!("{name} takes the engine slot"));
+            assert!(slot < gate, "{name}: the slot, then the start:\n{code}");
+            for forbidden in [".session", "master_key", "token"] {
+                assert!(
+                    !code.contains(forbidden),
+                    "{name} handles key material itself ({forbidden}):\n{code}"
+                );
+            }
+        }
+        // The start after a naming reads who the session is only through `named_session_identity` (the loop above
+        // forbids `.session` in the start itself), and that helper takes out the email and the profile, nothing else.
+        assert!(
+            code_of(&production, "fn start_engine_unless_running(").contains("named_session_identity(&acct)"),
+            "the start after a naming reads the session's identity through the helper"
+        );
+        let identity = code_of(&production, "fn named_session_identity(");
+        for forbidden in ["master_key", "token"] {
+            assert!(
+                !identity.contains(forbidden),
+                "named_session_identity handles key material ({forbidden}):\n{identity}"
+            );
+        }
+        assert!(
+            crate::source_pin::squeeze(&identity).contains(&crate::source_pin::squeeze(
+                "guard.as_ref().and_then(|session| session.email.clone())"
+            )),
+            "what it takes out of the session is its email:\n{identity}"
+        );
+        assert_eq!(
+            identity.matches(".clone()").count(),
+            2,
+            "and the only things cloned are that email and the cached profile:\n{identity}"
+        );
+        // The reconciler's StartEngine and FinishReady, and the startup restore, reach it through these.
+        let ports = include_str!("finder_setup/macos_ports.rs");
+        assert!(ports.contains("crate::start_check_engine(") && ports.contains("crate::ensure_sync_root_and_engine("));
+        let restore = code_of(&production, "async fn restore_session_inner(");
+        assert!(restore.contains("start_engine_if_possible("), "{restore}");
+    }
+
+    /// Lead ruling 2: the token and the key reach the engine as `Zeroizing`, and no start receives a
+    /// copy from its caller. The runner's task entry takes them the same way.
+    #[test]
+    fn the_keys_travel_as_zeroizing_values_and_no_start_takes_them_as_parameters() {
+        let production = production_source();
+        let source = |name: &str| {
+            let function = body_between(&production, name, "\n}\n");
+            function[..function.find(") -> ").expect("a return type")].to_string()
+        };
+        for name in ["async fn start_engine_if_possible(", "fn spawn_bound_engine("] {
+            let signature = source(name);
+            for key_material in ["token", "master_key", "[u8; 32]"] {
+                assert!(
+                    !signature.contains(key_material),
+                    "{name} takes {key_material}:\n{signature}"
+                );
+            }
+        }
+        assert!(
+            !production.contains("token_clone"),
+            "apply_session no longer keeps a plain copy of the token"
+        );
+        let keys = body_between(&production, "fn keys_for_engine_start(", "\n}\n");
+        assert!(
+            keys.contains("EngineKeys")
+                && keys.contains("zeroize::Zeroizing::new(session.token.clone())")
+                && keys.contains("zeroize::Zeroizing::new(session.master_key)"),
+            "the keys come out wrapped:\n{keys}"
+        );
+        assert!(
+            production.contains("type EngineKeys = (zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>);"),
+            "the alias is the wrapped pair"
+        );
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
+        for (entry, end) in [("pub fn spawn(", ") -> Self {"), ("async fn run(", ") {\n")] {
+            let at = runner.find(entry).unwrap_or_else(|| panic!("{entry}"));
+            let signature = &runner[at..at + runner[at..].find(end).unwrap_or_else(|| panic!("the end of {entry}"))];
+            assert!(
+                signature.contains("zeroize::Zeroizing<String>") && signature.contains("zeroize::Zeroizing<[u8; 32]>"),
+                "{entry} takes plain keys:\n{signature}"
+            );
+        }
+    }
+
+    /// The pieces of the binding that take a state dir never read the process-wide one, so a test
+    /// points them at a throwaway directory and nothing else can be reached (lead ruling 7).
+    #[test]
+    fn the_binding_never_reads_the_process_wide_state_dir_except_at_the_edges() {
+        let production = production_source();
+        for signature in [
+            "fn authorize_engine_start(",
+            "fn bind_local_data_to_session(",
+            "fn bind_data_to_session(",
+            "fn adopt_unbound_local_data_in(",
+        ] {
+            let code = code_of(&production, signature);
+            assert!(
+                !code.contains("beebeeb_state_dir"),
+                "{signature} reads the global state dir:\n{code}"
+            );
+        }
+        let impl_block = body_between(&production, "impl StateDbLocalData {", "\n}\n");
+        assert!(!impl_block.contains("beebeeb_state_dir()"), "{impl_block}");
+        let bound = code_of(&production, "fn start_engine_bound(");
+        assert!(
+            !bound.contains("beebeeb_state_dir"),
+            "fn start_engine_bound( reads the global state dir:\n{bound}"
+        );
+        assert!(
+            code_of(&production, "fn spawn_bound_engine(").contains("LocalDataPaths::production("),
+            "the gate resolves it"
+        );
+        for edge in ["fn production(", "fn adopt_unbound_local_data_at_startup("] {
+            assert!(
+                code_of(&production, edge).contains("state_paths::beebeeb_state_dir()"),
+                "{edge} resolves it"
+            );
+        }
+    }
+
+    /// Lead ruling 3: `is_disposable_cache_path` stays the ONLY deletion gate. The reset's files go only through
+    /// `purge_local_state_files`, and its removal loop checks the gate before every `remove_file`; neither the
+    /// binding's pure module nor the glue deletes anything on its own.
+    #[test]
+    fn the_reset_deletes_files_only_through_the_one_disposable_path_gate() {
+        let production = production_source();
+        let pure = include_str!("account_binding.rs");
+        let pure = &pure[..pure.find("#[cfg(test)]").expect("its test module")];
+        for needle in ["remove_file", "remove_dir", "std::fs", "fs::"] {
+            assert!(!pure.contains(needle), "the pure binding touches files ({needle})");
+        }
+        let impl_block = body_between(&production, "impl StateDbLocalData {", "\n}\n");
+        let reset = body_between(&production, "    fn reset(&self)", "\n    }\n");
+        for part in [impl_block, reset] {
+            for needle in ["remove_file", "remove_dir", "std::fs", "fs::"] {
+                assert!(
+                    !part.contains(needle),
+                    "the glue deletes a file itself ({needle}):\n{part}"
+                );
+            }
+        }
+        assert!(
+            reset.contains("purge_local_state_files_in("),
+            "the reset is the sign-out purge:\n{reset}"
+        );
+        let purge = code_of(&production, "fn purge_local_state_files_as(");
+        let removals: Vec<usize> = purge.match_indices("remove_file(").map(|(at, _)| at).collect();
+        assert_eq!(removals.len(), 1, "one removal in the purge:\n{purge}");
+        assert!(
+            purge[..removals[0]]
+                .rfind("is_disposable_cache_path(")
+                .is_some_and(|gate| purge[gate..removals[0]].lines().count() < 10),
+            "the gate runs right before the removal:\n{purge}"
+        );
+    }
+
+    /// Lead ruling 4 (R11): the Windows arm refuses instead of resetting. The pure arm is tested
+    /// everywhere; this pins that the glue passes the right flag, so a Mac cannot hide a flipped one.
+    #[test]
+    fn the_glue_forbids_a_reset_on_windows_only() {
+        let production = production_source();
+        let bind = code_of(&production, "fn bind_data_to_session(");
+        assert!(
+            bind.contains(r#"bind_before_engine_start(data, session, !cfg!(target_os = "windows"))?"#),
+            "{bind}"
+        );
+        assert!(
+            bind.contains("Trigger::Repair"),
+            "a reset on a Mac asks the reconciler for a Repair:\n{bind}"
+        );
+        assert!(
+            !bind.contains(".await"),
+            "and never waits for it: the reconciler starts engines through here:\n{bind}"
+        );
+    }
+
+    // ---- the local data under test ----
+
+    struct LocalFixture {
+        data: StateDbLocalData,
+        files: Vec<PathBuf>,
+        staging: PathBuf,
+        dir: tempfile::TempDir,
+    }
+
+    impl Drop for LocalFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.staging);
+        }
+    }
+
+    /// A computer holding one account's queued change, staged upload and cached file, in real
+    /// files under the OS temp dir so `is_disposable_cache_path` allows their removal.
+    fn local_data_of(owner: Option<Identity>) -> LocalFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        let staging = std::env::temp_dir().join(format!("bb-test-r10-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&staging).unwrap();
+        let payload = staging.join("op-1-payload.bin");
+        let cache = staging.join("file-a-cache.bin");
+        let staged = staging.join("staged-1.bin");
+        for path in [&payload, &cache, &staged] {
+            std::fs::write(path, b"local bytes").unwrap();
+        }
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: "file-a".into(),
+            path: "/A.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 11,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        db.mark_cached("file-a", cache.to_str().unwrap(), 11, 10).unwrap();
+        db.enqueue_operation(&crate::state_db::PendingOperation {
+            op_id: "op-1".into(),
+            kind: crate::state_db::OperationKind::UploadVersion,
+            file_id: Some("file-a".into()),
+            parent_id: None,
+            target_path: Some("/A.txt".into()),
+            metadata_json: None,
+            payload_path: Some(payload.to_str().unwrap().to_string()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        db.track_staged_payload(staged.to_str().unwrap(), None, false).unwrap();
+        if let Some(owner) = owner {
+            db.set_owner(&owner).unwrap();
+        }
+        LocalFixture {
+            data: StateDbLocalData {
+                db,
+                sync_root: None,
+                staging_dirs: Vec::new(),
+            },
+            files: vec![payload, cache, staged],
+            staging,
+            dir,
+        }
+    }
+
+    // ---- the decision, run against real state.db rows and real files ----
+
+    /// R10: a different account never reuses this computer's local data, whichever way it is
+    /// identified. macOS and Linux reset it before the engine starts; Windows starts nothing and
+    /// discards nothing silently.
+    #[test]
+    fn a_different_account_never_reuses_local_data() {
+        let by_id_and_email = bob();
+        let by_email_only = Identity::new(None, Some("b@beebeeb.io"));
+        for session in [by_id_and_email, by_email_only] {
+            let local = local_data_of(Some(alice()));
+            let db = &local.data.db;
+            let result = bind_data_to_session(&AppState::default(), &local.data, &session);
+            if RESET_ALLOWED {
+                assert_eq!(result, Ok(()), "{session:?}");
+                assert!(
+                    db.list_due_operations(i64::MAX).unwrap().is_empty(),
+                    "no queued change survives"
+                );
+                assert!(db.list_files().unwrap().is_empty(), "no file row survives");
+                assert!(!db.has_account_data().unwrap());
+                for path in &local.files {
+                    assert!(!path.exists(), "{} is deleted", path.display());
+                }
+                assert_eq!(db.owner().unwrap(), Some(session.clone()));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+                );
+                assert_eq!(db.list_due_operations(i64::MAX).unwrap().len(), 1, "nothing discarded");
+                assert_eq!(db.owner().unwrap(), Some(alice()));
+            }
+        }
+    }
+
+    /// R8 + R10: the same account keeps everything, also offline (by its exact email).
+    #[test]
+    fn the_same_account_never_purges() {
+        for session in [alice(), Identity::new(None, Some("a@beebeeb.io"))] {
+            let local = local_data_of(Some(alice()));
+            assert_eq!(
+                bind_before_engine_start(&local.data, &session, RESET_ALLOWED),
+                Ok(Bound::Kept),
+                "{session:?}"
+            );
+            assert_eq!(
+                bind_data_to_session(&AppState::default(), &local.data, &session),
+                Ok(())
+            );
+            assert_eq!(local.data.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+            for path in &local.files {
+                assert!(path.exists(), "{} is kept", path.display());
+            }
+            assert_eq!(
+                local.data.db.owner().unwrap().and_then(|owner| owner.user_id),
+                Some("u-a".to_string())
+            );
+        }
+    }
+
+    /// Ruling A″ (fix round 3; this was F5): a session whose email is a letter-case variant of the owner's (no user id to
+    /// settle it) is the SAME account, because the server keeps one account per canonical address. It starts on every
+    /// platform and keeps everything; the record follows the session's spelling. History: Task 10 read it as another
+    /// account (a reset on macOS and Linux); rulings A and A′ refused it.
+    #[test]
+    fn a_case_variant_of_the_owners_email_is_the_same_account_and_keeps_its_data() {
+        let local = local_data_of(Some(Identity::new(None, Some("sam@beebeeb.io"))));
+        let result = bind_data_to_session(
+            &AppState::default(),
+            &local.data,
+            &Identity::new(None, Some("Sam@beebeeb.io")),
+        );
+        assert_eq!(result, Ok(()), "it starts, on every platform");
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "nothing discarded"
+        );
+        for path in &local.files {
+            assert!(path.exists(), "{} is kept", path.display());
+        }
+        assert_eq!(
+            local.data.db.owner().unwrap(),
+            Some(Identity::new(None, Some("Sam@beebeeb.io"))),
+            "one owner, in the session's spelling"
+        );
+    }
+
+    /// Fail closed: local data without a recorded owner is never handed to a session.
+    #[test]
+    fn local_data_without_an_owner_is_reset_before_any_account_uses_it() {
+        let local = local_data_of(None);
+        let result = bind_data_to_session(&AppState::default(), &local.data, &bob());
+        if RESET_ALLOWED {
+            assert_eq!(result, Ok(()));
+            assert!(local.data.db.list_due_operations(i64::MAX).unwrap().is_empty());
+            for path in &local.files {
+                assert!(!path.exists(), "{} is deleted", path.display());
+            }
+            assert_eq!(local.data.db.owner().unwrap(), Some(bob()));
+        } else {
+            assert_eq!(
+                result,
+                Err(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+            );
+            assert_eq!(local.data.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+        }
+    }
+
+    /// R10, behaviourally: another account's engine starts only AFTER the previous account's local
+    /// state was purged. The whole gate runs (`start_engine_bound`, the function the one real spawn sits
+    /// in), with a constructor that records what is on disk at the exact moment an engine would be created.
+    /// Windows refuses instead, and the constructor is never called.
+    #[test]
+    fn another_accounts_engine_starts_only_after_the_local_state_was_purged() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let local = local_data_of(Some(alice()));
+            let fx = AuthorizeFixture::with_session(&bob());
+            let mut slot = fx.acct.engine.lock().await;
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let seen = std::cell::RefCell::new(None);
+            let spawner = || {
+                |_root: PathBuf, token: zeroize::Zeroizing<String>, key: zeroize::Zeroizing<[u8; 32]>| {
+                    assert_eq!(
+                        (token.as_str(), *key),
+                        ("tok-r10", [7u8; 32]),
+                        "b's own keys start b's engine"
+                    );
+                    *seen.borrow_mut() = Some((
+                        local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                        local.files.iter().filter(|path| path.exists()).count(),
+                        local.data.db.owner().unwrap(),
+                    ));
+                    crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+                }
+            };
+            let mut result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, spawner());
+            if cfg!(target_os = "macos") && RESET_ALLOWED {
+                // The reset left the previous account's Finder domain registered, so nothing starts yet ...
+                assert_eq!(result, Ok(EngineStart::FinderRemovalOwed));
+                assert!(
+                    seen.borrow().is_none() && slot.is_none(),
+                    "no engine was created while the removal is owed"
+                );
+                // ... until a removal is confirmed.
+                #[cfg(target_os = "macos")]
+                clear_finder_removal_owed_in(local.dir.path());
+                result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, spawner());
+            }
+            if RESET_ALLOWED {
+                assert_eq!(result, Ok(EngineStart::Started));
+                assert_eq!(
+                    seen.into_inner(),
+                    Some((0, 0, Some(bob()))),
+                    "when the engine is created: no queued change, no file of the previous account, and b is the owner"
+                );
+                assert!(slot.is_some(), "and it is in the slot");
+            } else {
+                assert_eq!(
+                    result,
+                    Err(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+                );
+                assert_eq!(seen.into_inner(), None, "no engine was created");
+                assert!(slot.is_none());
+            }
+        });
+    }
+
+    /// An owner that cannot be compared with the session stops the start and deletes nothing, on every
+    /// platform.
+    #[test]
+    fn an_owner_that_cannot_be_compared_deletes_nothing_and_starts_nothing() {
+        let local = local_data_of(Some(Identity::new(Some("u-a"), None)));
+        let result = bind_data_to_session(
+            &AppState::default(),
+            &local.data,
+            &Identity::new(None, Some("a@beebeeb.io")),
+        );
+        assert_eq!(result, Err(crate::account_binding::IDENTITY_UNKNOWN.to_string()));
+        assert_eq!(local.data.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+        assert_eq!(local.data.db.owner().unwrap(), Some(Identity::new(Some("u-a"), None)));
+        for path in &local.files {
+            assert!(path.exists(), "{} is kept", path.display());
+        }
+    }
+
+    #[test]
+    fn a_fresh_computer_records_its_first_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = StateDbLocalData {
+            db: crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap(),
+            sync_root: None,
+            staging_dirs: Vec::new(),
+        };
+        assert_eq!(bind_before_engine_start(&data, &bob(), RESET_ALLOWED), Ok(Bound::Kept));
+        assert_eq!(data.db.owner().unwrap(), Some(bob()));
+    }
+
+    /// Lead ruling 4: a purge that fails blocks the engine. Here the failure is at the row step (a trigger that
+    /// refuses the queue's deletion stands in for a disk that fails): nothing starts, and no row and no owner
+    /// changes (the rows are cleared in one transaction). The file step failing is the next two tests.
+    #[test]
+    fn a_purge_whose_row_step_fails_blocks_the_engine_start() {
+        let local = local_data_of(Some(alice()));
+        {
+            let conn = rusqlite::Connection::open(local.dir.path().join("state.db")).unwrap();
+            conn.execute_batch("CREATE TRIGGER refuse_the_delete BEFORE DELETE ON operation_queue BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;")
+                .unwrap();
+        }
+        let fx = AuthorizeFixture::with_session(&bob());
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let result = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        if RESET_ALLOWED {
+            let error = result.expect_err("a failed purge starts nothing");
+            assert!(error.contains("disk I/O error"), "{error}");
+        } else {
+            assert!(result.is_err(), "Windows refuses before any purge");
+        }
+        assert_eq!(
+            local.data.db.owner().unwrap(),
+            Some(alice()),
+            "the new account is not recorded over data still there"
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "the queue rows are untouched"
+        );
+        if RESET_ALLOWED {
+            // The purge removes files FIRST and clears rows only when every file is gone (fix round 1, F4), so
+            // a failure at the row step comes after the files. The reset of another account's data is going
+            // ahead by design; what matters is that nothing started and no row or owner changed.
+            for path in &local.files {
+                assert!(
+                    !path.exists(),
+                    "{} was removed before the row step failed",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// A state.db that cannot be opened stops the start too.
+    #[test]
+    fn a_state_db_that_cannot_be_opened_blocks_the_engine_start() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("state.db"),
+            b"this is not a database, and it is long enough to be read as one: 0123456789",
+        )
+        .unwrap();
+        let fx = AuthorizeFixture::with_session(&bob());
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let error = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(dir.path(), dir.path()),
+        )
+        .expect_err("an unreadable database starts nothing");
+        assert!(error.contains("state.db") || error.contains("database"), "{error}");
+    }
+
+    // ---- the gate's own contract ----
+
+    struct AuthorizeFixture {
+        state: AppState,
+        acct: Arc<crate::account::AccountRuntime>,
+    }
+
+    impl AuthorizeFixture {
+        fn without_session() -> Self {
+            let state = AppState::default();
+            let id = crate::account::AccountId::new_v4();
+            crate::account::synthesize_single_account(&state, id);
+            let acct = state.active_account().unwrap();
+            Self { state, acct }
+        }
+
+        /// A signed-in account whose session is `identity`'s (its email, and its profile when it has an id).
+        fn with_session(identity: &Identity) -> Self {
+            let fx = Self::without_session();
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-r10".into(),
+                master_key: [7u8; 32],
+                email: identity.email.clone(),
+            });
+            *fx.acct.auth_email.lock().unwrap() = identity.email.clone();
+            if let (Some(user_id), Some(email)) = (&identity.user_id, &identity.email) {
+                *fx.acct.cached_profile.lock().unwrap() = Some(
+                    serde_json::from_str::<account_dto::AccountProfile>(&format!(
+                        r#"{{"user_id":"{user_id}","email":"{email}","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}}"#
+                    ))
+                    .unwrap(),
+                );
+            }
+            fx
+        }
+    }
+
+    /// A start onto a database that has never had an owner first owes the Finder removal on a Mac (R3); this confirms
+    /// that removal, as the reconciler does, and starts again. Off a Mac it is one start.
+    fn authorize_after_removal(
+        fx: &AuthorizeFixture,
+        slot: &tokio::sync::MutexGuard<'_, Option<crate::runner::EngineRunner>>,
+        paths: &LocalDataPaths,
+    ) -> Result<StartPermit, String> {
+        let first = authorize_engine_start(&fx.state, &fx.acct, slot, paths);
+        if matches!(first, Ok(StartPermit::FinderRemovalOwed)) {
+            #[cfg(target_os = "macos")]
+            clear_finder_removal_owed_in(&paths.state_dir);
+            return authorize_engine_start(&fx.state, &fx.acct, slot, paths);
+        }
+        first
+    }
+
+    #[test]
+    fn a_start_with_no_session_starts_nothing_and_binds_nothing() {
+        let fx = AuthorizeFixture::without_session();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = fx.acct.engine.try_lock().unwrap();
+        assert!(matches!(
+            authorize_engine_start(
+                &fx.state,
+                &fx.acct,
+                &slot,
+                &LocalDataPaths::for_test(dir.path(), dir.path())
+            )
+            .unwrap(),
+            StartPermit::NoSession
+        ));
+        assert!(
+            !dir.path().join("state.db").exists(),
+            "no database was even created for a vault that is locked"
+        );
+        assert_eq!(
+            keys_for_engine_start(&fx.acct).err(),
+            Some(EngineStartBlocked::NoSession)
+        );
+    }
+
+    #[test]
+    fn a_start_with_a_session_binds_and_then_hands_out_the_keys() {
+        let fx = AuthorizeFixture::with_session(&alice());
+        let dir = tempfile::tempdir().unwrap();
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let StartPermit::Go((token, key)) =
+            authorize_after_removal(&fx, &slot, &LocalDataPaths::for_test(dir.path(), dir.path())).unwrap()
+        else {
+            panic!("keys for a signed-in account");
+        };
+        assert_eq!((token.as_str(), *key), ("tok-r10", [7u8; 32]));
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(
+            db.owner().unwrap(),
+            Some(alice()),
+            "the first account to start here owns the data"
+        );
+    }
+
+    #[test]
+    fn a_start_never_overwrites_an_engine_in_the_slot() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let fx = AuthorizeFixture::with_session(&alice());
+            let task = tokio::spawn(async {});
+            *fx.acct.engine.lock().await = Some(crate::runner::EngineRunner::for_test_with_task(task));
+            let dir = tempfile::tempdir().unwrap();
+            let slot = fx.acct.engine.lock().await;
+            let error = authorize_engine_start(
+                &fx.state,
+                &fx.acct,
+                &slot,
+                &LocalDataPaths::for_test(dir.path(), dir.path()),
+            )
+            .expect_err("an occupied slot is never started over");
+            assert_eq!(error, ENGINE_SLOT_OCCUPIED_ERROR);
+            assert!(!dir.path().join("state.db").exists(), "and nothing was bound");
+        });
+    }
+
+    #[test]
+    fn a_start_refuses_while_an_earlier_stop_is_unconfirmed_before_it_binds() {
+        let fx = AuthorizeFixture::with_session(&alice());
+        fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let error = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(dir.path(), dir.path()),
+        )
+        .expect_err("refused");
+        assert_eq!(error, ENGINE_START_REFUSED_ERROR);
+        assert!(!dir.path().join("state.db").exists(), "a refused start binds nothing");
+    }
+
+    fn profile_of(user_id: &str, email: &str) -> account_dto::AccountProfile {
+        serde_json::from_str::<account_dto::AccountProfile>(&format!(
+            r#"{{"user_id":"{user_id}","email":"{email}","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_session_identity_takes_the_profile_only_when_it_is_this_sessions() {
+        let profile = |email: &str| profile_of("u-a", email);
+        assert_eq!(
+            identity_of_session(Some("a@beebeeb.io"), Some(&profile("a@beebeeb.io"))),
+            Identity::new(Some("u-a"), Some("a@beebeeb.io"))
+        );
+        assert_eq!(
+            identity_of_session(Some("a@beebeeb.io"), Some(&profile("A@beebeeb.io"))),
+            Identity::new(None, Some("a@beebeeb.io")),
+            "a profile whose email differs only in case is another account's: never folded"
+        );
+        assert_eq!(
+            identity_of_session(Some("a@beebeeb.io"), Some(&profile("someone-else@beebeeb.io"))),
+            Identity::new(None, Some("a@beebeeb.io")),
+            "a profile of another email is ignored"
+        );
+        assert_eq!(
+            identity_of_session(Some("a@beebeeb.io"), None),
+            Identity::new(None, Some("a@beebeeb.io")),
+            "offline: the email alone"
+        );
+        assert_eq!(
+            identity_of_session(None, Some(&profile("a@beebeeb.io"))),
+            Identity::default(),
+            "no session email: a cached profile is nobody's to borrow"
+        );
+        assert_eq!(
+            identity_of_session(Some("  "), Some(&profile("a@beebeeb.io"))),
+            Identity::default(),
+            "an empty email is no email"
+        );
+    }
+
+    /// F1: the identity of a session is its own. A session with no email is unidentified even when a cached profile
+    /// of some other account exists, and an unidentified session against a recorded owner is refused with a reason
+    /// and deletes nothing.
+    #[test]
+    fn an_unidentified_session_is_refused_and_takes_no_cached_profile_for_its_own() {
+        let local = local_data_of(Some(alice()));
+        let fx = AuthorizeFixture::without_session();
+        *fx.acct.session.lock().unwrap() = Some(Session {
+            token: "tok-b".into(),
+            master_key: [5u8; 32],
+            email: None,
+        });
+        *fx.acct.auth_email.lock().unwrap() = None;
+        *fx.acct.cached_profile.lock().unwrap() = Some(profile_of("u-a", "a@beebeeb.io"));
+        let (_, identity) = keys_for_engine_start(&fx.acct).expect("keys");
+        assert_eq!(identity, Identity::default(), "the profile is not borrowed");
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let result = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        assert_eq!(
+            result.err(),
+            Some(crate::account_binding::IDENTITY_UNKNOWN.to_string()),
+            "an unidentified session against a recorded owner"
+        );
+        assert_eq!(local.data.db.owner().unwrap(), Some(alice()));
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "nothing is deleted either"
+        );
+    }
+
+    /// F1: the keys and the identity a start checks come from the same session, read together. The mirrored
+    /// account fields (`auth_email`, `cached_profile`) are never where the identity comes from, so they cannot
+    /// disagree with the keys.
+    #[test]
+    fn a_start_pairs_the_keys_with_the_identity_of_the_same_session() {
+        let local = local_data_of(Some(alice()));
+        let fx = AuthorizeFixture::with_session(&bob());
+        // The mirrored fields describe another account; they play no part.
+        *fx.acct.auth_email.lock().unwrap() = Some("a@beebeeb.io".into());
+        *fx.acct.cached_profile.lock().unwrap() = Some(profile_of("u-a", "a@beebeeb.io"));
+        let (_, identity) = keys_for_engine_start(&fx.acct).expect("keys");
+        assert_eq!(
+            identity,
+            Identity::new(None, Some("b@beebeeb.io")),
+            "the identity is the session's own"
+        );
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let result = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        if RESET_ALLOWED {
+            // On a Mac b's engine then waits for the previous account's Finder domain to be removed (F3).
+            if cfg!(target_os = "macos") {
+                assert!(
+                    matches!(result, Ok(StartPermit::FinderRemovalOwed)),
+                    "b waits for the removal: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Ok(StartPermit::Go(_))),
+                    "b starts, on a clean slate: {result:?}"
+                );
+            }
+            assert!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+                "a's queue is not b's"
+            );
+            assert_eq!(
+                local.data.db.owner().unwrap(),
+                Some(Identity::new(None, Some("b@beebeeb.io")))
+            );
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+            );
+            assert_eq!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                1,
+                "nothing discarded"
+            );
+        }
+    }
+
+    // ---- the log directory survives the reset (lead ruling 5) ----
+
+    /// The R10 reset removes the previous account's files through the sign-out purge's one deletion gate, and
+    /// that gate never reaches the lifecycle log directory, in the home or in the app's container.
+    #[test]
+    fn an_account_reset_never_deletes_the_lifecycle_log() {
+        if !RESET_ALLOWED {
+            return; // Windows refuses instead of resetting; nothing to delete.
+        }
+        let root = std::env::temp_dir().join(format!("bb-test-r10-logs-{}", uuid::Uuid::new_v4()));
+        let logs = root.join("Library").join("Logs").join("Beebeeb");
+        let container_logs = root
+            .join("Library")
+            .join("Containers")
+            .join("io.beebeeb.app")
+            .join("Data")
+            .join("Library")
+            .join("Logs")
+            .join("Beebeeb");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::create_dir_all(&container_logs).unwrap();
+        let ordinary = root.join("ordinary-cache.bin");
+        let (log, rotated) = (logs.join("lifecycle.log"), container_logs.join("lifecycle.log.1"));
+        for path in [&ordinary, &log, &rotated] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        for (n, path) in [&ordinary, &log, &rotated].into_iter().enumerate() {
+            db.track_staged_payload(path.to_str().unwrap(), None, false).unwrap();
+            db.enqueue_operation(&crate::state_db::PendingOperation {
+                op_id: format!("op-{n}"),
+                kind: crate::state_db::OperationKind::UploadVersion,
+                file_id: None,
+                parent_id: None,
+                target_path: Some(format!("/{n}.txt")),
+                metadata_json: None,
+                payload_path: Some(path.to_str().unwrap().to_string()),
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        }
+        db.set_owner(&alice()).unwrap();
+        let data = StateDbLocalData {
+            db,
+            sync_root: None,
+            staging_dirs: Vec::new(),
+        };
+        assert_eq!(bind_data_to_session(&AppState::default(), &data, &bob()), Ok(()));
+        let survived = (log.exists(), rotated.exists(), ordinary.exists());
+        let cleared = !data.db.has_account_data().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            survived,
+            (true, true, false),
+            "the log directory survives; the ordinary file does not"
+        );
+        assert!(cleared, "and the account's rows are all gone");
+    }
+
+    /// On a Mac a reset asks the reconciler for a Repair, so Finder drops the old listing and gets Beebeeb back
+    /// for the new account; the same account asks for nothing. The reconciler's end is a stand-in that only
+    /// receives, and the call returns without waiting for an answer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reset_asks_the_reconciler_for_a_repair_and_a_kept_account_asks_for_nothing() {
+        use finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+        use finder_setup::launch_location::LaunchLocation;
+        let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+        let state = AppState::default();
+        let _ = state.finder_setup.set(handle);
+
+        let kept = local_data_of(Some(alice()));
+        assert_eq!(bind_data_to_session(&state, &kept.data, &alice()), Ok(()));
+        assert!(rx.try_recv().is_err(), "the same account asks for no repair");
+
+        let reset = local_data_of(Some(alice()));
+        assert_eq!(bind_data_to_session(&state, &reset.data, &bob()), Ok(()));
+        let event = rx.try_recv().expect("a reset asks the reconciler for something");
+        assert!(
+            matches!(event, Event::Trigger(finder_setup::core::Trigger::Repair)),
+            "a Repair, and nothing else"
+        );
+        assert!(rx.try_recv().is_err(), "once");
+    }
+
+    /// F4: the account reset sweeps orphan staged files too (plaintext copies no row points at), through the
+    /// staging directories its `StateDbLocalData` was given.
+    #[test]
+    fn an_account_reset_also_sweeps_orphan_staged_files() {
+        if !RESET_ALLOWED {
+            return;
+        }
+        let mut local = local_data_of(Some(alice()));
+        let staging = std::env::temp_dir()
+            .join(format!("bb-test-1834-f4-reset-{}", uuid::Uuid::new_v4()))
+            .join("finder-writes");
+        std::fs::create_dir_all(&staging).unwrap();
+        let orphan = staging.join("orphan.bin");
+        std::fs::write(&orphan, b"plaintext with no row").unwrap();
+        local.data.staging_dirs = vec![staging.clone()];
+        assert_eq!(bind_data_to_session(&AppState::default(), &local.data, &bob()), Ok(()));
+        let swept = !orphan.exists();
+        let _ = std::fs::remove_dir_all(staging.parent().unwrap());
+        assert!(swept, "the orphan is gone");
+    }
+
+    /// F4 at the gate: an account reset that cannot remove a file starts nothing, leaves the owner and every row
+    /// where they were, and the retry (once the file can go) starts the engine on a clean slate.
+    #[test]
+    fn an_account_reset_that_cannot_remove_a_file_starts_nothing_until_it_can() {
+        if !RESET_ALLOWED {
+            return; // Windows refuses before any purge
+        }
+        let local = local_data_of(Some(alice()));
+        let payload = local.files[0].clone();
+        std::fs::remove_file(&payload).unwrap();
+        std::fs::create_dir(&payload).unwrap(); // a removal that fails
+        let fx = AuthorizeFixture::with_session(&bob());
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+        let error = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths).expect_err("nothing starts");
+        assert!(error.contains("could not be removed"), "{error}");
+        assert_eq!(
+            local.data.db.owner().unwrap(),
+            Some(alice()),
+            "the new account is not recorded over data still there"
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "the queue is still there"
+        );
+        std::fs::remove_dir(&payload).unwrap();
+        let retry = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths);
+        // On a Mac the engine then waits for the previous account's Finder domain to be removed (F3).
+        if cfg!(target_os = "macos") {
+            assert!(
+                matches!(retry, Ok(StartPermit::FinderRemovalOwed)),
+                "the retry resets, then waits for the removal: {retry:?}"
+            );
+        } else {
+            assert!(matches!(retry, Ok(StartPermit::Go(_))), "the retry starts: {retry:?}");
+        }
+        assert!(local.data.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        assert_eq!(local.data.db.owner().unwrap(), Some(bob()));
+    }
+
+    /// F2: a database the engine start itself creates is not the upgrade's, so the adoption window is shut from
+    /// the beginning: unowned data that shows up in it later is never adopted.
+    #[test]
+    fn a_database_the_engine_start_creates_never_opens_the_adoption_window() {
+        let fx = AuthorizeFixture::with_session(&alice());
+        let dir = tempfile::tempdir().unwrap();
+        let slot = fx.acct.engine.try_lock().unwrap();
+        assert!(matches!(
+            authorize_after_removal(&fx, &slot, &LocalDataPaths::for_test(dir.path(), dir.path())),
+            Ok(StartPermit::Go(_))
+        ));
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        db.clear_account_data(false).unwrap(); // no owner left ...
+        rusqlite::Connection::open(dir.path().join("state.db"))
+            .unwrap()
+            .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '1')", []) // ... and unowned data
+            .unwrap();
+        assert!(
+            !db.adopt_owner_once(Some(&bob())).unwrap(),
+            "the window was shut when the database was created"
+        );
+        assert_eq!(db.owner().unwrap(), None);
+    }
+
+    /// F3: a reset on a Mac does not start the new account's engine in that call. It records a
+    /// Finder-removal debt in the reset's own transaction, asks the reconciler for a Repair (never waiting for it),
+    /// and every start refuses while the debt stands. A removal that FAILS releases nothing, so nothing starts and
+    /// nothing is reset a second time; a confirmed removal releases it, and then the engine starts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reset_whose_removal_fails_keeps_the_new_accounts_engine_from_starting_until_a_removal_is_confirmed() {
+        use finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+        use finder_setup::launch_location::LaunchLocation;
+        fn start(
+            fx: &AuthorizeFixture,
+            slot: &mut tokio::sync::MutexGuard<'_, Option<crate::runner::EngineRunner>>,
+            paths: &LocalDataPaths,
+            started: &std::cell::Cell<u32>,
+        ) -> Result<EngineStart, String> {
+            start_engine_bound(&fx.state, &fx.acct, slot, paths, |_root, _token, _key| {
+                started.set(started.get() + 1);
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            })
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(LaunchLocation::Applications));
+            let local = local_data_of(Some(alice()));
+            let fx = AuthorizeFixture::with_session(&bob());
+            let _ = fx.state.finder_setup.set(handle);
+            let mut slot = fx.acct.engine.lock().await;
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let started = std::cell::Cell::new(0);
+
+            // 1. b's start: the reset runs, the debt is recorded, Repair is asked for, and no engine starts.
+            assert_eq!(
+                start(&fx, &mut slot, &paths, &started),
+                Ok(EngineStart::FinderRemovalOwed)
+            );
+            assert_eq!(started.get(), 0);
+            assert!(slot.is_none());
+            assert!(
+                local.data.db.finder_removal_owed().unwrap(),
+                "the debt is recorded with the reset"
+            );
+            assert!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+                "the reset itself went through"
+            );
+            assert_eq!(local.data.db.owner().unwrap(), Some(bob()));
+            assert!(
+                matches!(rx.try_recv(), Ok(Event::Trigger(finder_setup::core::Trigger::Repair))),
+                "a Repair was asked for"
+            );
+
+            // 2. The removal failed: nothing released the debt. Still no engine, and no second reset or Repair.
+            assert_eq!(
+                start(&fx, &mut slot, &paths, &started),
+                Ok(EngineStart::FinderRemovalOwed)
+            );
+            assert_eq!(started.get(), 0);
+            assert!(rx.try_recv().is_err(), "the refusal asks for nothing more");
+            assert_eq!(local.data.db.owner().unwrap(), Some(bob()));
+            // 2b. While the debt stands, even a DIFFERENT account that signs in is refused before anything is bound:
+            //     no second reset, and the owner is not touched.
+            let bobs_session = fx.acct.session.lock().unwrap().take();
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-a".into(),
+                master_key: [4u8; 32],
+                email: alice().email,
+            });
+            assert_eq!(
+                start(&fx, &mut slot, &paths, &started),
+                Ok(EngineStart::FinderRemovalOwed)
+            );
+            assert_eq!(
+                local.data.db.owner().unwrap(),
+                Some(bob()),
+                "nothing was bound while the removal is owed"
+            );
+            *fx.acct.session.lock().unwrap() = bobs_session;
+
+            // 3. A removal is confirmed (the reconciler's port does exactly this): the engine may start.
+            clear_finder_removal_owed_in(local.dir.path());
+            assert!(!local.data.db.finder_removal_owed().unwrap());
+            assert_eq!(start(&fx, &mut slot, &paths, &started), Ok(EngineStart::Started));
+            assert_eq!(started.get(), 1);
+            assert!(slot.is_some());
+        });
+    }
+
+    /// F3: the debt is read by the reconciler's facts (`finder_removal_owed_in`) and cleared by its port
+    /// (`clear_finder_removal_owed_in`), through the same database the gate reads.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_reconcilers_view_of_the_removal_debt_is_the_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!finder_removal_owed_in(dir.path()), "no database, no debt");
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        assert!(!finder_removal_owed_in(dir.path()));
+        db.set_finder_removal_owed(true).unwrap();
+        assert!(finder_removal_owed_in(dir.path()));
+        assert!(!db.has_account_data().unwrap(), "the debt is not account data");
+        clear_finder_removal_owed_in(dir.path());
+        assert!(!finder_removal_owed_in(dir.path()));
+    }
+
+    /// The sign-out purge, behaviourally (macOS and Linux), through the real function `clear_session_impl` calls and
+    /// a state dir of its own: it clears every account row and the owner, records a removal debt only when the
+    /// sign-out's Finder removal was not confirmed, and a failure of any step stops it with the sign-out sentence.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn the_sign_out_purge_clears_everything_and_records_the_debt_only_when_the_removal_was_not_confirmed() {
+        for (owe, expected) in [(false, false), (true, true)] {
+            let local = local_data_of(Some(alice()));
+            rusqlite::Connection::open(local.dir.path().join("state.db"))
+                .unwrap()
+                .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '9')", [])
+                .unwrap();
+            assert_eq!(
+                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe),
+                Ok(())
+            );
+            assert!(!local.data.db.has_account_data().unwrap(), "no account row survives");
+            assert_eq!(local.data.db.owner().unwrap(), None, "and nobody owns what is left");
+            assert_eq!(
+                local.data.db.finder_removal_owed().unwrap(),
+                expected,
+                "debt, owe = {owe}"
+            );
+            for path in &local.files {
+                assert!(!path.exists(), "{} is gone", path.display());
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn the_sign_out_purge_stops_with_the_sign_out_sentence_when_any_step_fails() {
+        // A file that cannot be removed.
+        let local = local_data_of(Some(alice()));
+        std::fs::remove_file(&local.files[0]).unwrap();
+        std::fs::create_dir(&local.files[0]).unwrap();
+        let error = purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false).unwrap_err();
+        assert!(
+            error.starts_with(SIGN_OUT_PURGE_FAILED) && error.contains("could not be removed"),
+            "{error}"
+        );
+        assert_eq!(local.data.db.owner().unwrap(), Some(alice()), "nothing was cleared");
+        assert_eq!(local.data.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+        // A database that cannot be opened, and a state dir that cannot be resolved.
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::write(
+            broken.path().join("state.db"),
+            b"this is not a database, and it is long enough to be read as one: 0123456789",
+        )
+        .unwrap();
+        assert!(
+            purge_local_data_for_sign_out(Ok(broken.path().to_path_buf()), None, false)
+                .unwrap_err()
+                .starts_with(SIGN_OUT_PURGE_FAILED)
+        );
+        assert!(
+            purge_local_data_for_sign_out(Err("not initialised".into()), None, false)
+                .unwrap_err()
+                .starts_with(SIGN_OUT_PURGE_FAILED)
+        );
+        // No database yet is a fresh install: nothing to purge.
+        let fresh = tempfile::tempdir().unwrap();
+        assert_eq!(
+            purge_local_data_for_sign_out(Ok(fresh.path().to_path_buf()), None, true),
+            Ok(())
+        );
+    }
+
+    /// F3, shape: the gate refuses while a removal is owed, before it binds anything and again after a reset; and the
+    /// reset records the debt in its own transaction (a Mac only).
+    #[test]
+    fn the_gate_refuses_while_a_finder_removal_is_owed_and_a_reset_records_the_debt() {
+        let production = production_source();
+        let bind = code_of(&production, "fn bind_local_data_to_session(");
+        let first = bind.find("finder_removal_owed()").expect("it reads the debt");
+        let bound = bind.find("bind_data_to_session(").expect("it binds");
+        let second = bind.rfind("finder_removal_owed()").unwrap();
+        assert!(
+            first < bound && bound < second,
+            "the debt is read before the binding and again after it:\n{bind}"
+        );
+        assert_eq!(
+            bind.matches("return Ok(BoundData::FinderRemovalOwed)").count(),
+            2,
+            "{bind}"
+        );
+        let reset = body_between(&production, "    fn reset(&self)", "\n    }\n");
+        assert!(
+            reset.contains("clear_account_data(cfg!(target_os = \"macos\"))"),
+            "the reset owes the removal on a Mac:\n{reset}"
+        );
+        let bound = body_between(&production, "fn start_engine_bound(", "\n}\n");
+        assert!(
+            bound.contains("StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed)"),
+            "{bound}"
+        );
+    }
+
+    /// This is a public repository: the comments in the account-binding code, the reconciler's core and the state
+    /// database say what the code guarantees, and never announce that something is unresolved. (The needles
+    /// are generic and split so this test does not match itself.)
+    #[test]
+    fn no_public_comment_announces_something_still_open() {
+        let needles = [
+            concat!("is still", " open"),
+            concat!("not", " closed"),
+            concat!("un", "mitigated"),
+            concat!("known", " weakness"),
+            concat!("un", "fixed"),
+        ];
+        let strip_tests = |source: &str| {
+            source[..source.find("#[cfg(test)]\nmod tests {").unwrap_or(source.len())].to_ascii_lowercase()
+        };
+        let sources = [
+            ("lib.rs", production_source().to_ascii_lowercase()),
+            (
+                "finder_setup/core.rs",
+                strip_tests(&include_str!("finder_setup/core.rs").replace("\r\n", "\n")),
+            ),
+            (
+                "account_binding.rs",
+                strip_tests(&include_str!("account_binding.rs").replace("\r\n", "\n")),
+            ),
+            (
+                "state_db.rs",
+                strip_tests(&include_str!("state_db.rs").replace("\r\n", "\n")),
+            ),
+        ];
+        for (name, source) in &sources {
+            for needle in needles {
+                assert!(!source.contains(needle), "{name} says {needle:?}");
+            }
+        }
+    }
+
+    /// R1 (fix round 2): the adoption window shuts on EVERY way out of the startup restore, not only on the paths
+    /// that reach the adoption call: a Windows restore that is refused, a restore with no account, a session
+    /// already installed, a Keychain with nothing in it. The restore is a thin wrapper that shuts the window after
+    /// the real body has returned (by whatever return), and the real body adopts on what it loaded. The restore
+    /// needs a real window system, so this is a source pin; the window's behaviour is the state_db and gate tests.
+    #[test]
+    fn every_return_of_the_startup_restore_shuts_the_adoption_window() {
+        let production = production_source();
+        let wrapper = code_of(&production, "async fn restore_session_on_startup(");
+        let statements: Vec<&str> = wrapper
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "restore_session_inner(app).await;",
+                "adopt_unbound_local_data_at_startup(None);"
+            ],
+            "the wrapper is exactly: run the restore, then shut the window, with nothing that can skip it:\n{wrapper}"
+        );
+        let body = code_of(&production, "async fn restore_session_inner(");
+        assert!(
+            body.contains("return;"),
+            "the real restore has early returns (that is the point of the wrapper)"
+        );
+    }
+
+    /// R1: an engine start shuts a window that is still open, on a database that already existed (the startup pass
+    /// could not run, say because the state dir was not resolved yet). Unowned data that appears later is then
+    /// never adopted.
+    #[test]
+    fn an_engine_start_shuts_an_open_adoption_window_on_an_existing_database() {
+        let local = local_data_of(None); // a database from before the upgrade: unowned rows, window open
+        let fx = AuthorizeFixture::with_session(&alice());
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let _ = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        local.data.db.clear_account_data(false).unwrap();
+        rusqlite::Connection::open(local.dir.path().join("state.db"))
+            .unwrap()
+            .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '1')", [])
+            .unwrap();
+        assert!(
+            !local.data.db.adopt_owner_once(Some(&bob())).unwrap(),
+            "the engine start shut the window"
+        );
+        assert_eq!(local.data.db.owner().unwrap(), None);
+    }
+
+    /// A signed-in account the way a sign-in builds it: the session email is `session_email(profile)` (the server's
+    /// own record and nothing typed) and the profile is cached, exactly what `desktop_login`, `desktop_login_2fa`
+    /// and `apply_session` do. `None`: the sign-in's account-record fetch failed, so the session has no identity.
+    fn signed_in_via(profile: Option<&account_dto::AccountProfile>) -> AuthorizeFixture {
+        let fx = AuthorizeFixture::without_session();
+        let email = session_email(profile);
+        *fx.acct.session.lock().unwrap() = Some(Session {
+            token: "tok-r10".into(),
+            master_key: [7u8; 32],
+            email: email.clone(),
+        });
+        *fx.acct.auth_email.lock().unwrap() = email;
+        *fx.acct.cached_profile.lock().unwrap() = profile.cloned();
+        fx
+    }
+
+    /// An HTTP server on localhost that answers every request with `status_line` and `body`; the base URL.
+    fn answering(status_line: &'static str, body: String) -> String {
+        answering_after(status_line, body, || {})
+    }
+
+    /// [`answering`], running `before_reply` after the request arrived and before the answer is sent: a change to
+    /// the world that happens WHILE a fetch is in flight.
+    fn answering_after(status_line: &'static str, body: String, before_reply: impl Fn() + Send + 'static) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                before_reply();
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        base_url
+    }
+
+    /// R2 (fix round 2; round 3): the email a session is known by is the server's own spelling of it, and nothing
+    /// else. Typed text is not a parameter any more, so a sign-in that has no account record has no email.
+    #[test]
+    fn the_session_email_is_the_servers_spelling_and_nothing_else() {
+        let profile = profile_of("u-1", "sam@beebeeb.io");
+        assert_eq!(session_email(Some(&profile)).as_deref(), Some("sam@beebeeb.io"));
+        assert_eq!(
+            session_email(Some(&profile_of("u-1", "  sam@beebeeb.io "))).as_deref(),
+            Some("sam@beebeeb.io"),
+            "trimmed"
+        );
+        assert_eq!(
+            session_email(Some(&profile_of("u-1", "  "))),
+            None,
+            "an empty email names nobody"
+        );
+        assert_eq!(session_email(None), None, "no account record: no email");
+    }
+
+    /// R2: one account is ONE owner whichever way it signs in, because the identity is the server's record and
+    /// never the text a sign-in was handed. The account `sam@x` (user id u-1) owns the data; its sign-in starts
+    /// without purging its own unsynced queue. The server's other account `Sam@x` (a different user id) is another
+    /// owner (the ids decide, whatever the emails say).
+    #[test]
+    fn one_account_is_one_owner_whichever_way_it_signs_in_and_case_twins_stay_apart() {
+        let owner = Identity::new(Some("u-1"), Some("sam@beebeeb.io"));
+        let server = profile_of("u-1", "sam@beebeeb.io");
+        let fx = signed_in_via(Some(&server));
+        let local = local_data_of(Some(owner.clone()));
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let result = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        assert!(
+            matches!(result, Ok(StartPermit::Go(_))),
+            "the same account starts: {result:?}"
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "its own queue is never purged"
+        );
+        assert_eq!(local.data.db.owner().unwrap(), Some(owner.clone()), "still one owner");
+        for path in &local.files {
+            assert!(path.exists(), "{} is kept", path.display());
+        }
+        // The server's other account `Sam@x` (a different user id): another owner.
+        let twin = signed_in_via(Some(&profile_of("u-2", "Sam@beebeeb.io")));
+        let local = local_data_of(Some(owner));
+        let slot = twin.acct.engine.try_lock().unwrap();
+        let result = authorize_engine_start(
+            &twin.state,
+            &twin.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        if RESET_ALLOWED {
+            assert!(
+                !matches!(result, Ok(StartPermit::Go(_)) if !local.data.db.list_due_operations(i64::MAX).unwrap().is_empty()),
+                "{result:?}"
+            );
+            assert!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+                "the twin does not inherit the queue"
+            );
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+            );
+        }
+    }
+
+    /// R2, wiring: every sign-in names the session by the server's profile and by nothing it was handed, and the
+    /// browser handoff fetches the profile and passes NO fallback email (round 3: a failed fetch leaves the session
+    /// unidentified instead of falling back to the web client's text).
+    #[test]
+    fn every_sign_in_names_the_session_by_the_servers_email() {
+        let production = production_source();
+        for signature in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let code = code_of(&production, signature);
+            let canonical = code
+                .find("session_email(Some(&profile))")
+                .unwrap_or_else(|| panic!("{signature}: the profile names the email"));
+            // The token, the profile and the flags are written in the sign-in's turn, by `store_first_sign_in` (Task 12).
+            let stored = code
+                .find("store_first_sign_in(&state, &acct, &mut turn, &session_token, &email, profile)")
+                .expect("the profile is cached by the checked store");
+            assert!(
+                canonical < stored,
+                "{signature}: the email is read from the profile BEFORE it is moved into the cache, and the Keychain gets it"
+            );
+        }
+        let store = code_of(&production, "fn store_first_sign_in(");
+        assert!(
+            store
+                .find("persist_session_token_to_keychain(&write, acct.id.as_str(), token, Some(email))?;")
+                .unwrap()
+                < store.find("*guard = Some(profile);").unwrap(),
+            "{store}"
+        );
+        let apply = code_of(&production, "pub(crate) async fn apply_session(");
+        assert!(
+            apply.contains("let email = session_email(profile.as_ref());"),
+            "{apply}"
+        );
+        assert!(
+            apply.find("session_email(").unwrap() < apply.find("install_new_session_or_revoke(").unwrap(),
+            "the server's email reaches the checked install"
+        );
+        assert!(
+            code_of(&production, "async fn install_new_session_or_revoke(")
+                .contains("install_new_session(state, acct, turn, token, master_key, email, profile)?")
+        );
+        assert!(
+            code_of(&production, "fn install_new_session(").contains(
+                "persist_session_to_keychain(&write, acct.id.as_str(), token, master_key, email.as_deref())?;"
+            )
+        );
+        let signature = apply[..apply.find(") -> Result<(), String> {").unwrap()].to_string();
+        assert!(
+            !signature.contains("email"),
+            "apply_session takes no email, only the server's profile:\n{signature}"
+        );
+        let browser = include_str!("browser_login.rs");
+        assert!(
+            browser.contains("crate::fetch_canonical_profile(&creds.session_token).await"),
+            "the browser handoff fetches the profile"
+        );
+        assert!(
+            browser.contains("let email = crate::session_email(profile.as_ref());"),
+            "and names the email from it alone"
+        );
+        assert!(!browser.contains("creds.email"), "the browser's own email is not read");
+    }
+
+    /// Fix round 3 (R2 residual): a sign-in whose account-record fetch FAILED has no identity, and an unidentified
+    /// session starts nothing and changes nothing: no engine, no purge, no adoption, no owner recorded, no Finder
+    /// debt, no database opened. Whatever the local data is: another account's, unowned, or none.
+    #[tokio::test]
+    async fn an_unidentified_session_starts_nothing_and_changes_nothing() {
+        let unidentified = signed_in_via(None); // what `fetch_canonical_profile` -> None leaves behind
+        assert!(
+            unidentified
+                .acct
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|session| session.email.is_none())
+        );
+        for (name, owner) in [
+            ("another account's data", Some(alice())),
+            ("data with no recorded owner", None),
+        ] {
+            let local = local_data_of(owner.clone());
+            let mut slot = unidentified.acct.engine.try_lock().unwrap();
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let created = std::cell::Cell::new(false);
+            let result = start_engine_bound(
+                &unidentified.state,
+                &unidentified.acct,
+                &mut slot,
+                &paths,
+                |_root, _token, _key| {
+                    created.set(true);
+                    crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+                },
+            );
+            assert_eq!(
+                result,
+                Err(crate::account_binding::IDENTITY_UNKNOWN.to_string()),
+                "{name}: the existing identity message"
+            );
+            assert!(!created.get() && slot.is_none(), "{name}: no engine");
+            assert_eq!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                1,
+                "{name}: nothing purged"
+            );
+            for path in &local.files {
+                assert!(path.exists(), "{name}: {} is kept", path.display());
+            }
+            assert_eq!(
+                local.data.db.owner().unwrap(),
+                owner,
+                "{name}: no owner recorded, none adopted, none replaced"
+            );
+            assert!(!local.data.db.finder_removal_owed().unwrap(), "{name}: no Finder debt");
+        }
+        // No data at all: the database is not even created.
+        let dir = tempfile::tempdir().unwrap();
+        let mut slot = unidentified.acct.engine.try_lock().unwrap();
+        let result = start_engine_bound(
+            &unidentified.state,
+            &unidentified.acct,
+            &mut slot,
+            &LocalDataPaths::for_test(dir.path(), dir.path()),
+            |_root, _token, _key| panic!("no engine for an unidentified session"),
+        );
+        assert_eq!(result, Err(crate::account_binding::IDENTITY_UNKNOWN.to_string()));
+        assert!(
+            !dir.path().join("state.db").exists(),
+            "an unidentified start opens nothing"
+        );
+    }
+
+    /// Fix round 3: the fetch fails, nothing happens; a later fetch that succeeds names the session, and the start
+    /// then binds exactly as any other (the same account keeps its queue, another account's is reset).
+    #[tokio::test]
+    async fn a_later_fetch_that_succeeds_names_the_session_and_the_start_binds_normally() {
+        for (name, profile, is_the_owner) in [
+            ("the owner", profile_of("u-a", "a@beebeeb.io"), true),
+            ("another account", profile_of("u-b", "b@beebeeb.io"), false),
+        ] {
+            let local = local_data_of(Some(alice()));
+            let fx = signed_in_via(None);
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            // The account record cannot be fetched (the server errors, or answers with something that is no
+            // profile): still unidentified, still refused, nothing deleted.
+            for (status, body) in [("500 Internal Server Error", "{}"), ("200 OK", "{}")] {
+                let base_url = answering(status, body.to_string());
+                assert!(
+                    !establish_session_identity(&fx.state, &fx.acct, &base_url, None).await,
+                    "{name}: {status}"
+                );
+                assert_eq!(
+                    fx.acct.session.lock().unwrap().as_ref().unwrap().email,
+                    None,
+                    "{name}: still unidentified"
+                );
+                let slot = fx.acct.engine.try_lock().unwrap();
+                let refused = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths);
+                assert_eq!(
+                    refused.err(),
+                    Some(crate::account_binding::IDENTITY_UNKNOWN.to_string()),
+                    "{name}: {status}"
+                );
+                assert_eq!(
+                    local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                    1,
+                    "{name}: nothing purged"
+                );
+                assert_eq!(
+                    local.data.db.owner().unwrap(),
+                    Some(alice()),
+                    "{name}: the owner is untouched"
+                );
+            }
+            // A later fetch succeeds.
+            let base_url = answering("200 OK", serde_json::to_string(&profile).unwrap());
+            assert!(
+                establish_session_identity(&fx.state, &fx.acct, &base_url, None).await,
+                "{name}"
+            );
+            assert_eq!(
+                fx.acct.session.lock().unwrap().as_ref().unwrap().email.as_deref(),
+                Some(profile.email.as_str()),
+                "{name}: named by the server"
+            );
+            assert_eq!(
+                fx.acct
+                    .cached_profile
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|cached| cached.user_id.clone()),
+                Some(profile.user_id.clone())
+            );
+            assert_eq!(
+                fx.acct.auth_email.lock().unwrap().as_deref(),
+                Some(profile.email.as_str()),
+                "{name}: the Account page shows it"
+            );
+            let slot = fx.acct.engine.try_lock().unwrap();
+            let result = authorize_after_removal(&fx, &slot, &paths);
+            if is_the_owner {
+                assert!(matches!(result, Ok(StartPermit::Go(_))), "{name}: {result:?}");
+                assert_eq!(
+                    local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                    1,
+                    "{name}: its own queue is kept"
+                );
+                assert_eq!(local.data.db.owner().unwrap(), Some(alice()));
+            } else if RESET_ALLOWED {
+                assert!(matches!(result, Ok(StartPermit::Go(_))), "{name}: {result:?}");
+                assert!(
+                    local.data.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+                    "{name}: another account's queue is reset"
+                );
+                assert_eq!(local.data.db.owner().unwrap(), Some(bob()));
+            } else {
+                assert_eq!(
+                    result.err(),
+                    Some(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+                );
+            }
+            // A session that is named already, or was replaced meanwhile, is left alone.
+            assert!(
+                !establish_session_identity(&fx.state, &fx.acct, &base_url, None).await,
+                "{name}: already named"
+            );
+        }
+    }
+
+    /// A signed-in session whose stored email is a legacy spelling (`Sam@Beebeeb.io`, as an older build saved it) and the
+    /// local data it owns under that same spelling, with no id recorded; the server spells the address `sam@beebeeb.io`.
+    fn a_legacy_spelling() -> (AuthorizeFixture, LocalFixture, account_dto::AccountProfile) {
+        let legacy = Identity::new(None, Some("Sam@Beebeeb.io"));
+        let fx = AuthorizeFixture::with_session(&legacy);
+        AuthVault::new(platform_keychain_store_for(fx.acct.id.as_str()))
+            .store_account_email("Sam@Beebeeb.io")
+            .ok();
+        (fx, local_data_of(Some(legacy)), profile_of("u-1", "sam@beebeeb.io"))
+    }
+
+    /// Ruling A″ (fix round 3): the owner backfill and the naming compare in the engine start's own canonical form, so a
+    /// legacy spelling that differs from the server's only in a NON-ASCII letter case (`Émile@…`, `émile@…`) is
+    /// completed and named like an ASCII variant. Both folded ASCII letters only before.
+    #[test]
+    fn a_non_ascii_legacy_spelling_is_completed_and_named() {
+        let legacy = Identity::new(None, Some("Émile@beebeeb.io"));
+        let fx = AuthorizeFixture::with_session(&legacy);
+        let local = local_data_of(Some(legacy));
+        let server = profile_of("u-1", "émile@beebeeb.io");
+        assert_eq!(
+            backfill_local_data_owner(&SessionWrite::for_test(), local.dir.path(), &server),
+            Ok(true),
+            "the owner is completed"
+        );
+        assert_eq!(
+            local.data.db.owner().unwrap(),
+            Some(Identity::new(Some("u-1"), Some("émile@beebeeb.io")))
+        );
+        let named = name_session_after_profile(
+            &SessionWrite::for_test(),
+            &fx.state,
+            &fx.acct,
+            "tok-r10",
+            &server,
+            Some(local.dir.path()),
+        );
+        assert!(named, "the session is named after the server's spelling");
+        assert_eq!(session_spelling(&fx).as_deref(), Some("émile@beebeeb.io"));
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "its queued change is kept"
+        );
+    }
+
+    fn session_spelling(fx: &AuthorizeFixture) -> Option<String> {
+        fx.acct
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|session| session.email.clone())
+    }
+
+    /// Fix round 1, item 1 (review I1, P3-A): the session is renamed to the server's spelling only after the
+    /// owner record was completed. When that fails (here the state dir is a file, so `state.db` cannot be read), nothing
+    /// is renamed: the session, the Keychain email and the cache stay as they were, and the next engine start still
+    /// knows the account's own data (its queued change is kept, nothing is reset).
+    #[test]
+    fn a_failed_owner_backfill_renames_nothing_and_the_next_start_keeps_the_data() {
+        let (fx, local, server) = a_legacy_spelling();
+        let keychain_before = keychain_account_email(fx.acct.id.as_str());
+        let unreadable = tempfile::tempdir().unwrap();
+        let not_a_dir = unreadable.path().join("state-dir-is-a-file");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let named = name_session_after_profile(
+            &SessionWrite::for_test(),
+            &fx.state,
+            &fx.acct,
+            "tok-r10",
+            &server,
+            Some(&not_a_dir),
+        );
+        assert!(!named, "a failed backfill names nothing");
+        assert_eq!(
+            session_spelling(&fx).as_deref(),
+            Some("Sam@Beebeeb.io"),
+            "the stored spelling stays"
+        );
+        assert_eq!(
+            keychain_account_email(fx.acct.id.as_str()),
+            keychain_before,
+            "and so does the Keychain's"
+        );
+        assert!(fx.acct.cached_profile.lock().unwrap().is_none(), "nothing is cached");
+        let session = identity_of_session(
+            session_spelling(&fx).as_deref(),
+            fx.acct.cached_profile.lock().unwrap().as_ref(),
+        );
+        assert_eq!(
+            bind_before_engine_start(&local.data, &session, RESET_ALLOWED),
+            Ok(Bound::Kept),
+            "the next start keeps the data"
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "its queued change is still there"
+        );
+    }
+
+    /// Fix round 2, item 3 (re-check N2): the naming completed the owner record (its id and the server's
+    /// spelling) but could not write the Keychain email, and the next launch is OFFLINE: the session comes back from the
+    /// Keychain with the legacy spelling and no id. The engine-start binding must not take that for another account:
+    /// nothing of the account's own data is reset. Since ruling A″ the spelling IS the same account (equal in canonical
+    /// form), so the offline start proceeds and keeps everything; under rulings A and A′ it was refused until a fetch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stale_keychain_spelling_after_a_completed_owner_never_resets_the_data_on_an_offline_launch() {
+        let (fx, local, server) = a_legacy_spelling();
+        let id = fx.acct.id.as_str().to_string();
+        // The naming in the run before: the backfill succeeds, the Keychain email write fails.
+        crate::keychain::test_fail_account_email_writes(Some(&id), true);
+        let named = name_session_after_profile(
+            &SessionWrite::for_test(),
+            &fx.state,
+            &fx.acct,
+            "tok-r10",
+            &server,
+            Some(local.dir.path()),
+        );
+        crate::keychain::test_fail_account_email_writes(Some(&id), false);
+        assert!(named, "the premise: the backfill succeeded, so the session was named");
+        assert_eq!(
+            local.data.db.owner().unwrap(),
+            Some(Identity::new(Some("u-1"), Some("sam@beebeeb.io"))),
+            "the premise: the owner record was completed"
+        );
+        assert_eq!(
+            keychain_account_email(&id).as_deref(),
+            Some("Sam@Beebeeb.io"),
+            "the premise: the Keychain write failed"
+        );
+        // The offline launch: the session comes back from the Keychain, no profile can be fetched.
+        let restored = identity_of_session(keychain_account_email(&id).as_deref(), None);
+        assert_eq!(
+            restored,
+            Identity::new(None, Some("Sam@Beebeeb.io")),
+            "the premise: the stale spelling, no id"
+        );
+        assert_eq!(
+            bind_before_engine_start(&local.data, &restored, RESET_ALLOWED),
+            Ok(Bound::Kept),
+            "the same account starts offline; its own data is never reset for a spelling"
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "its queued change is still there"
+        );
+        assert_eq!(
+            local.data.db.owner().unwrap().and_then(|owner| owner.user_id),
+            Some("u-1".to_string()),
+            "and its owner record keeps the account's id"
+        );
+        // Once a fetch names the session (the cached profile carries the id), the ids decide and the data is kept.
+        let named_again = identity_of_session(Some("sam@beebeeb.io"), Some(&server));
+        assert_eq!(
+            bind_before_engine_start(&local.data, &named_again, RESET_ALLOWED),
+            Ok(Bound::Kept)
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "still there"
+        );
+    }
+
+    /// Ruling P (Task 12 fix round 2): a session that does not know who it is (its account record could not be fetched)
+    /// is refused, and `sync_status` carries the closed code and its sentence and nothing else. The later naming start
+    /// (the session named after the server's record and its profile cached, as `name_session_after_profile` leaves it)
+    /// runs and clears it. Fix round 3: this used a case-only spelling, which ruling A″ makes the same account.
+    #[test]
+    fn an_unidentified_sessions_refusal_shows_in_sync_status_until_the_naming_start_runs() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let local = local_data_of(Some(Identity::new(Some("u-1"), Some("sam@beebeeb.io"))));
+            let fx = AuthorizeFixture::with_session(&Identity::default());
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let mut slot = fx.acct.engine.lock().await;
+            let refused = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                unreachable!("no engine")
+            });
+            assert_eq!(
+                refused,
+                Err(crate::account_binding::IDENTITY_UNKNOWN.to_string()),
+                "the premise: the start is refused"
+            );
+            let shown = engine_refusal_view(&fx.acct);
+            assert_eq!(
+                shown,
+                serde_json::json!({ "code": "identity_unknown", "sentence": crate::account_binding::IDENTITY_UNKNOWN })
+            );
+            assert_eq!(
+                shown.as_object().unwrap().len(),
+                2,
+                "the code and the sentence, nothing about the account"
+            );
+            fx.acct.session.lock().unwrap().as_mut().unwrap().email = Some("sam@beebeeb.io".into());
+            *fx.acct.cached_profile.lock().unwrap() = Some(profile_of("u-1", "sam@beebeeb.io"));
+            let started = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
+            assert_eq!(started, Ok(EngineStart::Started), "the premise: the naming start runs");
+            assert_eq!(
+                engine_refusal_view(&fx.acct),
+                serde_json::Value::Null,
+                "and clears the refusal"
+            );
+            assert_eq!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                1,
+                "the account's own change is kept"
+            );
+        });
+    }
+
+    /// Fix round 3, M5: a Lock and a Sign-out drop a Keychain email write still owed (it belonged to the session they
+    /// end); a Write keeps it, because the naming that marks a failed write moves the generation with a Write.
+    #[test]
+    fn a_lock_and_a_sign_out_drop_a_keychain_email_write_still_owed_and_a_write_keeps_it() {
+        use crate::account::SessionTransition;
+        let fx = AuthorizeFixture::with_session(&alice());
+        for (by, kept) in [
+            (SessionTransition::Lock, false),
+            (SessionTransition::SignOut, false),
+            (SessionTransition::Write, true),
+        ] {
+            fx.acct.keychain_email_pending.store(true, Ordering::SeqCst);
+            let _turn = SessionWrite::for_test();
+            fx.acct.advance_session_generation_holding_session_write_lock(by);
+            assert_eq!(fx.acct.keychain_email_pending.load(Ordering::SeqCst), kept, "{by:?}");
+        }
+    }
+
+    /// Ruling P: an engine-start error that is not one of the two binding refusals records nothing (here the slot is
+    /// taken), and only the exact two sentences count as refusals.
+    #[test]
+    fn an_engine_start_error_that_is_not_a_binding_refusal_records_nothing() {
+        use crate::account_binding::{IDENTITY_UNKNOWN, OTHER_ACCOUNT_ON_WINDOWS, Refusal};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let local = local_data_of(Some(alice()));
+            let fx = AuthorizeFixture::with_session(&alice());
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let mut slot = fx.acct.engine.lock().await;
+            *slot = Some(crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {})));
+            let refused = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                unreachable!("no engine")
+            });
+            assert_eq!(
+                refused,
+                Err(ENGINE_SLOT_OCCUPIED_ERROR.to_string()),
+                "the premise: another error"
+            );
+            assert_eq!(
+                engine_refusal_view(&fx.acct),
+                serde_json::Value::Null,
+                "recorded nothing"
+            );
+        });
+        assert_eq!(Refusal::of(IDENTITY_UNKNOWN), Some(Refusal::IdentityUnknown));
+        assert_eq!(
+            Refusal::of(OTHER_ACCOUNT_ON_WINDOWS),
+            Some(Refusal::OtherAccountOnWindows)
+        );
+        assert_eq!(Refusal::of("read the local data owner: disk I/O error"), None);
+        assert_eq!(
+            Refusal::of(&format!("{IDENTITY_UNKNOWN} (detail)")),
+            None,
+            "an exact sentence only"
+        );
+        assert_eq!(Refusal::of(""), None);
+    }
+
+    /// Ruling P: every session transition clears the refusal, and a refusal found before a transition is not recorded
+    /// after it (the start checks the generation it read, under the same mutex the transition clears).
+    #[test]
+    fn every_session_transition_clears_the_engine_refusal_and_a_stale_one_is_not_recorded() {
+        use crate::account::SessionTransition;
+        use crate::account_binding::{IDENTITY_UNKNOWN, Refusal};
+        let fx = AuthorizeFixture::with_session(&alice());
+        for by in [
+            SessionTransition::Write,
+            SessionTransition::Lock,
+            SessionTransition::SignOut,
+        ] {
+            *fx.acct.engine_refusal.lock().unwrap() = Some(Refusal::IdentityUnknown);
+            let _turn = SessionWrite::for_test();
+            fx.acct.advance_session_generation_holding_session_write_lock(by);
+            assert_eq!(
+                engine_refusal_view(&fx.acct),
+                serde_json::Value::Null,
+                "{by:?} cleared it"
+            );
+        }
+        let before = fx.acct.session_generation();
+        {
+            let _turn = SessionWrite::for_test();
+            fx.acct
+                .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+        }
+        record_engine_refusal(&fx.acct, before, IDENTITY_UNKNOWN);
+        assert_eq!(
+            engine_refusal_view(&fx.acct),
+            serde_json::Value::Null,
+            "found before the transition: not recorded"
+        );
+        record_engine_refusal(&fx.acct, fx.acct.session_generation(), IDENTITY_UNKNOWN);
+        assert_eq!(
+            engine_refusal_view(&fx.acct)["code"],
+            "identity_unknown",
+            "found for the current session: recorded"
+        );
+    }
+
+    /// Local data with an owner and a file row (which writes the Finder change log too), nothing waiting to upload:
+    /// the state the Windows sign-out sees for an account that synced and finished.
+    fn a_synced_account(owner: &Identity) -> (tempfile::TempDir, StateDbLocalData) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: "file-a".into(),
+            path: "/A.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 11,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        db.set_owner(owner).unwrap();
+        (
+            dir,
+            StateDbLocalData {
+                db,
+                sync_root: None,
+                staging_dirs: Vec::new(),
+            },
+        )
+    }
+
+    /// The database steps of the Windows sign-out (`windows_cf::signout::purge`; its file handling is Windows-only).
+    fn windows_sign_out(data: &StateDbLocalData) {
+        data.db
+            .windows_signout_preflight()
+            .expect("nothing waits to upload, so the sign-out goes ahead");
+        data.db.finish_windows_signout().expect("and finishes");
+    }
+
+    /// Fix to the R10 binding (ruling W1): after a Windows sign-out of an account that had a file row, nothing of that
+    /// account counts as local data any more, so another account's sign-in starts instead of being refused as if the
+    /// previous account's data were still here.
+    #[test]
+    fn after_a_windows_sign_out_another_account_starts() {
+        let (_dir, data) = a_synced_account(&alice());
+        windows_sign_out(&data);
+        assert!(!data.db.has_account_data().unwrap(), "no account data is left");
+        assert_eq!(data.db.owner().unwrap(), None, "and no owner");
+        assert_eq!(
+            bind_before_engine_start(&data, &bob(), false),
+            Ok(Bound::Kept),
+            "another account's sign-in starts"
+        );
+        assert_eq!(
+            data.db.owner().unwrap(),
+            Some(bob()),
+            "and owns what it syncs from now on"
+        );
+    }
+
+    /// Ruling A″ (fix round 3): on Windows a letter-case variant of the owner's email starts without a sign-out, as it
+    /// did before the binding existed (ruling A′ refused it with "Sign out, then sign in again"). Its synced data is
+    /// kept, and the record follows the session's spelling.
+    #[test]
+    fn on_windows_a_case_variant_starts_without_a_sign_out() {
+        let (_dir, data) = a_synced_account(&Identity::new(None, Some("sam@beebeeb.io")));
+        let variant = Identity::new(None, Some("Sam@Beebeeb.io"));
+        assert_eq!(
+            bind_before_engine_start(&data, &variant, false),
+            Ok(Bound::Kept),
+            "it starts"
+        );
+        assert!(data.db.has_account_data().unwrap(), "and its data is kept");
+        assert_eq!(
+            data.db.owner().unwrap(),
+            Some(variant),
+            "one owner, in the session's spelling"
+        );
+    }
+
+    /// Ruling W2 (kept as it is): with a change waiting to upload, the Windows sign-out refuses ("Pending changes
+    /// remain…") and discards nothing, and the binding keeps refusing a start for an email that is not the owner's
+    /// (here the same person's changed address, which no id settles). Fix round 3: this used a case-only variant, which
+    /// ruling A″ makes the same account.
+    #[test]
+    fn on_windows_a_change_waiting_to_upload_blocks_the_sign_out_and_the_start_stays_refused() {
+        let local = local_data_of(Some(Identity::new(None, Some("sam@beebeeb.io"))));
+        let changed_address = Identity::new(None, Some("samuel@beebeeb.io"));
+        let refused = Err(crate::account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string());
+        assert_eq!(
+            bind_before_engine_start(&local.data, &changed_address, false),
+            refused,
+            "the premise"
+        );
+        assert!(
+            local.data.db.windows_signout_preflight().is_err(),
+            "the sign-out refuses while a change waits"
+        );
+        assert!(
+            local.data.db.finish_windows_signout().is_err(),
+            "and could not finish either"
+        );
+        assert_eq!(
+            bind_before_engine_start(&local.data, &changed_address, false),
+            refused,
+            "so the next start is refused again"
+        );
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "nothing was discarded"
+        );
+    }
+
+    /// Fix round 1, item 1 (review I1, P2-B): with no owner record to complete (Windows), a session that has an
+    /// email is never renamed to another spelling, so an upgraded Windows user whose saved email differs from the
+    /// server's only in letter case starts normally (the profile the restore caches anyway does not change who the
+    /// session is: it names a different spelling). Since ruling A″ the renamed session would start too (the same
+    /// canonical address); under rulings A and A′ it was refused.
+    #[test]
+    fn without_an_owner_record_a_case_variant_email_is_never_renamed_and_starts_normally() {
+        let (fx, local, server) = a_legacy_spelling();
+        let named =
+            name_session_after_profile(&SessionWrite::for_test(), &fx.state, &fx.acct, "tok-r10", &server, None);
+        assert!(!named);
+        assert_eq!(
+            session_spelling(&fx).as_deref(),
+            Some("Sam@Beebeeb.io"),
+            "never renamed"
+        );
+        *fx.acct.cached_profile.lock().unwrap() = Some(server.clone()); // the restore caches the probed profile either way
+        let session = identity_of_session(
+            session_spelling(&fx).as_deref(),
+            fx.acct.cached_profile.lock().unwrap().as_ref(),
+        );
+        assert_eq!(
+            bind_before_engine_start(&local.data, &session, false),
+            Ok(Bound::Kept),
+            "Windows starts normally"
+        );
+        let renamed = identity_of_session(Some("sam@beebeeb.io"), Some(&server));
+        assert_eq!(
+            bind_before_engine_start(&local.data, &renamed, false),
+            Ok(Bound::Kept),
+            "a renamed session starts too"
+        );
+        // An email-less session is still named, as before (that is not a rename).
+        let unnamed = signed_in_via(None);
+        assert!(name_session_after_profile(
+            &SessionWrite::for_test(),
+            &unnamed.state,
+            &unnamed.acct,
+            "tok-r10",
+            &server,
+            None
+        ));
+        assert_eq!(session_spelling(&unnamed).as_deref(), Some("sam@beebeeb.io"));
+    }
+
+    /// Fix round 3: an answer is never applied to a session it was not fetched for. If the session is replaced (a
+    /// different token) or named by someone else while the fetch is in flight, the old answer is dropped, so one
+    /// account's record can never become the identity of another account's keys.
+    #[tokio::test]
+    async fn an_answer_is_dropped_when_the_session_changed_while_the_fetch_ran() {
+        let owners_answer = serde_json::to_string(&profile_of("u-a", "a@beebeeb.io")).unwrap();
+        // 1. The session is replaced by another sign-in's (another token) during the fetch.
+        let fx = signed_in_via(None);
+        let acct = fx.acct.clone();
+        let base_url = answering_after("200 OK", owners_answer.clone(), move || {
+            *acct.session.lock().unwrap() = Some(Session {
+                token: "tok-another".into(),
+                master_key: [9u8; 32],
+                email: None,
+            });
+        });
+        assert!(
+            !establish_session_identity(&fx.state, &fx.acct, &base_url, None).await,
+            "a replaced session is not named by the old answer"
+        );
+        {
+            let session = fx.acct.session.lock().unwrap();
+            assert_eq!(
+                session.as_ref().map(|s| (s.token.as_str(), s.email.clone())),
+                Some(("tok-another", None)),
+                "the new session stays unidentified"
+            );
+        }
+        assert!(
+            fx.acct.cached_profile.lock().unwrap().is_none(),
+            "and no profile is cached for it"
+        );
+        // 2. The same session is named by someone else during the fetch: the first name stands.
+        let fx = signed_in_via(None);
+        let acct = fx.acct.clone();
+        let base_url = answering_after("200 OK", owners_answer, move || {
+            acct.session.lock().unwrap().as_mut().unwrap().email = Some("someone-else@beebeeb.io".into());
+        });
+        assert!(!establish_session_identity(&fx.state, &fx.acct, &base_url, None).await);
+        assert_eq!(
+            fx.acct.session.lock().unwrap().as_ref().unwrap().email.as_deref(),
+            Some("someone-else@beebeeb.io")
+        );
+        assert!(fx.acct.cached_profile.lock().unwrap().is_none());
+    }
+
+    /// Fix round 3: the restore at launch names an unidentified session BEFORE it asks an engine to start, so the
+    /// "open Beebeeb again" the refusal asks for is enough.
+    #[test]
+    fn the_startup_restore_names_an_unidentified_session_before_it_starts_an_engine() {
+        let production = production_source();
+        // Task 12 fix round 1, item 7: the restore itself asks the server once (the probe, whose answer names the
+        // session); a second request runs in the background after the engine start, which never waits for it.
+        let restore = code_of(&production, "async fn restore_stored_session(");
+        assert!(
+            !restore.contains("establish_session_identity("),
+            "the restore does not wait for a second request:\n{restore}"
+        );
+        let inner = code_of(&production, "async fn restore_session_inner(");
+        let restored = inner
+            .find("if !restore_stored_session(&state, &acct, &runner::api_base_url()).await {")
+            .expect("the restore runs first");
+        let started = inner.find("start_engine_if_possible(").expect("and then starts");
+        let spawned = inner
+            .find("tauri::async_runtime::spawn(identify_then_start(app.clone(), IdentifyPace::Now));")
+            .expect("the second request is spawned");
+        assert!(restored < started && started < spawned, "{inner}");
+        let windows = inner
+            .find("#[cfg(target_os = \"windows\")]\n    if acct\n        .session\n        .lock()")
+            .expect("Windows keeps today's rule");
+        assert!(
+            inner[windows..started]
+                .contains("establish_session_identity(&state, &acct, &runner::api_base_url(), None).await;"),
+            "{inner}"
+        );
+        assert!(
+            inner[spawned - 60..spawned].contains("#[cfg(not(target_os = \"windows\"))]"),
+            "{inner}"
+        );
+    }
+
+    /// R3 (fix round 2): a start onto an UNOWNED, EMPTY database on a Mac owes the Finder removal as a reset does: the
+    /// database may have been deleted or never existed while the previous account's domain stayed registered. The
+    /// debt is recorded with the first owner, nothing starts in that call, and a confirmed removal (or an Observe that
+    /// finds no domain) lets the next start through. Off a Mac nothing is owed.
+    #[test]
+    fn a_first_start_on_an_unowned_empty_database_owes_the_finder_removal_on_a_mac() {
+        let fx = AuthorizeFixture::with_session(&alice());
+        let dir = tempfile::tempdir().unwrap();
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let paths = LocalDataPaths::for_test(dir.path(), dir.path());
+        let first = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths);
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(
+            db.owner().unwrap(),
+            Some(alice()),
+            "the first account to start here is recorded"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(
+                matches!(first, Ok(StartPermit::FinderRemovalOwed)),
+                "nothing starts while a removal is owed: {first:?}"
+            );
+            assert!(db.finder_removal_owed().unwrap(), "the debt is recorded");
+            #[cfg(target_os = "macos")]
+            clear_finder_removal_owed_in(dir.path());
+            let second = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths);
+            assert!(
+                matches!(second, Ok(StartPermit::Go(_))),
+                "a confirmed removal lets the start through: {second:?}"
+            );
+            assert!(
+                !db.finder_removal_owed().unwrap(),
+                "and nothing is owed again: the owner is recorded now"
+            );
+        } else {
+            assert!(matches!(first, Ok(StartPermit::Go(_))), "no Finder, no debt: {first:?}");
+            assert!(!db.finder_removal_owed().unwrap());
+        }
+    }
+
+    /// R3: the exceptions are exact. A sign-out whose Finder removal was CONFIRMED leaves the domain gone, so the
+    /// next account's first start owes nothing (no wait on every sign-in after a sign-out); one whose removal was
+    /// not confirmed owes it.
+    #[test]
+    fn a_start_after_a_confirmed_sign_out_owes_nothing_and_after_an_unconfirmed_one_it_does() {
+        for (owe_after_sign_out, expect_debt) in [(false, false), (true, true)] {
+            let local = local_data_of(Some(alice()));
+            // The sign-out purge, as `clear_session_impl` runs it, with its removal confirmed or not.
+            #[cfg(not(target_os = "windows"))]
+            assert_eq!(
+                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe_after_sign_out),
+                Ok(())
+            );
+            #[cfg(target_os = "windows")]
+            local.data.db.clear_account_data(owe_after_sign_out).unwrap();
+            let fx = AuthorizeFixture::with_session(&bob());
+            let slot = fx.acct.engine.try_lock().unwrap();
+            let result = authorize_engine_start(
+                &fx.state,
+                &fx.acct,
+                &slot,
+                &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+            );
+            if cfg!(target_os = "macos") && expect_debt {
+                assert!(
+                    matches!(result, Ok(StartPermit::FinderRemovalOwed)),
+                    "owe = {owe_after_sign_out}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Ok(StartPermit::Go(_))),
+                    "owe = {owe_after_sign_out}: {result:?}"
+                );
+                assert!(!local.data.db.finder_removal_owed().unwrap());
+            }
+        }
+    }
+
+    /// Fix round 3: the "domain gone" mark holds only until the domain is registered again. After a confirmed
+    /// sign-out the next first start owes nothing; once the reconciler has added the domain the mark is cleared, so
+    /// an unowned, empty database found later owes the removal check again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_registered_domain_is_no_longer_known_gone_so_a_later_first_start_owes_a_check() {
+        let local = local_data_of(Some(alice()));
+        assert_eq!(
+            purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false),
+            Ok(())
+        );
+        assert!(
+            local.data.db.finder_domain_gone().unwrap(),
+            "a confirmed sign-out leaves the domain known gone"
+        );
+        // The reconciler adds the domain (a confirmed add), as `Ports::domain_added` does on a Mac.
+        clear_finder_domain_gone_in(local.dir.path());
+        assert!(
+            !local.data.db.finder_domain_gone().unwrap(),
+            "a confirmed add clears the mark"
+        );
+        // The owner row is gone with the sign-out and the database is empty: the next first start owes the check.
+        let fx = AuthorizeFixture::with_session(&bob());
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let result = authorize_engine_start(
+            &fx.state,
+            &fx.acct,
+            &slot,
+            &LocalDataPaths::for_test(local.dir.path(), &local.staging),
+        );
+        assert!(matches!(result, Ok(StartPermit::FinderRemovalOwed)), "{result:?}");
+    }
+
+    /// R4 (fix round 2): the staging directories the sweep covers come from the PRODUCTION call sites, and they pass
+    /// the complete list. A test build's list is empty unless a test sets it (so no test sweeps the shared sandbox the
+    /// engine-bridge tests stage into); these tests set it and drive the real call sites, so a call site that passes an
+    /// empty or a shortened list leaves an orphan behind and fails.
+    struct StagingOverride {
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl StagingOverride {
+        fn set(dirs: Vec<PathBuf>) -> Self {
+            static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            *STAGING_DIRS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = Some(dirs);
+            Self { _serial: serial }
+        }
+    }
+
+    impl Drop for StagingOverride {
+        fn drop(&mut self) {
+            *STAGING_DIRS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// Two staging directories in the shape the engine uses (`<root>/beebeeb/finder-writes`), one orphan in each.
+    fn two_staging_dirs_with_orphans() -> (PathBuf, Vec<PathBuf>, Vec<PathBuf>) {
+        let root = std::env::temp_dir().join(format!("bb-test-r4-{}", uuid::Uuid::new_v4()));
+        let dirs: Vec<PathBuf> = ["cache", "temp"]
+            .iter()
+            .map(|name| root.join(name).join("beebeeb").join("finder-writes"))
+            .collect();
+        let orphans: Vec<PathBuf> = dirs.iter().map(|dir| dir.join("orphan.bin")).collect();
+        for (dir, orphan) in dirs.iter().zip(&orphans) {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(orphan, b"plaintext with no row").unwrap();
+        }
+        (root, dirs, orphans)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn the_sign_out_purge_sweeps_every_production_staging_directory() {
+        let (root, dirs, orphans) = two_staging_dirs_with_orphans();
+        let _override = StagingOverride::set(dirs);
+        let state_dir = tempfile::tempdir().unwrap();
+        crate::state_db::StateDb::open(state_dir.path().join("state.db")).unwrap();
+        // The function `clear_session_impl` calls, which reaches `purge_local_state_files`.
+        assert_eq!(
+            purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false),
+            Ok(())
+        );
+        let left: Vec<&PathBuf> = orphans.iter().filter(|orphan| orphan.exists()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            left.is_empty(),
+            "every staging directory is swept, none is skipped: {left:?}"
+        );
+    }
+
+    #[test]
+    fn the_engine_start_reset_sweeps_every_production_staging_directory() {
+        if !RESET_ALLOWED {
+            return; // Windows refuses instead of resetting
+        }
+        let (root, dirs, orphans) = two_staging_dirs_with_orphans();
+        let _override = StagingOverride::set(dirs.clone());
+        crate::state_paths::init_for_test(); // the process-wide state dir `LocalDataPaths::production` resolves
+        let mut paths = LocalDataPaths::production(&root).unwrap();
+        assert_eq!(paths.staging_dirs, dirs, "the production paths carry the complete list");
+        // The real paths, but with a database of this test's own (the shared one belongs to the sign-out tests).
+        let local = local_data_of(Some(alice()));
+        paths.state_dir = local.dir.path().to_path_buf();
+        let fx = AuthorizeFixture::with_session(&bob());
+        let slot = fx.acct.engine.try_lock().unwrap();
+        let _ = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths);
+        let left: Vec<&PathBuf> = orphans.iter().filter(|orphan| orphan.exists()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(left.is_empty(), "the reset swept every staging directory: {left:?}");
+    }
+
+    /// R4 (fix round 3): the list a RELEASE build sweeps is complete. A test build never compiles the release arm of
+    /// `production_staging_dirs` (it reads the override), so two things hold it: the arm is exactly one call to
+    /// `release_staging_dirs` (source pin), and that function returns every directory the engine stages into
+    /// (behaviour, and `engine_bridge`'s own test that those are the engine's directories).
+    #[test]
+    fn a_release_build_sweeps_every_directory_the_engine_stages_into() {
+        let candidates = engine_bridge::finder_staging_candidates();
+        assert_eq!(candidates.len(), 2, "the preferred directory and the temp-dir fallback");
+        assert_eq!(
+            release_staging_dirs(),
+            candidates,
+            "the release list is the engine's complete list, in order"
+        );
+
+        let production = production_source();
+        let code = code_of(&production, "fn production_staging_dirs(");
+        let lines: Vec<&str> = code.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+        assert_eq!(
+            lines,
+            [
+                "fn production_staging_dirs() -> Vec<PathBuf> {",
+                "#[cfg(not(test))]",
+                "{",
+                "release_staging_dirs()",
+                "}"
+            ],
+            "the release arm is one call to release_staging_dirs and nothing else:\n{code}"
+        );
+        let release = code_of(&production, "fn release_staging_dirs(");
+        let release: Vec<&str> = release.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+        assert_eq!(
+            release,
+            [
+                "fn release_staging_dirs() -> Vec<PathBuf> {",
+                "engine_bridge::finder_staging_candidates()"
+            ],
+            "the release list is the engine's own list, not a copy of it"
+        );
+    }
+
+    /// F7 (fix round 1 of Task 10): the sign-in token, and the recovery-phrase unlock's token and key, are
+    /// `Zeroizing`, and the recovery-phrase copies are wiped before the engine start's await instead of living
+    /// to the end of the function.
+    #[test]
+    fn the_sign_in_and_recovery_copies_of_the_token_and_key_are_wiped() {
+        let production = production_source();
+        for signature in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let code = code_of(&production, signature);
+            let binding = concat!("let session_", "token");
+            assert!(
+                code.contains(&format!("{binding} = zeroize::Zeroizing::new(")),
+                "{signature}: a plain session token"
+            );
+            assert_eq!(
+                code.matches(&format!("{binding} ")).count(),
+                1,
+                "{signature} keeps a second plain copy"
+            );
+        }
+        let unlock = code_of(&production, "async fn desktop_unlock_with_recovery_phrase(");
+        assert!(
+            unlock.contains("let token = zeroize::Zeroizing::new("),
+            "the loaded token is wrapped:\n{unlock}"
+        );
+        assert!(
+            !unlock.contains("let master_key = *verified_key;"),
+            "no plain copy of the verified key:\n{unlock}"
+        );
+        let wiped = unlock.find("drop(token);").expect("the token is wiped");
+        // The one copy into the session happens in `install_recovered_session` (Task 12), which borrows the key.
+        assert!(
+            unlock.find("drop(verified_key);").expect("the key is wiped")
+                > unlock.find("install_recovered_session(").unwrap()
+        );
+        let install = code_of(&production, "fn install_recovered_session(");
+        assert!(
+            install.contains("verified_key: &[u8; 32],") && install.contains("master_key: *verified_key"),
+            "{install}"
+        );
+        let started = unlock.rfind("start_engine_if_possible(").expect("the engine start");
+        assert!(
+            wiped < started,
+            "both copies are gone before the await of the engine start:\n{unlock}"
+        );
+    }
+
+    // ---- sign-out and startup (source pins) ----
+
+    /// R10: on macOS and Linux a sign-out whose purge fails stops, instead of warning and completing. The shape,
+    /// as source pins; the behaviour is `the_sign_out_purge_*` below.
+    #[test]
+    fn a_failed_sign_out_purge_stops_the_sign_out_on_macos_and_linux() {
+        let production = production_source();
+        let purge = body_between(&production, "fn purge_local_data_for_sign_out(", "\n}\n");
+        assert_eq!(purge.matches("return Err(").count(), 1, "a failed clear stops it");
+        assert_eq!(
+            purge.matches("SIGN_OUT_PURGE_FAILED").count(),
+            3,
+            "a failed clear, a failed purge and an unopenable database all stop it"
+        );
+        assert!(
+            purge.contains("db.clear_account_data(owe_finder_removal)"),
+            "a sign-out leaves no account row and no owner"
+        );
+        assert!(!purge.contains("tracing::warn!"), "no warn-and-continue left");
+        let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        assert!(
+            crate::source_pin::squeeze(clear).contains(&crate::source_pin::squeeze(
+                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;"
+            )),
+            "sign-out returns the purge's error:\n{clear}"
+        );
+        assert!(
+            clear.contains("let owe_removal = finder_cleanup.is_err();"),
+            "a removal the reconciler could not confirm is owed before any engine starts:\n{clear}"
+        );
+    }
+
+    /// The upgrade path runs on what the Keychain gave back, before the probe can drop a revoked token and before
+    /// any engine starts, and the window shuts on the path that returns early too.
+    #[test]
+    fn the_startup_restore_adopts_unbound_local_data_before_anything_starts() {
+        let production = production_source();
+        let restore = body_between(&production, "async fn restore_stored_session(", "\n}\n");
+        let load = restore.find("load_session_from_keychain(").expect("the keychain read");
+        let adopt = restore
+            .find("adopt_unbound_local_data_at_startup(startup_adoption_candidate(&loaded).as_ref());")
+            .expect("the upgrade path runs at startup, on what was loaded");
+        assert!(load < adopt, "adoption looks at what the Keychain returned");
+        assert!(adopt < restore.find("probe_startup_session(").expect("the probe"));
+        assert!(
+            !restore.contains("start_engine_if_possible("),
+            "the engine start comes after, in the caller"
+        );
+        let inner = body_between(&production, "async fn restore_session_inner(", "\n}\n");
+        assert!(
+            inner.find("restore_stored_session(").expect("the restore")
+                < inner.find("start_engine_if_possible(").expect("the engine start")
+        );
+        assert!(
+            restore.contains("adopt_unbound_local_data_at_startup(None);"),
+            "the early return shuts the window too:\n{restore}"
+        );
+        let candidate = body_between(&production, "fn startup_adoption_candidate(", "\n}\n");
+        assert!(
+            candidate.contains("loaded.as_ref().ok()?.as_ref()?"),
+            "only a session the Keychain returned COMPLETE names a candidate:\n{candidate}"
+        );
+    }
+
+    // ---- the upgrade path, with the Keychain the tests use (an in-memory one on a Mac) ----
+
+    /// A complete session in the (test) Keychain: token, wrapped vault key and email.
+    #[cfg(target_os = "macos")]
+    fn store_complete_session(acct: &crate::account::AccountRuntime, email: &str) {
+        persist_session_to_keychain(
+            &SessionWrite::for_test(),
+            acct.id.as_str(),
+            "tok-keychain",
+            &[3u8; 32],
+            Some(email),
+        )
+        .expect("the in-memory test store takes it");
+    }
+
+    /// What the startup restore does with the Keychain, for the data in `dir`: read the session, hand the adoption
+    /// what came back, report who (if anybody) the data now belongs to.
+    #[cfg(target_os = "macos")]
+    fn startup_adoption(dir: &Path, acct: &crate::account::AccountRuntime) -> Option<Identity> {
+        let loaded = load_session_from_keychain(acct.id.as_str(), None);
+        adopt_unbound_local_data_in(dir, startup_adoption_candidate(&loaded).as_ref());
+        crate::state_db::StateDb::open(dir.join("state.db"))
+            .unwrap()
+            .owner()
+            .unwrap()
+    }
+
+    /// Lead ruling 8: an install from before the binding keeps its queue. The account whose vault key this
+    /// computer's Keychain holds is recorded as the owner at startup, and the same account's first engine start
+    /// then keeps everything.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_upgrader_keeps_the_queue_when_the_keychain_holds_the_same_accounts_vault_key() {
+        let fx = AuthorizeFixture::without_session();
+        store_complete_session(&fx.acct, "a@beebeeb.io");
+        let local = local_data_of(None);
+        assert_eq!(
+            local.data.db.owner().unwrap(),
+            None,
+            "the premise: data from before the binding has no owner"
+        );
+        assert_eq!(
+            startup_adoption(local.dir.path(), &fx.acct),
+            Some(Identity::new(None, Some("a@beebeeb.io"))),
+            "the Keychain's account owns it"
+        );
+
+        // The same person signs back in (offline: by the exact email the Keychain names).
+        let session = identity_of_session(Some("a@beebeeb.io"), None);
+        assert_eq!(bind_data_to_session(&fx.state, &local.data, &session), Ok(()));
+        assert_eq!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+            1,
+            "the queue survived the upgrade"
+        );
+        for path in &local.files {
+            assert!(path.exists(), "{} survived the upgrade", path.display());
+        }
+    }
+
+    /// The same upgrade, but another account starts: it does not inherit the queue.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_upgrade_never_hands_the_queue_to_another_account() {
+        let fx = AuthorizeFixture::without_session();
+        store_complete_session(&fx.acct, "a@beebeeb.io");
+        let local = local_data_of(None);
+        startup_adoption(local.dir.path(), &fx.acct);
+        let bob_session = Identity::new(None, Some("b@beebeeb.io"));
+        assert_eq!(bind_data_to_session(&fx.state, &local.data, &bob_session), Ok(()));
+        assert!(
+            local.data.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "another account does not inherit the queue"
+        );
+    }
+
+    // ---- the Keychain keeps an email only next to the session it names (fix round 4) ----
+
+    /// A sign-in that has no identity (its account-record fetch failed: `apply_session` stores `session_email(None)`)
+    /// stores its token and vault key with NO email. The email the Keychain kept for the account signed in before is
+    /// removed, so the stored session is unidentified and is never taken for that account.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unidentified_sign_in_removes_the_previous_accounts_email_from_the_keychain() {
+        let fx = AuthorizeFixture::without_session();
+        let id = fx.acct.id.as_str().to_string();
+        store_complete_session(&fx.acct, "a@beebeeb.io");
+        assert_eq!(
+            keychain_account_email(&id).as_deref(),
+            Some("a@beebeeb.io"),
+            "the premise: the Keychain names the account before"
+        );
+        persist_session_to_keychain(
+            &SessionWrite::for_test(),
+            &id,
+            "tok-b",
+            &[5u8; 32],
+            session_email(None).as_deref(),
+        )
+        .expect("the in-memory test store takes it");
+        assert_eq!(
+            keychain_account_email(&id),
+            None,
+            "no email is kept next to the new token and key"
+        );
+        let restored = load_session_from_keychain(&id, None)
+            .unwrap()
+            .expect("the new session is stored");
+        assert_eq!(
+            (restored.token.as_str(), restored.master_key, restored.email.clone()),
+            ("tok-b", [5u8; 32], None),
+            "restored without an identity"
+        );
+    }
+
+    /// What a relaunch then does, step by step as `restore_session_inner` runs it (the restore itself needs an
+    /// `AppHandle`): read the Keychain (no email in memory yet), offer the adoption what it read, install the session,
+    /// try to name it (the server cannot be reached), start the engine. The session is unidentified: no engine, nothing
+    /// purged, nobody adopted, no owner replaced, no Finder debt. For the previous account's data and for unowned data.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn after_an_unidentified_sign_in_a_relaunch_starts_nothing_purges_nothing_and_adopts_nothing() {
+        for (name, owner) in [
+            ("the previous account's data", Some(alice())),
+            ("data with no recorded owner", None),
+        ] {
+            let fx = AuthorizeFixture::without_session();
+            let id = fx.acct.id.as_str().to_string();
+            store_complete_session(&fx.acct, "a@beebeeb.io");
+            let local = local_data_of(owner.clone());
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-b",
+                &[5u8; 32],
+                session_email(None).as_deref(),
+            )
+            .expect("the in-memory test store takes it");
+
+            let loaded = load_session_from_keychain(&id, None);
+            adopt_unbound_local_data_in(local.dir.path(), startup_adoption_candidate(&loaded).as_ref());
+            let owner_after_adoption = local.data.db.owner().unwrap();
+            let session = loaded.unwrap().expect("the new session is stored");
+            let restored_email = session.email.clone();
+            *fx.acct.session.lock().unwrap() = Some(session);
+            establish_session_identity(
+                &fx.state,
+                &fx.acct,
+                &answering("503 Service Unavailable", "{}".to_string()),
+                None,
+            )
+            .await;
+            let mut slot = fx.acct.engine.try_lock().unwrap();
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let seen = std::cell::RefCell::new(None);
+            let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                *seen.borrow_mut() = Some((
+                    local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                    local.files.iter().filter(|path| path.exists()).count(),
+                ));
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
+            assert_eq!(
+                (owner_after_adoption, restored_email, result, seen.into_inner()),
+                (
+                    owner.clone(),
+                    None,
+                    Err(crate::account_binding::IDENTITY_UNKNOWN.to_string()),
+                    None
+                ),
+                "{name}: (owner after the adoption, restored email, engine start, what an engine was created with)"
+            );
+            assert!(slot.is_none(), "{name}: no engine in the slot");
+            assert_eq!(
+                local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                1,
+                "{name}: nothing purged"
+            );
+            for path in &local.files {
+                assert!(path.exists(), "{name}: {} is kept", path.display());
+            }
+            assert_eq!(local.data.db.owner().unwrap(), owner, "{name}: the owner is unchanged");
+            assert!(!local.data.db.finder_removal_owed().unwrap(), "{name}: no Finder debt");
+        }
+    }
+
+    /// An identified sign-in stores its OWN email in place of the previous account's: the browser sign-in (token and
+    /// key) and the password and 2FA sign-ins (token only). A token-only write without an email (no sign-in does that
+    /// today; the writer is shared) leaves none either.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_identified_sign_in_stores_its_own_email_in_place_of_the_previous_accounts() {
+        let email = session_email(Some(&profile_of("u-b", "b@beebeeb.io")));
+        for (name, token_only) in [("browser", false), ("password or 2FA", true)] {
+            let fx = AuthorizeFixture::without_session();
+            let id = fx.acct.id.as_str().to_string();
+            store_complete_session(&fx.acct, "a@beebeeb.io");
+            if token_only {
+                persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-b", email.as_deref()).unwrap();
+            } else {
+                persist_session_to_keychain(&SessionWrite::for_test(), &id, "tok-b", &[5u8; 32], email.as_deref())
+                    .unwrap();
+                let restored = load_session_from_keychain(&id, None).unwrap().expect("stored");
+                assert_eq!(
+                    restored.email.as_deref(),
+                    Some("b@beebeeb.io"),
+                    "{name}: the restore knows the session by its own email"
+                );
+            }
+            assert_eq!(keychain_account_email(&id).as_deref(), Some("b@beebeeb.io"), "{name}");
+        }
+        let fx = AuthorizeFixture::without_session();
+        let id = fx.acct.id.as_str().to_string();
+        store_complete_session(&fx.acct, "a@beebeeb.io");
+        persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-c", None).unwrap();
+        assert_eq!(
+            keychain_account_email(&id),
+            None,
+            "a token-only write without an email keeps none"
+        );
+    }
+
+    /// Every write of a session token removes the email kept for the session before it, BEFORE the token is stored
+    /// (so no failure part-way can leave the new token next to the old email), and a removal that fails stops the
+    /// write; the session's own email is written after its secrets. The vault key alone is written only by the
+    /// recovery-phrase unlock, for the token already stored, whose email was written or removed with that token.
+    #[test]
+    fn every_write_of_a_session_token_removes_the_previous_email_first() {
+        let production = production_source();
+        assert_eq!(
+            production.matches(".install_session(").count(),
+            2,
+            "the two writers of a session token"
+        );
+        for signature in [
+            "fn persist_session_to_keychain(",
+            "fn persist_session_token_to_keychain(",
+        ] {
+            let code = code_of(&production, signature);
+            let forget = code
+                .find("forget_account_email_in_keychain(account_id)?;")
+                .unwrap_or_else(|| {
+                    panic!("{signature}: removes the previous email, and a failure stops the write:\n{code}")
+                });
+            let token = code.find(".install_session(").expect("the token");
+            assert!(
+                forget < token,
+                "{signature}: the email goes before the token is stored:\n{code}"
+            );
+            let own = code
+                .find("persist_account_email_to_keychain(&vault, email)")
+                .unwrap_or_else(|| panic!("{signature}: its own email"));
+            assert!(
+                token < own,
+                "{signature}: the session's own email is written after its secrets:\n{code}"
+            );
+        }
+        let forget = code_of(&production, "fn forget_account_email_in_keychain(");
+        assert!(
+            forget.contains(".delete_account_email()") && !forget.contains("let _"),
+            "{forget}"
+        );
+        assert_eq!(
+            production.matches(".store_wrapped_master_key(").count(),
+            2,
+            "with a new token, and for the recovery phrase"
+        );
+        assert_eq!(
+            production.matches("persist_vault_key_to_keychain(").count(),
+            2,
+            "defined once, called by the recovery-phrase unlock only"
+        );
+        let recovery = code_of(&production, "async fn desktop_unlock_with_recovery_phrase(");
+        assert!(
+            recovery.contains("load_session_token_from_keychain(&account_id)?"),
+            "the key is for the token already stored"
+        );
+    }
+
+    /// F2, across restarts: unowned data from before the upgrade, and a Keychain that holds a token but no vault key.
+    /// The startup pass adopts nobody and uses up the one window; once the key is added and the session installed,
+    /// the engine starts only on a clean slate; at every later startup the Keychain is complete and adopts nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn adoption_needs_a_vault_key_and_the_window_closes_at_the_first_startup() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let fx = AuthorizeFixture::without_session();
+            let id = fx.acct.id.as_str().to_string();
+            let local = local_data_of(None); // another account's queue and files, no owner
+            // 1. A sign-in stores a token and an email, and no key yet.
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-b", Some("b@beebeeb.io")).unwrap();
+            // 2. A startup: the Keychain holds no vault key for that token, so nobody is adopted.
+            let loaded = load_session_from_keychain(&id, None);
+            assert!(loaded.is_err(), "a token without a key does not restore: {loaded:?}");
+            assert_eq!(startup_adoption_candidate(&loaded), None);
+            assert_eq!(startup_adoption(local.dir.path(), &fx.acct), None, "nobody was adopted");
+            // 3. The recovery phrase is entered: the key is stored and the session is installed.
+            persist_vault_key_to_keychain(&SessionWrite::for_test(), &id, &[3u8; 32]).unwrap();
+            *fx.acct.session.lock().unwrap() = Some(Session {
+                token: "tok-b".into(),
+                master_key: [3u8; 32],
+                email: Some("b@beebeeb.io".into()),
+            });
+            // 4. B's engine starts. When it is created the previous account's queue and files are gone. (The Mac
+            //    first waits for the previous account's Finder domain to be removed: a confirmed removal frees it.)
+            let mut slot = fx.acct.engine.lock().await;
+            let seen = std::cell::RefCell::new(None);
+            let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
+            let spawner = || {
+                |_root: PathBuf, _token: zeroize::Zeroizing<String>, _key: zeroize::Zeroizing<[u8; 32]>| {
+                    *seen.borrow_mut() = Some((
+                        local.data.db.list_due_operations(i64::MAX).unwrap().len(),
+                        local.files.iter().filter(|path| path.exists()).count(),
+                    ));
+                    crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+                }
+            };
+            let first = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, spawner());
+            assert_eq!(
+                first,
+                Ok(EngineStart::FinderRemovalOwed),
+                "the reset leaves the previous account's domain to remove first"
+            );
+            assert!(seen.borrow().is_none(), "no engine while the removal is owed");
+            clear_finder_removal_owed_in(local.dir.path());
+            let started = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, spawner());
+            assert_eq!(started, Ok(EngineStart::Started));
+            assert_eq!(
+                seen.into_inner(),
+                Some((0, 0)),
+                "the engine saw none of the previous account's data"
+            );
+            drop(slot);
+            // 5. A later startup: the Keychain is complete and names the signed-in account. The window is shut, so
+            //    nothing is adopted, and nothing of the previous account is back.
+            let loaded = load_session_from_keychain(&id, None);
+            assert_eq!(
+                startup_adoption_candidate(&loaded),
+                Some(Identity::new(None, Some("b@beebeeb.io")))
+            );
+            assert_eq!(
+                startup_adoption(local.dir.path(), &fx.acct),
+                Some(Identity::new(None, Some("b@beebeeb.io")))
+            );
+            assert!(local.data.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        });
+    }
+
+    /// And the window really is shut: with a complete Keychain at a LATER startup, unowned data is not adopted.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_later_startup_never_adopts_even_with_a_complete_keychain() {
+        let fx = AuthorizeFixture::without_session();
+        let id = fx.acct.id.as_str().to_string();
+        let local = local_data_of(None);
+        persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-b", Some("b@beebeeb.io")).unwrap();
+        assert_eq!(
+            startup_adoption(local.dir.path(), &fx.acct),
+            None,
+            "the first startup: no vault key"
+        );
+        persist_vault_key_to_keychain(&SessionWrite::for_test(), &id, &[3u8; 32]).unwrap();
+        assert_eq!(
+            startup_adoption(local.dir.path(), &fx.acct),
+            None,
+            "a later startup with a complete Keychain: too late"
+        );
+        assert_eq!(local.data.db.owner().unwrap(), None);
+    }
+}
+
+/// Ruling R8 (spec 2026-10-06 §3): signing in again as the account that is already on this Mac
+/// replaces only the session token; another account is an account switch, and nothing local changes until the person
+/// confirms it; Windows is unchanged. Behaviour is tested against the in-memory test Keychain and throwaway state
+/// directories (macOS), the wiring as source pins (`run()` needs a real window system).
+#[cfg(test)]
+mod reauth_tests {
+    use super::finder_setup_command_tests::{body_between, production_source};
+    use super::*;
+
+    /// The code of a function without its comment lines.
+    fn code_of(production: &str, signature: &str) -> String {
+        body_between(production, signature, "\n}\n")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The arm of `text` that contains `needle`, up to the closing brace at the arm's own indentation.
+    fn arm<'a>(text: &'a str, needle: &str) -> &'a str {
+        let at = text.find(needle).unwrap_or_else(|| panic!("{needle} exists"));
+        let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let line = &text[line_start..];
+        let indent = " ".repeat(line.len() - line.trim_start().len());
+        let rest = &text[at..];
+        &rest[..rest
+            .find(&format!("\n{indent}}}"))
+            .unwrap_or_else(|| panic!("the end of the arm {needle}"))]
+    }
+
+    fn browser_source() -> String {
+        include_str!("browser_login.rs").replace("\r\n", "\n")
+    }
+
+    // ---- the wire contract with the frontend (lead ruling 4) ----
+
+    /// `settledFrom` (the frontend's strict parser, `onboardingSignIn.ts`) reads `requires_2fa`, `reauthenticated`,
+    /// `vault_unlocked`, `key_replaced` and `account_mismatch.pending_changes`. Every shape the commands can return always
+    /// carries all five fields, never fewer. `key_replaced` is true only for a re-sign-in whose kept key the server no
+    /// longer accepted (spec §5.6).
+    #[test]
+    fn login_outcome_json_is_the_frontends_contract() {
+        let json = |outcome: LoginOutcome| serde_json::to_value(&outcome).unwrap();
+        let cases = [
+            (
+                "a plain sign-in",
+                LoginOutcome::signed_in(),
+                r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":null}"#,
+            ),
+            (
+                "a second factor is needed",
+                LoginOutcome::needs_2fa(),
+                r#"{"requires_2fa":true,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":null}"#,
+            ),
+            (
+                "the same account, keys here",
+                LoginOutcome::reauthenticated(true, false),
+                r#"{"requires_2fa":false,"reauthenticated":true,"vault_unlocked":true,"key_replaced":false,"account_mismatch":null}"#,
+            ),
+            (
+                "the same account, no keys here",
+                LoginOutcome::reauthenticated(false, false),
+                r#"{"requires_2fa":false,"reauthenticated":true,"vault_unlocked":false,"key_replaced":false,"account_mismatch":null}"#,
+            ),
+            (
+                "the same account, the kept key was no longer the account's",
+                LoginOutcome::reauthenticated(false, true),
+                r#"{"requires_2fa":false,"reauthenticated":true,"vault_unlocked":false,"key_replaced":true,"account_mismatch":null}"#,
+            ),
+            (
+                "another account",
+                LoginOutcome::account_mismatch(3),
+                r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":{"pending_changes":3}}"#,
+            ),
+            (
+                "another account, nothing waiting",
+                LoginOutcome::account_mismatch(0),
+                r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":{"pending_changes":0}}"#,
+            ),
+        ];
+        for (name, outcome, expected) in cases {
+            let value = json(outcome);
+            assert_eq!(
+                value,
+                serde_json::from_str::<serde_json::Value>(expected).unwrap(),
+                "{name}"
+            );
+            let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+            assert_eq!(keys.len(), 5, "{name}: all five fields are always sent: {keys:?}");
+            // The types the parser insists on: four flags that are booleans, a null or an object with a whole count.
+            assert!(
+                value["requires_2fa"].is_boolean()
+                    && value["reauthenticated"].is_boolean()
+                    && value["vault_unlocked"].is_boolean()
+                    && value["key_replaced"].is_boolean(),
+                "{name}"
+            );
+            assert!(
+                value["account_mismatch"].is_null() || value["account_mismatch"]["pending_changes"].is_u64(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Both password steps return the outcome (the second one returned nothing before R8), `LoginOutcome` never skips
+    /// a field, and the window command the frontend opens exists and starts sign-in in place.
+    #[test]
+    fn the_commands_and_the_window_the_frontend_calls_exist() {
+        let production = production_source();
+        for signature in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let head = body_between(&production, signature, "{\n");
+            assert!(head.contains("-> Result<LoginOutcome, String>"), "{signature}:\n{head}");
+        }
+        let outcome = body_between(&production, "struct LoginOutcome {", "\n}\n");
+        assert!(
+            !outcome.contains("skip_serializing_if") && !outcome.contains("skip_serializing"),
+            "{outcome}"
+        );
+        let handler = body_between(&production, "tauri::generate_handler![", "])");
+        assert!(
+            handler.contains("open_reauth_window,") && handler.contains("open_onboarding_window,"),
+            "registered next to the other window command"
+        );
+        let window = body_between(&production, "async fn open_reauth_window(", "\n}\n");
+        assert!(
+            window.contains(r#"const URL: &str = "index.html?window=onboarding&mode=reauth";"#),
+            "{window}"
+        );
+        assert!(
+            window.contains("window.location.search = '?window=onboarding&mode=reauth'"),
+            "an open window is reloaded into the same mode:\n{window}"
+        );
+        let windows_arm = arm(window, "#[cfg(target_os = \"windows\")]\n    {");
+        assert!(
+            windows_arm.contains("Err(") && !windows_arm.contains("WebviewWindowBuilder"),
+            "Windows keeps its own flow:\n{windows_arm}"
+        );
+        // Nothing is cleared first: the window command touches no session state.
+        for forbidden in ["clear_", "session", "keychain", "purge"] {
+            assert!(
+                !window.contains(forbidden),
+                "open_reauth_window must not touch {forbidden}:\n{window}"
+            );
+        }
+    }
+
+    // ---- wiring: every sign-in method asks, before anything is stored; Windows keeps its refusal (lead ruling 10) ----
+
+    #[test]
+    fn every_sign_in_method_is_checked_before_it_stores_anything_and_windows_never_reaches_the_check() {
+        let production = production_source();
+        for signature in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let body = body_between(&production, signature, "\n}\n");
+            let check = body
+                .find("settle_sign_in(")
+                .unwrap_or_else(|| panic!("{signature} checks the account"));
+            let store = body.find("store_first_sign_in(").expect("then stores the token");
+            assert!(check < store, "{signature}: the check comes before anything is stored");
+            let cfg_at = body[..check]
+                .rfind("#[cfg(not(target_os = \"windows\"))]")
+                .expect("a not-Windows cfg above the check");
+            assert!(
+                check - cfg_at < 120,
+                "{signature}: the check sits directly under a not-Windows cfg"
+            );
+            assert!(
+                body.contains("Sign out of the current account before signing in again."),
+                "{signature}: Windows keeps its refusal"
+            );
+        }
+        let browser = browser_source();
+        let check = browser
+            .find("crate::settle_sign_in(")
+            .expect("the browser handoff checks the account");
+        assert!(check < browser.find("crate::apply_session(").expect("then applies the session"));
+        assert!(
+            browser[..check]
+                .rfind("#[cfg(not(target_os = \"windows\"))]")
+                .is_some_and(|cfg_at| check - cfg_at < 1200),
+            "the browser handoff's check is compiled out on Windows"
+        );
+        assert_eq!(
+            production
+                .matches("Sign out of the current account before signing in again.")
+                .count(),
+            4,
+            "Windows keeps all four refusals"
+        );
+        for signature in [
+            "async fn settle_sign_in(",
+            "async fn reauth_in_place(",
+            "fn reauth_swap_token(",
+            "fn classify_sign_in(",
+            "async fn decide_sign_in(",
+            "async fn prove_stored_key(",
+            "fn load_stored_vault_key(",
+            "fn gather_local_facts(",
+            "fn note_engine_start_failure(",
+            "fn keychain_session_trace(",
+            "fn keychain_email_trace(",
+            "fn unowned_local_data(",
+            "fn credentials_identity(",
+        ] {
+            let at = production.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            let above = production[..at].lines().rev().take(8).collect::<Vec<_>>().join("\n");
+            assert!(
+                above.contains("#[cfg(not(target_os = \"windows\"))]"),
+                "{signature} does not exist on Windows:\n{above}"
+            );
+        }
+    }
+
+    /// A mismatch, an unconfirmed account and a failed re-sign-in change nothing local: each arm only revokes the
+    /// session just minted (a failed one only before its Keychain write succeeded: after it, that token is the live
+    /// one) and tells the frontend. In all three sign-in methods. (The behaviour is `a_mismatch_changes_nothing…`.)
+    #[test]
+    fn every_arm_that_does_not_sign_in_revokes_the_new_session_and_changes_nothing() {
+        let production = production_source();
+        let settle = code_of(&production, "async fn settle_sign_in(");
+        assert!(
+            settle.contains(
+                "reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),"
+            ),
+            "{settle}"
+        );
+        assert!(settle.contains("reauth::SignInKind::NeedsKeyProof | reauth::SignInKind::Unconfirmed => Ok(SignInSettlement::Unconfirmed),"), "{settle}");
+        let texts = [
+            ("desktop_login", code_of(&production, "async fn desktop_login(")),
+            ("desktop_login_2fa", code_of(&production, "async fn desktop_login_2fa(")),
+            ("the browser handoff", browser_source()),
+        ];
+        for (name, text) in &texts {
+            for needle in [
+                "SignInSettlement::AccountMismatch { pending_changes }",
+                "SignInSettlement::Unconfirmed",
+            ] {
+                let arm = arm(text, needle);
+                for forbidden in [
+                    "persist_",
+                    "record_local_data_owner",
+                    "set_auth_",
+                    "clear_",
+                    "acct.session",
+                    "cached_profile",
+                    "apply_session",
+                    "keychain",
+                ] {
+                    assert!(
+                        !arm.contains(forbidden),
+                        "{name}: the {needle} arm must not touch {forbidden}:\n{arm}"
+                    );
+                }
+                assert!(
+                    arm.contains("revoke_desktop_session("),
+                    "{name}: the {needle} arm revokes the session just minted:\n{arm}"
+                );
+            }
+            let unconfirmed = arm(text, "SignInSettlement::Unconfirmed");
+            assert!(
+                unconfirmed.contains("SIGN_IN_ACCOUNT_UNKNOWN"),
+                "{name}: the retryable sentence:\n{unconfirmed}"
+            );
+            let failure = arm(text, "Err(failure) =>");
+            let revoke = failure
+                .find("revoke_desktop_session(")
+                .unwrap_or_else(|| panic!("{name}: a failure before the Keychain write revokes:\n{failure}"));
+            assert!(
+                failure[..revoke].contains("if !failure.token_stored"),
+                "{name}: only while its token is not stored:\n{failure}"
+            );
+            assert!(failure.contains("return Err(failure.message)"), "{name}:\n{failure}");
+        }
+        // The browser handoff also refuses a sign-in it could not identify on a Mac that holds an account: it revokes the
+        // session and says so, and (like every arm above) changes nothing.
+        let unidentified = arm(&texts[2].1, "None if crate::sign_in_leaves_account_traces(state) =>");
+        assert!(
+            unidentified.contains("revoke_desktop_session(") && unidentified.contains("SIGN_IN_ACCOUNT_UNKNOWN"),
+            "{unidentified}"
+        );
+        for forbidden in [
+            "persist_",
+            "record_local_data_owner",
+            "set_auth_",
+            "clear_",
+            "apply_session",
+            "keychain",
+        ] {
+            assert!(
+                !unidentified.contains(forbidden),
+                "the unidentified arm must not touch {forbidden}:\n{unidentified}"
+            );
+        }
+        // The two password methods return what the re-sign-in became, `key_replaced` included (spec §5.6), and the
+        // second one drops the held second-factor challenge on every way out that spends it.
+        for (name, text) in &texts[..2] {
+            let at = text
+                .find("SignInSettlement::Reauthenticated {")
+                .unwrap_or_else(|| panic!("{name}: the re-sign-in arm"));
+            let end = at
+                + text[at..]
+                    .find("SignInSettlement::AccountMismatch")
+                    .expect("the next arm");
+            let reauthenticated = &text[at..end];
+            assert!(
+                crate::source_pin::squeeze(reauthenticated).contains(&crate::source_pin::squeeze(
+                    "return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));"
+                )),
+                "{name}:\n{reauthenticated}"
+            );
+            if *name == "desktop_login_2fa" {
+                assert!(
+                    reauthenticated.contains("state.pending_2fa.lock()"),
+                    "the spent challenge is dropped on a re-sign-in:\n{reauthenticated}"
+                );
+            }
+        }
+        let second_factor = &texts[1].1;
+        for needle in [
+            "SignInSettlement::AccountMismatch { pending_changes }",
+            "SignInSettlement::Unconfirmed",
+            "Err(failure) =>",
+        ] {
+            assert!(
+                arm(second_factor, needle).contains("state.pending_2fa.lock()"),
+                "the spent challenge is dropped on {needle}"
+            );
+        }
+    }
+
+    /// R8: "Finder, keys, cache and pending edits all stay". The re-sign-in path never purges, never removes the
+    /// domain, never writes or clears keys, never signs out, and never creates an engine itself.
+    #[test]
+    fn a_re_sign_in_never_purges_removes_or_touches_keys() {
+        let production = production_source();
+        for signature in [
+            "async fn settle_sign_in(",
+            "async fn reauth_in_place(",
+            "fn reauth_swap_token(",
+            "fn replace_session_token_in_memory(",
+            "fn name_session_in_memory(",
+            "fn reauth_settle_flags(",
+            "fn classify_sign_in(",
+            "async fn decide_sign_in(",
+            "fn gather_local_facts(",
+            "fn unowned_local_data(",
+            "fn credentials_identity(",
+            "fn note_engine_start_failure(",
+        ] {
+            let body = code_of(&production, signature);
+            for forbidden in [
+                "purge_local_state_files",
+                "purge_all_local_state",
+                "purge_local_data_for_sign_out",
+                "clear_account_data",
+                "clear_keychain_session",
+                "clear_session_impl",
+                "remove_file_provider_domain",
+                "finder_remove_for",
+                "Trigger::SignOut",
+                "Trigger::Repair",
+                "persist_vault_key_to_keychain",
+                "persist_session_to_keychain",
+                "store_wrapped_master_key",
+                "store_recovered_vault_key",
+                "master_key =",
+                "EngineRunner::",
+                "spawn_bound_engine",
+            ] {
+                assert!(!body.contains(forbidden), "{signature} must not use {forbidden}");
+            }
+        }
+        // The token a re-sign-in replaces is wiped, not only dropped.
+        assert!(
+            code_of(&production, "fn replace_session_token_in_memory(")
+                .contains("zeroize::Zeroize::zeroize(&mut replaced);"),
+            "the replaced token is wiped"
+        );
+        // The decision reads no key material: it only asks whether a vault key exists (the one server proof reads the
+        // key inside `prove_stored_key`, which is pinned below).
+        for signature in [
+            "async fn settle_sign_in(",
+            "fn classify_sign_in(",
+            "async fn decide_sign_in(",
+            "fn gather_local_facts(",
+            "fn unowned_local_data(",
+            "fn credentials_identity(",
+        ] {
+            let body = code_of(&production, signature);
+            for forbidden in [
+                "master_key",
+                "load_session_from_keychain",
+                ".unlock(",
+                "AuthVault",
+                "load_session_token_from_keychain",
+                "load_stored_vault_key",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{signature} reads key material ({forbidden})"
+                );
+            }
+        }
+        // A re-sign-in starts an engine only through the one start function, which only ever reaches the gate.
+        let in_place = code_of(&production, "async fn reauth_in_place(");
+        assert_eq!(in_place.matches("start_engine_if_possible(").count(), 1);
+        // An engine that does not start does not fail the sign-in (nothing in this function returns its error), so a
+        // retry never mints a second server session for an account that is already signed in.
+        assert!(
+            !in_place.contains("started?") && !in_place.contains("return Err("),
+            "the engine's error is not the sign-in's:\n{in_place}"
+        );
+        assert!(
+            in_place.contains("note_engine_start_failure(acct, &error)"),
+            "{in_place}"
+        );
+        assert!(in_place.contains("-> Result<bool, ReauthError>"), "{in_place}");
+    }
+
+    /// Spec §5.6: a re-sign-in whose kept key the server no longer accepts removes only that key. It never purges,
+    /// never removes the domain, never signs out, never writes a key and never starts an engine; the session in memory
+    /// ends the Lock way (the turn first, then the reconciler's hold, then the engine stop, all before the writes, which
+    /// run under the slot); and memory is cleared before the key is removed from both layouts and the token stored.
+    /// Compared with `squeeze`, so the pins do not depend on rustfmt's layout.
+    #[test]
+    fn a_kept_key_the_server_rejects_is_removed_the_lock_way_and_nothing_else_changes() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let settle = squeeze(&code_of(&production, "async fn settle_sign_in("));
+        let arm = settle
+            .find(&squeeze("reauth::SignInKind::KeyOutdated =>"))
+            .expect("the KeyOutdated arm");
+        assert!(
+            settle[arm..].starts_with(&squeeze(
+                "reauth::SignInKind::KeyOutdated => { reauth_without_the_kept_key(state, &acct, &sources, token, profile, turn).await"
+            )) || settle[arm..].starts_with(&squeeze(
+                "reauth::SignInKind::KeyOutdated => reauth_without_the_kept_key(state, &acct, &sources, token, profile, turn).await"
+            )),
+            "{settle}"
+        );
+        let outer = squeeze(&code_of(&production, "async fn reauth_without_the_kept_key("));
+        let inner = squeeze(&code_of(&production, "fn reauth_swap_token_without_key("));
+        for (name, body) in [
+            ("reauth_without_the_kept_key", &outer),
+            ("reauth_swap_token_without_key", &inner),
+        ] {
+            for forbidden in [
+                "purge_local_state_files",
+                "purge_all_local_state",
+                "purge_local_data_for_sign_out",
+                "clear_account_data",
+                "clear_keychain_session",
+                "clear_session_impl",
+                "remove_file_provider_domain",
+                "finder_remove_for",
+                "Trigger::SignOut",
+                "Trigger::Repair",
+                "persist_vault_key_to_keychain",
+                "persist_session_to_keychain",
+                "store_wrapped_master_key",
+                "install_unlocked_session",
+                "EngineRunner::",
+                "spawn_bound_engine",
+                "start_engine_if_possible",
+                "keys_arrived",
+            ] {
+                assert!(!body.contains(forbidden), "{name} must not use {forbidden}:\n{body}");
+            }
+        }
+        let order = |body: &str, steps: &[&str]| {
+            let at: Vec<usize> = steps
+                .iter()
+                .map(|step| body.find(&squeeze(step)).unwrap_or_else(|| panic!("{step}:\n{body}")))
+                .collect();
+            assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{steps:?}:\n{body}");
+        };
+        order(
+            &outer,
+            &[
+                "drop(claim_session_write(acct, turn)",
+                "finder_lock_for(state)",
+                "acct.engine.lock().await",
+                "stop_engine_in_slot(acct, engine)",
+                "reauth_swap_token_without_key(state, acct, sources, token, profile, turn, &engine_slot)",
+                "drop(engine_slot);",
+            ],
+        );
+        order(
+            &inner,
+            &[
+                "claim_session_write(acct, turn)",
+                "acct.session.lock()",
+                "record_local_data_owner(",
+                "delete_vault_key_from_keychain(&write, acct.id.as_str())",
+                "persist_session_token_to_keychain(&write, acct.id.as_str(), token, email.as_deref())",
+                "drop(write);",
+            ],
+        );
+        assert!(
+            inner.contains(&squeeze(
+                "_engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>"
+            )),
+            "the writes run while the caller holds the engine slot:\n{inner}"
+        );
+        let delete = squeeze(&code_of(&production, "fn delete_vault_key_from_keychain("));
+        for needle in [
+            "platform_keychain_store_for(account_id).delete_wrapped_master_key()",
+            "keychain::legacy_platform_keychain_store().delete_wrapped_master_key()",
+            "if keychain_vault_key_present(account_id) {",
+        ] {
+            assert!(
+                delete.contains(&squeeze(needle)),
+                "both layouts, then checked gone ({needle}):\n{delete}"
+            );
+        }
+        for forbidden in ["delete_session_token", "delete_account_email", "clear_session"] {
+            assert!(
+                !delete.contains(forbidden),
+                "only the key is removed ({forbidden}):\n{delete}"
+            );
+        }
+    }
+
+    /// Spec §5.6: the browser handoff carries the account's current key. `reauth_in_place` returns before it starts an
+    /// engine when the kept key differs from it (so the handoff's own `apply_session` installs it), and the handoff
+    /// returns early only when the vault is unlocked with the kept key. The comparison reads every byte.
+    #[test]
+    fn a_handed_over_key_that_differs_is_installed_and_the_comparison_reads_every_byte() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let in_place = squeeze(&code_of(&production, "async fn reauth_in_place("));
+        let check = in_place
+            .find(&squeeze(
+                "if vault_unlocked && handoff_replaces_kept_key(acct, handoff_key) {",
+            ))
+            .expect("the handoff key is compared");
+        let start = in_place.find("start_engine_if_possible(").expect("the engine start");
+        assert!(check < start, "compared before any engine starts:\n{in_place}");
+        assert!(in_place[check..start].contains("returnOk(false);"), "{in_place}");
+        let browser = squeeze(&browser_source());
+        assert!(
+            browser.contains(&squeeze("Some(&*master_key),")),
+            "the handoff passes its key to the check"
+        );
+        assert!(
+            browser.contains(&squeeze(
+                "Some(crate::SignInSettlement::Reauthenticated { vault_unlocked: true, .. }) => {"
+            )),
+            "only an unlocked vault returns early"
+        );
+        let equal = squeeze(&code_of(&production, "fn vault_keys_equal("));
+        assert!(
+            equal.contains(&squeeze(".fold(0u8, |acc, (x, y)| acc | (x ^ y))"))
+                && equal.contains(&squeeze("std::hint::black_box(difference) == 0")),
+            "{equal}"
+        );
+        let compares = equal.replace(&squeeze("std::hint::black_box(difference) == 0"), "");
+        for early in ["return", "==", "!=", "any(", "all(", "position("] {
+            assert!(!compares.contains(early), "no early exit ({early}):\n{equal}");
+        }
+        assert!(
+            squeeze(&code_of(&production, "fn session_holds_vault_key("))
+                .contains(&squeeze("vault_keys_equal(&session.master_key, key)")),
+            "the one comparison"
+        );
+    }
+
+    /// The server proof is the one place R8 reads a vault key: into a wiped buffer that lives inside one function, from
+    /// which a `MasterKey` (wiped on drop, not `Clone`) is built at once. Nothing else holds a plain copy: the proof
+    /// receives the `MasterKey` and sends only its check. (The core takes the 32 bytes by value and has no
+    /// reference-taking constructor; it wipes the argument it is given, and the buffer here is a `Zeroizing`.)
+    #[test]
+    fn the_server_proof_reads_the_key_only_to_send_its_check() {
+        let production = production_source();
+        assert_eq!(
+            production.matches("load_stored_vault_key(").count(),
+            2,
+            "defined once, called by the proof only"
+        );
+        assert_eq!(production.matches("fn read_vault_key<").count(), 1);
+        assert_eq!(
+            production.matches("read_vault_key(").count(),
+            2,
+            "called for the two Keychain layouts, and only there"
+        );
+        let proof = code_of(&production, "async fn prove_stored_key(");
+        let load = proof.find("load_stored_vault_key(").expect("the proof reads the key");
+        let sent = proof.find("recovery_check_answer(").expect("then asks the server");
+        assert!(load < sent, "read, then ask:\n{proof}");
+        for plain_copy in ["from_bytes", "[u8; 32]", "drop(", "*key"] {
+            assert!(
+                !proof.contains(plain_copy),
+                "the proof makes no plain copy of the key ({plain_copy}):\n{proof}"
+            );
+        }
+        assert!(
+            proof.contains("Err(_) => reauth::KeyProof::Unavailable"),
+            "an error from the server settles nothing:\n{proof}"
+        );
+        let read = code_of(&production, "fn read_vault_key<");
+        assert!(
+            read.contains("-> Result<Option<beebeeb_core::kdf::MasterKey>, String>"),
+            "the key leaves as a MasterKey:\n{read}"
+        );
+        assert!(
+            read.contains("let mut raw = zeroize::Zeroizing::new([0u8; 32]);"),
+            "the only plain buffer is a wiped one:\n{read}"
+        );
+        assert!(
+            read.contains("beebeeb_core::kdf::MasterKey::from_bytes(*raw)"),
+            "{read}"
+        );
+        assert!(
+            code_of(&production, "fn load_stored_vault_key(")
+                .contains("-> Result<Option<beebeeb_core::kdf::MasterKey>, String>")
+        );
+    }
+
+    /// R10: a same-account re-sign-in records the owner before anything else changes.
+    #[test]
+    fn a_same_account_re_sign_in_records_the_owner_first() {
+        let production = production_source();
+        let body = code_of(&production, "fn reauth_swap_token(");
+        let record = body.find("record_local_data_owner(").expect("the owner is recorded");
+        assert!(record < body.find("persist_session_token_to_keychain(").expect("then the token"));
+        assert!(record < body.find("replace_session_token_in_memory(").expect("then memory"));
+    }
+
+    /// A failure counts as "the token is not stored" up to and including the Keychain write, and as "stored" after it:
+    /// the owner record and the Keychain write say `before_store`, every later step says `after_store`. (The Keychain
+    /// write itself cannot be made to fail in a test, so this is pinned as source; the two ends are behaviour in
+    /// `a_re_sign_in_that_fails_says_whether_its_token_was_stored`.)
+    #[test]
+    fn the_swap_calls_its_token_stored_exactly_when_the_keychain_write_has_succeeded() {
+        let production = production_source();
+        let swap = code_of(&production, "fn reauth_swap_token(");
+        let keychain = swap
+            .find("persist_session_token_to_keychain(")
+            .expect("the Keychain write");
+        let (before, after) = swap.split_at(keychain);
+        let line_end = after
+            .find(".map_err(ReauthError::before_store)?;")
+            .expect("the write's failure is before_store");
+        assert!(
+            !after[..line_end].contains("after_store"),
+            "the Keychain write's own failure is not 'stored':\n{after}"
+        );
+        assert!(
+            before.contains("record_local_data_owner(") && before.contains(".map_err(ReauthError::before_store)?;"),
+            "{before}"
+        );
+        assert!(
+            !before.contains("after_store"),
+            "nothing before the Keychain write is 'stored':\n{before}"
+        );
+        let later = &after[line_end + ".map_err(ReauthError::before_store)?;".len()..];
+        assert!(
+            !later.contains("before_store"),
+            "nothing after the Keychain write is 'not stored':\n{later}"
+        );
+        assert!(
+            later.matches("ReauthError::after_store").count() >= 3,
+            "every later failure is 'stored':\n{later}"
+        );
+    }
+
+    /// The account check looks at every retained trace, not only the token.
+    #[test]
+    fn the_account_check_counts_every_retained_trace() {
+        let production = production_source();
+        let facts = code_of(&production, "fn gather_local_facts(");
+        for probe in [
+            "acct.session.lock()",
+            "state.auth_present.lock()",
+            "keychain_session_trace(",
+            "keychain_email_trace(",
+            "keychain_vault_key_present(",
+            "local_data_owner(",
+            "acct.cached_profile.lock()",
+            "queued_or_staged_present(",
+        ] {
+            assert!(facts.contains(probe), "gather_local_facts must use {probe}");
+        }
+        assert!(code_of(&production, "fn classify_sign_in_after(").contains("traces: facts.traces.any()"));
+        assert!(
+            code_of(&production, "fn classify_sign_in(")
+                .contains("classify_sign_in_after(state, acct, sources, profile, None)"),
+            "one place gathers the facts"
+        );
+        // An unreadable source is a trace, never an absence: each of the three locks, on its own line, so flipping any
+        // ONE of them fails this pin (`a_poisoned_lock_counts_as_a_trace_in_each_of_its_three_places` is the behaviour).
+        for lock in [
+            "session_in_memory: acct.session.lock().map(|guard| guard.is_some()).unwrap_or(true),",
+            "auth_present: state.auth_present.lock().map(|guard| *guard).unwrap_or(true),",
+            "cached_profile: acct.cached_profile.lock().map(|guard| guard.is_some()).unwrap_or(true),",
+        ] {
+            assert!(facts.contains(lock), "a poisoned lock counts as a trace: {lock}");
+        }
+        assert!(
+            !facts.contains("keychain_session_present(") && !facts.contains("keychain_account_email("),
+            "the fail-open readers are not the probes"
+        );
+        let queued = code_of(&production, "fn queued_or_staged_present(");
+        assert!(
+            queued.contains("Err(_) => true"),
+            "an unreadable state.db counts as present:\n{queued}"
+        );
+    }
+
+    /// Item 3 is about unowned local DATA only: rows of `state.db`, read through `has_account_data`, in a database whose
+    /// owner is not recorded. Credentials (the token, the Keychain email, the vault key, the cached profile) are not
+    /// data: they name an account for the identity order. A source that cannot be read is neither data nor an absence:
+    /// it is `unreadable`, and settles nothing.
+    #[test]
+    fn unowned_data_is_local_data_only_and_an_unreadable_source_settles_nothing() {
+        let production = production_source();
+        let data = code_of(&production, "fn unowned_local_data(");
+        assert!(data.contains("-> Result<bool, String>"), "{data}");
+        assert!(
+            data.contains("match sources.state_db()? {"),
+            "an unreadable database is an error, not an answer:\n{data}"
+        );
+        // Read through `squeeze`: rustfmt wraps this chain over lines.
+        let squeezed_data = crate::source_pin::squeeze(&data);
+        assert!(
+            squeezed_data.contains(&crate::source_pin::squeeze(
+                "Some(db) => db.has_account_data().map_err("
+            )),
+            "{data}"
+        );
+        assert!(
+            data.contains("None => Ok(false),"),
+            "no database yet is no data:\n{data}"
+        );
+        for credential in ["keychain", "session", "cached_profile", "auth_present", "AuthVault"] {
+            assert!(
+                !data.contains(credential),
+                "unowned data does not look at credentials ({credential}):\n{data}"
+            );
+        }
+        let facts = code_of(&production, "fn gather_local_facts(");
+        assert!(
+            facts.contains("let owner_unreadable = owner.is_err();"),
+            "an owner record that cannot be read:\n{facts}"
+        );
+        assert!(
+            crate::source_pin::squeeze(&facts).contains(&crate::source_pin::squeeze(
+                "let data = if owner.is_some() { Ok(false) } else { unowned_local_data(sources) };"
+            )),
+            "{facts}"
+        );
+        assert!(facts.contains("unowned_data: matches!(data, Ok(true)),"), "{facts}");
+        assert!(
+            facts.contains("unreadable: owner_unreadable || data.is_err() || pending_changes.is_err(),"),
+            "{facts}"
+        );
+        // Triage 25: the switch warning's count fails closed, never to 0.
+        let count = code_of(&production, "fn pending_changes_count(");
+        assert!(count.contains("-> Result<u64, String>"), "{count}");
+        assert!(!count.contains("unwrap_or("), "an error is never a count:\n{count}");
+        assert!(facts.contains("credentials: credentials_identity(acct)"), "{facts}");
+        let classify = code_of(&production, "fn classify_sign_in_after(");
+        assert!(
+            classify.contains("unowned_data: facts.unowned_data,")
+                && classify.contains("unreadable: facts.unreadable,"),
+            "{classify}"
+        );
+        assert!(
+            classify.contains("facts.owner.as_ref().unwrap_or(&facts.credentials)"),
+            "an owner record wins; else the credentials name the account:\n{classify}"
+        );
+        let credentials = code_of(&production, "fn credentials_identity(");
+        assert!(
+            credentials.contains("acct.cached_profile.lock()") && credentials.contains("keychain_account_email("),
+            "{credentials}"
+        );
+        assert!(
+            !credentials.contains("master_key") && !credentials.contains("token"),
+            "an identity is not a secret:\n{credentials}"
+        );
+    }
+
+    /// The vault-key probe asks both Keychain layouts and never unlocks.
+    #[test]
+    fn the_vault_key_probe_asks_both_layouts_and_never_unlocks() {
+        let production = production_source();
+        let probe = code_of(&production, "fn keychain_vault_key_present(");
+        assert!(
+            probe.contains("platform_keychain_store_for(account_id)")
+                && probe.contains("legacy_platform_keychain_store()"),
+            "{probe}"
+        );
+        assert!(!probe.contains("unlock") && !probe.contains("AuthVault"), "{probe}");
+        // The token and email probes: both layouts, through the fail-closed presence functions, never a read of the item.
+        for (name, holds) in [
+            ("fn keychain_session_trace(", "holds_session_token("),
+            ("fn keychain_email_trace(", "holds_account_email("),
+        ] {
+            let body = code_of(&production, name);
+            assert_eq!(
+                body.matches(holds).count(),
+                2,
+                "{name} asks both layouts with {holds}:\n{body}"
+            );
+            assert!(
+                body.contains("platform_keychain_store_for(account_id)")
+                    && body.contains("legacy_platform_keychain_store()"),
+                "{body}"
+            );
+            assert!(
+                !body.contains("load_")
+                    && !body.contains("AuthVault")
+                    && !body.contains(".ok()")
+                    && !body.contains("unwrap_or(false)"),
+                "{name} must not fail open:\n{body}"
+            );
+        }
+    }
+
+    /// Every test that runs the real sign-out shares one scratch state directory, so the purge takes turns in test
+    /// builds (a gate inside `clear_session_impl`, before the purge), and no test retries around a busy database. A test
+    /// that works in that directory itself (the one that seeds it before it signs out) holds the same gate for its whole
+    /// body through `with_the_shared_state_dir`, and its own sign-out knows it does (a task-local marker), so it does not
+    /// wait for what it holds.
+    #[test]
+    fn the_sign_out_purge_takes_turns_in_tests_and_nothing_retries_around_it() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let clear = &source[source.find("async fn clear_session_impl(").unwrap()..];
+        let clear = &clear[..clear.find("\n}\n").unwrap()];
+        let held = "let _one_purge_at_a_time = if PURGE_GATE_HELD.try_with(|_| ()).is_ok() {\n            None\n        } else {\n            Some(SIGN_OUT_TEST_PURGE_GATE.lock().await)\n        };";
+        let gate = clear
+            .find(held)
+            .expect("the purge takes turns, unless this test already holds the gate");
+        assert!(
+            clear[..gate].trim_end().ends_with("#[cfg(test)]"),
+            "the gate is compiled into test builds only"
+        );
+        assert!(
+            gate < clear
+                .find("purge_local_data_for_sign_out(state_paths::")
+                .expect("the purge"),
+            "the gate is taken before the purge"
+        );
+        // The one test that seeds the shared database itself works under the gate, from its first write to its last check.
+        let seeding = &source[source
+            .find(concat!("fn a_sign_out_leaves_no_account_row_", "and_no_owner() {"))
+            .expect("the seeding test")..];
+        let seeding = &seeding[..seeding.find("\n    }\n").unwrap()];
+        let under_the_gate = seeding
+            .find("with_the_shared_state_dir(")
+            .expect("the seeding test holds the gate");
+        assert!(
+            under_the_gate < seeding.find("StateDb::open(").expect("it opens the shared database"),
+            "the gate comes before its first write:\n{seeding}"
+        );
+        assert!(
+            under_the_gate < seeding.find("has_account_data()").unwrap(),
+            "{seeding}"
+        );
+        assert!(
+            source.contains("static SIGN_OUT_TEST_PURGE_GATE: tokio::sync::Mutex<()>"),
+            "the gate is one process-wide lock"
+        );
+        assert!(
+            !source.contains(concat!("sign_out_", "retrying")),
+            "no retry around a busy database is left"
+        );
+    }
+
+    /// Ruling 3 (Task 11), carried by lead ruling 1 of Task 12: the unlock re-checks the account before it writes the
+    /// key and the email, in the same checked turn as every other session write, and puts the session in memory before
+    /// that turn ends. Every writer of a session takes the turn as a parameter, so none can write outside one; only the
+    /// claim and the end of transitions make one.
+    #[test]
+    fn the_unlock_rechecks_the_account_and_every_session_writer_takes_the_lock() {
+        let production = production_source();
+        let unlock = code_of(&production, "async fn desktop_unlock_with_recovery_phrase(");
+        let verified = unlock.find("verify_vault_key_from_phrase(").expect("the server check");
+        let installed = unlock
+            .find("install_recovered_session(&state, &acct, &mut turn,")
+            .expect("the key goes through the checked install");
+        assert!(
+            verified < installed,
+            "the key is written after the server check, through the checked install:\n{unlock}"
+        );
+        assert!(
+            !unlock.contains("persist_vault_key_to_keychain(") && !unlock.contains("store_account_email("),
+            "no unchecked write of the key or the email:\n{unlock}"
+        );
+        assert!(
+            unlock.find("let mut turn = acct.session_generation();").unwrap()
+                < unlock.find("load_session_token_from_keychain(").unwrap(),
+            "captured before the Keychain is read"
+        );
+        let install = code_of(&production, "fn install_recovered_session(");
+        let stored = install
+            .find("let write = store_recovered_vault_key(acct, turn,")
+            .expect("the checked writer");
+        let in_memory = install
+            .find("*guard = Some(Session {")
+            .expect("the session goes into memory");
+        let released = install.find("drop(write);").expect("and the turn ends");
+        assert!(
+            stored < in_memory && in_memory < released,
+            "the install happens inside the unlock's turn:\n{install}"
+        );
+        let helper = code_of(&production, "fn store_recovered_vault_key(");
+        let claim = helper
+            .find("claim_session_write(acct, turn)")
+            .expect("the writer takes the turn");
+        let token = helper
+            .find("load_session_token_from_keychain(")
+            .expect("it re-reads the stored token");
+        let write = helper
+            .find("persist_vault_key_to_keychain(&write, ")
+            .expect("then writes the key");
+        assert!(claim < token && token < write, "turn, re-check, write:\n{helper}");
+        assert!(
+            helper.find("UNLOCK_ACCOUNT_CHANGED").unwrap() < write,
+            "a changed account stops before the write:\n{helper}"
+        );
+        for signature in [
+            "fn persist_session_to_keychain(",
+            "fn persist_session_token_to_keychain(",
+            "fn persist_vault_key_to_keychain(",
+            "fn install_unlocked_session(",
+            "fn clear_keychain_session_token(",
+            "fn name_session_after_profile(",
+            "fn backfill_local_data_owner(",
+            "fn clear_keychain_session_holding(",
+            "fn replace_session_token_in_memory(",
+            "fn name_session_in_memory(",
+            "fn delete_vault_key_from_keychain(",
+        ] {
+            let function = &production[production.find(signature).unwrap_or_else(|| panic!("{signature}"))..];
+            let parameters = &function[..function.find(") ->").unwrap()];
+            assert!(
+                parameters.contains("write: &SessionWrite"),
+                "{signature} can only write inside a checked turn:\n{parameters}"
+            );
+        }
+        // The same for the one writer with no return value (triage 10, P3-C).
+        let settle = &production[production.find("fn reauth_settle_flags(").expect("the flags writer")..];
+        let parameters = &settle[..settle.find(") {").unwrap()];
+        assert!(
+            parameters.contains("write: &SessionWrite"),
+            "reauth_settle_flags can only write inside a checked turn:\n{parameters}"
+        );
+        // The naming checks its turn and moves the generation on only when it named something (fix round 1, item 5).
+        let naming = code_of(&production, "async fn establish_session_identity(");
+        let checked = naming
+            .find("check_session_turn(acct, &turn)")
+            .expect("the naming checks its turn");
+        let named = naming
+            .find("let named = name_session_after_profile(&write,")
+            .expect("then names");
+        let moved = naming.find("if named {\n        acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::Write);").expect("and moves the generation only then");
+        assert!(checked < named && named < moved, "{naming}");
+        assert!(
+            !naming.contains("claim_session_write("),
+            "a naming that names nothing moves nothing:\n{naming}"
+        );
+        assert!(
+            naming.find("let turn = acct.session_generation();").unwrap() < naming.find("acct.session.lock()").unwrap(),
+            "captured before the session is read"
+        );
+        // The Keychain email retry (fix round 2, item 3) writes in a turn captured before it read the session's email.
+        let retry = code_of(&production, "async fn identify_unidentified_session(");
+        let captured = retry
+            .find("let turn = acct.session_generation();")
+            .expect("the retry captures its turn");
+        assert!(
+            captured < retry.find("acct.session.lock()").unwrap(),
+            "captured before the session is read:\n{retry}"
+        );
+        assert!(
+            retry.contains("&& let Ok(write) = check_session_turn(&acct, &turn)"),
+            "and checked with it:\n{retry}"
+        );
+        assert_eq!(
+            retry.matches("session_generation()").count(),
+            1,
+            "never re-captured at the check:\n{retry}"
+        );
+        assert_eq!(
+            production.matches("lock_session_keychain_writes()").count(),
+            5,
+            "the definition, the check, the end of transitions, the sign-out's last turn and the full Keychain clear"
+        );
+        // Struct literals only. Read through `squeeze`, since rustfmt wraps some of the literals over lines; the
+        // definition (`struct SessionWrite { _writes: ..`) squeezes to the same text and is taken off.
+        let squeezed = crate::source_pin::squeeze(&production);
+        assert_eq!(
+            squeezed.matches("SessionWrite{_writes:").count() - squeezed.matches("structSessionWrite{_writes:").count(),
+            4,
+            "only the check (the claim goes through it), the end of transitions, the sign-out's last turn and the full Keychain clear make a turn"
+        );
+        // The claim is the check plus the move, and every refusal names what moved the generation (item 8).
+        let claim = code_of(&production, "fn claim_session_write(");
+        assert!(
+            claim.contains("let write = check_session_turn(acct, turn)?;"),
+            "{claim}"
+        );
+        let check = code_of(&production, "fn check_session_turn(");
+        assert!(check.contains("return Err(SessionChanged::of(acct));"), "{check}");
+    }
+
+    // ---- behaviour ----
+
+    #[cfg(target_os = "macos")]
+    mod on_a_mac {
+        use super::super::*;
+        use crate::account::{AccountId, AccountRuntime, synthesize_single_account};
+        use crate::account_binding::Identity;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        pub(super) fn profile(user_id: &str, email: &str) -> account_dto::AccountProfile {
+            serde_json::from_str(&format!(
+                r#"{{"user_id":"{user_id}","email":"{email}","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}}"#
+            ))
+            .unwrap()
+        }
+
+        pub(super) struct Fixture {
+            pub state: AppState,
+            pub acct: Arc<AccountRuntime>,
+            pub dir: tempfile::TempDir,
+        }
+
+        impl Fixture {
+            pub fn new() -> Self {
+                let state = AppState::default();
+                synthesize_single_account(&state, AccountId::new_v4());
+                let acct = state.active_account().unwrap();
+                Self {
+                    state,
+                    acct,
+                    dir: tempfile::tempdir().unwrap(),
+                }
+            }
+
+            pub fn id(&self) -> &str {
+                self.acct.id.as_str()
+            }
+
+            /// Where this computer's local data is: a throwaway state dir.
+            pub fn sources(&self) -> LocalSources {
+                LocalSources::for_test(self.dir.path())
+            }
+
+            pub fn db(&self) -> state_db::StateDb {
+                state_db::StateDb::open(self.dir.path().join("state.db")).unwrap()
+            }
+
+            /// The session in memory (and the flags that go with it).
+            pub fn install_session(&self, token: &str, key: [u8; 32], email: Option<&str>) {
+                *self.acct.session.lock().unwrap() = Some(Session {
+                    token: token.into(),
+                    master_key: key,
+                    email: email.map(str::to_string),
+                });
+                set_auth_present(&self.state, true);
+            }
+
+            pub fn classify(&self, profile: &account_dto::AccountProfile) -> (reauth::SignInKind, u64) {
+                classify_sign_in(&self.state, &self.acct, &self.sources(), profile)
+            }
+
+            /// The decision with the server's proof, against the server at `base_url`.
+            pub async fn decide(
+                &self,
+                profile: &account_dto::AccountProfile,
+                token: &str,
+                base_url: &str,
+            ) -> (reauth::SignInKind, u64) {
+                decide_sign_in(&self.state, &self.acct, &self.sources(), profile, token, base_url).await
+            }
+
+            /// Everything a sign-in could change on this Mac. `state.db` is looked at only if it exists (looking creates it).
+            pub fn snapshot(&self) -> Snapshot {
+                let id = self.id();
+                let db = self.dir.path().join("state.db").exists().then(|| self.db());
+                Snapshot {
+                    token: stored_token(id),
+                    key: stored_key(id),
+                    email: keychain_account_email(id),
+                    owner: db.as_ref().and_then(|db| db.owner().unwrap()),
+                    waiting: db.as_ref().map(|db| db.queued_or_staged_count().unwrap()),
+                    session: self
+                        .acct
+                        .session
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|s| (s.token.clone(), s.master_key, s.email.clone())),
+                    auth_present: *self.state.auth_present.lock().unwrap(),
+                    auth_email: self.acct.auth_email.lock().unwrap().clone(),
+                    cached: self
+                        .acct
+                        .cached_profile
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|p| p.user_id.clone()),
+                    engine_state: self.acct.engine_state.lock().unwrap().clone(),
+                }
+            }
+        }
+
+        impl Fixture {
+            /// [`Fixture::snapshot`] for a world whose `state.db` may be unreadable: the database is left out.
+            pub fn snapshot_without_reading_state_db(&self) -> Snapshot {
+                let id = self.id();
+                Snapshot {
+                    token: stored_token(id),
+                    key: stored_key(id),
+                    email: keychain_account_email(id),
+                    owner: None,
+                    waiting: None,
+                    session: self
+                        .acct
+                        .session
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|s| (s.token.clone(), s.master_key, s.email.clone())),
+                    auth_present: *self.state.auth_present.lock().unwrap(),
+                    auth_email: self.acct.auth_email.lock().unwrap().clone(),
+                    cached: self
+                        .acct
+                        .cached_profile
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|p| p.user_id.clone()),
+                    engine_state: self.acct.engine_state.lock().unwrap().clone(),
+                }
+            }
+        }
+
+        /// A Mac's whole account state: the Keychain, the local database, memory and the flags.
+        #[derive(Debug, PartialEq)]
+        pub(super) struct Snapshot {
+            token: Option<String>,
+            key: Option<[u8; 32]>,
+            email: Option<String>,
+            owner: Option<Identity>,
+            waiting: Option<u64>,
+            session: Option<(String, [u8; 32], Option<String>)>,
+            auth_present: bool,
+            auth_email: Option<String>,
+            cached: Option<String>,
+            engine_state: String,
+        }
+
+        /// A local HTTP server that answers every request with `status_line` and `body` and records each request it
+        /// received (request line, headers and body, as sent): a test sees what the server was asked, and with which token.
+        fn serving(status_line: &'static str, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+            serving_by(move |_| (status_line, body))
+        }
+
+        /// A server that confirms exactly one key: `200 {valid:true}` for that key's check, `invalid_recovery_phrase`
+        /// for any other request. Records each request, as [`serving`] does.
+        fn confirming_only(key: [u8; 32]) -> (String, Arc<Mutex<Vec<String>>>) {
+            let check = recovery_check_of(key);
+            serving_by(move |request| {
+                if request.contains(&check) {
+                    KEY_IS_THIS_ACCOUNTS
+                } else {
+                    KEY_IS_ANOTHER_ACCOUNTS
+                }
+            })
+        }
+
+        /// [`serving`], with the status line and body chosen per request by `respond` (given the request as received).
+        fn serving_by(
+            respond: impl Fn(&str) -> (&'static str, &'static str) + Send + 'static,
+        ) -> (String, Arc<Mutex<Vec<String>>>) {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+            let record = seen.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                            let wanted = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + wanted {
+                                break;
+                            }
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    let (status_line, body) = respond(&request);
+                    record.lock().unwrap().push(request);
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            (base_url, seen)
+        }
+
+        const KEY_IS_THIS_ACCOUNTS: (&str, &str) = ("200 OK", r#"{"valid":true}"#);
+        const KEY_IS_ANOTHER_ACCOUNTS: (&str, &str) = ("400 Bad Request", r#"{"error":"invalid_recovery_phrase"}"#);
+        const SERVER_IS_BROKEN: (&str, &str) = ("500 Internal Server Error", r#"{"error":"boom"}"#);
+
+        /// The `recovery_check` the server is sent for a key.
+        fn recovery_check_of(key: [u8; 32]) -> String {
+            encode_base64(&*beebeeb_core::opaque::compute_recovery_check(
+                &beebeeb_core::kdf::MasterKey::from_bytes(key),
+            ))
+        }
+
+        /// A base URL nothing listens on: the connection is refused at once.
+        fn nobody_listens() -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            drop(listener);
+            url
+        }
+
+        /// Poison a lock the way a panic while holding it does.
+        fn poison<T: Send>(mutex: &Mutex<T>) {
+            std::thread::scope(|scope| {
+                let _ = scope
+                    .spawn(|| {
+                        let _held = mutex.lock().unwrap();
+                        panic!("poisoned on purpose");
+                    })
+                    .join();
+            });
+        }
+
+        pub(super) fn some_operation(db: &state_db::StateDb, op_id: &str) {
+            db.enqueue_operation(&state_db::PendingOperation {
+                op_id: op_id.into(),
+                kind: state_db::OperationKind::UploadVersion,
+                file_id: Some("file-r8".into()),
+                parent_id: None,
+                target_path: Some("/R8.txt".into()),
+                metadata_json: None,
+                payload_path: None,
+                base_version: None,
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        }
+
+        pub(super) fn stored_token(id: &str) -> Option<String> {
+            load_session_token_from_keychain(id).unwrap()
+        }
+
+        pub(super) fn stored_key(id: &str) -> Option<[u8; 32]> {
+            let mut vault = AuthVault::new(platform_keychain_store_for(id));
+            vault.unlock().ok()?;
+            let mut key = [0u8; 32];
+            key.copy_from_slice(vault.master_key().ok()?);
+            Some(key)
+        }
+
+        pub(super) fn put_email(id: &str, email: &str) {
+            AuthVault::new(platform_keychain_store_for(id))
+                .store_account_email(email)
+                .unwrap();
+        }
+
+        pub(super) fn sam() -> account_dto::AccountProfile {
+            profile("u-1", "sam@beebeeb.io")
+        }
+
+        pub(super) fn kim() -> account_dto::AccountProfile {
+            profile("u-2", "kim@beebeeb.io")
+        }
+
+        // -- the token swap --
+
+        #[test]
+        fn a_new_token_replaces_only_the_token_in_memory() {
+            let fx = Fixture::new();
+            fx.install_session("old-token", [7u8; 32], Some("sam@beebeeb.io"));
+            assert!(replace_session_token_in_memory(&SessionWrite::for_test(), &fx.acct, "new-token").unwrap());
+            let guard = fx.acct.session.lock().unwrap();
+            let session = guard.as_ref().unwrap();
+            assert_eq!(session.token, "new-token");
+            assert_eq!(session.master_key, [7u8; 32], "the keys stay");
+            assert_eq!(session.email.as_deref(), Some("sam@beebeeb.io"));
+        }
+
+        #[test]
+        fn without_keys_in_memory_nothing_is_invented() {
+            let fx = Fixture::new();
+            assert!(!replace_session_token_in_memory(&SessionWrite::for_test(), &fx.acct, "new-token").unwrap());
+            assert!(fx.acct.session.lock().unwrap().is_none());
+            assert!(
+                !name_session_in_memory(&SessionWrite::for_test(), &fx.acct, "sam@beebeeb.io").unwrap(),
+                "no session, nobody to name"
+            );
+            assert!(fx.acct.session.lock().unwrap().is_none());
+        }
+
+        #[test]
+        fn a_re_sign_in_ends_the_revoked_streak_and_never_asks_finder_to_remove() {
+            let fx = Fixture::new();
+            fx.install_session("old-token", [7u8; 32], Some("sam@beebeeb.io"));
+            for _ in 0..3 {
+                fx.acct
+                    .auth_health
+                    .note_result(Some(&anyhow::anyhow!("HTTP 401 Unauthorized: session revoked")));
+            }
+            assert!(
+                fx.acct.auth_health.is_expired(),
+                "precondition: the session reads as revoked"
+            );
+            let (handle, mut rx) =
+                finder_setup::driver::FinderSetupHandle::for_test(finder_setup::driver::FinderSetupView::initial(
+                    finder_setup::launch_location::LaunchLocation::Applications,
+                ));
+            let _ = fx.state.finder_setup.set(handle);
+            reauth_settle_flags(&SessionWrite::for_test(), &fx.state, &fx.acct, "sam@beebeeb.io");
+            keys_arrived(&fx.state, KeysFrom::SignIn);
+            assert!(!fx.acct.auth_health.is_expired());
+            assert!(*fx.state.auth_present.lock().unwrap());
+            let mut seen = 0;
+            while let Ok(event) = rx.try_recv() {
+                seen += 1;
+                assert!(
+                    matches!(
+                        event,
+                        finder_setup::driver::Event::Trigger(finder_setup::core::Trigger::KeysArrived)
+                    ),
+                    "a re-sign-in only ever tells Finder that keys are here"
+                );
+            }
+            assert_eq!(seen, 1, "and tells it once");
+        }
+
+        /// R8: the same account signs in again, with keys in memory and in the Keychain. Only the token changes, in
+        /// the Keychain and in memory; the key, the email, the queue, the owner and the cache all stay.
+        #[test]
+        fn a_same_account_re_sign_in_swaps_only_the_token_and_changes_nothing_else() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-old",
+                &[7u8; 32],
+                Some("sam@beebeeb.io"),
+            )
+            .unwrap();
+            fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            some_operation(&db, "op-r8");
+            let waiting = db.queued_or_staged_count().unwrap();
+            assert_eq!(waiting, 1);
+
+            // The ids match and a key is here, so the server proves the key first (spec §5.6); here it confirms it.
+            assert_eq!(fx.classify(&sam()), (reauth::SignInKind::NeedsKeyProof, 1));
+            assert_eq!(
+                classify_sign_in_after(
+                    &fx.state,
+                    &fx.acct,
+                    &fx.sources(),
+                    &sam(),
+                    Some(reauth::KeyProof::Matches)
+                ),
+                (reauth::SignInKind::SameAccount, 1)
+            );
+            let unlocked = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+
+            assert!(unlocked, "the keys were here");
+            assert_eq!(
+                stored_token(&id).as_deref(),
+                Some("tok-new"),
+                "the Keychain holds the new token"
+            );
+            assert_eq!(stored_key(&id), Some([7u8; 32]), "and the same key");
+            assert_eq!(keychain_account_email(&id).as_deref(), Some("sam@beebeeb.io"));
+            {
+                let guard = fx.acct.session.lock().unwrap();
+                let session = guard.as_ref().unwrap();
+                assert_eq!(
+                    (session.token.as_str(), session.master_key),
+                    ("tok-new", [7u8; 32]),
+                    "memory: the new token, the same keys"
+                );
+                assert_eq!(session.email.as_deref(), Some("sam@beebeeb.io"));
+            }
+            assert_eq!(
+                db.queued_or_staged_count().unwrap(),
+                waiting,
+                "pending edits stay and upload afterwards"
+            );
+            assert_eq!(
+                db.owner().unwrap(),
+                Some(Identity::new(Some("u-1"), Some("sam@beebeeb.io"))),
+                "the same owner"
+            );
+            assert_eq!(
+                fx.acct
+                    .cached_profile
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|p| p.user_id.clone())
+                    .as_deref(),
+                Some("u-1")
+            );
+            assert!(*fx.state.auth_present.lock().unwrap());
+            assert_eq!(fx.acct.auth_email.lock().unwrap().as_deref(), Some("sam@beebeeb.io"));
+        }
+
+        /// After a startup 401 (R9) the Keychain keeps the key and the email and no session is in memory: the same
+        /// account signing in again reloads that key, and nothing asks for the recovery phrase.
+        #[test]
+        fn a_same_account_re_sign_in_after_a_revoked_token_reloads_the_key_this_mac_kept() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_vault_key_to_keychain(&SessionWrite::for_test(), &id, &[5u8; 32]).unwrap();
+            put_email(&id, "sam@beebeeb.io");
+            fx.db()
+                .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            assert!(fx.acct.session.lock().unwrap().is_none());
+
+            // The ids match and the key is kept, so the server proves it first (spec §5.6); here it confirms it.
+            assert_eq!(fx.classify(&sam()).0, reauth::SignInKind::NeedsKeyProof);
+            assert_eq!(
+                classify_sign_in_after(
+                    &fx.state,
+                    &fx.acct,
+                    &fx.sources(),
+                    &sam(),
+                    Some(reauth::KeyProof::Matches)
+                )
+                .0,
+                reauth::SignInKind::SameAccount
+            );
+            let unlocked = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+
+            assert!(unlocked, "the kept key was loaded");
+            let guard = fx.acct.session.lock().unwrap();
+            let session = guard.as_ref().expect("the keys are in memory again");
+            assert_eq!((session.token.as_str(), session.master_key), ("tok-new", [5u8; 32]));
+            assert_eq!(session.email.as_deref(), Some("sam@beebeeb.io"));
+            assert_eq!(stored_key(&id), Some([5u8; 32]), "the Keychain key is untouched");
+        }
+
+        /// Same account, no key on this Mac: the token is replaced and the person is sent to the recovery phrase.
+        #[test]
+        fn a_same_account_re_sign_in_without_a_key_here_asks_for_the_recovery_phrase() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            put_email(&id, "sam@beebeeb.io");
+            fx.db()
+                .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+
+            let unlocked = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+
+            assert!(!unlocked, "no key here: the recovery phrase step follows");
+            assert!(fx.acct.session.lock().unwrap().is_none(), "no keys are invented");
+            assert_eq!(stored_token(&id).as_deref(), Some("tok-new"));
+            assert_eq!(stored_key(&id), None);
+            assert!(*fx.state.auth_present.lock().unwrap());
+        }
+
+        /// The session in memory is named by the server's spelling of the email, so the next engine start compares
+        /// the same identity as the owner record and keeps the data (a different spelling would read as another
+        /// account and reset the local data).
+        #[test]
+        fn a_re_sign_in_gives_the_session_the_servers_email_so_the_binding_keeps_the_data() {
+            let fx = Fixture::new();
+            let owner = Identity::new(Some("u-1"), Some("Sam@beebeeb.io"));
+            fx.db().set_owner(&owner).unwrap();
+            for (name, session_email) in [
+                ("an unidentified session", None),
+                ("an older spelling", Some("sam@beebeeb.io")),
+            ] {
+                fx.install_session("tok-old", [7u8; 32], session_email);
+                let canonical = profile("u-1", "Sam@beebeeb.io");
+                reauth_swap_token(
+                    &fx.state,
+                    &fx.acct,
+                    &fx.sources(),
+                    "tok-new",
+                    &canonical,
+                    &mut fx.acct.session_generation(),
+                )
+                .unwrap();
+                let email = fx.acct.session.lock().unwrap().as_ref().unwrap().email.clone();
+                assert_eq!(email.as_deref(), Some("Sam@beebeeb.io"), "{name}");
+                let cached = fx.acct.cached_profile.lock().unwrap().clone();
+                let identity = identity_of_session(email.as_deref(), cached.as_ref());
+                assert_eq!(
+                    account_binding::same_account(&owner, &identity),
+                    Some(true),
+                    "{name}: the engine start keeps the data"
+                );
+            }
+        }
+
+        // -- the account check --
+
+        /// Against the real sources: each retained trace alone means the Mac is not fresh, and
+        /// another account never gets `Fresh`. An empty Mac is `Fresh`.
+        #[test]
+        fn the_account_check_reads_every_retained_trace_from_the_real_sources() {
+            use reauth::SignInKind::{DifferentAccount, NeedsKeyProof};
+            type Set = fn(&Fixture);
+            // What each retained trace alone makes of another account signing in: a switch, except a vault key, stored
+            // or in a session in memory, which the server is asked about (it names no account itself; spec §5.6).
+            let cases: [(&str, Set, reauth::SignInKind); 9] = [
+                (
+                    "a session in memory",
+                    |fx| {
+                        *fx.acct.session.lock().unwrap() = Some(Session {
+                            token: "t".into(),
+                            master_key: [1u8; 32],
+                            email: None,
+                        })
+                    },
+                    NeedsKeyProof,
+                ),
+                ("auth present", |fx| set_auth_present(&fx.state, true), DifferentAccount),
+                (
+                    "a Keychain token",
+                    |fx| persist_session_token_to_keychain(&SessionWrite::for_test(), fx.id(), "tok-a", None).unwrap(),
+                    DifferentAccount,
+                ),
+                (
+                    "a Keychain email",
+                    |fx| put_email(fx.id(), "a@beebeeb.io"),
+                    DifferentAccount,
+                ),
+                (
+                    "a vault key",
+                    |fx| persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[3u8; 32]).unwrap(),
+                    NeedsKeyProof,
+                ),
+                (
+                    "a recorded owner",
+                    |fx| fx.db().set_owner(&Identity::new(None, Some("a@beebeeb.io"))).unwrap(),
+                    DifferentAccount,
+                ),
+                (
+                    "a cached profile",
+                    |fx| *fx.acct.cached_profile.lock().unwrap() = Some(profile("u-a", "a@beebeeb.io")),
+                    DifferentAccount,
+                ),
+                (
+                    "a queued change",
+                    |fx| some_operation(&fx.db(), "op-trace"),
+                    DifferentAccount,
+                ),
+                (
+                    "a staged payload",
+                    |fx| {
+                        fx.db()
+                            .track_staged_payload("/tmp/bb-trace-staged.bin", None, false)
+                            .unwrap()
+                    },
+                    DifferentAccount,
+                ),
+            ];
+            let empty = Fixture::new();
+            assert_eq!(
+                empty.classify(&kim()),
+                (reauth::SignInKind::Fresh, 0),
+                "nothing here: the first sign-in"
+            );
+            for (name, set, expected) in cases {
+                let fx = Fixture::new();
+                set(&fx);
+                let (kind, _) = fx.classify(&kim());
+                assert_ne!(
+                    kind,
+                    reauth::SignInKind::Fresh,
+                    "{name} alone is a trace: another account must not get Fresh"
+                );
+                assert_eq!(kind, expected, "{name}");
+            }
+        }
+
+        /// An unreadable local database is a trace, never an absence, and it settles nothing: the sign-in is
+        /// `LocalDataUnreadable` (not `Fresh`, not a switch, not decided by the credentials; lead ruling 12 gave it its
+        /// own outcome, where Task 11 had `Unconfirmed`).
+        #[test]
+        fn an_unreadable_state_db_is_a_trace_and_settles_nothing() {
+            let fx = Fixture::new();
+            std::fs::write(
+                fx.dir.path().join("state.db"),
+                b"this is not a database, and it is long enough to be read",
+            )
+            .unwrap();
+            assert_eq!(fx.classify(&kim()).0, reauth::SignInKind::LocalDataUnreadable);
+            assert!(gather_local_facts(&fx.state, &fx.acct, &fx.sources()).unreadable);
+            assert!(
+                queued_or_staged_present(&fx.sources()),
+                "unreadable counts as waiting data"
+            );
+            assert!(local_data_owner(&fx.sources()).is_err());
+            // Each fail-closed answer is its own trace, so neither depends on the other.
+            let facts = gather_local_facts(&fx.state, &fx.acct, &fx.sources());
+            assert!(
+                facts.traces.recorded_owner,
+                "an owner that cannot be read counts as recorded"
+            );
+            assert!(
+                facts.traces.queued_or_staged,
+                "data that cannot be read counts as waiting"
+            );
+            assert_eq!(facts.owner, None, "and names nobody");
+        }
+
+        /// The state database file of a fixture, opened directly: to break and repair it as a transient fault would.
+        fn raw_state_db(fx: &Fixture) -> rusqlite::Connection {
+            rusqlite::Connection::open(fx.dir.path().join("state.db")).unwrap()
+        }
+
+        /// A signed-in sam: credentials, a stored key, an owner record naming him, and one edit not uploaded yet.
+        fn sam_with_a_pending_edit() -> Fixture {
+            let fx = Fixture::new();
+            after_a_first_sign_in(&fx, true, true);
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            some_operation(&db, "op-pending");
+            fx
+        }
+
+        /// Lead ruling 12 (Task 12), end to end: a Mac whose owner record names sam by email only (another letter case)
+        /// and that stores a vault key asks the server to prove the key. When the server answers with exactly
+        /// `recovery_check_missing` (sam has no check on file), the email decides: sam signs in again in place, kim is a
+        /// switch. When it answers `invalid_recovery_phrase`, it is the switch, whatever the email says.
+        #[tokio::test]
+        async fn no_recovery_check_on_file_lets_the_email_decide_and_a_mismatch_is_still_the_switch() {
+            use reauth::SignInKind::{DifferentAccount, NeedsKeyProof, SameAccount};
+            let fx = Fixture::new();
+            after_a_first_sign_in(&fx, false, true);
+            fx.db().set_owner(&Identity::new(None, Some("Sam@Beebeeb.io"))).unwrap();
+            assert_eq!(
+                fx.classify(&sam()).0,
+                NeedsKeyProof,
+                "the premise: the server's proof is asked first"
+            );
+            let (missing, asked) = serving("400 Bad Request", r#"{"error":"recovery_check_missing"}"#);
+            assert_eq!(
+                fx.decide(&sam(), "tok-2", &missing).await.0,
+                SameAccount,
+                "no check on file: the same address decides"
+            );
+            assert_eq!(
+                fx.decide(&kim(), "tok-2", &missing).await.0,
+                DifferentAccount,
+                "and another address is a switch"
+            );
+            assert_eq!(asked.lock().unwrap().len(), 2, "the server was asked both times");
+            let (mismatch, _) = serving(KEY_IS_ANOTHER_ACCOUNTS.0, KEY_IS_ANOTHER_ACCOUNTS.1);
+            assert_eq!(
+                fx.decide(&sam(), "tok-2", &mismatch).await.0,
+                DifferentAccount,
+                "a key that is not sam's is the switch"
+            );
+        }
+
+        /// Spec §5.6: a `400` decides only with one of the server's two exact codes. A `400` with any other body (no
+        /// JSON, another code, a near miss, a body the server's extractor rejected, an intermediary's page) says nothing
+        /// about the kept key, so a same-account sign-in with a stored key settles nothing, as for a server error: the
+        /// key is not called outdated, and nothing on this Mac changes. The same holds without a user id (rule 2).
+        #[tokio::test]
+        async fn a_400_without_one_of_the_two_codes_settles_nothing_and_the_kept_key_stays() {
+            let not_an_answer: [&'static str; 5] = [
+                "not json",
+                r#"{"error":"bad_request"}"#,
+                r#"{"error":"Invalid_Recovery_Phrase"}"#,
+                "Failed to deserialize the JSON body into the target type: missing field `recovery_check`",
+                "<html><body><h1>400 Bad Request</h1></body></html>",
+            ];
+            for body in not_an_answer {
+                let fx = sam_with_a_pending_edit();
+                let before = fx.snapshot();
+                let (server, seen) = serving("400 Bad Request", body);
+                assert_eq!(
+                    fx.decide(&sam(), "tok-new", &server).await,
+                    (reauth::SignInKind::Unconfirmed, 1),
+                    "the same id and a stored key: {body:?} is not a mismatch"
+                );
+                assert_eq!(seen.lock().unwrap().len(), 1, "{body:?}: the server was asked once");
+                assert_eq!(fx.snapshot(), before, "{body:?}: nothing changed, the kept key stays");
+                assert_eq!(
+                    stored_key(fx.id()),
+                    Some([5u8; 32]),
+                    "{body:?}: the key is still stored"
+                );
+
+                let fx = Fixture::new();
+                persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[5u8; 32]).unwrap();
+                fx.db().set_owner(&Identity::new(None, Some("sam@beebeeb.io"))).unwrap();
+                let (server, _) = serving("400 Bad Request", body);
+                assert_eq!(
+                    fx.decide(&sam(), "tok-new", &server).await.0,
+                    reauth::SignInKind::Unconfirmed,
+                    "no user id here (rule 2): {body:?} is not a switch either"
+                );
+            }
+        }
+
+        /// An owner record or a `state.db` that cannot be read is neither "no owner" nor a switch: nothing is decided,
+        /// nothing changes (the pending edit is not purged, the credentials do not decide), the server is not asked, and
+        /// once the read works again the same account is signed in again in place.
+        #[tokio::test]
+        async fn an_unreadable_owner_record_or_state_db_settles_nothing_and_the_same_account_then_stays_in_place() {
+            use reauth::SignInKind::{LocalDataUnreadable, SameAccount};
+            let (server, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+            let pending_edits = |fx: &Fixture| {
+                raw_state_db(fx)
+                    .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get::<_, i64>(0))
+                    .unwrap()
+            };
+
+            // (A) The owner record alone cannot be read: its value is not text. Everything else in the database is fine.
+            let fx = sam_with_a_pending_edit();
+            raw_state_db(&fx)
+                .execute("UPDATE sync_state SET value = x'ff00' WHERE key = 'owner_user_id'", [])
+                .unwrap();
+            assert!(
+                local_data_owner(&fx.sources()).is_err(),
+                "the premise: the owner cannot be read, the database opens"
+            );
+            let before = fx.snapshot_without_reading_state_db();
+            assert_eq!(
+                fx.decide(&sam(), "tok-2", &server).await,
+                (LocalDataUnreadable, 1),
+                "the credentials name sam and a key is stored: still nothing is decided"
+            );
+            assert_eq!(
+                fx.decide(&kim(), "tok-2", &server).await.0,
+                LocalDataUnreadable,
+                "and another account is not switched either"
+            );
+            assert!(seen.lock().unwrap().is_empty(), "the server is not asked");
+            assert_eq!(
+                fx.snapshot_without_reading_state_db(),
+                before,
+                "nothing changed in the Keychain, memory or the flags"
+            );
+            assert_eq!(pending_edits(&fx), 1, "the pending edit is still there");
+            // The read works again: the same account stays in place.
+            raw_state_db(&fx)
+                .execute("UPDATE sync_state SET value = 'u-1' WHERE key = 'owner_user_id'", [])
+                .unwrap();
+            assert_eq!(fx.decide(&sam(), "tok-2", &server).await, (SameAccount, 1));
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                1,
+                "the ids match and a key is stored: the server proves it (spec §5.6)"
+            );
+            seen.lock().unwrap().clear();
+            reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-2",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+            assert_eq!(stored_token(fx.id()).as_deref(), Some("tok-2"));
+            assert_eq!(stored_key(fx.id()), Some([5u8; 32]));
+            assert_eq!(
+                fx.db().owner().unwrap(),
+                Some(Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+            );
+            assert_eq!(pending_edits(&fx), 1, "and still the edit");
+
+            // (B) The whole database cannot be read: moved aside, a file that is not a database in its place.
+            let fx = sam_with_a_pending_edit();
+            let aside = |suffix: &str| {
+                (
+                    fx.dir.path().join(format!("state.db{suffix}")),
+                    fx.dir.path().join(format!("state.db{suffix}.valid")),
+                )
+            };
+            for suffix in ["", "-wal", "-shm"] {
+                let (from, to) = aside(suffix);
+                if from.exists() {
+                    std::fs::rename(from, to).unwrap();
+                }
+            }
+            let garbage = b"this is not a database, and it is long enough to be read".to_vec();
+            std::fs::write(fx.dir.path().join("state.db"), &garbage).unwrap();
+            let before = fx.snapshot_without_reading_state_db();
+            assert_eq!(fx.decide(&sam(), "tok-2", &server).await.0, LocalDataUnreadable);
+            assert_eq!(fx.decide(&kim(), "tok-2", &server).await.0, LocalDataUnreadable);
+            assert!(seen.lock().unwrap().is_empty(), "the server is not asked");
+            assert_eq!(fx.snapshot_without_reading_state_db(), before);
+            assert_eq!(
+                std::fs::read(fx.dir.path().join("state.db")).unwrap(),
+                garbage,
+                "the unreadable file is not touched"
+            );
+            // The read works again: the real database is back, and nothing of it was purged.
+            std::fs::remove_file(fx.dir.path().join("state.db")).unwrap();
+            for suffix in ["", "-wal", "-shm"] {
+                let (back, valid) = aside(suffix);
+                if valid.exists() {
+                    std::fs::rename(valid, back).unwrap();
+                }
+            }
+            assert_eq!(fx.decide(&sam(), "tok-2", &server).await, (SameAccount, 1));
+            assert_eq!(pending_edits(&fx), 1, "the pending edit survived the whole episode");
+        }
+
+        /// A test that works in the shared scratch state directory holds the gate the sign-out purge takes, and the marker
+        /// that tells that sign-out so (otherwise its own sign-out would wait for the gate its test holds, for ever).
+        #[tokio::test]
+        async fn a_test_in_the_shared_state_dir_holds_the_purge_gate_and_says_so() {
+            assert!(PURGE_GATE_HELD.try_with(|_| ()).is_err(), "no gate is held outside");
+            with_the_shared_state_dir(async {
+                assert!(
+                    SIGN_OUT_TEST_PURGE_GATE.try_lock().is_err(),
+                    "the gate is held for the whole body"
+                );
+                assert!(PURGE_GATE_HELD.try_with(|_| ()).is_ok(), "and the sign-out can tell");
+            })
+            .await;
+            assert!(
+                PURGE_GATE_HELD.try_with(|_| ()).is_err(),
+                "the marker goes with the body"
+            );
+        }
+
+        // -- the identity rule: ids, then the server's key proof, then the email in its canonical form (ruling A″) --
+
+        /// Rule 2, the legacy owner: an older build recorded the lowercase text of the address, the server's own spelling
+        /// has a capital, and the key is still stored on this Mac. The server proves the key is this account's, and the
+        /// sign-in is in place: nothing is purged, the key stays, and the record is completed with the user id and the
+        /// server's spelling. The proof is asked as the account that is signing in, about the key this Mac stores.
+        #[tokio::test]
+        async fn a_key_the_server_proves_signs_a_legacy_email_only_owner_in_again_in_place_whatever_the_letter_case() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_vault_key_to_keychain(&SessionWrite::for_test(), &id, &[5u8; 32]).unwrap();
+            put_email(&id, "sam@beebeeb.io");
+            let db = fx.db();
+            db.set_owner(&Identity::new(None, Some("sam@beebeeb.io"))).unwrap();
+            some_operation(&db, "op-legacy");
+            let (server, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+            let signing_in = profile("u-1", "Sam@beebeeb.io");
+
+            assert_eq!(
+                fx.decide(&signing_in, "tok-new", &server).await,
+                (reauth::SignInKind::SameAccount, 1)
+            );
+            {
+                let requests = seen.lock().unwrap();
+                assert_eq!(requests.len(), 1, "one question to the server");
+                assert!(
+                    requests[0].starts_with("POST /api/v1/auth/verify-recovery-check "),
+                    "{}",
+                    requests[0]
+                );
+                assert!(
+                    requests[0].to_lowercase().contains("authorization: bearer tok-new"),
+                    "asked as the account that is signing in"
+                );
+                assert!(
+                    requests[0].contains(&recovery_check_of([5u8; 32])),
+                    "about the key this Mac stores"
+                );
+            }
+
+            let unlocked = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &signing_in,
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+            assert!(unlocked, "the stored key is loaded: no recovery phrase");
+            assert_eq!(
+                db.owner().unwrap(),
+                Some(Identity::new(Some("u-1"), Some("Sam@beebeeb.io"))),
+                "the record gets the id and the server's spelling"
+            );
+            assert_eq!(
+                db.queued_or_staged_count().unwrap(),
+                1,
+                "no purge: the pending edit stays"
+            );
+            assert_eq!(stored_key(&id), Some([5u8; 32]), "the key stays");
+            assert_eq!(stored_token(&id).as_deref(), Some("tok-new"));
+            assert_eq!(keychain_account_email(&id).as_deref(), Some("Sam@beebeeb.io"));
+            let session = fx.acct.session.lock().unwrap();
+            let session = session.as_ref().expect("the keys are in memory again");
+            assert_eq!((session.token.as_str(), session.master_key), ("tok-new", [5u8; 32]));
+        }
+
+        /// Rule 2, a key that is not this account's: a different account, and nothing local changes.
+        #[tokio::test]
+        async fn a_key_the_server_says_is_another_accounts_makes_the_sign_in_a_switch() {
+            let fx = Fixture::new();
+            persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[5u8; 32]).unwrap();
+            put_email(fx.id(), "sam@beebeeb.io");
+            let db = fx.db();
+            db.set_owner(&Identity::new(None, Some("sam@beebeeb.io"))).unwrap();
+            some_operation(&db, "op-legacy");
+            let before = fx.snapshot();
+            let (server, seen) = serving(KEY_IS_ANOTHER_ACCOUNTS.0, KEY_IS_ANOTHER_ACCOUNTS.1);
+
+            let decision = fx.decide(&profile("u-1", "Sam@beebeeb.io"), "tok-new", &server).await;
+
+            assert_eq!(
+                decision,
+                (reauth::SignInKind::DifferentAccount, 1),
+                "the same letters, but not this account's key"
+            );
+            assert_eq!(seen.lock().unwrap().len(), 1);
+            assert_eq!(fx.snapshot(), before, "nothing changed on this Mac");
+        }
+
+        /// Rule 2, no answer: nothing is swapped and nothing is switched. A broken server, a refused connection and a
+        /// stored key that cannot be read are all "cannot confirm", and nothing local changes.
+        #[tokio::test]
+        async fn a_proof_that_cannot_complete_changes_nothing_and_decides_nothing() {
+            let (broken, _) = serving(SERVER_IS_BROKEN.0, SERVER_IS_BROKEN.1);
+            for (name, server) in [("a broken server", broken), ("a refused connection", nobody_listens())] {
+                let fx = Fixture::new();
+                persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[5u8; 32]).unwrap();
+                put_email(fx.id(), "sam@beebeeb.io");
+                let db = fx.db();
+                db.set_owner(&Identity::new(None, Some("sam@beebeeb.io"))).unwrap();
+                some_operation(&db, "op-legacy");
+                let before = fx.snapshot();
+                let decision = fx.decide(&profile("u-1", "Sam@beebeeb.io"), "tok-new", &server).await;
+                assert_eq!(decision.0, reauth::SignInKind::Unconfirmed, "{name}");
+                assert_eq!(fx.snapshot(), before, "{name}: nothing changed on this Mac");
+            }
+            // A key item that cannot be read (here: not 32 bytes) cannot be proven either, and the server is not asked.
+            let fx = Fixture::new();
+            AuthVault::new(platform_keychain_store_for(fx.id()))
+                .store_wrapped_master_key(keychain::SecretBytes::new(vec![1u8, 2, 3]).unwrap())
+                .unwrap();
+            fx.db().set_owner(&Identity::new(None, Some("sam@beebeeb.io"))).unwrap();
+            let (server, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+            assert_eq!(
+                fx.decide(&profile("u-1", "sam@beebeeb.io"), "tok-new", &server).await.0,
+                reauth::SignInKind::Unconfirmed
+            );
+            assert!(seen.lock().unwrap().is_empty(), "an unreadable key is never sent");
+        }
+
+        /// Rule 1 (spec §5.6): another user id is a switch and the server is never asked. The same id with a vault key
+        /// here is one question to the server, about that key, asked as the account that is signing in: a key it
+        /// confirms is in place, one it no longer accepts is `KeyOutdated`. The same id with no key here asks nothing.
+        #[tokio::test]
+        async fn with_the_same_id_the_server_proves_the_kept_key_and_another_id_asks_nothing() {
+            use reauth::SignInKind::{DifferentAccount, KeyOutdated, SameAccount};
+            let cases = [
+                (
+                    "the same id, a key it confirms",
+                    "u-1",
+                    true,
+                    KEY_IS_THIS_ACCOUNTS,
+                    SameAccount,
+                    1,
+                ),
+                (
+                    "the same id, a key it no longer accepts",
+                    "u-1",
+                    true,
+                    KEY_IS_ANOTHER_ACCOUNTS,
+                    KeyOutdated,
+                    1,
+                ),
+                (
+                    "the same id, no key here",
+                    "u-1",
+                    false,
+                    KEY_IS_ANOTHER_ACCOUNTS,
+                    SameAccount,
+                    0,
+                ),
+                (
+                    "another id, a key here",
+                    "u-9",
+                    true,
+                    KEY_IS_THIS_ACCOUNTS,
+                    DifferentAccount,
+                    0,
+                ),
+            ];
+            for (name, owner_id, key_here, answer, expected, questions) in cases {
+                let fx = Fixture::new();
+                if key_here {
+                    persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[5u8; 32]).unwrap();
+                }
+                fx.db()
+                    .set_owner(&Identity::new(Some(owner_id), Some("sam@beebeeb.io")))
+                    .unwrap();
+                let (server, seen) = serving(answer.0, answer.1);
+                assert_eq!(
+                    fx.decide(&profile("u-1", "sam@beebeeb.io"), "tok-new", &server).await.0,
+                    expected,
+                    "{name}"
+                );
+                let asked = seen.lock().unwrap();
+                assert_eq!(asked.len(), questions, "{name}: questions to the server");
+                if let Some(request) = asked.first() {
+                    assert!(
+                        request.contains(&recovery_check_of([5u8; 32])),
+                        "{name}: about the kept key"
+                    );
+                    assert!(
+                        request.to_lowercase().contains("authorization: bearer tok-new"),
+                        "{name}: asked as the account that is signing in"
+                    );
+                }
+            }
+        }
+
+        /// A stand-in reconciler that records what it is told (and whether the engine was still in its slot then), and
+        /// acknowledges every Lock and every removal at once.
+        fn recording_reconciler(fx: &Fixture) -> Arc<Mutex<Vec<String>>> {
+            use finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+            let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(
+                finder_setup::launch_location::LaunchLocation::Applications,
+            ));
+            let _ = fx.state.finder_setup.set(handle);
+            let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+            let (record, acct) = (seen.clone(), fx.acct.clone());
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    let engine = match acct.engine.try_lock() {
+                        Ok(slot) if slot.is_some() => "engine_tracked",
+                        Ok(_) => "no_engine",
+                        Err(_) => "slot_busy",
+                    };
+                    let line = match event {
+                        Event::Lock { ack } => {
+                            let _ = ack.send(());
+                            format!("lock:{engine}")
+                        }
+                        Event::Remove { trigger, ack } => {
+                            let _ = ack.send((Ok(()), finder_removal::KeptFolder::default()));
+                            format!("remove:{}", trigger.as_str())
+                        }
+                        Event::Trigger(trigger) => format!("trigger:{}", trigger.as_str()),
+                        Event::AppActivated => "activated".to_string(),
+                    };
+                    record.lock().unwrap().push(line);
+                }
+            });
+            seen
+        }
+
+        const KEY_REPLACED: SignInSettlement = SignInSettlement::Reauthenticated {
+            vault_unlocked: false,
+            key_replaced: true,
+        };
+
+        /// Spec §5.6, a stored key: after a startup 401 this Mac kept sam's key, and meanwhile sam's key was changed on
+        /// another device. Sam signs in again: the server says the kept key is no longer his, so the new token is stored
+        /// WITHOUT it, the key is gone from both Keychain layouts and is not in memory, the recovery phrase is asked
+        /// (`key_replaced`), and the pending edit and the owner stay. Nothing asks Finder to remove anything.
+        #[tokio::test]
+        async fn a_stored_key_the_server_no_longer_accepts_is_removed_and_never_installed() {
+            let fx = sam_with_a_pending_edit();
+            let id = fx.id().to_string();
+            let reconciler = recording_reconciler(&fx);
+            let (server, seen) = serving(KEY_IS_ANOTHER_ACCOUNTS.0, KEY_IS_ANOTHER_ACCOUNTS.1);
+            let mut turn = fx.acct.session_generation();
+
+            let (kind, pending_changes) = fx.decide(&sam(), "tok-new", &server).await;
+            assert_eq!((kind, pending_changes), (reauth::SignInKind::KeyOutdated, 1));
+            assert_eq!(seen.lock().unwrap().len(), 1, "one question, about the kept key");
+            let settled = reauth_without_the_kept_key(&fx.state, &fx.acct, &fx.sources(), "tok-new", &sam(), &mut turn)
+                .await
+                .unwrap();
+
+            assert_eq!(settled, KEY_REPLACED, "the recovery phrase follows, and says why");
+            assert_eq!(stored_key(&id), None, "the outdated key is gone");
+            assert!(!keychain_vault_key_present(&id), "from both Keychain layouts");
+            assert!(fx.acct.session.lock().unwrap().is_none(), "and no key is in memory");
+            assert_eq!(
+                stored_token(&id).as_deref(),
+                Some("tok-new"),
+                "the new token is the stored one"
+            );
+            assert_eq!(keychain_account_email(&id).as_deref(), Some("sam@beebeeb.io"));
+            let db = fx.db();
+            assert_eq!(db.queued_or_staged_count().unwrap(), 1, "the pending edit stays");
+            assert_eq!(
+                db.owner().unwrap(),
+                Some(Identity::new(Some("u-1"), Some("sam@beebeeb.io"))),
+                "the same owner"
+            );
+            assert!(*fx.state.auth_present.lock().unwrap(), "signed in");
+            tokio::task::yield_now().await;
+            assert!(
+                reconciler
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|event| !event.starts_with("remove")),
+                "Finder is never asked to remove: {:?}",
+                reconciler.lock().unwrap()
+            );
+        }
+
+        /// Spec §5.6, a key in memory: sam is unlocked, an engine runs with his key, and the Keychain kept no key. His key
+        /// was changed on another device. The proof is asked about the key in memory; the server no longer accepts it, so
+        /// the session ends the way Lock ends it: the reconciler is told to hold while the engine is still in its slot
+        /// (never to remove), then the engine stops, and no key is left in memory or in the Keychain.
+        #[tokio::test]
+        async fn a_key_in_memory_the_server_no_longer_accepts_ends_the_way_lock_ends_it() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-old", Some("sam@beebeeb.io"))
+                .unwrap();
+            fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            some_operation(&db, "op-pending");
+            let task = tokio::spawn(async {});
+            tokio::task::yield_now().await;
+            *fx.acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+            let reconciler = recording_reconciler(&fx);
+            let (server, seen) = serving(KEY_IS_ANOTHER_ACCOUNTS.0, KEY_IS_ANOTHER_ACCOUNTS.1);
+            let mut turn = fx.acct.session_generation();
+
+            let (kind, _) = fx.decide(&sam(), "tok-new", &server).await;
+            assert_eq!(kind, reauth::SignInKind::KeyOutdated);
+            {
+                let asked = seen.lock().unwrap();
+                assert_eq!(asked.len(), 1);
+                assert!(
+                    asked[0].contains(&recovery_check_of([7u8; 32])),
+                    "the key in memory is the one proved"
+                );
+            }
+            let settled = reauth_without_the_kept_key(&fx.state, &fx.acct, &fx.sources(), "tok-new", &sam(), &mut turn)
+                .await
+                .unwrap();
+
+            assert_eq!(settled, KEY_REPLACED);
+            assert!(
+                fx.acct.session.lock().unwrap().is_none(),
+                "the outdated key left memory"
+            );
+            assert!(fx.acct.engine.lock().await.is_none(), "the engine stopped");
+            assert_eq!(fx.acct.engine_state.lock().unwrap().as_str(), "stopped");
+            assert!(!keychain_vault_key_present(&id), "no key in the Keychain");
+            assert_eq!(stored_token(&id).as_deref(), Some("tok-new"));
+            assert_eq!(db.queued_or_staged_count().unwrap(), 1, "the pending edit stays");
+            tokio::task::yield_now().await;
+            assert_eq!(
+                *reconciler.lock().unwrap(),
+                vec!["lock:engine_tracked".to_string()],
+                "held before the engine stopped, and nothing removed"
+            );
+        }
+
+        /// Spec §5.6: the proof is about the key a same-account sign-in keeps. With a session in memory that is the key
+        /// in memory (`reauth_swap_token` keeps it), even when the Keychain holds another one. Here memory holds one key,
+        /// the Keychain another, and the server accepts only the Keychain's: the key in memory is the one proved, the
+        /// server does not accept it, so the sign-in is `KeyOutdated` (never `SameAccount`), and the key in memory is
+        /// never used with the new session.
+        #[tokio::test]
+        async fn with_a_session_in_memory_the_key_in_memory_is_the_one_proved() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_vault_key_to_keychain(&SessionWrite::for_test(), &id, &[5u8; 32]).unwrap();
+            fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+            fx.db()
+                .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            let _reconciler = recording_reconciler(&fx);
+            let (server, seen) = confirming_only([5u8; 32]);
+            let mut turn = fx.acct.session_generation();
+
+            let (kind, _) = fx.decide(&sam(), "tok-new", &server).await;
+            {
+                let asked = seen.lock().unwrap();
+                assert_eq!(asked.len(), 1, "one question to the server");
+                assert!(
+                    asked[0].contains(&recovery_check_of([7u8; 32])),
+                    "about the key in memory, the one the sign-in keeps"
+                );
+                assert!(
+                    !asked[0].contains(&recovery_check_of([5u8; 32])),
+                    "not about the Keychain's"
+                );
+            }
+            assert_eq!(
+                kind,
+                reauth::SignInKind::KeyOutdated,
+                "the server does not accept the key that would be kept"
+            );
+            let settled = reauth_without_the_kept_key(&fx.state, &fx.acct, &fx.sources(), "tok-new", &sam(), &mut turn)
+                .await
+                .unwrap();
+            assert_eq!(settled, KEY_REPLACED);
+            assert!(
+                fx.acct.session.lock().unwrap().is_none(),
+                "the key in memory is not used with the new session"
+            );
+            assert_eq!(stored_token(&id).as_deref(), Some("tok-new"));
+            assert!(!keychain_vault_key_present(&id), "and no key is left in the Keychain");
+        }
+
+        /// Rule 2 (spec §5.6): with no user id on this Mac's side, a key in memory is proved like a stored one, never
+        /// left to the email. An email-only owner, an unlocked session and no key in the Keychain: the server is asked
+        /// about the key in memory. A key it confirms is in place; one it says is not this account's is a switch, though
+        /// the email is the same; with no check on file, the email decides.
+        #[tokio::test]
+        async fn without_a_user_id_a_key_in_memory_is_proved_not_left_to_the_email() {
+            use reauth::SignInKind::{DifferentAccount, NeedsKeyProof, SameAccount};
+            let cases = [
+                ("a key the server confirms", KEY_IS_THIS_ACCOUNTS, SameAccount),
+                (
+                    "a key the server says is another account's",
+                    KEY_IS_ANOTHER_ACCOUNTS,
+                    DifferentAccount,
+                ),
+                (
+                    "no check on file: the same address decides",
+                    ("400 Bad Request", r#"{"error":"recovery_check_missing"}"#),
+                    SameAccount,
+                ),
+            ];
+            for (name, answer, expected) in cases {
+                let fx = Fixture::new();
+                fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+                fx.db().set_owner(&Identity::new(None, Some("sam@beebeeb.io"))).unwrap();
+                assert!(
+                    !keychain_vault_key_present(fx.id()),
+                    "the premise: no key in the Keychain"
+                );
+                assert_eq!(
+                    fx.classify(&sam()).0,
+                    NeedsKeyProof,
+                    "{name}: rule 2 asks the server, the email rule does not decide"
+                );
+                let (server, seen) = serving(answer.0, answer.1);
+                assert_eq!(fx.decide(&sam(), "tok-new", &server).await.0, expected, "{name}");
+                let asked = seen.lock().unwrap();
+                assert_eq!(asked.len(), 1, "{name}: one question to the server");
+                assert!(
+                    asked[0].contains(&recovery_check_of([7u8; 32])),
+                    "{name}: about the key in memory"
+                );
+            }
+        }
+
+        /// A browser sign-in hands over the account's current key. When the key this Mac kept (and the server
+        /// confirmed, or could not check) is not that key, the kept one is not used: `reauth_in_place` returns before it
+        /// starts an engine, and the handoff installs its own key (`apply_session`). The same key, or a password
+        /// sign-in (no key handed over), keeps the kept one.
+        #[tokio::test]
+        async fn a_handed_over_key_that_differs_from_the_kept_one_replaces_it() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_vault_key_to_keychain(&SessionWrite::for_test(), &id, &[5u8; 32]).unwrap();
+            put_email(&id, "sam@beebeeb.io");
+            fx.db()
+                .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            let (server, _) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+            assert_eq!(
+                fx.decide(&sam(), "tok-new", &server).await.0,
+                reauth::SignInKind::SameAccount
+            );
+            let unlocked = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+            assert!(unlocked, "the kept key is in memory after the swap");
+            assert!(
+                handoff_replaces_kept_key(&fx.acct, Some(&[6u8; 32])),
+                "another key handed over replaces the kept one"
+            );
+            assert!(
+                !handoff_replaces_kept_key(&fx.acct, Some(&[5u8; 32])),
+                "the same key handed over keeps it"
+            );
+            assert!(
+                !handoff_replaces_kept_key(&fx.acct, None),
+                "a password sign-in hands over no key"
+            );
+            let mut one_bit_off = [5u8; 32];
+            one_bit_off[31] ^= 1;
+            assert!(
+                handoff_replaces_kept_key(&fx.acct, Some(&one_bit_off)),
+                "every byte is compared"
+            );
+        }
+
+        /// Rule 3: no id and no stored key. The emails are compared in their canonical form (ruling A″; ASCII-only before):
+        /// a letter-case variant, ASCII or not, is the same account (and the record is completed); another address, or
+        /// an accent that is not a letter case, is not. The server is never asked.
+        #[tokio::test]
+        async fn without_an_id_or_a_key_the_email_decides_in_its_canonical_form() {
+            use reauth::SignInKind::*;
+            let cases = [
+                ("the same address", "sam@beebeeb.io", "sam@beebeeb.io", SameAccount),
+                (
+                    "an ASCII letter-case variant",
+                    "sam@beebeeb.io",
+                    "Sam@Beebeeb.IO",
+                    SameAccount,
+                ),
+                ("another address", "kim@beebeeb.io", "sam@beebeeb.io", DifferentAccount),
+                (
+                    "a non-ASCII case variant is the same account",
+                    "josé@beebeeb.io",
+                    "JOSÉ@beebeeb.io",
+                    SameAccount,
+                ),
+                (
+                    "an accent is not a letter case",
+                    "josé@beebeeb.io",
+                    "jose@beebeeb.io",
+                    DifferentAccount,
+                ),
+            ];
+            for (name, stored, server_spelling, expected) in cases {
+                let fx = Fixture::new();
+                fx.db().set_owner(&Identity::new(None, Some(stored))).unwrap();
+                let (server, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+                let signing_in = profile("u-1", server_spelling);
+                assert_eq!(fx.decide(&signing_in, "tok-new", &server).await.0, expected, "{name}");
+                assert!(
+                    seen.lock().unwrap().is_empty(),
+                    "{name}: without a stored key the server is not asked"
+                );
+                if expected == SameAccount {
+                    reauth_swap_token(
+                        &fx.state,
+                        &fx.acct,
+                        &fx.sources(),
+                        "tok-new",
+                        &signing_in,
+                        &mut fx.acct.session_generation(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fx.db().owner().unwrap(),
+                        Some(Identity::new(Some("u-1"), Some(server_spelling))),
+                        "{name}: the record is completed"
+                    );
+                }
+            }
+        }
+
+        /// What a first sign-in leaves behind before its engine has started: a token and an email in the Keychain, the
+        /// auth flags and (until a relaunch) the cached profile. No owner record, no local data.
+        fn after_a_first_sign_in(fx: &Fixture, cached_profile: bool, vault_key: bool) {
+            persist_session_token_to_keychain(&SessionWrite::for_test(), fx.id(), "tok-1", Some("sam@beebeeb.io"))
+                .unwrap();
+            set_auth_present(&fx.state, true);
+            set_auth_email(&fx.state, Some("sam@beebeeb.io".into()));
+            if cached_profile {
+                *fx.acct.cached_profile.lock().unwrap() = Some(sam());
+            }
+            if vault_key {
+                persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[5u8; 32]).unwrap();
+            }
+        }
+
+        /// Signing in twice as the same account before the first engine has started is NOT a switch: the credentials of
+        /// the first sign-in name the account, and the same order decides (ids, then the server's proof, then the
+        /// email). No warning, no sign-out, nothing created: the token is replaced and the recovery phrase step goes on.
+        #[tokio::test]
+        async fn signing_in_twice_as_the_same_account_before_the_first_engine_starts_is_in_place() {
+            use reauth::SignInKind::SameAccount;
+            // (name, a cached profile is held, a vault key is stored, the sign-in's email, requests the server must get)
+            let worlds = [
+                ("straight after the first sign-in", true, false, "sam@beebeeb.io", 0),
+                (
+                    "straight after, the account's email has changed since: the ids decide",
+                    true,
+                    false,
+                    "renamed@beebeeb.io",
+                    0,
+                ),
+                (
+                    "after a relaunch (no cached profile): the email decides",
+                    false,
+                    false,
+                    "sam@beebeeb.io",
+                    0,
+                ),
+                (
+                    "after a relaunch, another letter case: the email decides",
+                    false,
+                    false,
+                    "Sam@Beebeeb.IO",
+                    0,
+                ),
+                (
+                    "the recovery phrase is entered, profile cached: the ids match and the server proves the key",
+                    true,
+                    true,
+                    "sam@beebeeb.io",
+                    1,
+                ),
+                (
+                    "the recovery phrase is entered, after a relaunch: the server proves the key",
+                    false,
+                    true,
+                    "sam@beebeeb.io",
+                    1,
+                ),
+            ];
+            for (name, cached_profile, vault_key, email, requests) in worlds {
+                let fx = Fixture::new();
+                after_a_first_sign_in(&fx, cached_profile, vault_key);
+                // An empty `state.db` (created, no rows, no owner) is not data either.
+                let _ = fx.db();
+                let (server, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+                let signing_in = profile("u-1", email);
+                let before = fx.snapshot();
+                assert_eq!(
+                    fx.decide(&signing_in, "tok-2", &server).await,
+                    (SameAccount, 0),
+                    "{name}"
+                );
+                assert_eq!(seen.lock().unwrap().len(), requests, "{name}: requests to the server");
+                assert_eq!(fx.snapshot(), before, "{name}: deciding changes nothing");
+
+                let unlocked = reauth_swap_token(
+                    &fx.state,
+                    &fx.acct,
+                    &fx.sources(),
+                    "tok-2",
+                    &signing_in,
+                    &mut fx.acct.session_generation(),
+                )
+                .unwrap();
+                assert_eq!(
+                    unlocked, vault_key,
+                    "{name}: keys come back only if this Mac holds the key"
+                );
+                assert_eq!(
+                    stored_token(fx.id()).as_deref(),
+                    Some("tok-2"),
+                    "{name}: only the token is replaced"
+                );
+                assert_eq!(
+                    stored_key(fx.id()),
+                    vault_key.then_some([5u8; 32]),
+                    "{name}: the key is as it was"
+                );
+                assert!(*fx.state.auth_present.lock().unwrap(), "{name}");
+            }
+            // No state.db at all: the swap does not create one (the engine's first start records the owner).
+            let fx = Fixture::new();
+            after_a_first_sign_in(&fx, true, false);
+            reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-2",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+            assert!(!fx.dir.path().join("state.db").exists(), "nothing is invented");
+        }
+
+        /// A session in memory names its account when nothing else does: the Keychain holds no email (that write is
+        /// allowed to fail) and no profile is cached. Its vault key is proved first (rule 2, spec §5.6): the key the
+        /// server confirms is in place, one it says is another account's is a switch. When the account has no check on
+        /// file, the session's email decides: the same account signs in in place, another one is a switch.
+        #[tokio::test]
+        async fn a_session_in_memory_names_the_account_when_the_keychain_holds_no_email() {
+            use reauth::SignInKind::{DifferentAccount, SameAccount};
+            let fx = Fixture::new();
+            fx.install_session("tok-1", [1u8; 32], Some("sam@beebeeb.io"));
+            assert_eq!(keychain_account_email(fx.id()), None);
+            let sam_spelled = profile("u-1", "Sam@beebeeb.io");
+            let (confirms, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+            assert_eq!(fx.decide(&sam_spelled, "tok-2", &confirms).await.0, SameAccount);
+            let (rejects, _) = serving(KEY_IS_ANOTHER_ACCOUNTS.0, KEY_IS_ANOTHER_ACCOUNTS.1);
+            assert_eq!(fx.decide(&kim(), "tok-2", &rejects).await.0, DifferentAccount);
+            let (missing, _) = serving("400 Bad Request", r#"{"error":"recovery_check_missing"}"#);
+            assert_eq!(
+                fx.decide(&sam_spelled, "tok-2", &missing).await.0,
+                SameAccount,
+                "no check on file: the session's email names sam"
+            );
+            assert_eq!(
+                fx.decide(&kim(), "tok-2", &missing).await.0,
+                DifferentAccount,
+                "and kim is a switch"
+            );
+            let asked = seen.lock().unwrap();
+            assert_eq!(asked.len(), 1);
+            assert!(
+                asked[0].contains(&recovery_check_of([1u8; 32])),
+                "the proof is about the key in memory"
+            );
+        }
+
+        /// Another account in that same window is a switch, by the same order: another id, another email, or a key the
+        /// server says is not this account's. Nothing changes.
+        #[tokio::test]
+        async fn another_account_before_the_first_engine_starts_is_a_switch() {
+            use reauth::SignInKind::DifferentAccount;
+            let worlds = [
+                (
+                    "straight after the first sign-in: another id",
+                    true,
+                    false,
+                    KEY_IS_THIS_ACCOUNTS,
+                    0,
+                ),
+                ("after a relaunch: another email", false, false, KEY_IS_THIS_ACCOUNTS, 0),
+                (
+                    "the phrase is entered, profile cached: another id, the server is not asked",
+                    true,
+                    true,
+                    KEY_IS_THIS_ACCOUNTS,
+                    0,
+                ),
+                (
+                    "the phrase is entered, after a relaunch: the server says it is not this account's key",
+                    false,
+                    true,
+                    KEY_IS_ANOTHER_ACCOUNTS,
+                    1,
+                ),
+            ];
+            for (name, cached_profile, vault_key, answer, requests) in worlds {
+                let fx = Fixture::new();
+                after_a_first_sign_in(&fx, cached_profile, vault_key);
+                let (server, seen) = serving(answer.0, answer.1);
+                let before = fx.snapshot();
+                assert_eq!(fx.decide(&kim(), "tok-2", &server).await.0, DifferentAccount, "{name}");
+                assert_eq!(seen.lock().unwrap().len(), requests, "{name}: requests to the server");
+                assert_eq!(fx.snapshot(), before, "{name}: nothing changed on this Mac");
+            }
+        }
+
+        /// Unowned local DATA is still a switch, whatever the credentials say: rows of `state.db` (the queue, a file
+        /// row, a staged payload). The server is not asked, and nothing changes. (A database that cannot be read is not
+        /// this: see `an_unreadable_owner_record_or_state_db_settles_nothing…`.)
+        #[tokio::test]
+        async fn unowned_local_data_is_a_switch_whatever_the_credentials_say() {
+            use reauth::SignInKind::DifferentAccount;
+            type Plant = fn(&Fixture);
+            let data: [(&str, Plant); 3] = [
+                ("a queued change", |fx| some_operation(&fx.db(), "op-unowned")),
+                ("a file row", |fx| {
+                    fx.db()
+                        .upsert_file(&state_db::FileEntry {
+                            file_id: "file-unowned".into(),
+                            path: "/Unowned.txt".into(),
+                            status: state_db::FileStatus::Local,
+                            size_bytes: 1,
+                            modified_at: 0,
+                            content_hash: None,
+                            remote_updated_at: 0,
+                            parent_id: None,
+                            item_kind: state_db::ItemKind::File,
+                        })
+                        .unwrap()
+                }),
+                ("a staged payload", |fx| {
+                    fx.db()
+                        .track_staged_payload("/tmp/bb-unowned-staged.bin", None, false)
+                        .unwrap()
+                }),
+            ];
+            for (name, plant) in data {
+                // The credentials name the very account that is signing in, and a key is stored: the strongest case for
+                // "the same account", and still a switch.
+                let fx = Fixture::new();
+                after_a_first_sign_in(&fx, true, true);
+                plant(&fx);
+                let (server, seen) = serving(KEY_IS_THIS_ACCOUNTS.0, KEY_IS_THIS_ACCOUNTS.1);
+                let before = fx.snapshot_without_reading_state_db();
+                assert_eq!(fx.decide(&sam(), "tok-2", &server).await.0, DifferentAccount, "{name}");
+                assert!(
+                    seen.lock().unwrap().is_empty(),
+                    "{name}: unowned data is not for the server to settle"
+                );
+                assert_eq!(
+                    fx.snapshot_without_reading_state_db(),
+                    before,
+                    "{name}: nothing changed"
+                );
+            }
+            // A recorded owner makes the same rows owned: the ids decide.
+            let fx = Fixture::new();
+            after_a_first_sign_in(&fx, true, false);
+            fx.db()
+                .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            some_operation(&fx.db(), "op-owned");
+            assert_eq!(fx.classify(&sam()).0, reauth::SignInKind::SameAccount);
+        }
+
+        /// A lock that a panic poisoned counts as a trace, in each of the three places that read one: flipping any ONE of
+        /// them to "absent" lets another account in as a first sign-in.
+        #[test]
+        fn a_poisoned_lock_counts_as_a_trace_in_each_of_its_three_places() {
+            type Spoil = fn(&Fixture);
+            type Trace = fn(&reauth::LocalTraces) -> bool;
+            let places: [(&str, Spoil, Trace); 3] = [
+                (
+                    "the session in memory",
+                    |fx| poison(&fx.acct.session),
+                    |t| t.session_in_memory,
+                ),
+                ("auth present", |fx| poison(&fx.state.auth_present), |t| t.auth_present),
+                (
+                    "the cached profile",
+                    |fx| poison(&fx.acct.cached_profile),
+                    |t| t.cached_profile,
+                ),
+            ];
+            for (name, spoil, trace) in places {
+                let fx = Fixture::new();
+                assert!(
+                    !trace(&gather_local_facts(&fx.state, &fx.acct, &fx.sources()).traces),
+                    "{name}: a clean world holds nothing"
+                );
+                spoil(&fx);
+                assert!(
+                    trace(&gather_local_facts(&fx.state, &fx.acct, &fx.sources()).traces),
+                    "{name}: a poisoned lock is a trace"
+                );
+                assert_ne!(
+                    fx.classify(&kim()).0,
+                    reauth::SignInKind::Fresh,
+                    "{name}: another account is never a first sign-in"
+                );
+            }
+        }
+
+        // -- a re-sign-in that fails, and an engine that does not start --
+
+        /// A re-sign-in that fails says whether its token was already written: before that nothing of the new session
+        /// is stored (the caller revokes it), after that the new token is the live one.
+        #[test]
+        fn a_re_sign_in_that_fails_says_whether_its_token_was_stored() {
+            // The owner record cannot be written (an unreadable database): nothing was stored.
+            let fx = Fixture::new();
+            std::fs::write(
+                fx.dir.path().join("state.db"),
+                b"this is not a database, and it is long enough to be read",
+            )
+            .unwrap();
+            let error = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap_err();
+            assert!(!error.token_stored, "{error:?}");
+            assert_eq!(
+                stored_token(fx.id()),
+                None,
+                "nothing of the new session reached the Keychain"
+            );
+
+            // The Keychain write worked and memory cannot be updated (a poisoned lock): the token is stored.
+            let fx = Fixture::new();
+            poison(&fx.acct.session);
+            let error = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap_err();
+            assert!(error.token_stored, "{error:?}");
+            assert_eq!(
+                stored_token(fx.id()).as_deref(),
+                Some("tok-new"),
+                "the new token is the stored one"
+            );
+        }
+
+        /// An engine that does not start after a successful re-sign-in is reported through the engine status; it does
+        /// not turn the sign-in into an error.
+        #[test]
+        fn an_engine_that_does_not_start_after_a_re_sign_in_is_reported_through_the_engine_status() {
+            let fx = Fixture::new();
+            assert_eq!(
+                engine_status::sync_status_engine(&fx.acct.engine_state.lock().unwrap().clone()),
+                "stopped"
+            );
+            note_engine_start_failure(
+                &fx.acct,
+                "Beebeeb couldn’t confirm which account this computer’s local files belong to",
+            );
+            assert_eq!(
+                engine_status::sync_status_engine(&fx.acct.engine_state.lock().unwrap().clone()),
+                "error"
+            );
+            assert!(
+                fx.acct.session.lock().unwrap().is_none() && !*fx.state.auth_present.lock().unwrap(),
+                "and nothing else moves"
+            );
+        }
+
+        // -- the email that names an unidentified session --
+
+        /// A session named after the fact is named in ONE turn of the session-write lock (Task 12, lead ruling 1): the
+        /// session in memory, the cached profile and the Keychain email. While the lock is held none of them changes,
+        /// even after the server has answered; all of them land when the lock is free.
+        #[test]
+        fn the_email_that_names_an_unidentified_session_is_written_under_the_session_lock() {
+            let fx = Fixture::new();
+            fx.install_session("tok-x", [1u8; 32], None);
+            let (server, seen) = serving(
+                "200 OK",
+                r#"{"user_id":"u-1","email":"sam@beebeeb.io","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#,
+            );
+            let held = lock_session_keychain_writes();
+            std::thread::scope(|scope| {
+                let naming = scope.spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(establish_session_identity(&fx.state, &fx.acct, &server, None))
+                });
+                // Wait until the server has the request, then give the naming time to happen if nothing stops it.
+                // Polling, not a fixed pause: the first request of a process is slow.
+                let asked = (0..200).any(|_| {
+                    std::thread::sleep(Duration::from_millis(50));
+                    !seen.lock().unwrap().is_empty()
+                });
+                assert!(asked, "the server was asked while the lock is held");
+                std::thread::sleep(Duration::from_millis(400));
+                assert_eq!(
+                    fx.acct
+                        .session
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|session| session.email.clone()),
+                    None,
+                    "memory waits for the lock"
+                );
+                assert!(fx.acct.cached_profile.lock().unwrap().is_none(), "so does the profile");
+                assert_eq!(keychain_account_email(fx.id()), None, "and the Keychain email");
+                assert!(!naming.is_finished(), "the naming is waiting on the lock, not done");
+                drop(held);
+                assert!(naming.join().unwrap(), "and it names the session once the lock is free");
+            });
+            assert_eq!(
+                fx.acct
+                    .session
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|session| session.email.clone())
+                    .as_deref(),
+                Some("sam@beebeeb.io")
+            );
+            assert_eq!(keychain_account_email(fx.id()).as_deref(), Some("sam@beebeeb.io"));
+        }
+
+        /// The switch warning's count (triage 25): every change that has not uploaded, the queue AND the staged copies
+        /// that outlive their queue row (a staged copy can be the only unsynced copy of an edit, and the sign-out deletes
+        /// it), each counted once. A count that cannot be read settles nothing: the sign-in is `LocalDataUnreadable`,
+        /// never a warning that says 0.
+        #[test]
+        fn the_switch_warning_counts_staged_copies_once_and_an_unreadable_count_settles_nothing() {
+            use reauth::SignInKind::{DifferentAccount, LocalDataUnreadable};
+            let queued_with_payload = |db: &state_db::StateDb, op_id: &str, payload: &str| {
+                db.enqueue_operation(&state_db::PendingOperation {
+                    op_id: op_id.into(),
+                    kind: state_db::OperationKind::UploadVersion,
+                    file_id: Some(format!("file-{op_id}")),
+                    parent_id: None,
+                    target_path: Some(format!("/{op_id}.txt")),
+                    metadata_json: None,
+                    payload_path: Some(payload.into()),
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 5,
+                    next_retry_at: 0,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .unwrap();
+            };
+            let fx = Fixture::new();
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            db.track_staged_payload("/staging/only-copy", None, false).unwrap();
+            assert_eq!(
+                fx.classify(&kim()),
+                (DifferentAccount, 1),
+                "a staged copy whose queue row is gone is a change that has not uploaded"
+            );
+            queued_with_payload(&db, "op-queued", "/staging/queued-copy");
+            db.track_staged_payload("/staging/queued-copy", None, false).unwrap();
+            assert_eq!(
+                fx.classify(&kim()),
+                (DifferentAccount, 2),
+                "a queued change and its staged copy count once"
+            );
+
+            // The count cannot be read (the queue lost the column it is counted by; opening the database recreates a
+            // dropped table, but not a dropped column), while the owner record can.
+            let fx = Fixture::new();
+            fx.db()
+                .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            raw_state_db(&fx)
+                .execute("ALTER TABLE operation_queue DROP COLUMN payload_path", [])
+                .unwrap();
+            assert!(local_data_owner(&fx.sources()).is_ok(), "the premise: the owner reads");
+            assert!(
+                fx.db().pending_changes_count().is_err(),
+                "the premise: the count does not"
+            );
+            assert_eq!(
+                fx.classify(&kim()).0,
+                LocalDataUnreadable,
+                "never a warning that says 0"
+            );
+            assert_eq!(
+                fx.classify(&sam()).0,
+                LocalDataUnreadable,
+                "and nothing is decided for sam either"
+            );
+        }
+
+        /// A mismatch changes nothing on this Mac (lead ruling 6): the check only reads. The world, before and
+        /// after, is identical in the Keychain, the state database, memory and the flags.
+        #[test]
+        fn a_mismatch_changes_nothing_on_this_mac() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-a",
+                &[7u8; 32],
+                Some("sam@beebeeb.io"),
+            )
+            .unwrap();
+            fx.install_session("tok-a", [7u8; 32], Some("sam@beebeeb.io"));
+            *fx.acct.cached_profile.lock().unwrap() = Some(sam());
+            set_auth_email(&fx.state, Some("sam@beebeeb.io".into()));
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            some_operation(&db, "op-a");
+
+            let snapshot = || {
+                (
+                    stored_token(&id),
+                    stored_key(&id),
+                    keychain_account_email(&id),
+                    db.owner().unwrap(),
+                    db.queued_or_staged_count().unwrap(),
+                    fx.acct
+                        .session
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|s| (s.token.clone(), s.master_key, s.email.clone())),
+                    *fx.state.auth_present.lock().unwrap(),
+                    fx.acct.auth_email.lock().unwrap().clone(),
+                    fx.acct
+                        .cached_profile
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|p| p.user_id.clone()),
+                )
+            };
+            let before = snapshot();
+            assert_eq!(
+                fx.classify(&kim()),
+                (reauth::SignInKind::DifferentAccount, 1),
+                "the warning's count is the waiting change"
+            );
+            assert_eq!(snapshot(), before, "nothing on this Mac changed");
+        }
+
+        // -- ruling 2: another account over a retained vault key --
+
+        /// A password, second-factor or browser sign-in as another account while an older account's vault key is
+        /// stored takes the switch path, writes nothing, and the confirmed switch removes the old key BEFORE the
+        /// new account's own key is written: a token is never paired with another account's key.
+        #[tokio::test]
+        async fn another_account_over_a_retained_vault_key_is_a_switch_and_the_switch_removes_the_key_first() {
+            crate::state_paths::init_for_test();
+            type World = fn(&Fixture);
+            let worlds: [(&str, World); 3] = [
+                ("after a startup 401: the key and the email are kept", |fx| {
+                    persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[1u8; 32]).unwrap();
+                    put_email(fx.id(), "a@beebeeb.io");
+                }),
+                ("only the vault key is left", |fx| {
+                    persist_vault_key_to_keychain(&SessionWrite::for_test(), fx.id(), &[1u8; 32]).unwrap()
+                }),
+                ("signed in: token, key, email and the session in memory", |fx| {
+                    persist_session_to_keychain(
+                        &SessionWrite::for_test(),
+                        fx.id(),
+                        "tok-a",
+                        &[1u8; 32],
+                        Some("a@beebeeb.io"),
+                    )
+                    .unwrap();
+                    fx.install_session("tok-a", [1u8; 32], Some("a@beebeeb.io"));
+                }),
+            ];
+            for (name, world) in worlds {
+                // Its own `desktop.toml`, holding A's address for the sign-in prefill (a startup 401 saves it).
+                let config_dir = tempfile::tempdir().unwrap();
+                let config = config_dir.path().to_path_buf();
+                crate::config::CONFIG_DIR_OVERRIDE
+                    .scope(config, async {
+                        let mut cfg = DesktopConfig::load().unwrap();
+                        cfg.last_signed_in_email = Some("a@beebeeb.io".into());
+                        cfg.save().unwrap();
+                        let fx = Fixture::new();
+                        let id = fx.id().to_string();
+                        let (handle, rx) = finder_setup::driver::FinderSetupHandle::for_test(
+                            finder_setup::driver::FinderSetupView::initial(
+                                finder_setup::launch_location::LaunchLocation::Applications,
+                            ),
+                        );
+                        let _ = fx.state.finder_setup.set(handle);
+                        tokio::spawn(confirm_every_finder_event(rx));
+                        world(&fx);
+                        let token_before = stored_token(&id);
+                        let bob = profile("u-b", "b@beebeeb.io");
+                        // The server says A's key is not B's.
+                        let (server, _) = serving(KEY_IS_ANOTHER_ACCOUNTS.0, KEY_IS_ANOTHER_ACCOUNTS.1);
+
+                        // B signs in: the account check says "another account" and writes nothing.
+                        assert_eq!(
+                            fx.decide(&bob, "tok-b", &server).await.0,
+                            reauth::SignInKind::DifferentAccount,
+                            "{name}"
+                        );
+                        assert_eq!(
+                            stored_key(&id),
+                            Some([1u8; 32]),
+                            "{name}: the check leaves A's key where it is"
+                        );
+                        assert_eq!(stored_token(&id), token_before, "{name}: and stores no token of B's");
+
+                        // The confirmed switch: the full sign-out, which forgets A's email too (spec §5.6).
+                        clear_session_impl(&fx.state, true)
+                            .await
+                            .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
+                        assert!(!keychain_vault_key_present(&id), "{name}: A's vault key is gone");
+                        assert_eq!(
+                            (stored_token(&id), keychain_account_email(&id)),
+                            (None, None),
+                            "{name}: and A's token and email"
+                        );
+                        assert_eq!(
+                            DesktopConfig::load().unwrap().last_signed_in_email,
+                            None,
+                            "{name}: and A's address for the sign-in prefill"
+                        );
+
+                        // B signs in again: a first sign-in. A's key is gone BEFORE B's token is stored and before B's key is.
+                        assert_eq!(fx.classify(&bob).0, reauth::SignInKind::Fresh, "{name}");
+                        let key_present_when_b_signs_in = keychain_vault_key_present(&id);
+                        persist_session_token_to_keychain(
+                            &SessionWrite::for_test(),
+                            &id,
+                            "tok-b",
+                            Some("b@beebeeb.io"),
+                        )
+                        .unwrap();
+                        set_auth_email(&fx.state, Some("b@beebeeb.io".into()));
+                        assert!(
+                            !key_present_when_b_signs_in,
+                            "{name}: a token is never stored next to another account's key"
+                        );
+                        store_recovered_vault_key(
+                            &fx.acct,
+                            &mut fx.acct.session_generation(),
+                            "tok-b",
+                            Some("b@beebeeb.io"),
+                            &[2u8; 32],
+                        )
+                        .unwrap();
+                        assert_eq!(stored_key(&id), Some([2u8; 32]), "{name}: B's key, and only B's");
+                    })
+                    .await;
+            }
+        }
+
+        /// Spec §5.6: the switch's sign-out (`forget_email`) leaves none of A's email in `desktop.toml`, even the address
+        /// an earlier startup 401 saved for the prefill, and saves none again; a plain sign-out keeps the prefill. Each
+        /// world has its own config directory, so no other test's sign-out writes it meanwhile.
+        #[tokio::test]
+        async fn an_account_switch_forgets_the_previous_email_and_a_plain_sign_out_keeps_it() {
+            crate::state_paths::init_for_test();
+            let worlds = [
+                ("the switch", true, Some("a@beebeeb.io"), None),
+                ("the switch, nothing saved before", true, None, None),
+                ("a plain sign-out", false, None, Some("a@beebeeb.io")),
+            ];
+            for (name, forget_email, saved_before, expected) in worlds {
+                let config_dir = tempfile::tempdir().unwrap();
+                let config = config_dir.path().to_path_buf();
+                crate::config::CONFIG_DIR_OVERRIDE
+                    .scope(config, async {
+                        let mut cfg = DesktopConfig::load().unwrap();
+                        cfg.last_signed_in_email = saved_before.map(str::to_string);
+                        cfg.save().unwrap();
+                        let fx = Fixture::new();
+                        let _reconciler = recording_reconciler(&fx);
+                        persist_session_to_keychain(
+                            &SessionWrite::for_test(),
+                            fx.id(),
+                            "tok-a",
+                            &[1u8; 32],
+                            Some("a@beebeeb.io"),
+                        )
+                        .unwrap();
+                        fx.install_session("tok-a", [1u8; 32], Some("a@beebeeb.io"));
+                        clear_session_impl(&fx.state, forget_email)
+                            .await
+                            .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
+                        assert_eq!(
+                            DesktopConfig::load().unwrap().last_signed_in_email.as_deref(),
+                            expected,
+                            "{name}"
+                        );
+                    })
+                    .await;
+            }
+        }
+
+        /// Spec §5.6 ("or it stops"): when `desktop.toml` cannot be written, the switch's sign-out stops before anything
+        /// is torn down: the session, the Keychain, the generation and Finder are as they were, and it says why.
+        #[tokio::test]
+        async fn a_switch_that_cannot_forget_the_email_stops_before_anything_is_torn_down() {
+            crate::state_paths::init_for_test();
+            let config_dir = tempfile::tempdir().unwrap();
+            let config = config_dir.path().to_path_buf();
+            crate::config::CONFIG_DIR_OVERRIDE
+                .scope(config, async {
+                    let mut cfg = DesktopConfig::load().unwrap();
+                    cfg.last_signed_in_email = Some("a@beebeeb.io".into());
+                    cfg.save().unwrap();
+                    // A save writes a temporary file next to `desktop.toml` first: a directory in its place fails it.
+                    std::fs::create_dir(DesktopConfig::path().unwrap().with_extension("toml.tmp")).unwrap();
+                    let fx = Fixture::new();
+                    let reconciler = recording_reconciler(&fx);
+                    persist_session_to_keychain(
+                        &SessionWrite::for_test(),
+                        fx.id(),
+                        "tok-a",
+                        &[1u8; 32],
+                        Some("a@beebeeb.io"),
+                    )
+                    .unwrap();
+                    fx.install_session("tok-a", [1u8; 32], Some("a@beebeeb.io"));
+                    let generation = fx.acct.session_generation();
+                    let before = fx.snapshot();
+
+                    assert_eq!(
+                        clear_session_impl(&fx.state, true).await,
+                        Err(SIGN_OUT_EMAIL_NOT_FORGOTTEN.into())
+                    );
+                    assert_eq!(fx.snapshot(), before, "nothing was torn down");
+                    assert!(
+                        fx.acct.session_unchanged_since(generation),
+                        "no session transition happened"
+                    );
+                    assert_eq!(
+                        DesktopConfig::load().unwrap().last_signed_in_email.as_deref(),
+                        Some("a@beebeeb.io")
+                    );
+                    tokio::task::yield_now().await;
+                    assert!(reconciler.lock().unwrap().is_empty(), "Finder was not asked to remove");
+                })
+                .await;
+        }
+
+        // -- ruling 3: a sign-in while a recovery-phrase unlock is in its server check --
+
+        /// The unlock read A's token and email, then waited for the server. While it waited, A signed out and B signed
+        /// in. The unlock must not write A's key next to B's token, nor A's email over B's.
+        #[test]
+        fn an_unlock_started_for_one_account_never_writes_its_key_next_to_another_accounts_token() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-a", Some("a@beebeeb.io")).unwrap();
+            set_auth_email(&fx.state, Some("a@beebeeb.io".into()));
+            clear_keychain_session(&id).unwrap();
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-b", Some("b@beebeeb.io")).unwrap();
+
+            let result = store_recovered_vault_key(
+                &fx.acct,
+                &mut fx.acct.session_generation(),
+                "tok-a",
+                Some("a@beebeeb.io"),
+                &[7u8; 32],
+            )
+            .map(drop);
+
+            assert_eq!(result, Err(UNLOCK_ACCOUNT_CHANGED.to_string()));
+            assert_eq!(stored_key(&id), None, "A's key is not written next to B's token");
+            assert_eq!(stored_token(&id).as_deref(), Some("tok-b"));
+            assert_eq!(
+                keychain_account_email(&id).as_deref(),
+                Some("b@beebeeb.io"),
+                "and A's email does not replace B's"
+            );
+            assert!(fx.acct.session.lock().unwrap().is_none());
+        }
+
+        /// Every other way the world can change while the phrase is being checked stops the write too, and a world
+        /// that did not change is written as before.
+        #[test]
+        fn an_unlock_writes_only_while_the_account_it_started_with_is_still_stored() {
+            let started = |fx: &Fixture| {
+                persist_session_token_to_keychain(&SessionWrite::for_test(), fx.id(), "tok-a", Some("a@beebeeb.io"))
+                    .unwrap();
+                set_auth_email(&fx.state, Some("a@beebeeb.io".into()));
+            };
+            let unlock = |fx: &Fixture| {
+                store_recovered_vault_key(
+                    &fx.acct,
+                    &mut fx.acct.session_generation(),
+                    "tok-a",
+                    Some("a@beebeeb.io"),
+                    &[7u8; 32],
+                )
+                .map(drop)
+            };
+            let refused = Err(UNLOCK_ACCOUNT_CHANGED.to_string());
+
+            let fx = Fixture::new();
+            started(&fx);
+            clear_keychain_session(fx.id()).unwrap();
+            assert_eq!(unlock(&fx), refused, "signed out meanwhile: no token is stored");
+            assert_eq!(stored_key(fx.id()), None, "and no key is left behind by a sign-out");
+
+            let fx = Fixture::new();
+            started(&fx);
+            persist_session_token_to_keychain(&SessionWrite::for_test(), fx.id(), "tok-a2", Some("a@beebeeb.io"))
+                .unwrap();
+            assert_eq!(
+                unlock(&fx),
+                refused,
+                "the same account signed in again meanwhile: another token is stored"
+            );
+            assert_eq!(stored_key(fx.id()), None);
+            assert_eq!(stored_token(fx.id()).as_deref(), Some("tok-a2"));
+
+            let fx = Fixture::new();
+            started(&fx);
+            fx.install_session("tok-a", [9u8; 32], Some("a@beebeeb.io"));
+            assert_eq!(unlock(&fx), refused, "keys were installed in memory meanwhile");
+            assert_eq!(stored_key(fx.id()), None);
+
+            let fx = Fixture::new();
+            started(&fx);
+            set_auth_email(&fx.state, Some("someone-else@beebeeb.io".into()));
+            assert_eq!(unlock(&fx), refused, "the identity the unlock started with changed");
+            assert_eq!(stored_key(fx.id()), None);
+
+            let fx = Fixture::new();
+            started(&fx);
+            assert_eq!(unlock(&fx), Ok(()), "nothing changed: the key is written");
+            assert_eq!(stored_key(fx.id()), Some([7u8; 32]));
+            assert_eq!(keychain_account_email(fx.id()).as_deref(), Some("a@beebeeb.io"));
+            assert_eq!(stored_token(fx.id()).as_deref(), Some("tok-a"), "next to its own token");
+        }
+
+        /// The other half of the interleaving: B signs in while A's unlock is in its server check. A's token is still
+        /// stored, so B is another account and the check writes nothing, not even an email.
+        #[test]
+        fn a_sign_in_as_another_account_during_an_unlock_writes_nothing() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-a", Some("a@beebeeb.io")).unwrap();
+            set_auth_email(&fx.state, Some("a@beebeeb.io".into()));
+            assert_eq!(
+                fx.classify(&profile("u-b", "b@beebeeb.io")).0,
+                reauth::SignInKind::DifferentAccount
+            );
+            assert_eq!(stored_token(&id).as_deref(), Some("tok-a"));
+            assert_eq!(keychain_account_email(&id).as_deref(), Some("a@beebeeb.io"));
+            assert_eq!(stored_key(&id), None);
+            assert_eq!(
+                store_recovered_vault_key(
+                    &fx.acct,
+                    &mut fx.acct.session_generation(),
+                    "tok-a",
+                    Some("a@beebeeb.io"),
+                    &[7u8; 32]
+                )
+                .map(drop),
+                Ok(()),
+                "A's unlock still completes"
+            );
+        }
+
+        /// The writers of a session and the unlock's check-and-write never run at the same time: nothing runs while
+        /// the lock is held, and every one of them finishes once it is free.
+        #[test]
+        fn the_session_writers_and_the_unlock_check_never_run_at_the_same_time() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-a", Some("a@beebeeb.io")).unwrap();
+            set_auth_email(&fx.state, Some("a@beebeeb.io".into()));
+            let held = lock_session_keychain_writes();
+            let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+            type Job = Box<dyn FnOnce() + Send>;
+            let acct = fx.acct.clone();
+            let jobs: Vec<(&'static str, Job)> = vec![
+                ("a token write", {
+                    let id = id.clone();
+                    Box::new(move || {
+                        let _ = persist_session_token_to_keychain(&SessionWrite::for_test(), &id, "tok-b", None);
+                    })
+                }),
+                ("a token and key write", {
+                    let id = id.clone();
+                    Box::new(move || {
+                        let _ = persist_session_to_keychain(&SessionWrite::for_test(), &id, "tok-b", &[1u8; 32], None);
+                    })
+                }),
+                ("a sign-out clear", {
+                    let id = id.clone();
+                    Box::new(move || {
+                        let _ = clear_keychain_session(&id);
+                    })
+                }),
+                ("the unlock's check and key write", {
+                    Box::new(move || {
+                        let _ = store_recovered_vault_key(
+                            &acct,
+                            &mut acct.session_generation(),
+                            "tok-a",
+                            Some("a@beebeeb.io"),
+                            &[2u8; 32],
+                        );
+                    })
+                }),
+            ];
+            let total = jobs.len();
+            for (name, job) in jobs {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    job();
+                    let _ = tx.send(name);
+                });
+            }
+            if let Ok(name) = rx.recv_timeout(Duration::from_millis(400)) {
+                panic!("{name} ran while the session lock was held");
+            }
+            assert_eq!(
+                stored_token(&id).as_deref(),
+                Some("tok-a"),
+                "nothing was written while the lock was held"
+            );
+            drop(held);
+            for _ in 0..total {
+                rx.recv_timeout(Duration::from_secs(20))
+                    .expect("a writer finishes once the lock is free");
+            }
+        }
     }
 }
 
@@ -13063,9 +28808,19 @@ mod finder_removal_wiring_tests {
 
     /// The text of the item starting at `start`, up to the next line that is exactly `}`.
     fn item(source: &str, start: &str) -> String {
+        item_in(source, start, "\n}\n")
+    }
+
+    /// The text from `start` up to the first `end` after it.
+    fn item_in(source: &str, start: &str, end: &str) -> String {
         let at = source.find(start).unwrap_or_else(|| panic!("{start} exists"));
-        let end = source[at..].find("\n}\n").expect("item ends");
-        source[at..at + end].to_string()
+        let to = source[at..].find(end).expect("item ends");
+        source[at..at + to].to_string()
+    }
+
+    /// Layout-free text (`source_pin::squeeze`): rustfmt may wrap any of these calls.
+    fn squash_ws(text: &str) -> String {
+        crate::source_pin::squeeze(text)
     }
 
     #[test]
@@ -13079,6 +28834,7 @@ mod finder_removal_wiring_tests {
             skipped_cache_files: 0,
             pending_operations_preserved: 0,
             sync_root_preserved: None,
+            engine_stop_unconfirmed: false,
             warnings: Vec::new(),
         };
         let json = serde_json::to_value(&result).unwrap();
@@ -13168,8 +28924,16 @@ mod finder_removal_wiring_tests {
         assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
         assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 
-        // Repair and the add rollback record into the config they save afterwards.
+        // Repair and the add rollback record into the config they save afterwards (Windows and Linux). On macOS
+        // Repair saves no config (spec 2026-10-06 §6.1), so it saves the row's record on its own, under the
+        // config-write lock, without the alert: its result carries the folder to the Sync tab.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        assert!(
+            squash_ws(&repair).contains(&squash_ws(
+                "if let Some(location) = preserved_location.as_deref() {\n        #[cfg(target_os = \"macos\")]\n        remember_kept_folder(location);"
+            )),
+            "macOS Repair saves the folder for the row:\n{repair}"
+        );
         let recorded = repair
             .find("finder_removal::record_kept_folder(&mut cfg, location);")
             .expect("Repair records the folder into its config");
@@ -13198,6 +28962,30 @@ mod finder_removal_wiring_tests {
             .find("return finder_install_failed(&mut cfg, error);")
             .expect("which is saved");
         assert!(saved > 0);
+
+        // Spec A: a reconciler removal nobody waits for (an owed removal, the account binding's Repair, a waiter
+        // that gave up) is surfaced by the port like the sweep's: saved, then the alert.
+        let ports = include_str!("finder_setup/macos_ports.rs").replace("\r\n", "\n");
+        let kept = code_only(&item_in(
+            &ports,
+            "    fn kept_folder(&mut self, kept: KeptFolder) {",
+            "\n    }\n",
+        ));
+        assert!(
+            kept.contains("crate::surface_kept_folder(&self.app, location.as_deref());"),
+            "the port saves and shows it:\n{kept}"
+        );
+        // And the port's removal hands on what macOS kept, with a removal that worked and one that failed (M2).
+        let removal = &ports[ports
+            .find("Op::RemoveDomain => match within(")
+            .expect("the removal arm")..];
+        let removal = squash_ws(&removal[..removal.find("fn publish(").expect("publish follows run")]);
+        for answer in [
+            "Ok(Ok(removal)) => OpResult::Removed(Ok(()), removal.kept),",
+            "Ok(Err(failure)) => OpResult::Removed(Err(failure.error), failure.kept),",
+        ] {
+            assert!(removal.contains(&squash_ws(answer)), "{answer}");
+        }
 
         // The row's two commands are registered.
         for name in ["kept_unsynced_folder", "dismiss_kept_unsynced_folder"] {
@@ -13240,14 +29028,19 @@ mod finder_removal_wiring_tests {
             .expect("then saved");
         assert!(recorded < saved && shown < saved);
 
-        // M1: install() hands the cleanup's removal to the shared decision.
+        // M1 on macOS: since spec 2026-10-06 there is no `install()` (the reconciler adds Beebeeb), and the
+        // reconciler never removes a domain it added: a check that does not come up ends `Failed`, the domain stays.
         let provider = include_str!("macos_file_provider.rs").replace("\r\n", "\n");
-        let install_fn = &provider[provider
-            .find("pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {")
-            .expect("install()")..];
-        let install_fn = &install_fn[..install_fn.find("\n}\n").expect("install() ends")];
         assert!(
-            install_fn.contains("return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));")
+            !provider.contains("pub fn install("),
+            "no macOS install() to clean up after"
+        );
+        let core = include_str!("finder_setup/core.rs").replace("\r\n", "\n");
+        let core = &core[..core.find("\n#[cfg(test)]\nmod tests {").expect("tests follow")];
+        assert_eq!(
+            core.matches("s.phase = Phase::Removing {").count(),
+            4,
+            "the reconciler removes on sign-out, on Repair, and for an owed removal (two places), never after an add"
         );
 
         // M2: the sweep keeps a folder that came back with an error ...
@@ -13274,21 +29067,32 @@ mod finder_removal_wiring_tests {
                 .join("\n")
         };
 
-        // Sign-out: the removal's folder rides the report out of `clear_session_impl` ...
+        // Sign-out: the removal's folder rides the result out of `clear_session_impl` ...
         let sign_out = code_only(&item(&source, "async fn clear_session_impl("));
-        assert!(sign_out.contains(
-            "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain_blocking().await);"
-        ));
-        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-        assert!(squash(&sign_out).contains(
-            "finish_sign_out_after_removal(state,&acct,already_signed_out,preserved_location,clear_keychain_session,)"
-        ));
-        let tail = code_only(&item(&source, "fn finish_sign_out_after_removal("));
+        let removed = sign_out
+            .find("let finder_cleanup = finder_remove_for(state, finder_setup::core::Trigger::SignOut).await;")
+            .expect("spec A: the reconciler removes, first");
+        let kept = sign_out
+            .find("let preserved_location = finder_removal::sign_out_kept_location(finder_cleanup.clone());")
+            .expect("the folder it kept");
+        assert!(removed < kept);
+        // Review I1: every failure after the removal carries it (the removal comes first in spec A, so that is
+        // every failure from the engine stop on), and both Ok returns do.
+        for failure in [
+            "Some(take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?)",
+            "let engine_slot = take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?;",
+            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;",
+            "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
+        ] {
+            assert!(squash_ws(&sign_out).contains(&squash_ws(failure)), "{failure}");
+        }
+        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 6);
         assert_eq!(
-            tail.matches("preserved_location,\n").count(),
-            4,
-            "both Ok returns and both failures after the removal (the Windows session lock, the \
-             Keychain clear) carry it"
+            sign_out.matches("        preserved_location,\n").count(),
+            2,
+            "both Ok returns carry it"
         );
         // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
         let command = code_only(&item(&source, "async fn clear_session("));
@@ -13299,10 +29103,12 @@ mod finder_removal_wiring_tests {
 
         // Repair: the folder goes into the result the Sync tab reads.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        assert!(repair.contains("let removal = finder_remove_for(&state, finder_setup::core::Trigger::Repair).await;"));
+        assert!(repair.contains("let removal = remove_file_provider_domain_blocking().await;"));
         assert!(
-            repair.contains(
-                "finder_removal::repair_removal(remove_file_provider_domain_blocking().await, &mut warnings);"
-            )
+            squash_ws(&repair).contains(&squash_ws(
+                "let (removed_file_provider_domain, preserved_location) = finder_removal::repair_removal(removal, &mut warnings);"
+            ))
         );
         assert!(repair.contains("        preserved_location,\n"));
 
@@ -13312,19 +29118,25 @@ mod finder_removal_wiring_tests {
         assert!(install.contains("show_preserved_files_alert(&app, Some(&location));"));
         assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 
-        // And there is no other removal: three calls, all of them above, all through the wrapper
-        // that moves the blocking removal off the runtime (round 4).
+        // And there is no other removal. macOS: two through the reconciler (sign-out, Repair). Windows and
+        // Linux (no File Provider there): two through the wrapper that moves the call off the runtime (round 4).
+        let production = super::finder_setup_command_tests::production_source();
         assert_eq!(
-            code_only(&source)
-                .matches("remove_file_provider_domain_blocking().await")
-                .count(),
+            code_only(&production).matches("finder_remove_for(").count(),
             3,
-            "3 calls through the blocking wrapper"
+            "the definition and 2 calls"
         );
         assert_eq!(
-            code_only(&source).matches("remove_file_provider_domain()").count(),
+            code_only(&production)
+                .matches("remove_file_provider_domain_blocking().await")
+                .count(),
             2,
-            "only the 2 definitions: no inline call is left"
+            "2 calls through the blocking wrapper"
+        );
+        assert_eq!(
+            code_only(&production).matches("remove_file_provider_domain()").count(),
+            1,
+            "only the definition: no inline call is left"
         );
     }
 
@@ -13340,8 +29152,8 @@ mod finder_removal_wiring_tests {
     /// the completion handler's queue.
     #[test]
     fn test_1882_r4_no_blocking_file_provider_call_runs_on_the_main_thread_or_a_runtime_worker() {
-        let full = source();
-        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        // Production code only: the census below must not count this file's tests, which name these calls.
+        let source = super::finder_setup_command_tests::production_source();
         let code = source
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
@@ -13349,13 +29161,13 @@ mod finder_removal_wiring_tests {
             .join("\n");
         let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
 
-        // The blocking primitives are called in exactly one place each: inside the pool helper.
+        // The blocking primitives are called in exactly one place each: inside the pool helper (Windows and
+        // Linux), or the reconciler's bridge gate (macOS, spec 2026-10-06), which this file never calls past.
         for (call, definitions) in [
-            ("remove_file_provider_domain()", 2), // the macOS and the other-OS definitions
-            ("install_file_provider_domain()", 2),
-            ("macos_file_provider::remove()", 1),
-            ("macos_file_provider::install()?", 1),
-            ("cleanup_stale_domains()", 0),
+            ("remove_file_provider_domain()", 1), // the other-OS definition; macOS removes through the reconciler
+            ("install_file_provider_domain()", 1),
+            ("macos_file_provider::remove()", 0), // only the reconciler's port calls it, in the bridge gate
+            ("macos_file_provider::install()?", 0), // retired on macOS by spec 2026-10-06
         ] {
             assert_eq!(
                 code.matches(call).count(),
@@ -13377,28 +29189,45 @@ mod finder_removal_wiring_tests {
                 "async fn install_file_provider_domain_blocking(",
                 "on_blocking_pool(install_file_provider_domain).await",
             ),
-            (
-                "async fn cleanup_stale_domains_blocking(",
-                "on_blocking_pool(crate::macos_file_provider::cleanup_stale_domains).await",
-            ),
         ] {
             assert!(
                 squash(&item(&code, wrapper)).contains(primitive),
                 "{wrapper} goes through the pool with {primitive}"
             );
         }
+        // macOS: the reconciler's removal and the app-start sweep run inside the bridge gate, whose one
+        // blocking spawn runs every bridge call on the blocking pool (spec 2026-10-06, lead ruling T8-gate-all).
+        let ports = include_str!("finder_setup/macos_ports.rs").replace("\r\n", "\n");
+        assert!(
+            squash(&item_in(&ports, "    async fn blocking_holding<", "\n    }\n"))
+                .contains("tauri::async_runtime::spawn_blocking(move||{"),
+            "the gate's one blocking spawn"
+        );
+        let run = &ports[ports.find("fn run(&mut self, op: Op)").expect("run")..];
+        let run = &run[..run.find("fn publish(").expect("publish follows run")];
+        assert!(
+            squash(&run[run.find("Op::RemoveDomain =>").expect("the removal")..])
+                .contains("gate.run_waiting(BRIDGE_GATE_WAIT,||Ok(macos_file_provider::remove()))"),
+            "the reconciler's removal goes through the gate"
+        );
+        assert!(
+            squash(&item(&ports, "pub(crate) async fn cleanup_stale_domains("))
+                .contains("BridgeGate::shared().run(macos_file_provider::cleanup_stale_domains)"),
+            "so does the sweep"
+        );
 
-        // Every caller awaits the wrapper.
+        // Every caller awaits the reconciler or the wrapper.
         let sign_out = squash(&item(&code, "async fn clear_session_impl("));
-        assert!(sign_out.contains("sign_out_kept_location(remove_file_provider_domain_blocking().await)"));
+        assert!(sign_out.contains("finder_remove_for(state,finder_setup::core::Trigger::SignOut).await"));
         let repair = squash(&item(&code, "async fn reset_macos_integration("));
-        assert!(repair.contains("repair_removal(remove_file_provider_domain_blocking().await,&mutwarnings)"));
+        assert!(repair.contains("finder_remove_for(&state,finder_setup::core::Trigger::Repair).await"));
+        assert!(repair.contains("letremoval=remove_file_provider_domain_blocking().await;"));
         let install = squash(&item(&code, "async fn install_finder_location("));
         assert!(install.contains("matchinstall_file_provider_domain_blocking().await{"));
         assert!(install.contains("letremoval=remove_file_provider_domain_blocking().await;"));
         let sweep_at = code
-            .find("match cleanup_stale_domains_blocking().await")
-            .expect("the sweep awaits the wrapper");
+            .find("match crate::finder_setup::macos_ports::cleanup_stale_domains().await")
+            .expect("the sweep awaits the gate");
         assert!(
             squash(&code[sweep_at - 120..sweep_at]).ends_with("tauri::async_runtime::spawn(asyncmove{"),
             "and runs in a spawned task, off the startup path"
@@ -13408,7 +29237,7 @@ mod finder_removal_wiring_tests {
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
         assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
-        assert!(menu.contains("clear_session_impl(&state).await"));
+        assert!(menu.contains("clear_session_impl(&state,false).await"));
         assert!(
             !menu.contains("remove_file_provider_domain"),
             "no removal in the menu handler itself"
@@ -13450,80 +29279,6 @@ mod blocking_pool_tests {
             here, there,
             "the work ran on the blocking pool, not the caller's thread"
         );
-    }
-}
-
-/// Review I1 (round 2): a sign-out that fails AFTER it removed the Finder location still names
-/// the folder macOS kept. Drives the real post-removal step with a fake Keychain clear, so it
-/// never touches the Keychain, the bridge or a window.
-#[cfg(test)]
-mod sign_out_kept_folder_tests {
-    use super::{
-        AppState, SignOutOutcome, finder_removal, finish_sign_out_after_removal, set_auth_present, sign_out_kept_folder,
-    };
-    use crate::account::{AccountId, synthesize_single_account};
-
-    const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
-
-    fn signed_in(id: &str) -> (AppState, std::sync::Arc<crate::account::AccountRuntime>) {
-        let state = AppState::default();
-        synthesize_single_account(&state, AccountId(id.to_string()));
-        set_auth_present(&state, true);
-        let acct = state.active_account().expect("synthesized account resolves");
-        (state, acct)
-    }
-
-    #[test]
-    fn test_1882_r2_a_sign_out_that_fails_after_the_removal_still_names_the_kept_folder() {
-        let (state, acct) = signed_in("signout-i1-fail");
-        let result = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| {
-            Err("Could not clear Keychain session: the keychain is locked".to_string())
-        });
-        let failure = result
-            .as_ref()
-            .expect_err("the Keychain clear failed, so the sign-out fails");
-        assert_eq!(
-            failure.message,
-            "Could not clear Keychain session: the keychain is locked"
-        );
-        assert_eq!(
-            sign_out_kept_folder(&result),
-            Some(FOLDER),
-            "the error carries the kept folder"
-        );
-        // The alert text the command and the menu raise before they return the error.
-        assert_eq!(
-            sign_out_kept_folder(&result).map(finder_removal::preserved_files_message),
-            Some(format!("{}\n\n{FOLDER}", finder_removal::PRESERVED_FILES_SENTENCE))
-        );
-    }
-
-    #[test]
-    fn test_1882_r2_the_post_removal_step_carries_the_folder_on_success_and_nothing_when_nothing_was_kept() {
-        let (state, acct) = signed_in("signout-i1-ok");
-        let ok = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| Ok(()));
-        assert_eq!(ok.as_ref().map(|report| report.outcome), Ok(SignOutOutcome::Completed));
-        assert_eq!(sign_out_kept_folder(&ok), Some(FOLDER));
-
-        let (state, acct) = signed_in("signout-i1-none");
-        let failed = finish_sign_out_after_removal(&state, &acct, false, None, |_| Err("locked".to_string()));
-        assert_eq!(
-            sign_out_kept_folder(&failed),
-            None,
-            "nothing kept → no alert, even on failure"
-        );
-
-        // Already signed out: a failing Keychain clear is only logged, and the folder still rides out.
-        let (state, acct) = signed_in("signout-i1-noop");
-        set_auth_present(&state, false);
-        let noop = finish_sign_out_after_removal(&state, &acct, true, Some(FOLDER.to_string()), |_| {
-            Err("locked".to_string())
-        });
-        assert_eq!(
-            noop.as_ref().map(|report| report.outcome),
-            Ok(SignOutOutcome::NotSignedIn)
-        );
-        assert_eq!(sign_out_kept_folder(&noop), Some(FOLDER));
     }
 }
 

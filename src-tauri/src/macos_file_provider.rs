@@ -1,241 +1,128 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::time::Duration;
+
+use crate::finder_setup::core::DomainState;
+use crate::finder_setup::error::{FpError, FpErrorCode, app_code};
+
+/// Mirror of `BeebeebFpError` in `src-tauri/macos/FileProviderBridge.m` (spec §6.1). The C side
+/// `_Static_assert`s the same size and field offsets, and the `bridge_error_tests` module compares
+/// `sizeof`, `alignof` and every `offsetof` exported from Objective-C against this struct at
+/// runtime, so a one-sided edit fails a test and not only a compile.
+#[repr(C)]
+pub struct BeebeebFpErrorC {
+    pub code: i64,
+    pub underlying_code: i64,
+    pub has_underlying: i32,
+    pub domain: [c_char; 128],
+    pub underlying_domain: [c_char; 128],
+    pub message: [c_char; 1024],
+}
+
+const _: () = assert!(std::mem::size_of::<BeebeebFpErrorC>() == 1304);
+
+impl BeebeebFpErrorC {
+    /// Every call starts from an all-zero struct, so a bridge path that fails without filling the
+    /// error is seen as "no domain" and becomes an app error, never as stale or garbage data.
+    pub fn zeroed() -> Self {
+        Self {
+            code: 0,
+            underlying_code: 0,
+            has_underlying: 0,
+            domain: [0; 128],
+            underlying_domain: [0; 128],
+            message: [0; 1024],
+        }
+    }
+
+    pub fn into_fp_error(self) -> FpError {
+        let domain = c_array_to_string(&self.domain);
+        if domain.is_empty() {
+            return FpError::app(
+                app_code::UNEXPECTED_BRIDGE_RETURN,
+                "the File Provider bridge failed without describing the error",
+            );
+        }
+        FpError {
+            domain,
+            code: self.code,
+            message: c_array_to_string(&self.message),
+            underlying: (self.has_underlying != 0).then(|| FpErrorCode {
+                domain: c_array_to_string(&self.underlying_domain),
+                code: self.underlying_code,
+            }),
+        }
+    }
+}
+
+/// Bounded read: never past the array, even if the C side forgot the NUL.
+fn c_array_to_string(array: &[c_char]) -> String {
+    let bytes: Vec<u8> = array.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+    String::from_utf8_lossy(&bytes).trim().to_string()
+}
 
 unsafe extern "C" {
-    fn beebeeb_fp_status(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
-    fn beebeeb_fp_visible_url(
-        url_buffer: *mut c_char,
-        url_buffer_len: usize,
-        error_buffer: *mut c_char,
-        error_buffer_len: usize,
-    ) -> i32;
-    fn beebeeb_fp_domain_exists(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
-    fn beebeeb_fp_domain_user_enabled(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
-    fn beebeeb_fp_add_domain(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
-    fn beebeeb_fp_wait_for_domain_ready(
-        timeout_seconds: f64,
-        error_buffer: *mut c_char,
-        error_buffer_len: usize,
-    ) -> i32;
+    fn beebeeb_fp_visible_url(url_buffer: *mut c_char, url_buffer_len: usize, out_error: *mut BeebeebFpErrorC) -> i32;
+    fn beebeeb_fp_domain_user_enabled(out_error: *mut BeebeebFpErrorC) -> i32;
+    fn beebeeb_fp_add_domain(out_error: *mut BeebeebFpErrorC) -> i32;
+    fn beebeeb_fp_wait_for_domain_ready(timeout_seconds: f64, out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_remove(
         location_buffer: *mut c_char,
         location_buffer_len: usize,
         kept_state: *mut i32,
-        error_buffer: *mut c_char,
-        error_buffer_len: usize,
+        out_error: *mut BeebeebFpErrorC,
     ) -> i32;
     fn beebeeb_fp_kept_folder_state_for_path(path: *const c_char) -> i32;
+    fn beebeeb_fp_signal_working_set(out_error: *mut BeebeebFpErrorC) -> i32;
 }
 
 /// Room for the folder macOS reports after a removal that kept files (task 1882). File-system
 /// paths on macOS are limited to `PATH_MAX` (1024) bytes, well under this.
 const PRESERVED_LOCATION_BUFFER_LEN: usize = 4096;
 
-/// How long `install()` waits for a freshly (re-)added domain to stabilize before
-/// giving up with a real timeout. Unchanged from the pre-1524-issue-4 behavior.
-const INSTALL_STABILIZATION_TIMEOUT_SECONDS: f64 = 10.0;
-
-/// Result of an `install()` attempt that did not error outright.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallOutcome {
-    /// The domain was added (or already existed) and stabilized normally.
-    Installed,
-    /// The domain exists but is disabled by the user in System Settings -- installing
-    /// it further is pointless until the user re-enables it there. This is Issue 4:
-    /// `addDomain` reports success and `waitForStabilization` never fires, which used
-    /// to surface as a generic, misleading 10s timeout.
-    UserDisabled,
+/// Run one bridge primitive; a negative return carries the filled error.
+fn call(function: unsafe extern "C" fn(*mut BeebeebFpErrorC) -> i32) -> Result<i32, FpError> {
+    let mut out = BeebeebFpErrorC::zeroed();
+    let code = unsafe { function(&mut out) };
+    if code >= 0 { Ok(code) } else { Err(out.into_fp_error()) }
 }
 
-/// Tri-state read of `NSFileProviderDomain.userEnabled` for the Beebeeb domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DomainUserEnabledState {
-    Enabled,
-    Disabled,
-    /// The domain is not registered with the system yet (a fresh install, or after a
-    /// clean `removeDomain`). Not itself evidence of anything being wrong.
-    NotRegistered,
-}
-
-/// What `install()` should do next, given a `userEnabled` lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallDecision {
-    /// Proceed with the normal add-domain-then-wait-for-stabilization flow.
-    Proceed,
-    /// Short-circuit: report `UserDisabled` without waiting for stabilization.
-    UserDisabled,
-}
-
-/// Pure decision core for Issue 4, used both BEFORE `addDomain` (when the domain
-/// already exists) and AFTER it (before waiting for stabilization) -- the exact same
-/// rule applies at both call sites, so there is exactly one place this branches:
-///
-/// - `Enabled` or `NotRegistered` -> [`InstallDecision::Proceed`]: either the domain is
-///   fine, or it doesn't exist yet (the normal case for a fresh install, where
-///   `addDomain` still needs to run) -- both are the ordinary wait path.
-/// - `Disabled` -> [`InstallDecision::UserDisabled`], no wait: a user-disabled domain
-///   never launches its extension, so `waitForStabilizationWithCompletionHandler`'s
-///   completion block would never fire and the caller would otherwise always burn the
-///   full timeout for a state we already know about.
-/// - A lookup `Err` -> [`InstallDecision::Proceed`]: never invent a `UserDisabled`
-///   verdict from an unreliable signal -- fall back to the pre-existing wait/timeout
-///   behavior, which is what shipped before this fix and is still correct on error.
-pub fn decide_install_step(lookup: &Result<DomainUserEnabledState, String>) -> InstallDecision {
-    match lookup {
-        Ok(DomainUserEnabledState::Disabled) => InstallDecision::UserDisabled,
-        Ok(DomainUserEnabledState::Enabled) | Ok(DomainUserEnabledState::NotRegistered) | Err(_) => {
-            InstallDecision::Proceed
-        }
+/// `NSFileProviderDomain.userEnabled` for the Beebeeb domain, read from the OS's own live
+/// registry (`getDomainsWithCompletionHandler`), not a locally-constructed
+/// `NSFileProviderDomain` object (which carries no system state). `NotRegistered` is a fresh
+/// install, or the state after a clean `removeDomain`: not itself evidence of anything wrong.
+pub fn domain_state() -> Result<DomainState, FpError> {
+    match call(beebeeb_fp_domain_user_enabled)? {
+        1 => Ok(DomainState::Enabled),
+        0 => Ok(DomainState::Disabled),
+        2 => Ok(DomainState::NotRegistered),
+        other => Err(FpError::app(
+            app_code::UNEXPECTED_BRIDGE_RETURN,
+            format!("beebeeb_fp_domain_user_enabled returned {other}"),
+        )),
     }
 }
 
-/// Result of a [`status()`] check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusOutcome {
-    /// The domain is registered, enabled, and stabilized -- Finder integration is live.
-    Installed,
-    /// No Beebeeb domain is registered at all (a fresh install, or after a clean
-    /// `removeDomain`). Not an error.
-    NotInstalled,
-    /// The domain is registered but the user (or macOS) has disabled it in System
-    /// Settings -- Issue 4's condition (task 1524), detected WITHOUT waiting for
-    /// stabilization, which would never complete for a disabled domain.
-    UserDisabled,
+/// `+[NSFileProviderManager addDomain:completionHandler:]` only; does not wait for stabilization.
+pub fn add_domain() -> Result<(), FpError> {
+    call(beebeeb_fp_add_domain).map(|_| ())
 }
 
-/// Pure orchestration for [`status()`], with the live `beebeeb_fp_status` FFI call
-/// injected as `live_status` so this is unit-testable without a live
-/// `NSFileProviderManager` (task 1524 Issue 4, status-path leg -- PR #63 Codex review,
-/// `Onboarding.tsx:488`).
-///
-/// Uses the SAME pure decision ([`decide_install_step`]) as `install()`: a disabled
-/// domain short-circuits to [`StatusOutcome::UserDisabled`] WITHOUT calling
-/// `live_status` at all. That call is exactly the 2s
-/// `waitForStabilizationWithCompletionHandler` that used to always time out for a
-/// disabled domain (`beebeeb_fp_status`'s old unconditional wait) -- surfacing a
-/// fresh, generic "timed out" runtime error that `finder_install_state_from_config`
-/// (lib.rs) then preferred over any persisted `user_disabled` state, so reloading the
-/// onboarding card after leaving and coming back showed the stale timeout copy
-/// instead of the disabled-domain card. Short-circuiting here means the runtime error
-/// `status()` can still produce is only ever a GENUINE stabilization timeout (the
-/// domain is enabled but never came up) -- see [`decide_install_step`]'s own doc
-/// comment for why `Enabled`/`NotRegistered`/lookup-`Err` all fall through to the
-/// normal wait/timeout path.
-fn status_outcome_from(
-    user_enabled: &Result<DomainUserEnabledState, String>,
-    live_status: impl FnOnce() -> Result<bool, String>,
-) -> Result<StatusOutcome, String> {
-    if decide_install_step(user_enabled) == InstallDecision::UserDisabled {
-        return Ok(StatusOutcome::UserDisabled);
-    }
-    Ok(if live_status()? {
-        StatusOutcome::Installed
-    } else {
-        StatusOutcome::NotInstalled
-    })
+pub fn wait_for_domain_ready(timeout: Duration) -> Result<(), FpError> {
+    let mut out = BeebeebFpErrorC::zeroed();
+    let code = unsafe { beebeeb_fp_wait_for_domain_ready(timeout.as_secs_f64(), &mut out) };
+    if code < 0 { Err(out.into_fp_error()) } else { Ok(()) }
 }
 
-pub fn status() -> Result<StatusOutcome, String> {
-    status_outcome_from(&domain_user_enabled_state(), || Ok(call_bridge(beebeeb_fp_status)? == 1))
-}
-
-pub fn visible_url() -> Result<Option<String>, String> {
-    let mut url_buffer = [0i8; 2048];
-    let mut error_buffer = [0i8; 1024];
-    let code = unsafe {
-        beebeeb_fp_visible_url(
-            url_buffer.as_mut_ptr(),
-            url_buffer.len(),
-            error_buffer.as_mut_ptr(),
-            error_buffer.len(),
-        )
-    };
-    if code < 0 {
-        return Err(
-            buffer_to_string(&error_buffer).unwrap_or_else(|| "Resolve File Provider location failed".to_string())
-        );
-    }
-    if code == 0 {
-        return Ok(None);
-    }
-    Ok(buffer_to_string(&url_buffer))
-}
-
-/// Whether the Beebeeb domain is currently registered with the system.
-fn domain_exists() -> Result<bool, String> {
-    Ok(call_bridge(beebeeb_fp_domain_exists)? == 1)
-}
-
-/// Read `NSFileProviderDomain.userEnabled` for the Beebeeb domain via the OS's own
-/// live registry (`getDomainsWithCompletionHandler`), not a locally-constructed
-/// `NSFileProviderDomain` object (which carries no system state).
-fn domain_user_enabled_state() -> Result<DomainUserEnabledState, String> {
-    let mut error_buffer = [0i8; 1024];
-    let code = unsafe { beebeeb_fp_domain_user_enabled(error_buffer.as_mut_ptr(), error_buffer.len()) };
+pub fn visible_url() -> Result<Option<String>, FpError> {
+    let mut url_buffer = [0 as c_char; 2048];
+    let mut out = BeebeebFpErrorC::zeroed();
+    let code = unsafe { beebeeb_fp_visible_url(url_buffer.as_mut_ptr(), url_buffer.len(), &mut out) };
     match code {
-        1 => Ok(DomainUserEnabledState::Enabled),
-        0 => Ok(DomainUserEnabledState::Disabled),
-        2 => Ok(DomainUserEnabledState::NotRegistered),
-        _ => Err(buffer_to_string(&error_buffer)
-            .unwrap_or_else(|| "look up File Provider domain state failed".to_string())),
+        c if c < 0 => Err(out.into_fp_error()),
+        0 => Ok(None),
+        _ => Ok(Some(c_array_to_string(&url_buffer)).filter(|s| !s.is_empty())),
     }
-}
-
-/// Public, frontend-facing tri-state read of whether the Beebeeb domain is currently
-/// user-enabled. Used by the "Beebeeb is turned off in System Settings" card to poll
-/// while it is shown, so it can continue installation automatically once the user
-/// flips System Settings back on -- without re-attempting `addDomain` on every poll.
-pub fn domain_user_enabled() -> Result<DomainUserEnabledState, String> {
-    domain_user_enabled_state()
-}
-
-/// Add (or update) the Beebeeb File Provider domain and wait for it to come up,
-/// short-circuiting with [`InstallOutcome::UserDisabled`] instead of waiting when
-/// Issue 4's condition is detected -- either because the domain already existed and
-/// was disabled before this call, or because it is disabled immediately after
-/// `addDomain` replies (same check, same decision, see [`decide_install_step`]).
-///
-/// On a genuine stabilization failure for a domain that did NOT exist before this
-/// call, the just-created domain is removed again (unchanged cleanup behavior from
-/// the pre-1524-issue-4 implementation) so a failed install doesn't leave an orphaned
-/// domain registered.
-pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {
-    let existed_before_add = domain_exists()?;
-
-    if existed_before_add
-        && decide_install_step(&domain_user_enabled_state()) == InstallDecision::UserDisabled
-    {
-        return Ok(InstallOutcome::UserDisabled);
-    }
-
-    call_bridge(beebeeb_fp_add_domain)?;
-
-    if decide_install_step(&domain_user_enabled_state()) == InstallDecision::UserDisabled {
-        // Do NOT remove the domain here: it is exactly the domain the user needs to
-        // re-enable in System Settings. Removing it would strand the frontend's
-        // "wait for it to be re-enabled" poll with nothing to observe.
-        return Ok(InstallOutcome::UserDisabled);
-    }
-
-    let mut error_buffer = [0i8; 1024];
-    let wait_code = unsafe {
-        beebeeb_fp_wait_for_domain_ready(
-            INSTALL_STABILIZATION_TIMEOUT_SECONDS,
-            error_buffer.as_mut_ptr(),
-            error_buffer.len(),
-        )
-    };
-    if wait_code < 0 {
-        let setup_error =
-            buffer_to_string(&error_buffer).unwrap_or_else(|| "File Provider operation failed".to_string());
-        if !existed_before_add {
-            // Review M1: this cleanup is a removal too; its kept folder rides the error out.
-            return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));
-        }
-        return Err(setup_error.into());
-    }
-
-    Ok(InstallOutcome::Installed)
 }
 
 /// The bridge's own folder check on a path (the same function the removal runs on the URL macOS
@@ -248,6 +135,23 @@ fn kept_state_for_path(path: &str) -> i32 {
     }
 }
 
+/// A removal the bridge reported as failed: the OS error as spec 2026-10-06 §6.1 carries it (the
+/// reconciler classifies it, and callers see its domain and code only), and the folder macOS kept
+/// all the same (task 1882, review M2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeRemovalFailure {
+    pub error: FpError,
+    pub kept: crate::finder_removal::KeptFolder,
+}
+
+impl BridgeRemovalFailure {
+    /// Like `finder_removal::RemovalFailure::kept_location`: the folder to show, if any; logs never
+    /// carry it.
+    pub fn kept_location(self, context: &'static str) -> Option<String> {
+        crate::finder_removal::DomainRemoval { kept: self.kept }.kept_location(context)
+    }
+}
+
 /// Decodes the bridge's reply to a removal, for EVERY removal (`remove()` and the sweep). A folder
 /// that reads as missing is looked at again first (re-review D1, `settle_kept_state`), so the one
 /// early look inside the completion handler cannot hide files macOS puts there a moment later.
@@ -256,8 +160,8 @@ fn decode_removal(
     code: i32,
     kept_state: i32,
     location_buffer: &[c_char],
-    error_buffer: &[i8],
-) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+    error_buffer: BeebeebFpErrorC,
+) -> Result<crate::finder_removal::DomainRemoval, BridgeRemovalFailure> {
     decode_removal_with(
         code,
         kept_state,
@@ -269,37 +173,47 @@ fn decode_removal(
 }
 
 /// [`decode_removal`] with the look and the wait injected, so a test drives the real decode
-/// without sleeping.
+/// without sleeping. The error crosses as spec 2026-10-06 §6.1's structured error; a return code
+/// the bridge does not document is an app error, as for every other primitive.
 fn decode_removal_with(
     code: i32,
     kept_state: i32,
     location_buffer: &[c_char],
-    error_buffer: &[i8],
+    error_buffer: BeebeebFpErrorC,
     check: impl FnMut(&str) -> i32,
     wait: impl FnMut(std::time::Duration),
-) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+) -> Result<crate::finder_removal::DomainRemoval, BridgeRemovalFailure> {
     let location = buffer_to_exact_string(location_buffer);
     let kept_state = crate::finder_removal::settle_kept_state(kept_state, location.as_deref(), check, wait);
-    crate::finder_removal::removal_from_bridge(code, kept_state, location, buffer_to_string(error_buffer))
+    let error = (code < 0).then(|| error_buffer.into_fp_error());
+    crate::finder_removal::removal_from_bridge(
+        code,
+        kept_state,
+        location,
+        error.as_ref().map(|error| error.message.clone()),
+    )
+    .map_err(|failure| BridgeRemovalFailure {
+        error: error.unwrap_or_else(|| FpError::app(app_code::UNEXPECTED_BRIDGE_RETURN, failure.message)),
+        kept: failure.kept,
+    })
 }
 
 /// Removes our Finder location, keeping the files that never reached the server (task 1882,
 /// `NSFileProviderDomainRemovalModePreserveDirtyUserData`). The result says whether macOS kept
 /// anything, checked on disk (round 2, spec §4), and names the folder if so.
-pub fn remove() -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+pub fn remove() -> Result<crate::finder_removal::DomainRemoval, BridgeRemovalFailure> {
     let mut location_buffer = [0 as c_char; PRESERVED_LOCATION_BUFFER_LEN];
     let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
-    let mut error_buffer = [0 as c_char; 1024];
+    let mut out = BeebeebFpErrorC::zeroed();
     let code = unsafe {
         beebeeb_fp_remove(
             location_buffer.as_mut_ptr(),
             location_buffer.len(),
             &mut kept_state,
-            error_buffer.as_mut_ptr(),
-            error_buffer.len(),
+            &mut out,
         )
     };
-    decode_removal(code, kept_state, &location_buffer, &error_buffer)
+    decode_removal(code, kept_state, &location_buffer, out)
 }
 
 /// Result of a best-effort working-set signal (task 1697).
@@ -320,6 +234,14 @@ pub enum WorkingSetSignalOutcome {
 /// (`NSFileProviderManager.getDomains` needs app identity — an unsigned CLI
 /// gets error -2001). Must stay identical to `BeebeebDomainIdentifier` in
 /// `src-tauri/macos/FileProviderBridge.m`.
+///
+/// **Correction — 2026-10-06 (spec `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` §2):**
+/// the paragraph above was wrong on two counts. The zombie's folder is `Beebeeb-Beebeeb`, not
+/// `Beebeeb-Drive`. And no signed `io.beebeeb.app` context can enumerate it, because
+/// `NSFileProviderManager.getDomains` returns only the CALLING provider's domains, so the
+/// sweep below can never see `io.beebeeb.desktop.FileProvider`. The orphan is cleared by the
+/// one-off helper of spec §11. The 1696 forensics read the zombie's display name ("Beebeeb"),
+/// and 1698 renamed our domain to match it, which created the folder collision.
 pub const DOMAIN_IDENTIFIER: &str = "io.beebeeb.app.domain";
 
 /// Pure filter: which of the system's registered domains must be REMOVED?
@@ -342,9 +264,9 @@ pub fn stale_domain_identifiers<'a>(domains: &'a [String], ours: &str) -> Vec<&'
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleDomainCleanup {
     /// Identifiers that were present and stale, with their removal result:
-    /// Ok(()) = removed, Err(message) = the system refused (logged, NOT
+    /// Ok(()) = removed, Err(error) = the system refused (logged, NOT
     /// retried here — the next app start retries the whole sweep).
-    pub removals: Vec<(String, Result<(), String>)>,
+    pub removals: Vec<(String, Result<(), FpError>)>,
     /// Task 1882: the folders where macOS kept un-synced files of a removed
     /// domain, one per such removal. Shown to the person, never logged.
     pub preserved_locations: Vec<String>,
@@ -363,48 +285,38 @@ impl StaleDomainCleanup {
 
 #[cfg(target_os = "macos")]
 mod cleanup_ffi {
-    use std::ffi::CStr;
+    use super::{BeebeebFpErrorC, c_array_to_string};
+    use crate::finder_setup::error::FpError;
     use std::os::raw::c_char;
 
     unsafe extern "C" {
         fn beebeeb_fp_list_domains(
             ids_buffer: *mut c_char,
             ids_buffer_len: usize,
-            error_buffer: *mut c_char,
-            error_buffer_len: usize,
+            out_error: *mut BeebeebFpErrorC,
         ) -> i32;
         fn beebeeb_fp_remove_domain_by_id(
             identifier: *const c_char,
             location_buffer: *mut c_char,
             location_buffer_len: usize,
             kept_state: *mut i32,
-            error_buffer: *mut c_char,
-            error_buffer_len: usize,
+            out_error: *mut BeebeebFpErrorC,
         ) -> i32;
     }
 
     /// Enumerate every registered domain identifier via the ObjC bridge.
-    /// Newline-separated in `buffer`; returns the count, or Err(message).
-    pub fn list_domains() -> Result<Vec<String>, String> {
-        let mut ids_buffer = [0i8; 8192];
-        let mut error_buffer = [0i8; 1024];
-        let count = unsafe {
-            beebeeb_fp_list_domains(
-                ids_buffer.as_mut_ptr(),
-                ids_buffer.len(),
-                error_buffer.as_mut_ptr(),
-                error_buffer.len(),
-            )
-        };
+    /// Newline-separated in the buffer; returns them split, or the bridge's error.
+    pub fn list_domains() -> Result<Vec<String>, FpError> {
+        let mut ids_buffer = [0 as c_char; 8192];
+        let mut out = BeebeebFpErrorC::zeroed();
+        let count = unsafe { beebeeb_fp_list_domains(ids_buffer.as_mut_ptr(), ids_buffer.len(), &mut out) };
         if count < 0 {
-            return Err(super::buffer_to_string(&error_buffer)
-                .unwrap_or_else(|| "enumerate File Provider domains failed".to_string()));
+            return Err(out.into_fp_error());
         }
-        let raw = super::buffer_to_string(&ids_buffer).unwrap_or_default();
-        Ok(raw
+        Ok(c_array_to_string(&ids_buffer)
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty())
+            .filter(|l| !l.is_empty())
             .map(str::to_string)
             .collect())
     }
@@ -412,23 +324,27 @@ mod cleanup_ffi {
     /// Task 1882: keeps the domain's un-synced files, like every removal.
     pub fn remove_domain(
         identifier: &str,
-    ) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+    ) -> Result<crate::finder_removal::DomainRemoval, super::BridgeRemovalFailure> {
+        let c_id = std::ffi::CString::new(identifier).map_err(|_| super::BridgeRemovalFailure {
+            error: FpError::app(
+                crate::finder_setup::error::app_code::UNEXPECTED_BRIDGE_RETURN,
+                "domain identifier contained a NUL byte",
+            ),
+            kept: crate::finder_removal::KeptFolder::default(),
+        })?;
         let mut location_buffer = [0 as c_char; super::PRESERVED_LOCATION_BUFFER_LEN];
         let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
-        let mut error_buffer = [0i8; 1024];
+        let mut out = BeebeebFpErrorC::zeroed();
         let code = unsafe {
-            let c_id = std::ffi::CString::new(identifier)
-                .map_err(|_| "domain identifier contained a NUL byte".to_string())?;
             beebeeb_fp_remove_domain_by_id(
                 c_id.as_ptr(),
                 location_buffer.as_mut_ptr(),
                 location_buffer.len(),
                 &mut kept_state,
-                error_buffer.as_mut_ptr(),
-                error_buffer.len(),
+                &mut out,
             )
         };
-        super::decode_removal(code, kept_state, &location_buffer, &error_buffer)
+        super::decode_removal(code, kept_state, &location_buffer, out)
     }
 }
 
@@ -443,7 +359,7 @@ mod cleanup_ffi {
 /// filter above guarantees it). Per-domain removal failures are recorded and
 /// skipped — one stubborn zombie never blocks the rest or the app.
 #[cfg(target_os = "macos")]
-pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, String> {
+pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, FpError> {
     let domains = match cleanup_ffi::list_domains() {
         Ok(domains) => domains,
         Err(error) => return Err(error),
@@ -465,7 +381,7 @@ pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, String> {
                 cleanup.removals.push((identifier.to_string(), Ok(())));
             }
             Err(failure) => {
-                tracing::warn!(identifier = %identifier, error = %failure, "stale-domain removal failed; the next app start retries");
+                tracing::warn!(identifier = %identifier, error = %failure.error, "stale-domain removal failed; the next app start retries");
                 // Review M2: a folder kept with the error still reaches the person.
                 if let Some(location) = failure.kept_location("stale-domain sweep") {
                     cleanup.preserved_locations.push(location);
@@ -487,41 +403,17 @@ pub fn should_signal_working_set(changed_item_ids: &[String]) -> bool {
 /// Task 1697: call the FFI bridge to signal the replica's working set after
 /// the daemon applied a change batch. Best-effort by contract — a failure is
 /// returned for logging and must never fail the sync tick that produced it.
-pub fn signal_working_set() -> Result<WorkingSetSignalOutcome, String> {
-    let mut error_buffer = [0i8; 1024];
-    let code = unsafe {
-        beebeeb_fp_signal_working_set(error_buffer.as_mut_ptr(), error_buffer.len())
-    };
-    match code {
+pub fn signal_working_set() -> Result<WorkingSetSignalOutcome, FpError> {
+    match call(beebeeb_fp_signal_working_set)? {
         0 => Ok(WorkingSetSignalOutcome::Delivered),
-        -1 => Err(buffer_to_string(&error_buffer)
-            .unwrap_or_else(|| "signal the Beebeeb File Provider working set failed".to_string())),
-        other => Err(format!("beebeeb_fp_signal_working_set returned unexpected code {other}")),
+        other => Err(FpError::app(
+            app_code::UNEXPECTED_BRIDGE_RETURN,
+            format!("beebeeb_fp_signal_working_set returned {other}"),
+        )),
     }
 }
 
-unsafe extern "C" {
-    fn beebeeb_fp_signal_working_set(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
-}
-
-fn call_bridge(function: unsafe extern "C" fn(*mut c_char, usize) -> i32) -> Result<i32, String> {
-    let mut error_buffer = [0i8; 1024];
-    let code = unsafe { function(error_buffer.as_mut_ptr(), error_buffer.len()) };
-    if code >= 0 {
-        return Ok(code);
-    }
-    let message = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
-        .to_string_lossy()
-        .trim()
-        .to_string();
-    Err(if message.is_empty() {
-        "File Provider operation failed".to_string()
-    } else {
-        message
-    })
-}
-
-/// Like `buffer_to_string`, but never trims: a folder the system reported is shown byte for byte
+/// Never trims, unlike `c_array_to_string`: a folder the system reported is shown byte for byte
 /// (task 1882). `None` when the buffer is empty.
 fn buffer_to_exact_string(buffer: &[c_char]) -> Option<String> {
     let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
@@ -530,25 +422,9 @@ fn buffer_to_exact_string(buffer: &[c_char]) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-fn buffer_to_string(buffer: &[i8]) -> Option<String> {
-    let message = unsafe { CStr::from_ptr(buffer.as_ptr()) }
-        .to_string_lossy()
-        .trim()
-        .to_string();
-    if message.is_empty() { None } else { Some(message) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn decide_install_step_enabled_proceeds() {
-        assert_eq!(
-            decide_install_step(&Ok(DomainUserEnabledState::Enabled)),
-            InstallDecision::Proceed
-        );
-    }
 
     // ── Task 1698 part 3: stale domain cleanup (closes 1696, audit G8) ─────
 
@@ -577,7 +453,10 @@ mod tests {
             Vec::<&str>::new()
         );
         // An empty registry removes nothing.
-        assert_eq!(stale_domain_identifiers(&[], "io.beebeeb.app.domain"), Vec::<&str>::new());
+        assert_eq!(
+            stale_domain_identifiers(&[], "io.beebeeb.app.domain"),
+            Vec::<&str>::new()
+        );
         // NEVER a partial match: only exact foreign identifiers are stale.
         assert_eq!(
             stale_domain_identifiers(&["io.beebeeb.app.domain.stale".to_string()], "io.beebeeb.app.domain"),
@@ -590,92 +469,274 @@ mod tests {
             "a case-mangled copy of our id is NOT ours and must be cleaned"
         );
     }
+}
+
+/// Spec §13.1 "Bridge": a real NSError built in Objective-C crosses the FFI and Rust
+/// receives its domain and code unchanged. Also pins the C struct layout and the bridge's
+/// synthesized error codes against their Rust mirrors (lead ruling T1-2), and the memory-safety
+/// properties of the buffer copies (bounded, NUL-terminated, zeroed before filling).
+#[cfg(test)]
+mod bridge_error_tests {
+    use super::*;
+    use crate::finder_setup::error::{APP_DOMAIN, BRIDGE_DOMAIN, FpErrorCode, app_code, bridge_code};
+    use std::ffi::CString;
+    use std::mem::{align_of, offset_of, size_of};
+
+    unsafe extern "C" {
+        fn beebeeb_fp_test_fill_error(
+            domain: *const c_char,
+            code: i64,
+            message: *const c_char,
+            underlying_domain: *const c_char,
+            underlying_code: i64,
+            out_error: *mut BeebeebFpErrorC,
+        );
+        fn beebeeb_fp_test_fill_bridge_error(code: i64, message: *const c_char, out_error: *mut BeebeebFpErrorC);
+        fn beebeeb_fp_test_error_size() -> usize;
+        fn beebeeb_fp_test_error_align() -> usize;
+        /// code, underlying_code, has_underlying, domain, underlying_domain, message.
+        fn beebeeb_fp_test_error_offsets(out: *mut usize);
+        /// ManagerUnavailable, StabilizationTimeout, ResolveUrlTimeout, SignalTimeout, NoIdentifier.
+        fn beebeeb_fp_test_bridge_codes(out: *mut i64);
+        // The one real bridge entry point that fails before it touches the system (task 1882: its
+        // removal reply carries the kept folder too).
+        fn beebeeb_fp_remove_domain_by_id(
+            identifier: *const c_char,
+            location_buffer: *mut c_char,
+            location_buffer_len: usize,
+            kept_state: *mut i32,
+            out_error: *mut BeebeebFpErrorC,
+        ) -> i32;
+    }
+
+    fn through_bridge(domain: &str, code: i64, message: &str, underlying: Option<(&str, i64)>) -> FpError {
+        let domain = CString::new(domain).unwrap();
+        let message = CString::new(message).unwrap();
+        let underlying_domain = underlying.map(|(d, _)| CString::new(d).unwrap());
+        let mut out = BeebeebFpErrorC::zeroed();
+        unsafe {
+            beebeeb_fp_test_fill_error(
+                domain.as_ptr(),
+                code,
+                message.as_ptr(),
+                underlying_domain.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
+                underlying.map_or(0, |(_, c)| c),
+                &mut out,
+            );
+        }
+        out.into_fp_error()
+    }
 
     #[test]
-    fn decide_install_step_not_registered_proceeds() {
-        // A fresh install (domain doesn't exist yet) must still go through the normal
-        // addDomain-then-wait path -- NotRegistered is not itself Issue 4's condition.
+    fn the_error_struct_has_the_same_size_on_both_sides() {
+        assert_eq!(std::mem::size_of::<BeebeebFpErrorC>(), 1304);
         assert_eq!(
-            decide_install_step(&Ok(DomainUserEnabledState::NotRegistered)),
-            InstallDecision::Proceed
+            unsafe { beebeeb_fp_test_error_size() },
+            std::mem::size_of::<BeebeebFpErrorC>()
         );
     }
 
     #[test]
-    fn decide_install_step_disabled_short_circuits_without_waiting() {
+    fn every_field_sits_at_the_same_offset_on_both_sides() {
+        let mut c_offsets = [usize::MAX; 6];
+        unsafe { beebeeb_fp_test_error_offsets(c_offsets.as_mut_ptr()) };
+        let rust_offsets = [
+            offset_of!(BeebeebFpErrorC, code),
+            offset_of!(BeebeebFpErrorC, underlying_code),
+            offset_of!(BeebeebFpErrorC, has_underlying),
+            offset_of!(BeebeebFpErrorC, domain),
+            offset_of!(BeebeebFpErrorC, underlying_domain),
+            offset_of!(BeebeebFpErrorC, message),
+        ];
+        assert_eq!(c_offsets, rust_offsets, "ObjC offsetof vs Rust offset_of!");
+        assert_eq!(rust_offsets, [0, 8, 16, 20, 148, 276], "the layout the spec describes");
+        assert_eq!(unsafe { beebeeb_fp_test_error_align() }, align_of::<BeebeebFpErrorC>());
+        assert_eq!(size_of::<BeebeebFpErrorC>() % align_of::<BeebeebFpErrorC>(), 0);
+    }
+
+    #[test]
+    fn the_bridge_error_codes_are_the_rust_constants() {
+        let mut c_codes = [i64::MIN; 5];
+        unsafe { beebeeb_fp_test_bridge_codes(c_codes.as_mut_ptr()) };
         assert_eq!(
-            decide_install_step(&Ok(DomainUserEnabledState::Disabled)),
-            InstallDecision::UserDisabled
+            c_codes,
+            [
+                bridge_code::MANAGER_UNAVAILABLE,
+                bridge_code::STABILIZATION_TIMEOUT,
+                bridge_code::RESOLVE_URL_TIMEOUT,
+                bridge_code::SIGNAL_TIMEOUT,
+                bridge_code::NO_IDENTIFIER,
+            ],
+            "BeebeebBridge* enum in FileProviderBridge.m vs finder_setup::error::bridge_code"
+        );
+        assert_eq!(c_codes, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn every_classified_domain_and_code_crosses_the_bridge_unchanged() {
+        let cases: &[(&str, i64)] = &[
+            ("NSFileProviderErrorDomain", -2001),
+            ("NSFileProviderErrorDomain", -2002),
+            ("NSFileProviderErrorDomain", -2003),
+            ("NSFileProviderErrorDomain", -2004),
+            ("NSFileProviderErrorDomain", -2005),
+            ("NSFileProviderErrorDomain", -2011),
+            ("NSFileProviderErrorDomain", -2012),
+            ("NSFileProviderErrorDomain", -2013),
+            ("NSFileProviderErrorDomain", -2014),
+            ("NSCocoaErrorDomain", 516),
+            ("NSPOSIXErrorDomain", 17),
+        ];
+        for (domain, code) in cases {
+            let error = through_bridge(domain, *code, "fixture", None);
+            assert_eq!((error.domain.as_str(), error.code), (*domain, *code));
+            assert_eq!(error.message, "fixture");
+            assert_eq!(error.underlying, None, "{domain} {code}");
+        }
+    }
+
+    #[test]
+    fn the_underlying_error_crosses_with_its_own_domain_and_code() {
+        let error = through_bridge("NSCocoaErrorDomain", 516, "exists", Some(("NSPOSIXErrorDomain", 17)));
+        assert_eq!(
+            error.underlying,
+            Some(FpErrorCode {
+                domain: "NSPOSIXErrorDomain".into(),
+                code: 17
+            })
         );
     }
 
     #[test]
-    fn decide_install_step_lookup_error_falls_back_to_proceed() {
-        // A lookup failure must never be treated as evidence of Issue 4 -- fall back to
-        // the pre-existing wait/timeout behavior instead of guessing.
+    fn bridge_synthesized_errors_carry_the_bridge_domain() {
+        let message =
+            CString::new("Timed out waiting for the Beebeeb File Provider domain to become available").unwrap();
+        let mut out = BeebeebFpErrorC::zeroed();
+        unsafe { beebeeb_fp_test_fill_bridge_error(bridge_code::STABILIZATION_TIMEOUT, message.as_ptr(), &mut out) };
+        let error = out.into_fp_error();
         assert_eq!(
-            decide_install_step(&Err("getDomainsWithCompletionHandler failed".to_string())),
-            InstallDecision::Proceed
+            (error.domain.as_str(), error.code),
+            (BRIDGE_DOMAIN, bridge_code::STABILIZATION_TIMEOUT)
         );
+        assert_eq!(error.underlying, None);
     }
 
     #[test]
-    fn status_outcome_disabled_short_circuits_without_calling_live_status() {
-        // The whole point of the status-path fix (PR #63 Codex review,
-        // Onboarding.tsx:488): a disabled domain must never reach the
-        // stabilization-wait FFI call at all, not just resolve to the same
-        // answer eventually.
-        let called = std::cell::Cell::new(false);
-        let result = status_outcome_from(&Ok(DomainUserEnabledState::Disabled), || {
-            called.set(true);
-            Ok(true)
-        });
-        assert_eq!(result, Ok(StatusOutcome::UserDisabled));
-        assert!(!called.get(), "live_status must not be called for a disabled domain");
+    fn a_real_bridge_entry_point_reports_its_synthesized_code() {
+        // No system call happens before the NULL check, so this runs the real call site of
+        // BeebeebBridgeNoIdentifier on any machine.
+        let mut out = BeebeebFpErrorC::zeroed();
+        let code = unsafe {
+            beebeeb_fp_remove_domain_by_id(
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut out,
+            )
+        };
+        assert_eq!(code, -1);
+        let error = out.into_fp_error();
+        assert_eq!(
+            (error.domain.as_str(), error.code),
+            (BRIDGE_DOMAIN, bridge_code::NO_IDENTIFIER)
+        );
+        assert!(!error.message.is_empty());
     }
 
     #[test]
-    fn status_outcome_enabled_proceeds_to_live_status() {
-        assert_eq!(
-            status_outcome_from(&Ok(DomainUserEnabledState::Enabled), || Ok(true)),
-            Ok(StatusOutcome::Installed)
+    fn a_long_message_is_cut_not_overflowed() {
+        // 6000 UTF-8 bytes into a 1024-byte field: strlcpy may cut inside a code point, which
+        // from_utf8_lossy turns into U+FFFD, so count chars, not bytes.
+        let error = through_bridge("NSCocoaErrorDomain", 1, &"é".repeat(3000), None);
+        assert!(
+            error.message.chars().count() <= 1023,
+            "{}",
+            error.message.chars().count()
         );
-        assert_eq!(
-            status_outcome_from(&Ok(DomainUserEnabledState::Enabled), || Ok(false)),
-            Ok(StatusOutcome::NotInstalled)
-        );
+        assert_eq!(error.domain, "NSCocoaErrorDomain");
     }
 
     #[test]
-    fn status_outcome_not_registered_proceeds_to_live_status() {
-        // A fresh install (domain doesn't exist yet) still goes through the normal
-        // check -- NotRegistered is not itself Issue 4's condition.
-        assert_eq!(
-            status_outcome_from(&Ok(DomainUserEnabledState::NotRegistered), || Ok(false)),
-            Ok(StatusOutcome::NotInstalled)
-        );
+    fn an_overlong_ascii_message_fills_exactly_1023_bytes_and_the_last_byte_is_a_nul() {
+        let domain = CString::new("NSCocoaErrorDomain").unwrap();
+        let message = CString::new("m".repeat(5000)).unwrap();
+        let mut out = BeebeebFpErrorC::zeroed();
+        unsafe { beebeeb_fp_test_fill_error(domain.as_ptr(), 1, message.as_ptr(), std::ptr::null(), 0, &mut out) };
+        assert_eq!(out.message[1022], b'm' as c_char);
+        assert_eq!(out.message[1023], 0, "strlcpy must terminate inside the field");
+        assert_eq!(out.into_fp_error().message.len(), 1023);
     }
 
     #[test]
-    fn status_outcome_lookup_error_falls_back_to_live_status() {
-        // Never invent a UserDisabled verdict from an unreliable userEnabled lookup --
-        // fall back to the pre-existing live-status/timeout behavior.
-        assert_eq!(
-            status_outcome_from(&Err("getDomainsWithCompletionHandler failed".to_string()), || Ok(true)),
-            Ok(StatusOutcome::Installed)
+    fn an_overlong_domain_is_cut_and_terminated_without_touching_its_neighbours() {
+        let domain = CString::new("d".repeat(300)).unwrap();
+        let message = CString::new("kept").unwrap();
+        let mut out = BeebeebFpErrorC::zeroed();
+        unsafe { beebeeb_fp_test_fill_error(domain.as_ptr(), 1, message.as_ptr(), std::ptr::null(), 0, &mut out) };
+        assert_eq!(out.domain[126], b'd' as c_char);
+        assert_eq!(out.domain[127], 0, "strlcpy must terminate inside the field");
+        assert!(
+            out.underlying_domain.iter().all(|c| *c == 0),
+            "the domain overran into underlying_domain"
         );
+        let error = out.into_fp_error();
+        assert_eq!(error.domain.len(), 127);
+        assert_eq!(error.message, "kept");
     }
 
     #[test]
-    fn status_outcome_propagates_a_genuine_live_status_error() {
-        // When the domain IS enabled but the live stabilization wait itself times out
-        // (a real, unrelated failure), that error must still surface unchanged --
-        // short-circuiting only ever applies to the disabled case.
+    fn filling_clears_whatever_the_struct_held_before() {
+        let mut out = BeebeebFpErrorC {
+            code: -1,
+            underlying_code: -1,
+            has_underlying: 1,
+            domain: [0x7f; 128],
+            underlying_domain: [0x7f; 128],
+            message: [0x7f; 1024],
+        };
+        let domain = CString::new("NSCocoaErrorDomain").unwrap();
+        let message = CString::new("short").unwrap();
+        unsafe { beebeeb_fp_test_fill_error(domain.as_ptr(), 4, message.as_ptr(), std::ptr::null(), 0, &mut out) };
+        assert_eq!((out.has_underlying, out.underlying_code), (0, 0));
+        assert!(
+            out.underlying_domain.iter().all(|c| *c == 0),
+            "stale underlying_domain survived the fill"
+        );
+        assert!(
+            out.message[6..].iter().all(|c| *c == 0),
+            "stale message bytes survived the fill"
+        );
+        let error = out.into_fp_error();
         assert_eq!(
-            status_outcome_from(&Ok(DomainUserEnabledState::Enabled), || Err(
-                "Timed out waiting for the Beebeeb File Provider domain to become available".to_string()
-            )),
-            Err("Timed out waiting for the Beebeeb File Provider domain to become available".to_string())
+            (error.domain.as_str(), error.code, error.message.as_str()),
+            ("NSCocoaErrorDomain", 4, "short")
+        );
+        assert_eq!(error.underlying, None);
+    }
+
+    #[test]
+    fn a_missing_nul_is_read_only_up_to_the_end_of_its_own_array() {
+        let mut out = BeebeebFpErrorC::zeroed();
+        out.code = 9;
+        out.domain = [b'a' as c_char; 128];
+        out.underlying_domain = [b'b' as c_char; 128];
+        out.message = [b'm' as c_char; 1024];
+        let error = out.into_fp_error();
+        assert_eq!(
+            error.domain,
+            "a".repeat(128),
+            "a read past the array would append the b bytes"
+        );
+        assert_eq!(error.message, "m".repeat(1024));
+    }
+
+    #[test]
+    fn an_unfilled_error_becomes_an_app_error_not_an_empty_one() {
+        let error = BeebeebFpErrorC::zeroed().into_fp_error();
+        assert_eq!(
+            (error.domain.as_str(), error.code),
+            (APP_DOMAIN, app_code::UNEXPECTED_BRIDGE_RETURN)
         );
     }
 }
@@ -815,6 +876,22 @@ mod kept_folder_check_tests {
         buffer
     }
 
+    /// The bridge's structured error (spec 2026-10-06 §6.1) as `BeebeebFillError` leaves it for an
+    /// NSError `NSFileProviderErrorDomain -1001` whose description is `message`. Blank: no error.
+    fn bridge_error(message: &str) -> super::BeebeebFpErrorC {
+        let mut out = super::BeebeebFpErrorC::zeroed();
+        if !message.is_empty() {
+            out.code = -1001;
+            for (slot, byte) in out.domain.iter_mut().zip("NSFileProviderErrorDomain".bytes()) {
+                *slot = byte as std::os::raw::c_char;
+            }
+            for (slot, byte) in out.message.iter_mut().zip(message.bytes()) {
+                *slot = byte as std::os::raw::c_char;
+            }
+        }
+        out
+    }
+
     /// The real decode (the one `remove()` and the sweep both call), on a real disk, with the
     /// wait injected: files that appear after the completion handler reach the person.
     #[test]
@@ -822,14 +899,14 @@ mod kept_folder_check_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
         let location = kept.to_str().expect("utf-8 temp path").to_string();
-        for (code, error) in [(0, ""), (-1, "busy (NSFileProviderErrorDomain -1001)")] {
+        for (code, error) in [(0, ""), (-1, "busy")] {
             let _ = std::fs::remove_dir_all(&kept);
             let mut waits = 0;
             let decoded = super::decode_removal_with(
                 code,
                 KEPT_MISSING,
                 &buffer_of(&location),
-                &buffer_of(error),
+                bridge_error(error),
                 super::kept_state_for_path,
                 |_| {
                     waits += 1;
@@ -842,7 +919,15 @@ mod kept_folder_check_tests {
             let kept_by_it = match decoded {
                 Ok(removal) => removal.kept_location("test"),
                 Err(failure) => {
-                    assert_eq!(failure.message, error, "the error is reported as before");
+                    assert_eq!(
+                        (
+                            failure.error.domain.as_str(),
+                            failure.error.code,
+                            failure.error.message.as_str()
+                        ),
+                        ("NSFileProviderErrorDomain", -1001, error),
+                        "the error is reported as before, as spec 2026-10-06 §6.1's structured error"
+                    );
                     failure.kept_location("test")
                 }
             };
@@ -865,7 +950,7 @@ mod kept_folder_check_tests {
             0,
             KEPT_MISSING,
             &buffer_of(location),
-            &[0i8; 16],
+            super::BeebeebFpErrorC::zeroed(),
             super::kept_state_for_path,
             |_| waits += 1,
         )

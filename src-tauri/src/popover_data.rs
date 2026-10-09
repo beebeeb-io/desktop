@@ -26,14 +26,13 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine_status::{EngineStatusView, SharedStatusView};
 use crate::state_db::{FileEntry, TransferActivity, TransferBacklog};
-use crate::surfaces::phase::{FinderSetup, PopoverPhase, PopoverSnapshot, popover_phase};
+use crate::surfaces::phase::{FinderFailureReason, FinderSetup, PopoverPhase, PopoverSnapshot, popover_phase};
 use crate::transfer_progress::{Direction, Transfer, TransferBoard, display_name, parent_folder};
 
 /// Event Rust emits when the popover is shown; the UI refreshes its snapshot then.
@@ -63,8 +62,6 @@ pub struct PopoverRuntime {
     /// The last `engine-status` payload the listener saw.
     pub status: SharedStatusView,
     pub storage: Arc<Mutex<StorageCache>>,
-    /// `true` while `install_finder_location` runs (state f1, "Adding…").
-    pub finder_adding: Arc<AtomicBool>,
 }
 
 impl Default for PopoverRuntime {
@@ -73,24 +70,7 @@ impl Default for PopoverRuntime {
             transfers: TransferBoard::new(),
             status: Arc::new(Mutex::new(EngineStatusView::default())),
             storage: Arc::new(Mutex::new(StorageCache::default())),
-            finder_adding: Arc::new(AtomicBool::new(false)),
         }
-    }
-}
-
-impl PopoverRuntime {
-    /// Marks the Finder install as running until the guard drops (any exit path).
-    pub fn finder_adding_guard(&self) -> FinderAddingGuard {
-        self.finder_adding.store(true, Ordering::SeqCst);
-        FinderAddingGuard(self.finder_adding.clone())
-    }
-}
-
-pub struct FinderAddingGuard(Arc<AtomicBool>);
-
-impl Drop for FinderAddingGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -241,32 +221,16 @@ pub fn storage_is_full(usage: &StorageUsage) -> bool {
 
 // ── Finder ──────────────────────────────────────────────────────────────────
 
-/// The popover's Finder state from the saved install state. Only macOS has a
-/// Finder location to set up; elsewhere it is always `Ready` (Windows has its own
-/// Explorer integration that this popover does not manage).
-pub fn finder_setup_for(is_macos: bool, status: &str, reason_category: Option<&str>, adding: bool) -> FinderSetup {
-    if !is_macos {
-        return FinderSetup::Ready;
-    }
-    if adding {
-        return FinderSetup::Adding;
-    }
-    match (status, reason_category) {
-        ("installed", _) => FinderSetup::Ready,
-        ("error", Some("user_disabled")) => FinderSetup::UserDisabled,
-        ("error", _) => FinderSetup::Failed,
-        _ => FinderSetup::Missing,
-    }
-}
-
 /// The mono line under state f2 (spec section 4: "reason: timeout"; at most 30
-/// characters, single line). Only for a failure with a category.
-pub fn finder_reason_line(setup: FinderSetup, reason_category: Option<&str>) -> Option<String> {
+/// characters, single line). Only for a failure with a reason. The reason is the reconciler's
+/// typed vocabulary (`FinderFailureReason`, spec 2026-10-06 §6.2): no OS or Rust free text can
+/// reach this line. The popover's Finder state itself is the reconciler's published view; there
+/// is nothing left here to derive it from a saved install state.
+pub fn finder_reason_line(setup: FinderSetup, reason: Option<FinderFailureReason>) -> Option<String> {
     if setup != FinderSetup::Failed {
         return None;
     }
-    let code = reason_category.filter(|c| !c.is_empty())?;
-    let line = format!("reason: {code}");
+    let line = format!("reason: {}", reason?.as_str());
     Some(if line.chars().count() > 30 {
         let mut cut: String = line.chars().take(29).collect();
         cut.push('…');
@@ -308,8 +272,8 @@ pub struct ReasonDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FinderDto {
     pub setup: FinderSetup,
-    /// `finder_install_reason_category` (`timeout`, `provisioning`, ...).
-    pub reason: Option<String>,
+    /// Why setup failed (`extension_loading`, `timeout`, ...): a snake_case string, or null.
+    pub reason: Option<FinderFailureReason>,
     pub reason_line: Option<String>,
 }
 
@@ -386,7 +350,7 @@ pub struct SnapshotInputs {
     pub email: Option<String>,
     pub engine: EngineStatusView,
     pub finder: FinderSetup,
-    pub finder_reason: Option<String>,
+    pub finder_reason: Option<FinderFailureReason>,
     /// Another surface is showing the failed install (see `surfaces::failure`).
     pub finder_failure_elsewhere: bool,
     pub storage: Option<StorageDto>,
@@ -541,6 +505,7 @@ pub fn assemble(inputs: SnapshotInputs) -> PopoverSnapshotDto {
         auth_expired: inputs.auth_expired,
         vault_unlocked: inputs.vault_unlocked,
         finder: inputs.finder,
+        finder_reason: inputs.finder_reason,
         paused: inputs.paused,
         storage_full,
         connectivity: inputs.engine.connectivity(),
@@ -593,7 +558,7 @@ pub fn assemble(inputs: SnapshotInputs) -> PopoverSnapshotDto {
         reason,
         finder: FinderDto {
             setup: inputs.finder,
-            reason_line: finder_reason_line(inputs.finder, inputs.finder_reason.as_deref()),
+            reason_line: finder_reason_line(inputs.finder, inputs.finder_reason),
             reason: inputs.finder_reason,
         },
         storage: inputs.storage,
@@ -802,7 +767,14 @@ mod tests {
     #[test]
     fn a_file_on_the_board_is_syncing_even_when_the_last_event_said_idle() {
         let mut i = healthy();
-        i.board = vec![("u1".into(), Transfer { direction: Direction::Up, done: 1, total: 9 })];
+        i.board = vec![(
+            "u1".into(),
+            Transfer {
+                direction: Direction::Up,
+                done: 1,
+                total: 9,
+            },
+        )];
         assert_eq!(phase_of(i.clone()), PopoverPhase::Syncing);
         // Higher phases still win.
         i.paused = true;
@@ -932,7 +904,7 @@ mod tests {
     fn the_finder_failure_carries_the_reason_line() {
         let mut i = healthy();
         i.finder = FinderSetup::Failed;
-        i.finder_reason = Some("timeout".into());
+        i.finder_reason = Some(FinderFailureReason::Timeout);
         let s = serde_json::to_value(assemble(i)).unwrap();
         assert_eq!(
             s["finder"],
@@ -1051,8 +1023,10 @@ mod tests {
             done("t", "up", "root.txt", 1),
         ];
         let rows = build_activity_rows(&i);
-        let shape: Vec<(&str, &str, &str)> =
-            rows.iter().map(|r| (r.name.as_str(), r.folder.as_str(), r.path.as_str())).collect();
+        let shape: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.folder.as_str(), r.path.as_str()))
+            .collect();
         assert_eq!(
             shape,
             vec![
@@ -1066,77 +1040,36 @@ mod tests {
 
     // ── finder ──────────────────────────────────────────────────────────────
 
-    #[test]
-    fn the_finder_state_maps_from_the_saved_install_state() {
-        use FinderSetup::*;
-        assert_eq!(finder_setup_for(true, "installed", None, false), Ready);
-        assert_eq!(finder_setup_for(true, "missing", None, false), Missing);
-        assert_eq!(finder_setup_for(true, "error", Some("timeout"), false), Failed);
-        assert_eq!(finder_setup_for(true, "error", None, false), Failed);
-        assert_eq!(
-            finder_setup_for(true, "error", Some("user_disabled"), false),
-            UserDisabled
-        );
-        assert_eq!(
-            finder_setup_for(true, "", None, false),
-            Missing,
-            "an unknown status is not installed"
-        );
-    }
+    // The Finder state itself is the reconciler's published view (spec 2026-10-06): the saved
+    // install state and the "adding" flag these tests used to map are gone with `finder_setup_for`
+    // and `PopoverRuntime::finder_adding`. `lib.rs`'s popover command tests cover the view.
 
     #[test]
-    fn an_install_in_progress_is_adding_whatever_was_saved() {
-        use FinderSetup::*;
-        for status in ["installed", "missing", "error"] {
-            assert_eq!(finder_setup_for(true, status, None, true), Adding, "{status}");
-        }
-    }
-
-    #[test]
-    fn only_macos_has_a_finder_location_to_set_up() {
-        for status in ["missing", "error", "installed"] {
-            assert_eq!(
-                finder_setup_for(false, status, Some("unsupported"), true),
-                FinderSetup::Ready,
-                "{status}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_finder_reason_line_adds_the_category_and_fits_30_characters() {
+    fn the_finder_reason_line_adds_the_typed_reason_and_fits_30_characters() {
         assert_eq!(
-            finder_reason_line(FinderSetup::Failed, Some("timeout")).as_deref(),
+            finder_reason_line(FinderSetup::Failed, Some(FinderFailureReason::Timeout)).as_deref(),
             Some("reason: timeout")
         );
         assert_eq!(finder_reason_line(FinderSetup::Failed, None), None);
-        assert_eq!(finder_reason_line(FinderSetup::Failed, Some("")), None);
         assert_eq!(
-            finder_reason_line(FinderSetup::Missing, Some("timeout")),
+            finder_reason_line(FinderSetup::Missing, Some(FinderFailureReason::Timeout)),
             None,
             "only a failure has a reason line"
         );
-        let long = finder_reason_line(FinderSetup::Failed, Some("a-very-long-category-name-that-overflows")).unwrap();
-        assert_eq!(long.chars().count(), 30);
-        assert!(long.ends_with('…'));
     }
 
     #[test]
-    fn the_adding_guard_sets_the_flag_until_it_drops_on_any_exit() {
-        let rt = PopoverRuntime::default();
-        assert!(!rt.finder_adding.load(Ordering::SeqCst));
-        {
-            let _g = rt.finder_adding_guard();
-            assert!(rt.finder_adding.load(Ordering::SeqCst));
+    fn every_reason_line_fits_30_characters() {
+        for reason in FinderFailureReason::ALL {
+            let line =
+                finder_reason_line(FinderSetup::Failed, Some(reason)).expect("a failure with a reason has a line");
+            assert!(line.chars().count() <= 30, "{line}");
+            assert_eq!(
+                line,
+                format!("reason: {}", reason.as_str()),
+                "the typed reason, whole, never a cut word"
+            );
         }
-        assert!(!rt.finder_adding.load(Ordering::SeqCst));
-        // An early return (a failed install) drops it too.
-        fn failing(rt: &PopoverRuntime) -> Result<(), ()> {
-            let _g = rt.finder_adding_guard();
-            Err(())
-        }
-        let _ = failing(&rt);
-        assert!(!rt.finder_adding.load(Ordering::SeqCst));
     }
 
     // ── the storage cache ───────────────────────────────────────────────────
@@ -1345,9 +1278,17 @@ mod tests {
         db.enqueue_operation(&waiting).unwrap();
 
         let at_100 = gather_db_view(&db, 5, 100).unwrap().backlog;
-        assert_eq!((at_100.upload_files, at_100.upload_bytes), (1, 100), "only op-a is due at t=100");
+        assert_eq!(
+            (at_100.upload_files, at_100.upload_bytes),
+            (1, 100),
+            "only op-a is due at t=100"
+        );
         let at_500 = gather_db_view(&db, 5, 500).unwrap().backlog;
-        assert_eq!((at_500.upload_files, at_500.upload_bytes), (2, 5_100), "op-b is due again at t=500");
+        assert_eq!(
+            (at_500.upload_files, at_500.upload_bytes),
+            (2, 5_100),
+            "op-b is due again at t=500"
+        );
     }
 
     #[test]

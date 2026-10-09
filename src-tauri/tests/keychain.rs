@@ -73,7 +73,7 @@ fn install_and_clear_session_round_trips_through_store() {
     );
 
     vault
-        .store_wrapped_master_key(SecretBytes::new_master_key([7u8; 32]))
+        .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; 32]))
         .unwrap();
     vault.unlock().unwrap();
     assert_eq!(vault.lock_state(), VaultLockState::Unlocked);
@@ -91,7 +91,7 @@ fn unlock_requires_wrapped_key_and_keeps_key_in_memory_only_while_unlocked() {
 
     assert!(matches!(vault.unlock(), Err(AuthStoreError::NotFound)));
     vault
-        .store_wrapped_master_key(SecretBytes::new_master_key([42u8; 32]))
+        .store_wrapped_master_key(SecretBytes::new_master_key(&[42u8; 32]))
         .unwrap();
 
     vault.unlock().unwrap();
@@ -124,7 +124,7 @@ fn unlock_rejects_wrong_sized_master_key_and_remains_locked() {
 #[test]
 fn debug_output_redacts_session_token_and_key_material() {
     let token = SessionToken::new("super-secret-session-token").unwrap();
-    let secret = SecretBytes::new_master_key([9u8; 32]);
+    let secret = SecretBytes::new_master_key(&[9u8; 32]);
 
     assert_eq!(format!("{token:?}"), "SessionToken(<redacted>)");
     assert_eq!(format!("{secret:?}"), "SecretBytes(<redacted>, len=32)");

@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 // is_impersonation, admin_user_id) are captured so the Account page can
 // surface 2FA / freeze state without a second round-trip.
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AccountProfile {
     pub user_id: String,
     pub email: String,

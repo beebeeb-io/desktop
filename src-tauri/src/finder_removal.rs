@@ -270,7 +270,9 @@ pub fn removal_from_bridge(
 }
 
 /// Add to Finder's own cleanup failed the install (review M1): the error as before, and the folder
-/// the cleanup's removal kept, if any.
+/// the cleanup's removal kept, if any. Since spec 2026-10-06 only Windows and Linux build it (macOS has
+/// no install path; the reconciler adds Beebeeb and never removes a domain it added).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallFailure {
     pub message: String,
@@ -289,7 +291,11 @@ impl From<String> for InstallFailure {
 /// Review M1 (round 2): the cleanup inside Add to Finder removes the domain this attempt added
 /// when it does not come up in time. The install still fails with the setup error (and the
 /// cleanup's error, if that failed too, as before), and the folder that removal kept rides along.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+///
+/// Rebase onto spec 2026-10-06 (2026-10-10): its only caller was macOS `install()`, which spec A
+/// retired (the reconciler adds Beebeeb and never removes a domain it added). Kept, untouched, for
+/// the lead to decide whether it goes; nothing calls it.
+#[allow(dead_code)]
 pub fn install_cleanup_failure(setup_error: String, cleanup: Result<DomainRemoval, RemovalFailure>) -> InstallFailure {
     match cleanup {
         Ok(removal) => InstallFailure {
@@ -1044,8 +1050,9 @@ mod tests {
         let checked = body
             .find("BeebeebKeptFolderState(found_location)")
             .expect("the folder is checked");
+        // Spec 2026-10-06 renamed the bridge's bounded copy to `BeebeebCopyString` (rebase, 2026-10-10).
         let copied = body
-            .find("BeebeebCopyMessage(path, location_buffer")
+            .find("BeebeebCopyString(path, location_buffer")
             .expect("its path is copied");
         let error = body.find("if (found_error != nil)").expect("the error is handled");
         assert!(

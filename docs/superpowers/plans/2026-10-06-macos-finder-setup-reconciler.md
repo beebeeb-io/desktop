@@ -40,14 +40,15 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 14. **A macOS surface the spec does not list.** `src/windows/views/SettingsView.tsx:873` makes the macOS main window's Finder panel call `install_finder_location`. Task 17 moves it onto `finder_setup_state`.
 15. **Apostrophes.** Spec §6.2 writes straight quotes ("hasn't"). Product copy in this repo uses the typographic `’` (for example `src/macSettingsModel.ts:91`). `finderSetupCopy.ts` and the artefact use `’`, and the copy test pins those exact strings.
 16. **D6's "exactly 1 add attempt after the flip" vs §5.5 step 3.** Turning the extension back on leaves the domain registered. §5.5 step 3 then only confirms stability, so the app itself calls `addDomain` **0** times after the flip (core test `user_disabled_poll_reads_only_while_visible_and_a_flip_runs_one_check`). fileproviderd may still log its own re-registration. D6 is therefore gated as "≤ 1" (Task 21), and the wording goes to Guus.
-17. **Local data is bound to the account that created it (ruling R10, hardening).** `state.db` and the files it points at carried no record of their account. Background: private workspace task 1835, which stays out of this public repo. Task 10 adds the binding: an owner record inside `state.db`, checked before every engine start; a different or unrecorded owner's data is reset first; a failed reset or sign-out purge stops. **Windows is covered, but it refuses where macOS and Linux reset.** A Windows PC that holds another account's unsent changes cannot start sync for the new account. The Windows sign-out, which refuses while unsent changes exist (`windows_cf/signout.rs:24`), cannot clear it either, and Windows sign-in refuses while a session is present. That leaves no in-app way forward, ~~which is a decision for Guus (Task 21 step 1)~~. **Ruled R11 (Guus, 2026-10-06):** "Refuse now, escape hatch as its own task". Windows stays fail-closed in this plan, and Task 10's Windows tests prove the refusal. The explicit "Discard and switch" escape hatch is private workspace task 1837.
+17. **Local data is bound to the account that created it (ruling R10, hardening).** `state.db` and the files it points at carried no record of their account. Background: the private workspace task, which stays out of this public repo. Task 10 adds the binding: an owner record inside `state.db`, checked before every engine start; a different or unrecorded owner's data is reset first; a failed reset or sign-out purge stops. **Windows is covered, but it refuses where macOS and Linux reset.** A Windows PC that holds another account's unsent changes cannot start sync for the new account. The Windows sign-out, which refuses while unsent changes exist (`windows_cf/signout.rs:24`), cannot clear it either, and Windows sign-in refuses while a session is present. That leaves no in-app way forward, ~~which is a decision for Guus (Task 21 step 1)~~. **Ruled R11 (Guus, 2026-10-06):** "Refuse now, escape hatch as its own task". Windows stays fail-closed in this plan, and Task 10's Windows tests prove the refusal. The explicit "Discard and switch" escape hatch is private workspace task 1837.
 18. **R8 keeps the keys after a remote revocation.** Today a startup 401 deletes the vault key (`lib.rs:599-622`), so revoking a lost device from the web wipes its keys at its next launch. Task 12 keeps the key so the same account signs in again without its recovery phrase (R8: "keys … all stay"). That is a security trade-off. It is question 5 of the mandatory review (Task 11 step 9), and Task 12 merges only with that review's OK. Its fallback is described in Task 12. **Answered 2026-10-06 by ruling R9:** "Keep the key, review decides". The key stays. Task 12 merges only if the security review agrees, and if it disagrees the decision returns to Guus.
 19. ~~**Identity for installs from before R8.** No server user id is stored today. Task 6 adds `signed_in_user_id`: written at sign-in, backfilled by the startup probe (Task 12) while the session still works, and cleared by a sign-out by choice. Without it, the account check falls back to the account email recorded on this Mac (case-insensitive), and an unknown identity counts as a different account (fail closed). This is review question 1.~~
    Round 3: the identity is the owner record of the local data, inside `state.db` (Task 10), not a `desktop.toml` key. Local data from before R10 is adopted at startup by the email this computer's Keychain still holds. R8 falls back to the owner's email, then the Keychain email, then `last_signed_in_email` (case-insensitive). An identity that cannot be compared is never the same account. This is review question 1.
 20. **A mismatch revokes the newly minted session.** After "Sign out and switch" the person enters the other account's password again. That costs one extra sign-in, but leaves no second live session on the Mac and no new token held across a purge.
 21. **The switch warning is new UI copy.** Task 13 draws it in `design/hifi/macos-settings-dialogs.html` before any code (design first). Guus reviews the wording in that PR.
-22. **The 1835 fix boundary names one function, but engines start in five places.** They are `start_engine_if_possible` (`lib.rs:851`), `persist_sync_root_and_start_engine` (`lib.rs:2562`), `start_engine_for_pending_finder_install` (`lib.rs:2612`), `pick_sync_root` (`lib.rs:4909`) and Task 8's `ensure_sync_root_and_engine`. Onboarding's folder pick and the Finder reconciler bypass the first. So Task 10 binds at the spawn (`spawn_bound_engine`, the only remaining `EngineRunner::spawn(`), and a source test pins it. It also puts the owner inside `state.db` rather than a separate file next to it, with the evidence given in Task 10.
-23. **A failed sign-out now stops on macOS and Linux (R10).** The engine has already stopped and Beebeeb has already left Finder (Task 9 removes it first). So a person whose sign-out fails is still signed in, with no sync and no Finder entry, until they try again or relaunch. The error says to try again. Windows already behaves this way (`lib.rs:1751`).
+22. **The private task's fix boundary names one function, but engines start in five places.** They are `start_engine_if_possible` (`lib.rs:851`), `persist_sync_root_and_start_engine` (`lib.rs:2562`), `start_engine_for_pending_finder_install` (`lib.rs:2612`), `pick_sync_root` (`lib.rs:4909`) and Task 8's `ensure_sync_root_and_engine`. Onboarding's folder pick and the Finder reconciler bypass the first. So Task 10 binds at the spawn (`spawn_bound_engine`, the only remaining `EngineRunner::spawn(`), and a source test pins it. It also puts the owner inside `state.db` rather than a separate file next to it, with the evidence given in Task 10.
+23. **A failed sign-out now stops on macOS and Linux (R10).** The engine has already stopped and Beebeeb has already left Finder (Task 9 removes it first). ~~So a person whose sign-out fails is still signed in, with no sync and no Finder entry, until they try again or relaunch.~~ The error says to try again. Windows already behaves this way (`lib.rs:1751`).
+    Superseded during execution (spec §5.6): a sign-out that stops this way while the keys are still in memory leaves the person signed in, and the reconciler is told the keys are here, so Finder comes back and its check starts the engine again (same account, owner record untouched). Only a sign-out that stops while an earlier engine stop is unconfirmed does not ask for Finder back, because every start refuses until Beebeeb restarts. — lead, 2026-10-08 (final review)
 24. **The account check missed traces that a startup 401 keeps (Codex P1 on PR #113, confirmed).** Round 2's `traces` (Task 11 `settle_sign_in`) was:
     - the session in memory
     - `auth_present`
@@ -88,8 +89,8 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 - Evidence: every new test is seen failing first, and the failure is pasted into the task file's Notes. The tests the spec names are mutation-checked. Each task reports counts (`test result: ok. N passed; 0 failed`, `N pass / 0 fail`), never adjectives.
 - Process: one worktree per lane. `CARGO_TARGET_DIR` is never shared between worktrees. Heavy cargo runs go through `/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh cargo-build -- …` (rc 75 = busy, retry). No `git stash`, no `pkill`, foreground commands only. Lanes do not commit `graphify-out/`. Commits use an explicit pathspec and end with the trailer of the model that wrote them (for example `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`).
 - **R8, re-sign-in in place.** A same-account sign-in replaces only the session token (Keychain and memory). It never purges the queue, never clears or rewrites keys, never removes the Finder domain, and never signs out. A different account, or one whose identity cannot be established, is an account switch: the warning with the pending-change count, then the full sign-out, then a fresh sign-in. On a mismatch nothing local changes. Windows keeps today's sign-in refusal and today's "Sign in again" flow.
-- **R8/R9/R10, security.** The `crypto-security-reviewer` agent reviews Tasks 10–12 before Lane R's PR merges (Task 11 step 9). Its findings are recorded verbatim in the task Notes, and the R10 findings also in private workspace task 1835's Notes.
-- **R10, local data belongs to one account.** Every engine start binds first (`spawn_bound_engine`, the only `EngineRunner::spawn(` in production). Another account's or an unrecorded owner's data is reset before anything starts (Windows refuses instead). An owner that cannot be compared stops the start and deletes nothing. A failed reset or sign-out purge stops. Public wording stays neutral ("local data is bound to the account that created it; a different account never reuses it"); background lives only in private task 1835.
+- **R8/R9/R10, security.** The `crypto-security-reviewer` agent reviews Tasks 10–12 before Lane R's PR merges (Task 11 step 9). Its findings are recorded verbatim in the task Notes, and the R10 findings also in the private workspace task's Notes.
+- **R10, local data belongs to one account.** Every engine start binds first (`spawn_bound_engine`, the only `EngineRunner::spawn(` in production). Another account's or an unrecorded owner's data is reset before anything starts (Windows refuses instead). An owner that cannot be compared stops the start and deletes nothing. A failed reset or sign-out purge stops. Public wording stays neutral ("local data is bound to the account that created it; a different account never reuses it"); background lives only in the private task.
 
 ## Review Focus
 
@@ -99,7 +100,8 @@ These are the five conditions most likely to hurt a real person that the spec im
 2. **Signing out while a check is mid-flight** (for example 8 s into a 10 s stabilization wait): a person expects sign-out to finish with Beebeeb gone from Finder and no engine left running with their keys. Pinned by driver test `an_event_sent_during_an_operation_waits_for_it_and_wins_over_the_rest_of_the_check` (Task 7), source test `sign_out_lock_and_repair_reach_the_reconciler_before_the_engine_stops` (Task 9), and behavioural test `sign_out_waits_for_the_reconciler_removal` (Task 9).
 3. **Locking the vault while a check runs**: a person expects no engine afterwards. Pinned by core test `lock_cancels_the_check_and_holds_until_keys_arrive` (Task 3) and the Task 9 source test.
 4. **A Beebeeb window left open while the extension is off in System Settings**: a person expects a cheap read-only poll that never calls add, and exactly one check when they flip it back on. Pinned by core test `user_disabled_poll_reads_only_while_visible_and_a_flip_runs_one_check` (Task 3) and D6.
-5. **An app on an external disk's Applications folder** (`/Volumes/Data/Applications/Beebeeb.app`): a reasonable person expects it to work. The spec says refuse. Pinned *as the spec rules* by `volumes_is_refused_even_under_an_applications_folder` (Task 2), and listed as Spec issue 11 for Guus to confirm.
+5. **An app on an external disk's Applications folder** (`/Volumes/Data/Applications/Beebeeb.app`): a reasonable person expects it to work. ~~The spec says refuse. Pinned *as the spec rules* by `volumes_is_refused_even_under_an_applications_folder` (Task 2), and listed as Spec issue 11 for Guus to confirm.~~
+   Corrected during execution (spec §6.2): only a bundle at a volume's root is a disk image, so an Applications folder on another disk is a real install and is not refused. The test that pins it is `an_applications_folder_on_another_disk_is_a_real_install` (Task 2); the old test name no longer exists. Spec issue 11 is answered the same way. — lead, 2026-10-08 (final review)
 
 ---
 
@@ -4904,7 +4906,7 @@ Round 2: this step runs after Task 12 and after the security review (Task 11 ste
 
 ## Task 10: Local data is bound to the account that created it (R10, backend, all platforms)
 
-**Lane R.** Ruling R10 (Guus, 2026-10-06, "Fold into 1834"): spec A also owns "local data is bound to the account that created it". This task is the fix boundary of private workspace task 1835. Read that file before starting: it holds the background and the device check, which stay out of this public repo. Write about this task in neutral hardening terms only, in commits, comments and the PR ("local data is bound to the account that created it; a different account never reuses it"). It comes before the R8 tasks because R8's account check (Task 11) reads the owner this task records. Shared code covers macOS, Linux and Windows. **Security-sensitive:** the mandatory review in Task 11 step 9 covers this task too.
+**Lane R.** Ruling R10 (Guus, 2026-10-06, "Fold into 1834"): spec A also owns "local data is bound to the account that created it". This task is the fix boundary of the private workspace task. Read that file before starting: it holds the background and the device check, which stay out of this public repo. Write about this task in neutral hardening terms only, in commits, comments and the PR ("local data is bound to the account that created it; a different account never reuses it"). It comes before the R8 tasks because R8's account check (Task 11) reads the owner this task records. Shared code covers macOS, Linux and Windows. **Security-sensitive:** the mandatory review in Task 11 step 9 covers this task too.
 
 **One primitive, and where it lives (plan decision, with evidence).** The owner of the local data is stored **inside `state.db`**, in the existing `sync_state` key-value table (`state_db.rs:800-803`), as `owner_user_id` and `owner_email`. Round 2's `desktop.toml` key `signed_in_user_id` is dropped (Task 6 no longer adds it). There is now one record, and it is this one, for three reasons:
 
@@ -4914,7 +4916,7 @@ Round 2: this step runs after Task 12 and after the security review (Task 11 ste
 
 The session's own identity is not stored anywhere new. It is the profile its sign-in fetched (`acct.cached_profile`, set at `lib.rs:1105` and `1227`; the startup probe adds it in Task 12) when that profile matches the session's email, and otherwise the session email alone (`acct.auth_email`). So an offline relaunch compares by email.
 
-**Where the check sits (plan decision, with evidence).** The 1835 fix boundary names `start_engine_if_possible`. Engines start in five places, though: `start_engine_if_possible` (`lib.rs:851`), `persist_sync_root_and_start_engine` (`lib.rs:2562`), `start_engine_for_pending_finder_install` (`lib.rs:2612`), `pick_sync_root` (`lib.rs:4909`), and Task 8's `ensure_sync_root_and_engine`. Every sign-in path ends in the first one. Onboarding's folder pick and the Finder reconciler start engines without it. So the check sits at the spawn itself: `spawn_bound_engine` binds first and is the only `EngineRunner::spawn(` left in production code. A source test pins that.
+**Where the check sits (plan decision, with evidence).** The private task's fix boundary names `start_engine_if_possible`. Engines start in five places, though: `start_engine_if_possible` (`lib.rs:851`), `persist_sync_root_and_start_engine` (`lib.rs:2562`), `start_engine_for_pending_finder_install` (`lib.rs:2612`), `pick_sync_root` (`lib.rs:4909`), and Task 8's `ensure_sync_root_and_engine`. Every sign-in path ends in the first one. Onboarding's folder pick and the Finder reconciler start engines without it. So the check sits at the spawn itself: `spawn_bound_engine` binds first and is the only `EngineRunner::spawn(` left in production code. A source test pins that.
 
 **The decision** (pure, `account_binding::decide`):
 
@@ -4993,7 +4995,7 @@ mod account_binding_tests {
 cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib account_binding_tests > $EVID/t10-red-census.log 2>&1; echo "rc=$?"; grep -E "panicked|left|right|test result:" $EVID/t10-red-census.log | head
 ```
 
-Expected: `rc=101`, `every engine start goes through spawn_bound_engine`, `left: 5` (4 at `c351f98` plus Task 8's `ensure_sync_root_and_engine`; 4 if Task 8 removed one), `right: 1`. This is the RED on today's code that private task 1835 asks for. Paste it into Notes and into 1835's Notes.
+Expected: `rc=101`, `every engine start goes through spawn_bound_engine`, `left: 5` (4 at `c351f98` plus Task 8's `ensure_sync_root_and_engine`; 4 if Task 8 removed one), `right: 1`. This is the RED on today's code that the private task asks for. Paste it into Notes and into the private task's Notes.
 
 - [ ] **Step 2: The pure module, tests first**
 
@@ -5832,7 +5834,7 @@ Make each change, run the step-7 `account_binding` command, confirm the named te
 8. In `clear_session_impl`, put back the warn-only arm for a failed purge. Expected: `a_failed_sign_out_purge_stops_the_sign_out_on_macos_and_linux` fails.
 9. Move `adopt_unbound_local_data_at_startup(&acct);` below the probe. Expected: `the_startup_restore_adopts_unbound_local_data_before_anything_starts` fails.
 
-Paste every failure into Notes, and the failures of 1, 4 and 8 also into private task 1835's Notes.
+Paste every failure into Notes, and the failures of 1, 4 and 8 also into the private task's Notes.
 
 - [ ] **Step 9: Commit (neutral message)**
 
@@ -6712,7 +6714,7 @@ git show --stat HEAD
 
 - [ ] **Step 9: Mandatory security review (lead), before Lane R's PR merges**
 
-After Task 12 lands, the lead runs the `crypto-security-reviewer` agent on the combined diff of Tasks 10, 11 and 12 (`git diff <Task 9 commit>..HEAD -- src-tauri/src/account_binding.rs src-tauri/src/state_db.rs src-tauri/src/reauth.rs src-tauri/src/lib.rs src-tauri/src/browser_login.rs src-tauri/src/keychain.rs src-tauri/src/account_dto.rs`). The prompt also gives the reviewer the path of private task 1835, for the R10 background. It names these questions:
+After Task 12 lands, the lead runs the `crypto-security-reviewer` agent on the combined diff of Tasks 10, 11 and 12 (`git diff <Task 9 commit>..HEAD -- src-tauri/src/account_binding.rs src-tauri/src/state_db.rs src-tauri/src/reauth.rs src-tauri/src/lib.rs src-tauri/src/browser_login.rs src-tauri/src/keychain.rs src-tauri/src/account_dto.rs`). The prompt also gives the reviewer the path of the private task, for the R10 background. It names these questions:
 
 1. Can a different account ever be treated as `SameAccount`, by R8 or by the binding? Look at the email fallback and the upgrade adoption of Spec issue 19, and at an owner record that is missing, email-only or stale.
 2. Can local data ever be used under another account's session? Check every engine start (`spawn_bound_engine`), the upgrade adoption, R8's owner recording, and the Windows refusal.
@@ -6724,7 +6726,7 @@ After Task 12 lands, the lead runs the `crypto-security-reviewer` agent on the c
 8. R10 on Windows refuses instead of resetting (Spec issue 17, ruled R11: refuse here; the escape hatch is private task 1837). Is the resulting state safe?
 9. Codex P1 on PR #113 (Spec issue 24): can any retained trace be missed, so that another account gets `Fresh`? The traces are the recorded owner, the Keychain email, the vault key, the cached profile, and queued or staged data. Can the previous account's vault key ever sit next to another account's token, or be loaded for it?
 
-The findings go verbatim into the task Notes under "Security review (R8, R9, R10)", and the R10 findings also into private task 1835's Notes. A HIGH finding blocks the merge until it is fixed (back to the owning task) or Guus rules on it. Without this step, Lane R's PR does not merge.
+The findings go verbatim into the task Notes under "Security review (R8, R9, R10)", and the R10 findings also into the private task's Notes. A HIGH finding blocks the merge until it is fixed (back to the owning task) or Guus rules on it. Without this step, Lane R's PR does not merge.
 
 ---
 
@@ -9506,7 +9508,7 @@ Round 3 (replaces the round-2 paragraph; issue 1 is answered by R8, issues 6 and
 - Spec issue 21 (the switch-warning copy, linking the design commit).
 - Spec issue 23 (a failed sign-out stops).
 
-Background on R10 stays in private task 1835. Its Notes get the security review's R10 findings and the D9 results.
+Background on R10 stays in the private task. Its Notes get the security review's R10 findings and the D9 results.
 
 - [ ] **Step 2: Final automated gates (each branch in a fresh tree at its head, carrying only its own commits)**
 
@@ -9609,11 +9611,11 @@ The phrase `adding domain` is a guess at fileproviderd's wording. In D0, read `$
 
 **Optional D-S (capture a `signing` code; Spec issue 6).** Quit Beebeeb. Re-sign a copy of the QA app without its provisioning profile: `ditto "$APPQA" ~/bb-qa/$TASK/Beebeeb-adhoc.app; codesign --force --deep --sign - --entitlements src-tauri/entitlements.plist ~/bb-qa/$TASK/Beebeeb-adhoc.app`. Launch it, sign in, and read the failure's `domain=`/`code=` in the lifecycle log. If macOS refuses to launch it, write that down and skip the rung. If a new pair appears, add it to `SIGNING_CODES` with its row in `classify_covers_every_row_of_the_table` (Task 1, mutation-checked) before Lane R merges. Delete the ad-hoc copy afterwards.
 
-**D9: account binding (R10), before and after.** Follow the device check written in private workspace task 1835: its steps, its two local test accounts and its expected results stay in that private file. Run it twice:
+**D9: account binding (R10), before and after.** Follow the device check written in the private workspace task: its steps, its two local test accounts and its expected results stay in that private file. Run it twice:
 1. **Before**, on a debug build of `origin/main`. Build it with step 3's recipe in its own detached tree (`git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-before origin/main`), and install it in place of the QA build for this run only.
 2. **After**, on the QA build, reinstalled with `ditto "$APPQA" /Applications/Beebeeb.app`.
 
-Both runs use the local API (`BB_API_BASE` as set in step 4), and the step-4 precondition holds (nothing of Guus's waiting to upload). Evidence goes to the private `.claude/tasks/_qa-evidence/1835/` and to `$EVID` (lifecycle lines and screenshots only). Record the outcome in 1835's Notes. Here, write one line: `D9: pass — see private task 1835` (or the failure). Remove the before-tree afterwards with `git -C … worktree remove ~/code/bb-worktrees/desktop-$TASK-before`.
+Both runs use the local API (`BB_API_BASE` as set in step 4), and the step-4 precondition holds (nothing of Guus's waiting to upload). Evidence goes to the private task's folder under `.claude/tasks/_qa-evidence/` and to `$EVID` (lifecycle lines and screenshots only). Record the outcome in the private task's Notes. Here, write one line: `D9: pass — see the private task` (or the failure). Remove the before-tree afterwards with `git -C … worktree remove ~/code/bb-worktrees/desktop-$TASK-before`.
 
 After D7 and D9, run `launchctl unsetenv BB_API_BASE`.
 
@@ -9623,7 +9625,7 @@ Add a `## Verification evidence` section with one line per check (`D0: pass — 
 
 - [ ] **Step 7: Merge order**
 
-1. Lane R's PR, after its gate, its review, and the `crypto-security-reviewer` run on Tasks 10–12 (Task 11 step 9) with every finding recorded verbatim in Notes (the R10 findings also in private task 1835) and each one either fixed or answered. Task 12 merges only with the review's OK on keeping keys after a revocation (Spec issue 18). Otherwise its discard change is dropped before the PR, and D5's relaunch variant expects the recovery phrase.
+1. Lane R's PR, after its gate, its review, and the `crypto-security-reviewer` run on Tasks 10–12 (Task 11 step 9) with every finding recorded verbatim in Notes (the R10 findings also in the private task) and each one either fixed or answered. Task 12 merges only with the review's OK on keeping keys after a revocation (Spec issue 18). Otherwise its discard change is dropped before the PR, and D5's relaunch variant expects the recovery phrase.
 2. Rebase Lane T onto `origin/main` and rerun step 2's frontend gate and the Rust gate in a fresh tree at the rebased head.
 3. Lane T's PR. Graphify is regenerated on `main` by the lead after each merge.
 
@@ -9662,7 +9664,7 @@ Sign in with the **production** test account from the test-accounts skill. Setti
   - Suggested models: Sonnet lanes.
   - Tasks 3, 7, 8, 10 and 11 are the densest. Tasks 10 and 11 are also the security-sensitive ones. The review is a safety net, not a substitute for care.
   - If a lane stalls past ~40 minutes on one task, replace it with a continuation brief that names the last green step.
-- **R10 wording.** The Lane R brief for Task 10 tells the lane to read private task 1835 and to write only neutral hardening language in commits, comments and the PR. The lead checks the PR body and every commit message before pushing.
+- **R10 wording.** The Lane R brief for Task 10 tells the lane to read the private task and to write only neutral hardening language in commits, comments and the PR. The lead checks the PR body and every commit message before pushing.
 - **Batch boundaries for review:**
   - R1–R3 (pure)
   - R4 (the FFI struct)

@@ -39,7 +39,48 @@ fn every_credential_command_has_admission_before_credential_reads() {
 }
 #[test]
 fn every_engine_start_requires_transition_and_generation_validation() {
-    assert_eq!(SOURCE.matches("EngineRunner::spawn(").count(), 4);
+    // R10 (task 1834, lead ruling T9-starts): ONE `EngineRunner::spawn(` in lib.rs, inside
+    // `spawn_bound_engine`, which reads the keys under the engine slot and binds the local data to the
+    // account before it spawns. Every start site calls it. Six sites: the four below, and two that belong
+    // to the macOS Finder reconciler (spec 2026-10-06 §5.5), `ensure_sync_root_and_engine` and
+    // `start_check_engine`. Both are macOS only, so no Windows admission boundary can apply to them; the
+    // assertions pin that each stays macOS only and calls the gate exactly once. A new start that spawns
+    // an engine anywhere else turns the count red; a new Windows-reachable start must be added below,
+    // where it is checked for transition serialization and generation validation BEFORE the gate.
+    assert_eq!(SOURCE.matches("EngineRunner::spawn(").count(), 1);
+    let gate_at = SOURCE.find("fn spawn_bound_engine(").unwrap();
+    let gate = &SOURCE[gate_at..];
+    let gate = &gate[..gate.find("\n}").unwrap()];
+    assert_eq!(
+        gate.matches("EngineRunner::spawn(").count(),
+        1,
+        "the one start is inside the gate"
+    );
+    assert!(
+        !SOURCE[..gate_at]
+            .trim_end()
+            .lines()
+            .next_back()
+            .unwrap()
+            .trim_start()
+            .starts_with("#[cfg"),
+        "the gate is compiled on Windows"
+    );
+    for macos_only in ["ensure_sync_root_and_engine", "start_check_engine"] {
+        assert_eq!(SOURCE.matches(&format!("fn {macos_only}(")).count(), 1);
+        let at = SOURCE.find(&format!("async fn {macos_only}(")).unwrap();
+        assert!(
+            SOURCE[..at].trim_end().ends_with("#[cfg(target_os = \"macos\")]"),
+            "{macos_only} must stay macOS only"
+        );
+        let start = &SOURCE[at..];
+        let start = &start[..start.find("\n}").unwrap()];
+        assert_eq!(
+            start.matches("spawn_bound_engine(").count(),
+            1,
+            "{macos_only} starts through the gate once"
+        );
+    }
     for name in [
         "start_engine_if_possible",
         "persist_sync_root_and_start_engine",
@@ -47,9 +88,15 @@ fn every_engine_start_requires_transition_and_generation_validation() {
         "pick_sync_root",
     ] {
         let code = body(&SOURCE, name);
+        let validated = code
+            .find("SESSION_COMMANDS.validate_start(generation)?")
+            .unwrap_or_else(|| panic!("{name} bypasses generation validation"));
+        let started = code
+            .find("spawn_bound_engine(")
+            .unwrap_or_else(|| panic!("{name} does not start through the gate"));
         assert!(
-            code.contains("SESSION_COMMANDS.validate_start(generation)?"),
-            "{name} bypasses generation validation"
+            validated < started,
+            "{name} validates its generation after it has started the engine"
         );
         let function = &SOURCE[SOURCE.find(&format!("fn {name}(")).unwrap()..];
         let function = &function[..function.find("\n}").unwrap()];
@@ -92,8 +139,14 @@ fn auth_wiring(source: &str, browser: &str) -> bool {
     let Some(validation) = apply.find("AUTH_ATTEMPTS.validate(attempt)?") else {
         return false;
     };
+    // The persistence is one call deeper since the session writes take checked turns (desktop 1834 Task 12): the
+    // browser sign-in's in `install_new_session`, the password sign-ins' in `store_first_sign_in`.
+    let persists = |helper: &str, writer: &str| body(source, helper).contains(writer);
     validation > apply.find("SESSION_TRANSITION.lock().await").unwrap()
-        && validation < apply.find("persist_session_to_keychain(").unwrap()
+        && validation < apply.find("install_new_session_or_revoke(").unwrap()
+        && persists("install_new_session_or_revoke", "install_new_session(")
+        && persists("install_new_session", "persist_session_to_keychain(")
+        && persists("store_first_sign_in", "persist_session_token_to_keychain(")
         && close.contains("AUTH_ATTEMPTS.close()")
         && close.contains("auth.drain(")
         && begin < handoff
@@ -101,7 +154,7 @@ fn auth_wiring(source: &str, browser: &str) -> bool {
         && ["desktop_login", "desktop_login_2fa"].iter().all(|name| {
             let code = body(source, name);
             let network = code.find("fetch_session_profile(").unwrap();
-            let persist = code.find("persist_session_token_to_keychain(").unwrap();
+            let persist = code.find("store_first_sign_in(").unwrap();
             code[..network].contains("drop(_transition)")
                 && code[network..persist].contains("AUTH_ATTEMPTS.validate(&attempt)?")
         })
@@ -148,9 +201,15 @@ fn recovery_verification_is_fenced(source: &str) -> bool {
     let Some(verify) = code.find("verify_vault_key_from_phrase(") else {
         return false;
     };
-    let Some(persist) = code.find("persist_vault_key_to_keychain(") else {
+    // The key is persisted by `store_recovered_vault_key`, which re-checks the stored account under the session lock
+    // first, through `install_recovered_session` (desktop 1834 Task 12: the write and the install in one checked
+    // turn); the unlock calls it after the transition is re-acquired and the attempt validated.
+    let Some(persist) = code.find("install_recovered_session(") else {
         return false;
     };
+    if !body(source, "install_recovered_session").contains("store_recovered_vault_key(") {
+        return false;
+    }
     let Some(release) = code[..verify].rfind("drop(_transition)") else {
         return false;
     };
