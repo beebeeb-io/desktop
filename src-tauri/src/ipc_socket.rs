@@ -467,19 +467,40 @@ pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::
 /// hold short-lived plaintext.
 #[cfg(target_os = "macos")]
 fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    macos_open_private_staging_dir(dir)
+        .map(|_| ())
+        .map_err(StagingDirRefusal::into_io_error)
+}
 
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+/// [`macos_ensure_private_staging_dir`], returning the directory held open.
+///
+/// The directory is opened once, without following a symlink, and must be a
+/// real directory owned by this user ([`StagingDir::open`]). The mode and
+/// the backup exclusion are then set through that descriptor, so a symlink
+/// put in the directory's place can never redirect them to another folder.
+#[cfg(target_os = "macos")]
+fn macos_open_private_staging_dir(dir: &std::path::Path) -> Result<StagingDir, StagingDirRefusal> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    // `recursive` returns Ok when `dir` already exists, including as a
+    // symlink to a directory: the open below is what refuses that.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+    let staging = StagingDir::open(dir)?;
     // Belt-and-braces: `DirBuilder::mode` is subject to `mkdir`'s normal
     // umask handling like any other creation call, and a directory left over
-    // from an older build (before this fix) may already exist with looser
-    // permissions. Force it down explicitly rather than trusting creation
-    // alone.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    if let Err(e) = macos_exclude_from_backups(dir) {
+    // from an older build may already exist with looser permissions. Force it
+    // down explicitly rather than trusting creation alone.
+    staging
+        .restrict_to_owner()
+        .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+    if let Err(e) = macos_exclude_from_backups(&staging) {
         tracing::warn!(error = %e, dir = %dir.display(), "could not exclude a macOS staging dir from backups");
     }
-    Ok(())
+    Ok(staging)
 }
 
 /// Exclude the macOS hydrate-cache directory from Time Machine / iCloud
@@ -500,20 +521,22 @@ fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()
 /// Recursive by macOS's own backup semantics — an excluded directory's entire
 /// contents are skipped — so this only needs to run once, on the directory
 /// itself, not per hydrated file.
+///
+/// Set on the held descriptor (`fsetxattr`), never by path, so it cannot be
+/// redirected through a symlink.
 #[cfg(target_os = "macos")]
-fn macos_exclude_from_backups(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
+fn macos_exclude_from_backups(dir: &StagingDir) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
 
-    let path_c = std::ffi::CString::new(dir.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem")
         .expect("static attribute name has no interior NUL");
     let value = b"com.apple.backupd";
-    // SAFETY: `path_c`/`attr_name` are NUL-terminated and live for the call;
-    // `value` is a plain byte slice we own and pass with its exact length.
+    // SAFETY: the descriptor is open for the call; `attr_name` is
+    // NUL-terminated and lives for the call; `value` is a plain byte slice we
+    // own and pass with its exact length.
     let rc = unsafe {
-        libc::setxattr(
-            path_c.as_ptr(),
+        libc::fsetxattr(
+            dir.fd.as_raw_fd(),
             attr_name.as_ptr(),
             value.as_ptr() as *const libc::c_void,
             value.len(),
@@ -678,6 +701,268 @@ pub fn macos_upload_staging_dir() -> std::path::PathBuf {
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
+/// Why a staging directory itself was refused. Logged as this fixed
+/// category, never with the directory's path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagingDirRefusal {
+    /// Nothing at the path.
+    Missing,
+    /// A symlink, not a directory, or owned by another user.
+    NotPrivate,
+    /// It could not be opened or inspected.
+    Unavailable(std::io::ErrorKind),
+}
+
+impl StagingDirRefusal {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::NotPrivate => "not_private",
+            Self::Unavailable(_) => "unavailable",
+        }
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn into_io_error(self) -> std::io::Error {
+        match self {
+            Self::Missing => std::io::ErrorKind::NotFound.into(),
+            Self::NotPrivate => std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "staging directory is not a private directory",
+            ),
+            Self::Unavailable(kind) => kind.into(),
+        }
+    }
+}
+
+/// A staging directory opened once, without following a symlink, and checked
+/// to be a real directory owned by this user. Listing and deleting its
+/// entries goes through this descriptor (`fstatat`, `unlinkat`), so renaming
+/// the directory away and putting a symlink in its place cannot redirect
+/// them to another folder.
+pub(crate) struct StagingDir {
+    fd: std::os::fd::OwnedFd,
+}
+
+impl StagingDir {
+    /// Open `path` as a staging directory owned by this process's user.
+    pub(crate) fn open(path: &std::path::Path) -> Result<Self, StagingDirRefusal> {
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        Self::open_owned_by(path, unsafe { libc::geteuid() })
+    }
+
+    /// [`StagingDir::open`] with the expected owner as a parameter, so the
+    /// owner check is testable without a second account.
+    fn open_owned_by(path: &std::path::Path, owner: libc::uid_t) -> Result<Self, StagingDirRefusal> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| StagingDirRefusal::Unavailable(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: `c_path` is NUL-terminated and lives for the call.
+        let raw = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(libc::ENOENT) => StagingDirRefusal::Missing,
+                // ELOOP: the final component is a symlink (O_NOFOLLOW).
+                // ENOTDIR: it is not a directory.
+                Some(libc::ELOOP) | Some(libc::ENOTDIR) => StagingDirRefusal::NotPrivate,
+                _ => StagingDirRefusal::Unavailable(error.kind()),
+            });
+        }
+        // SAFETY: `raw` is a descriptor we just opened and own.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let stat = fstat_fd(fd.as_raw_fd()).map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+        if !is_dir_mode(stat.st_mode) || stat.st_uid != owner {
+            return Err(StagingDirRefusal::NotPrivate);
+        }
+        Ok(Self { fd })
+    }
+
+    /// Force the directory to owner-only `0o700`, through the descriptor.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn restrict_to_owner(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is open for the call.
+        if unsafe { libc::fchmod(self.fd.as_raw_fd(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The names directly inside, without `.` and `..`.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    fn entry_names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        use std::os::fd::AsRawFd;
+        list_dir_fd(self.fd.as_raw_fd())
+    }
+
+    /// `lstat` of one entry: a symlink is described, never followed.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    fn stat_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
+        use std::os::fd::AsRawFd;
+        fstatat_nofollow(self.fd.as_raw_fd(), name)
+    }
+
+    /// Remove one entry: a file or a symlink is unlinked (a symlink itself,
+    /// never its target); a directory is removed with everything below it,
+    /// through descriptors only ([`remove_tree_at`]).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    fn remove_entry(&self, name: &std::ffi::OsStr, stat: &libc::stat) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        if is_dir_mode(stat.st_mode) {
+            remove_tree_at(self.fd.as_raw_fd(), name, 0)
+        } else {
+            unlink_at(self.fd.as_raw_fd(), name, 0)
+        }
+    }
+}
+
+/// How deep [`remove_tree_at`] descends before it gives up on a tree. The
+/// extension only ever stages single files; this only bounds a stray tree.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const STAGING_TREE_MAX_DEPTH: usize = 32;
+
+fn is_dir_mode(mode: libc::mode_t) -> bool {
+    mode & libc::S_IFMT == libc::S_IFDIR
+}
+
+fn fstat_fd(fd: std::os::fd::RawFd) -> std::io::Result<libc::stat> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` is writable storage of the right type; the descriptor is
+    // open for the call.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fstat` returned 0, so it filled `stat` in.
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn entry_cstring(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name contains a NUL byte"))
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn fstatat_nofollow(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
+    let c_name = entry_cstring(name)?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `c_name` is NUL-terminated and lives for the call; `stat` is
+    // writable storage of the right type; the descriptor is open.
+    if unsafe { libc::fstatat(dir_fd, c_name.as_ptr(), stat.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fstatat` returned 0, so it filled `stat` in.
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn unlink_at(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr, flags: libc::c_int) -> std::io::Result<()> {
+    let c_name = entry_cstring(name)?;
+    // SAFETY: `c_name` is NUL-terminated and lives for the call; the
+    // descriptor is open.
+    if unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The names directly inside the directory open at `dir_fd`, without `.`
+/// and `..`. Reads a duplicate of the descriptor, so `dir_fd` stays usable.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn list_dir_fd(dir_fd: std::os::fd::RawFd) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: duplicating an open descriptor has no other preconditions.
+    let dup = unsafe { libc::fcntl(dir_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `dup` is an open directory descriptor we own; on success
+    // `fdopendir` takes it over and `closedir` below closes it.
+    let dirp = unsafe { libc::fdopendir(dup) };
+    if dirp.is_null() {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `dup` is still ours to close.
+        unsafe { libc::close(dup) };
+        return Err(error);
+    }
+    // The duplicate shares the read position with `dir_fd`: start over.
+    // SAFETY: `dirp` is a valid stream until `closedir`.
+    unsafe { libc::rewinddir(dirp) };
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `dirp` is a valid stream; the entry it returns stays valid
+        // until the next `readdir` on it, and is copied out before that.
+        let entry = unsafe { libc::readdir(dirp) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is NUL-terminated within the entry.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(std::ffi::OsStr::from_bytes(name).to_os_string());
+        }
+    }
+    // SAFETY: `dirp` came from `fdopendir` and is closed exactly once.
+    unsafe { libc::closedir(dirp) };
+    Ok(names)
+}
+
+/// Remove the directory `name` inside `parent_fd` and everything below it,
+/// through descriptors only: each level is opened with `O_NOFOLLOW`, and a
+/// symlink anywhere in the tree is unlinked, never followed.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn remove_tree_at(parent_fd: std::os::fd::RawFd, name: &std::ffi::OsStr, depth: usize) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    if depth >= STAGING_TREE_MAX_DEPTH {
+        return Err(std::io::Error::other("staging tree too deep"));
+    }
+    let c_name = entry_cstring(name)?;
+    // SAFETY: `c_name` is NUL-terminated and lives for the call; the parent
+    // descriptor is open.
+    let raw = unsafe {
+        libc::openat(
+            parent_fd,
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a descriptor we just opened and own.
+    let dir = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    for child in list_dir_fd(dir.as_raw_fd())? {
+        let stat = fstatat_nofollow(dir.as_raw_fd(), &child)?;
+        if is_dir_mode(stat.st_mode) {
+            remove_tree_at(dir.as_raw_fd(), &child, depth + 1)?;
+        } else {
+            unlink_at(dir.as_raw_fd(), &child, 0)?;
+        }
+    }
+    drop(dir);
+    unlink_at(parent_fd, name, libc::AT_REMOVEDIR)
+}
+
+/// `SystemTime` of a `stat` timestamp; `None` before the epoch.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn stat_time(secs: libc::time_t, nanos: libc::c_long) -> Option<std::time::SystemTime> {
+    let secs = u64::try_from(secs).ok()?;
+    let nanos = u32::try_from(nanos).ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
+}
+
 /// Where `QueueFinderCreate` / `QueueFinderModify` may take file contents from.
 #[derive(Debug, Clone)]
 pub(crate) enum WriteContentsPolicy {
@@ -761,13 +1046,11 @@ pub(crate) fn validate_staged_contents_path(
     if candidate.split('/').any(|segment| segment == ".." || segment == ".") {
         return Err(ContentsRefusal::Traversal);
     }
-    // The configured directory itself must be a real directory: if it were
-    // replaced by a symlink, canonicalizing would follow it and make another
-    // folder's files acceptable, and the daemon deletes what it accepts.
-    match std::fs::symlink_metadata(staging_dir) {
-        Ok(meta) if meta.is_dir() => {}
-        _ => return Err(ContentsRefusal::StagingUnavailable),
-    }
+    // The configured directory itself must be a real directory owned by this
+    // user: if it were replaced by a symlink, canonicalizing would follow it
+    // and make another folder's files acceptable, and the daemon deletes what
+    // it accepts.
+    StagingDir::open(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
     let staging = std::fs::canonicalize(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
     let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
         return Err(ContentsRefusal::OutsideStaging);
@@ -848,44 +1131,51 @@ fn contents_refusal_response(refusal: ContentsRefusal) -> IpcResponse {
     }
 }
 
-/// Remove upload-staging entries whose own mtime (not followed through a
-/// symlink) is at least `max_age` before `now`. A missing directory is not an
-/// error. `now` / `max_age` are parameters so this is testable without a
-/// clock.
+/// Remove upload-staging entries whose own mtime is at least `max_age` before
+/// `now`. A missing directory is not an error. `now` / `max_age` are
+/// parameters so this is testable without a clock.
+///
+/// The directory is opened once ([`StagingDir::open`]) and refused unless it
+/// is a real directory owned by this user: through a symlink, this purge
+/// would delete another folder's files. Every entry is inspected and removed
+/// through that descriptor.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn purge_stale_upload_staging(
     dir: &std::path::Path,
     max_age: std::time::Duration,
     now: std::time::SystemTime,
-) -> std::io::Result<usize> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e),
-    };
+) -> Result<usize, StagingDirRefusal> {
+    match StagingDir::open(dir) {
+        Ok(staging) => purge_stale_upload_staging_in(&staging, max_age, now),
+        Err(StagingDirRefusal::Missing) => Ok(0),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// [`purge_stale_upload_staging`] on a directory already held open.
+#[cfg(any(target_os = "macos", test))]
+fn purge_stale_upload_staging_in(
+    staging: &StagingDir,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> Result<usize, StagingDirRefusal> {
+    let names = staging
+        .entry_names()
+        .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
     let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+    for name in names {
+        // `lstat` of the entry itself: a symlink is described, not followed.
+        let Ok(stat) = staging.stat_entry(&name) else {
             continue;
         };
         // A future mtime (clock change) counts as fresh; a later sweep gets it.
-        let stale = meta
-            .modified()
-            .ok()
+        let stale = stat_time(stat.st_mtime, stat.st_mtime_nsec)
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age >= max_age);
         if !stale {
             continue;
         }
-        // `remove_file` unlinks a symlink itself; `remove_dir_all` does not
-        // follow symlinks inside the tree.
-        let result = if meta.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match result {
+        match staging.remove_entry(&name, &stat) {
             Ok(()) => removed += 1,
             Err(e) => tracing::warn!(error_kind = ?e.kind(), "upload-staging purge: could not remove an entry"),
         }
@@ -900,9 +1190,9 @@ pub(crate) fn macos_prepare_upload_staging_dir(
     dir: &std::path::Path,
     max_age: std::time::Duration,
     now: std::time::SystemTime,
-) -> std::io::Result<usize> {
-    macos_ensure_private_staging_dir(dir)?;
-    purge_stale_upload_staging(dir, max_age, now)
+) -> Result<usize, StagingDirRefusal> {
+    let staging = macos_open_private_staging_dir(dir)?;
+    purge_stale_upload_staging_in(&staging, max_age, now)
 }
 
 /// Runner startup: prepare the real directory and purge it. Best-effort.
@@ -916,20 +1206,31 @@ pub(crate) fn macos_prepare_upload_staging() {
 /// Runner tick: purge the real directory. Best-effort.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_sweep_upload_staging() {
-    let dir = macos_upload_staging_dir();
-    let result = purge_stale_upload_staging(&dir, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now());
-    log_upload_staging_purge("periodic", result);
+    sweep_upload_staging_at(&macos_upload_staging_dir(), "periodic", std::time::SystemTime::now());
 }
 
-#[cfg(target_os = "macos")]
-fn log_upload_staging_purge(context: &'static str, result: std::io::Result<usize>) {
+/// Age-bound purge of `dir`, logged. Split from the real-directory caller so a
+/// test can run it on a temp dir.
+#[cfg(any(target_os = "macos", test))]
+fn sweep_upload_staging_at(dir: &std::path::Path, context: &'static str, now: std::time::SystemTime) {
+    let result = purge_stale_upload_staging(dir, UPLOAD_STAGING_MAX_AGE, now);
+    log_upload_staging_purge(context, result);
+}
+
+/// Log a purge: a count, or the refusal's fixed category. Never a path.
+#[cfg(any(target_os = "macos", test))]
+fn log_upload_staging_purge(context: &'static str, result: Result<usize, StagingDirRefusal>) {
     match result {
         Ok(removed) if removed > 0 => {
             tracing::info!(removed, context, "purged orphaned upload-staging copies");
         }
         Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error_kind = ?e.kind(), context, "upload-staging purge failed (best-effort)");
+        Err(refusal) => {
+            tracing::warn!(
+                reason = refusal.category(),
+                context,
+                "upload-staging purge refused or failed; nothing was removed"
+            );
         }
     }
 }
@@ -2984,7 +3285,8 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let dir = tempdir().unwrap();
-        macos_exclude_from_backups(dir.path()).expect("setxattr must succeed on a writable dir");
+        let staging = StagingDir::open(dir.path()).expect("a temp dir is a private directory");
+        macos_exclude_from_backups(&staging).expect("setxattr must succeed on a writable dir");
 
         let attr_name =
             std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
@@ -3993,6 +4295,136 @@ mod tests {
             purge_stale_upload_staging(&missing, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now()).unwrap(),
             0
         );
+    }
+
+    /// The configured staging dir replaced by a symlink to another folder that
+    /// holds files the daemon must never lose (its own queued uploads, say).
+    fn symlinked_staging_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let (root, staging) = upload_staging_fixture();
+        std::fs::remove_dir(&staging).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        write_file(&elsewhere.join("queued-upload"), b"the only copy");
+        std::fs::create_dir(elsewhere.join("a-folder")).unwrap();
+        write_file(&elsewhere.join("a-folder").join("inside"), b"x");
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        (root, staging, elsewhere)
+    }
+
+    fn assert_elsewhere_untouched(elsewhere: &std::path::Path) {
+        assert_eq!(
+            std::fs::read(elsewhere.join("queued-upload")).unwrap(),
+            b"the only copy",
+            "a purge through a symlinked staging dir must delete nothing"
+        );
+        assert_eq!(std::fs::read(elsewhere.join("a-folder").join("inside")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn upload_staging_purge_refuses_a_symlinked_staging_dir_and_deletes_nothing() {
+        let (_root, staging, elsewhere) = symlinked_staging_fixture();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later),
+            Err(StagingDirRefusal::NotPrivate),
+            "a symlinked staging dir must be refused, not followed"
+        );
+        assert_elsewhere_untouched(&elsewhere);
+    }
+
+    #[test]
+    fn a_staging_dir_must_be_a_real_directory_owned_by_this_user() {
+        let (root, staging) = upload_staging_fixture();
+        // SAFETY: no preconditions.
+        let me = unsafe { libc::geteuid() };
+        assert!(StagingDir::open_owned_by(&staging, me).is_ok(), "our own dir is accepted");
+        let refusal = |result: Result<StagingDir, StagingDirRefusal>| result.err();
+        assert_eq!(
+            refusal(StagingDir::open_owned_by(&staging, me.wrapping_add(1))),
+            Some(StagingDirRefusal::NotPrivate),
+            "a dir owned by another user must be refused"
+        );
+        let file = root.path().join("a-file");
+        write_file(&file, b"x");
+        assert_eq!(refusal(StagingDir::open(&file)), Some(StagingDirRefusal::NotPrivate));
+        let link = root.path().join("link-to-staging");
+        std::os::unix::fs::symlink(&staging, &link).unwrap();
+        assert_eq!(
+            refusal(StagingDir::open(&link)),
+            Some(StagingDirRefusal::NotPrivate),
+            "a symlink to a real staging dir is refused too"
+        );
+        assert_eq!(
+            refusal(StagingDir::open(&root.path().join("gone"))),
+            Some(StagingDirRefusal::Missing)
+        );
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_a_stale_tree_without_following_links_inside_it() {
+        let (root, staging) = upload_staging_fixture();
+        let outside_file = root.path().join("outside.txt");
+        write_file(&outside_file, b"never purged");
+        let outside_dir = root.path().join("outside-dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+        write_file(&outside_dir.join("kept"), b"kept");
+        let tree = staging.join("stray-tree");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        write_file(&tree.join("file"), b"x");
+        write_file(&tree.join("sub").join("deeper"), b"x");
+        std::os::unix::fs::symlink(&outside_file, tree.join("link-to-file")).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, tree.join("sub").join("link-to-dir")).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later), Ok(1));
+        assert!(std::fs::symlink_metadata(&tree).is_err(), "the whole tree is removed");
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"never purged");
+        assert_eq!(
+            std::fs::read(outside_dir.join("kept")).unwrap(),
+            b"kept",
+            "a link inside the tree is unlinked, never followed"
+        );
+        assert!(staging.is_dir(), "the staging dir itself remains");
+    }
+
+    #[test]
+    fn a_refused_upload_staging_purge_is_logged_by_category_without_the_path() {
+        let (root, staging, elsewhere) = symlinked_staging_fixture();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        let logs = capture_logs(|| sweep_upload_staging_at(&staging, "periodic", later));
+        let warns: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("upload-staging purge refused"))
+            .collect();
+        assert_eq!(warns.len(), 1, "one warning for the refused purge, got:\n{logs}");
+        assert!(warns[0].contains("not_private"), "the warning names the category: {}", warns[0]);
+        let root_text = root.path().to_string_lossy();
+        assert!(
+            !logs.contains(root_text.as_ref()),
+            "the warning must not carry the path:\n{logs}"
+        );
+        assert_elsewhere_untouched(&elsewhere);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prepare_upload_staging_dir_refuses_a_symlink_and_never_touches_its_target() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, staging, elsewhere) = symlinked_staging_fixture();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(
+            macos_prepare_upload_staging_dir(&staging, UPLOAD_STAGING_MAX_AGE, later),
+            Err(StagingDirRefusal::NotPrivate)
+        );
+        let mode = std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the hardening must not chmod the symlink's target, got {mode:o}");
+        let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
+        let path_c = std::ffi::CString::new(elsewhere.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated strings that live for the call; a NULL buffer asks for the size.
+        let n = unsafe { libc::getxattr(path_c.as_ptr(), attr_name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+        assert!(n < 0, "the backup exclusion must not land on the symlink's target");
+        assert_elsewhere_untouched(&elsewhere);
     }
 
     #[test]
