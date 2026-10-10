@@ -8703,6 +8703,36 @@ mod tests {
         );
     }
 
+    /// A pass lists its ops once, so the claim skips an op that paused after the listing, as
+    /// the listing itself would (review Minor 5). It is claimable again once resumed.
+    #[test]
+    fn the_claim_skips_an_op_that_paused_after_the_pass_listed_it() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&queued("u1", OperationKind::UploadVersion, "f", Some("/staged/u1")))
+            .unwrap();
+        assert_eq!(db.list_due_operations(i64::MAX).unwrap().len(), 1, "listed");
+        db.record_operation_pause("u1", OperationPauseReason::Auth, Some("HTTP 401 Unauthorized"), 3)
+            .unwrap();
+        assert!(
+            matches!(db.claim_operation("u1", 4).unwrap(), ClaimOutcome::Gone),
+            "a paused op is not claimed"
+        );
+        let claim_id: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT claim_id FROM operation_queue WHERE op_id = 'u1'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+        assert_eq!(claim_id, None, "and holds no claim");
+        assert_eq!(db.resume_operations_paused_for_auth(5).unwrap(), 1);
+        assert!(
+            matches!(db.claim_operation("u1", 6).unwrap(), ClaimOutcome::Claimed(_)),
+            "claimable again once resumed"
+        );
+    }
+
     /// §8.6 rule 6 (Task 5 review, Minor 4): no park path parks an op whose completion is
     /// recorded. That covers the runner's park (Task 5's immediate stale-base arm, a missing
     /// payload, an unknown base), the snapshot count's park and the claim's parks (both
