@@ -2050,7 +2050,7 @@ fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>)
 /// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
 /// a failure is logged without the path, and the alert still names the folder.
 ///
-/// Round 5: one load-change-save under the config-write lock (`DesktopConfig::update`), because
+/// Round 5: one load-change-save under the config-write lock (`DesktopConfig::update_at`), because
 /// the app-start sweep runs this while the window may be saving a setting; two unserialized
 /// saves share one `desktop.toml.tmp` and the later could drop the earlier one's change.
 fn remember_kept_folder(location: &str) {

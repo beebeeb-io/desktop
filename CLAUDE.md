@@ -195,7 +195,7 @@ sweep; drawn by macOS's UserNotificationCenter, not a Beebeeb window) plus a row
 Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; commands
 `kept_unsynced_folder` / `dismiss_kept_unsynced_folder`, which returns
 `{ cleared, current }`). Writes to `desktop.toml` take the one config-write lock in
-`config.rs` (`DesktopConfig::update` is a load-change-save under it). The 1882 source pins
+`config.rs` (`DesktopConfig::update_at` is a load-change-save under it). The 1882 source pins
 read through `lf()`/`slash()` in `finder_removal.rs`, so they run on a Windows checkout
 (CRLF text, `\` paths). Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
 

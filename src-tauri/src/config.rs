@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every save of the config goes through the same `desktop.toml.tmp`, so two saves at once could
 /// tear each other's temp file, and two load-modify-save passes at once lose the earlier one's
-/// change. [`DesktopConfig::save`] takes this lock for the write; [`DesktopConfig::update`] takes
+/// change. [`DesktopConfig::save`] takes this lock for the write; [`DesktopConfig::update_at`] takes
 /// it across the whole load, change and write. The lock is not re-entrant: nothing inside an
-/// `update` closure may call `save` or `update`.
+/// `update_at` closure may call `save` or `update_at`.
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Takes [`CONFIG_WRITE_LOCK`]. A holder that panicked leaves the lock usable: the file itself is
@@ -569,20 +569,15 @@ impl DesktopConfig {
         self.save_to(&path)
     }
 
-    /// Load the config, let `change` modify it, and save it if `change` says so, all under the
-    /// config-write lock, so no other `update` or `save` lands between the load and the save
-    /// (task 1882 r5). `change` returns `(save, value)`: whether the config changed, and what
-    /// `update` hands back. A change that is not saved leaves the file untouched.
+    /// Load the config at `path`, let `change` modify it, and save it if `change` says so, all
+    /// under the config-write lock, so no other `update_at` or `save` lands between the load and
+    /// the save (task 1882 r5). `change` returns `(save, value)`: whether the config changed, and
+    /// what `update_at` hands back. A change that is not saved leaves the file untouched. Callers
+    /// pass [`Self::path`]; a test passes its own file, so it runs the real lock, load and save.
     ///
     /// For a short, synchronous change. A caller that loaded its own copy earlier and saves it
     /// later (the install and Repair commands) is not covered: its save still replaces the file
     /// with that copy.
-    pub fn update<R>(change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
-        Self::update_at(&Self::path()?, change)
-    }
-
-    /// [`Self::update`] on the config file at `path`. A seam so a test can run the real lock,
-    /// load and save against its own file.
     pub(crate) fn update_at<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
         let _writing = config_write_guard();
         let mut cfg = Self::load_from(path)?;
