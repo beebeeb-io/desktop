@@ -45,9 +45,9 @@ import {
   HELP_URL,
   keepCountLabel,
   keepOnMac,
+  KEPT_FOLDER_ROW_SENTENCE,
   NOTIFICATION_ROWS,
   planLine,
-  PRESERVED_FILES_SENTENCE,
   preservedFilesNote,
   REPAIR_BODY,
   REPAIR_TITLE,
@@ -706,7 +706,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             reasonWraps
             actions={<Btn onClick={() => void dismissKept()}>Dismiss</Btn>}
           >
-            {PRESERVED_FILES_SENTENCE}
+            {KEPT_FOLDER_ROW_SENTENCE}
           </Note>
         ) : null}
         <SettingRow

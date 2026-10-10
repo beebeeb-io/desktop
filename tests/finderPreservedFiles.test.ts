@@ -8,7 +8,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { PRESERVED_FILES_SENTENCE, preservedFilesLine, preservedFilesNote } from '../src/macSettingsModel'
+import { KEPT_FOLDER_ROW_SENTENCE, PRESERVED_FILES_SENTENCE, preservedFilesLine, preservedFilesNote } from '../src/macSettingsModel'
 
 const FOLDER = '/Users/sam/Library/CloudStorage/Beebeeb (kept) /Notes '
 
@@ -36,6 +36,18 @@ describe('kept-files note (1882)', () => {
     const rust = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'finder_removal.rs'), 'utf8')
     const match = rust.match(/pub const PRESERVED_FILES_SENTENCE: &str =\s*"([^"]*)";/)
     expect(match?.[1]).toBe(PRESERVED_FILES_SENTENCE)
+  })
+
+  test('round 3 (re-review D3): the saved row\'s sentence is neutral and names no provider', () => {
+    // The row outlives the sign-out and can be read by another account, so it must not claim the
+    // files were meant for "your vault". The alert and the Repair line, which appear straight
+    // after the removal, keep the sentence above.
+    expect(KEPT_FOLDER_ROW_SENTENCE).toBe('Files that had not reached the server were kept in this folder:')
+    expect(KEPT_FOLDER_ROW_SENTENCE).not.toBe(PRESERVED_FILES_SENTENCE)
+    expect(KEPT_FOLDER_ROW_SENTENCE.toLowerCase()).not.toMatch(/\byour\b|vault/)
+    for (const word of ['apple', 'icloud', 'hetzner', 'file provider', 'fileprovider', 'cloudstorage', '/']) {
+      expect(KEPT_FOLDER_ROW_SENTENCE.toLowerCase()).not.toContain(word)
+    }
   })
 
   test('round 2 (review I2): the kept folder\'s path wraps and is never cut off', () => {

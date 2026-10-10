@@ -251,10 +251,21 @@ warning).~~
   - Dismissing clears it only if it is still the folder the row showed.
 - **When it appears:** after a sign-out, a Repair, the add rollback, the cleanup inside Add to
   Finder, or the app-start sweep, whenever files were kept by the rule above.
-- **What it shows:** Settings › Sync, under "Beebeeb in Finder", a status note with the sentence,
-  the path in mono and a "Dismiss" button. The path wraps (`white-space: normal;
+- **What it shows:** Settings › Sync, under "Beebeeb in Finder", a status note with ~~the sentence~~
+  its own sentence (below), the path in mono and a "Dismiss" button. The path wraps (`white-space: normal;
   overflow-wrap: anywhere`) and is never cut off. The row stays until the person dismisses it. A
   tab switch, closing Settings or a restart does not clear it.
+- **Its own sentence** (re-review D3):
+  > Files that had not reached the server were kept in this folder:
+
+  ~~The row showed the constant sentence above, "…your vault…".~~ The row outlives the sign-out
+  that kept the files, so after an account switch another account reads it. "Your vault" would
+  claim files that may be another account's, and could lead a person to drag them into this
+  account's synced folder. The row says nothing about a vault, an account or a provider. The alert
+  and the Repair result line appear straight after the removal and keep the sentence above.
+  `KEPT_FOLDER_ROW_SENTENCE` lives once, in `src/macSettingsModel.ts`;
+  `tests/finderPreservedFiles.test.ts` pins its text, and the Sync tab test checks the rendered
+  row has no "your".
 - **No "Show in Finder".** The headers do not say that a sandboxed app may reveal a path outside
   its container: `selectFile:inFileViewerRootedAtPath:` and `activateFileViewerSelectingURLs:`
   (`AppKit.framework/Headers/NSWorkspace.h:50`, `:53`) carry no sandbox statement. The only
@@ -264,6 +275,8 @@ warning).~~
   Updating it is a design follow-up.
 
 — lead ruling, 2026-10-10 (review I2)
+
+— lead ruling, 2026-10-10 (re-review D3), for "Its own sentence" above
 
 **Who draws the alert** (2026-10-10, device K-F1):
 
@@ -321,6 +334,10 @@ sha256, and the alert must name that folder. Repeat with Repair (the Sync tab no
   - the record survives a settings save.
 - **Frontend:**
   - the Sync tab shows the saved row on open, and after a Repair;
+  - the row's sentence is neutral: it has no "your" (re-review D3, lead ruling, 2026-10-10);
+  - a Repair that reported a folder shows it even when the saved record cannot be read back. A
+    failed save is not this case: Repair then returns an error and the app's alert names the
+    folder (re-review D5, P1);
   - it shows nothing when nothing is saved;
   - "Dismiss" sends the exact path and the row goes;
   - the path element wraps.

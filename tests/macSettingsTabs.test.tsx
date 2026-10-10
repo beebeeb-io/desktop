@@ -627,8 +627,12 @@ describe('Sync tab', () => {
 
   // Task 1882 (spec 2026-10-09 §5): the repair's removal kept files that never reached the server.
   const KEPT = '/Users/sam/Library/CloudStorage/Beebeeb (kept)'
+  // Round 3 (re-review D3): the saved row outlives the account that kept the files, so its
+  // sentence is neutral: no "your vault" for files that may belong to another account. The
+  // literal is on purpose: it is what a person reads, not whatever the constant holds.
+  const ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
   const keptNotes = (m: Mounted) =>
-    statuses(m).filter((el) => readable(expand(el)).join(' ').includes(model.PRESERVED_FILES_SENTENCE))
+    statuses(m).filter((el) => readable(expand(el)).join(' ').includes(ROW_SENTENCE))
   const monoLines = (m: Mounted) => find(m, (el) => String(el.props.className ?? '').split(' ').includes('ms-mono'))
 
   // Round 2 (review I2, lead ruling 2026-10-10): the kept folder is saved by Rust and shown as a
@@ -659,6 +663,16 @@ describe('Sync tab', () => {
     expect(keptNotes(m)).toHaveLength(1)
     expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
     expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('the saved row is neutral, so it reads correctly after an account switch (re-review D3)', async () => {
+    const { m } = await openSync({ kept: KEPT })
+    const [note] = keptNotes(m)
+    const text = readable(expand(note)).join(' ')
+    expect(text).toContain(ROW_SENTENCE)
+    expect(text).not.toMatch(/\byour\b/i) // not "your vault": the files may be another account's
+    expect(visibleText(m)).not.toContain(model.PRESERVED_FILES_SENTENCE)
+    expect(model.KEPT_FOLDER_ROW_SENTENCE).toBe(ROW_SENTENCE)
   })
 
   test('the row survives a tab switch: a fresh Sync tab shows the same saved folder', async () => {
@@ -707,7 +721,7 @@ describe('Sync tab', () => {
     expect(keptNotes(m)).toHaveLength(1)
     const mono = monoLines(m).map((el) => textOf(el.props.children).trim())
     expect(mono).toEqual([KEPT])
-    expect(visibleText(m)).toContain(model.PRESERVED_FILES_SENTENCE)
+    expect(visibleText(m)).toContain(ROW_SENTENCE)
     expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
@@ -717,7 +731,7 @@ describe('Sync tab', () => {
       await press(m, 'Repair…')
       await press(m, 'Repair')
       expect(keptNotes(m)).toHaveLength(0)
-      expect(visibleText(m)).not.toContain(model.PRESERVED_FILES_SENTENCE)
+      expect(visibleText(m)).not.toContain(ROW_SENTENCE)
       expect(monoLines(m)).toHaveLength(0)
       expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('2 changes waiting to upload were kept.')
     }

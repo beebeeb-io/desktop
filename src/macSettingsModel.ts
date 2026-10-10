@@ -166,6 +166,14 @@ export function repairNote(result: { pending_operations_preserved: number; warni
  */
 export const PRESERVED_FILES_SENTENCE = 'Files that hadn’t reached your vault yet were kept on this Mac, in this folder:'
 
+/**
+ * Round 3 (re-review D3): the sentence on the saved kept-folder row in Settings › Sync. The row
+ * outlives the sign-out that kept the files, so after an account switch another account reads it:
+ * it says nothing about "your vault", and names no account or provider. The alert and the Repair
+ * line appear straight after the removal and keep `PRESERVED_FILES_SENTENCE`.
+ */
+export const KEPT_FOLDER_ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
+
 /** The kept-files note for a removal's result: the sentence and the exact folder, or null when macOS kept nothing. */
 export function preservedFilesNote(result: { preserved_location?: string | null }): { sentence: string; path: string } | null {
   const path = result.preserved_location
