@@ -5257,6 +5257,43 @@ impl StateDb {
         })
     }
 
+    /// §10.2–§10.3: every upload an earlier build queued gets a write id and is marked
+    /// earlier-build; its base is left as it is. First (m-4c) the held columns of its file
+    /// are cleared: a re-upgrade must not revive a token the system no longer holds.
+    /// Nothing else changes: a pause, the attempts and the staged copy's path stay as they are.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn mark_earlier_build_uploads(&self) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL, held_object_version_id = NULL
+             WHERE file_id IN (SELECT file_id FROM operation_queue
+                               WHERE write_id IS NULL AND file_id IS NOT NULL
+                                 AND kind IN ('upload_version', 'upload_file'))",
+            [],
+        )?;
+        let ops: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT op_id FROM operation_queue
+                 WHERE write_id IS NULL AND kind IN ('upload_version', 'upload_file') ORDER BY rowid",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        for op_id in &ops {
+            tx.execute(
+                "UPDATE operation_queue SET write_id = ?2, write_origin = ?3 WHERE op_id = ?1",
+                params![
+                    op_id,
+                    crate::write_token::mint_write_id(),
+                    WriteOrigin::EarlierBuild.as_str()
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ops.len())
+    }
+
     #[cfg(test)]
     pub(crate) fn set_created_at_for_test(&self, op_id: &str, created_at: i64) {
         let conn = self.0.lock().unwrap();
@@ -8432,6 +8469,144 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    /// T66, spec §10.2 (m-4c) and m-4a: on a re-upgrade after a downgrade, the held columns of a
+    /// file with an upload queued without a write id are cleared before that upload is marked, so
+    /// no token the system no longer holds is revived. A waiting op stores its token's `b`.
+    #[test]
+    fn a_re_upgrade_clears_stale_held_columns_and_waiting_ops_store_b() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "downgraded", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("downgraded").unwrap().unwrap();
+        contract.current_version = 2;
+        db.set_file_contract_state(&contract).unwrap();
+        // Borrowed parameters, not `&'static str`: the token below is an owned `String`.
+        let accept = |op_id: &str, base: &str| {
+            db.accept_finder_write(
+                &FinderAccept {
+                    op_id,
+                    file_id: "downgraded",
+                    kind: FinderAcceptKind::Modify {
+                        incoming_base: Some(base),
+                    },
+                    parent_id: None,
+                    target_path: Some("d.txt"),
+                    metadata_json: "{}",
+                    payload_path: "/staged/d",
+                    size_bytes: 1,
+                    modified_at: 1,
+                    backup_source_key: None,
+                    now: 1,
+                },
+                &|_, _| Vec::new(),
+            )
+            .unwrap()
+        };
+        let AcceptOutcome::Queued { token, .. } = accept("w1", "2") else {
+            panic!("queued")
+        };
+        let AcceptOutcome::Queued { .. } = accept("w2", &token) else {
+            panic!("queued")
+        };
+        assert_eq!(
+            db.get_operation("w2").unwrap().unwrap().base_version,
+            Some(2),
+            "m-4a: the waiting op stores its b"
+        );
+        // A downgraded build then queued an upload of the same file without a write id.
+        db.enqueue_operation(&queued("older-build", OperationKind::UploadVersion, "downgraded", None))
+            .unwrap();
+        db.mark_earlier_build_uploads().unwrap();
+        assert!(
+            db.item_presentation("downgraded").unwrap().unwrap().held.is_none(),
+            "m-4c: the held columns are cleared"
+        );
+        assert_eq!(
+            db.finder_write("older-build").unwrap().unwrap().origin,
+            WriteOrigin::EarlierBuild
+        );
+    }
+
+    /// Spec §10.2 with the auth pauses (lead ruling F9): an upload an earlier build queued that is
+    /// paused for `auth` or `key_replaced` is marked like any other and keeps its pause. The marking
+    /// adds a write id and the earlier-build origin; it never makes a paused op due and keeps its
+    /// attempts and base. A same-account sign-in then resumes only the `auth` one, still marked;
+    /// the `key_replaced` one stays kept and never sent.
+    #[test]
+    fn an_earlier_builds_paused_upload_keeps_its_pause_through_the_marking() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let enqueue_paused = |op_id: &str, file_id: &str| {
+            seed_own_row(&db, file_id, FileStatus::Uploading, 10);
+            let mut op = queued(
+                op_id,
+                OperationKind::UploadVersion,
+                file_id,
+                Some(&format!("/staged/{op_id}")),
+            );
+            op.attempts = 2;
+            op.base_version = Some(1);
+            db.enqueue_operation(&op).unwrap();
+            db.record_operation_pause(op_id, OperationPauseReason::Auth, Some("HTTP 401 Unauthorized"), 5)
+                .unwrap();
+        };
+        // The key-replaced path re-marks every auth pause, so that one is paused first.
+        enqueue_paused("key-replaced", "f-key");
+        assert_eq!(db.hold_operations_paused_for_auth_as_key_replaced(6).unwrap(), 1);
+        enqueue_paused("auth-paused", "f-auth");
+        let paused = |op_id: &str| -> Option<String> {
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT paused_reason FROM operation_queue WHERE op_id = ?1",
+                    [op_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        assert_eq!(db.mark_earlier_build_uploads().unwrap(), 2, "both are marked");
+
+        for op_id in ["auth-paused", "key-replaced"] {
+            assert_eq!(
+                db.finder_write(op_id).unwrap().expect("a write id").origin,
+                WriteOrigin::EarlierBuild
+            );
+            let op = db.get_operation(op_id).unwrap().unwrap();
+            assert_eq!(
+                (op.attempts, op.base_version),
+                (2, Some(1)),
+                "{op_id}: attempts and base kept"
+            );
+        }
+        assert_eq!(paused("auth-paused").as_deref(), Some("auth"), "the auth pause is kept");
+        assert_eq!(
+            paused("key-replaced").as_deref(),
+            Some("key_replaced"),
+            "the key-replaced pause is kept"
+        );
+        assert!(db.list_due_operations(i64::MAX).unwrap().is_empty(), "neither is due");
+
+        assert_eq!(db.resume_operations_paused_for_auth(600).unwrap(), 1);
+        let due: Vec<String> = db
+            .list_due_operations(600)
+            .unwrap()
+            .into_iter()
+            .map(|op| op.op_id)
+            .collect();
+        assert_eq!(due, vec!["auth-paused".to_string()], "only the auth one resumes");
+        assert_eq!(
+            db.finder_write("auth-paused").unwrap().unwrap().origin,
+            WriteOrigin::EarlierBuild,
+            "still marked after the resume"
+        );
+        assert_eq!(
+            paused("key-replaced").as_deref(),
+            Some("key_replaced"),
+            "kept, never sent"
+        );
     }
 
     #[test]

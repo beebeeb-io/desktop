@@ -1018,6 +1018,20 @@ async fn run(
         }
         Err(e) => tracing::warn!(error = %e, "engine start repair failed"),
     }
+    // Uploads an earlier build queued get a write id and are marked as from an earlier build,
+    // so they are never handed over; their bases are left as they are (spec §10.2–§10.3). Before
+    // the reconcile below, which keeps a row with an unparked Finder upload (one with a write id)
+    // uploading. macOS only: on Windows it would hand write ids to Cloud Files uploads, which have
+    // no base.
+    #[cfg(target_os = "macos")]
+    match db.mark_earlier_build_uploads() {
+        Ok(0) => {}
+        Ok(marked) => tracing::info!(
+            marked,
+            "engine start: uploads from an earlier build marked; their bases are unchanged"
+        ),
+        Err(e) => tracing::warn!(error = %e, "engine start: marking earlier-build uploads failed"),
+    }
     match db.reconcile_stale_in_flight_on_startup() {
         Ok(0) => {}
         Ok(touched) => {
@@ -2830,6 +2844,29 @@ mod tests {
                 "`run` still emits `{old}` around the tracker"
             );
         }
+    }
+
+    /// Spec §10.2 (plan Spec issue 13): engine start marks the uploads an earlier build queued,
+    /// once, on macOS only (on Windows it would hand write ids to Cloud Files uploads, which have
+    /// no base), after the start repair and before the stale in-flight rows are reconciled (that
+    /// reconcile is keyed on the write id). `run` needs a real window system, so the wiring is
+    /// asserted on the source, on every platform.
+    #[test]
+    fn engine_start_marks_earlier_build_uploads_on_macos_only_after_the_repair() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let call = "db.mark_earlier_build_uploads()";
+        assert_eq!(body.matches(call).count(), 1, "`run` marks once");
+        assert!(
+            body.contains(&format!("#[cfg(target_os = \"macos\")]\n    match {call}")),
+            "the marking is gated to macOS"
+        );
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` calls {needle}"));
+        assert!(
+            at("db.engine_start_repair()") < at(call) && at(call) < at("db.reconcile_stale_in_flight_on_startup()"),
+            "after the start repair, before the in-flight reconcile"
+        );
     }
 
     /// Collect every `engine-status` payload the mock app emits.

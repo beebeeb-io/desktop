@@ -19392,4 +19392,193 @@ mod tests {
             "after a modify's landing, its parked successor presents error"
         );
     }
+
+    // ── Rule 6: the upgrade path (spec §10.2–§10.3, m-4c) ──
+
+    /// T34, spec §10.3 (ruling 2): an upload an earlier build queued on a wall-clock second is
+    /// marked at engine start and keeps that base. It is sent once, the server refuses it as a
+    /// stale base, and it parks at its first attempt with its bytes. It never holds a token.
+    #[tokio::test]
+    async fn an_old_timestamp_base_parks_at_its_first_attempt() {
+        // The two QA shapes (spec §2 item 11); this is the first.
+        let (dir, sync_root, server, bridge) = rule3_setup([99u8; 32]);
+        seed_uploaded_row(&bridge, &server, "qa-89da");
+        // The way the round-3 QA build queued it: through the shared entry point, no write id,
+        // a base that is a wall-clock second (QA/inv2-statedb-copy-queries.log).
+        let contents = dir.path().join("old.txt");
+        std::fs::write(&contents, b"forty bytes the old build queued, here.").unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(
+                Some("qa-89da"),
+                "notes.txt",
+                &contents,
+                Some("1791550250".into()),
+            ))
+            .unwrap();
+        assert_eq!(bridge.db.mark_earlier_build_uploads().unwrap(), 1);
+        let op = bridge.db.list_operations_for_file("qa-89da").unwrap().remove(0);
+        assert_eq!(op.base_version, Some(1_791_550_250), "no re-base");
+        assert_eq!(
+            bridge.db.finder_write(&op.op_id).unwrap().unwrap().origin,
+            crate::state_db::WriteOrigin::EarlierBuild
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("qa-89da"), json!(1_791_550_250_i64), 409)],
+            "one init with the timestamp base"
+        );
+        let op = bridge.db.get_operation(&op.op_id).unwrap().unwrap();
+        assert_eq!(op.attempts, op.max_attempts, "parked at its first attempt");
+        assert!(
+            std::path::Path::new(op.payload_path.as_deref().unwrap()).is_file(),
+            "its bytes are kept"
+        );
+        assert!(
+            bridge.db.item_presentation("qa-89da").unwrap().unwrap().held.is_none(),
+            "no held token"
+        );
+    }
+
+    /// Spec §10.2 with §8.4's old folders: an upload an earlier build queued names its staged copy
+    /// by an absolute path in the old cache root, and the marking leaves that path as it is.
+    /// (a) Its base is version 1, but the server has moved on to 2: it parks. A newer save on
+    /// version 1, queued behind it, is never made its successor (the marking gives (a) no token,
+    /// and rule 3 excludes earlier builds), so it never takes it over: both park, and (a)'s copy
+    /// stays in the old root, journalled and unreleased. (b) On the server's version it uploads
+    /// from that copy, which is then released and unlinked, with its journal row. The data root
+    /// and the old cache root differ only on macOS, so the test is macOS-only.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_earlier_builds_copy_in_the_old_cache_root_is_never_handed_over_and_never_lost() {
+        let master_key = [102u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let bases = FinderStagingBases::current();
+        let old_root = bases.cache_root();
+        std::fs::create_dir_all(&old_root).unwrap();
+        let mut queued = Vec::new();
+        for (file_id, bytes, base) in [
+            ("moved-on", &b"an earlier build's edit of version 1"[..], "1"),
+            ("old-good", &b"an earlier build's save"[..], "1"),
+        ] {
+            seed_uploaded_row(&bridge, &server, file_id);
+            let contents = dir.path().join(format!("{file_id}.txt"));
+            std::fs::write(&contents, bytes).unwrap();
+            bridge
+                .queue_finder_modify(finder_file_target(
+                    Some(file_id),
+                    "notes.txt",
+                    &contents,
+                    Some(base.into()),
+                ))
+                .unwrap();
+            let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
+            // Where a build before the move staged it: the old cache root, by absolute path in
+            // the op and the journal.
+            let staged = PathBuf::from(op.payload_path.clone().expect("a save carries its copy"));
+            let old_copy = old_root.join(uuid::Uuid::new_v4().to_string());
+            std::fs::rename(&staged, &old_copy).unwrap();
+            {
+                let conn = bridge.db.hold_lock_for_test();
+                let (old, new) = (
+                    old_copy.to_string_lossy().into_owned(),
+                    staged.to_string_lossy().into_owned(),
+                );
+                for sql in [
+                    "UPDATE operation_queue SET payload_path = ?1 WHERE payload_path = ?2",
+                    "UPDATE staged_payloads SET path = ?1 WHERE path = ?2",
+                ] {
+                    assert_eq!(conn.execute(sql, rusqlite::params![old, new]).unwrap(), 1, "{sql}");
+                }
+            }
+            queued.push((op.op_id, old_copy, bytes));
+        }
+        let (a_op, a_copy, a_bytes) = queued[0].clone();
+        let (b_op, b_copy, b_bytes) = queued[1].clone();
+        // (a)'s file changed elsewhere: the server is at version 2, which this row has not seen.
+        server.seed_file("moved-on", 2);
+
+        assert_eq!(bridge.db.mark_earlier_build_uploads().unwrap(), 2);
+        for (op_id, copy) in [(&a_op, &a_copy), (&b_op, &b_copy)] {
+            let op = bridge.db.get_operation(op_id).unwrap().unwrap();
+            assert_eq!(
+                op.payload_path.as_deref(),
+                Some(copy.to_string_lossy().as_ref()),
+                "the marking leaves the copy's path as it is"
+            );
+        }
+        // A newer save of (a)'s file, on the version the system holds, queued behind it. Had the
+        // marking minted (a) as the accept does (a held token and the minted origin), rule 3 would
+        // make this save (a)'s successor, and its claim would hand (a) over.
+        fp_save(&bridge, dir.path(), "moved-on", "notes.txt", b"a newer save", "1");
+
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+
+        assert_eq!(
+            state.init_summary(),
+            vec![
+                (json!("moved-on"), json!(1), 409),
+                (json!("old-good"), json!(1), 201),
+                (json!("moved-on"), json!(1), 409)
+            ],
+            "(a) refused once, (b) uploaded once, and the newer save is sent on its own base"
+        );
+        // (a) never handed over, and its copy is not lost.
+        let a = bridge
+            .db
+            .get_operation(&a_op)
+            .unwrap()
+            .expect("(a) is kept in the queue");
+        assert_eq!(a.attempts, a.max_attempts, "(a) parked");
+        assert_eq!(a.payload_path.as_deref(), Some(a_copy.to_string_lossy().as_ref()));
+        assert_eq!(
+            std::fs::read(&a_copy).unwrap(),
+            a_bytes,
+            "(a)'s copy stays in the old root, with its bytes"
+        );
+        assert!(
+            bridge
+                .db
+                .staged_payloads_for_signout()
+                .unwrap()
+                .iter()
+                .any(|(path, _, completed)| path == a_copy.to_string_lossy().as_ref() && !completed),
+            "(a)'s journal row stays, not released"
+        );
+        let ops = bridge.db.list_operations_for_file("moved-on").unwrap();
+        assert_eq!(ops.len(), 2, "(a) and the newer save both remain: no hand-over");
+        assert!(ops.iter().all(|op| op.attempts == op.max_attempts), "both parked");
+        assert_eq!(
+            std::fs::read(ops[1].payload_path.as_deref().unwrap()).unwrap(),
+            b"a newer save",
+            "the newer save keeps its bytes too"
+        );
+        assert!(!logs.contains("took over"), "{logs}");
+        assert_eq!(
+            bridge.db.finder_write(&a_op).unwrap().unwrap().origin,
+            crate::state_db::WriteOrigin::EarlierBuild,
+            "(a) is still marked as from an earlier build"
+        );
+        // (b) read from the old root, landed, and released as any landing is.
+        assert_eq!(state.latest_plaintext("old-good", master_key), b_bytes);
+        assert!(bridge.db.get_operation(&b_op).unwrap().is_none(), "(b) landed");
+        assert!(
+            !b_copy.exists(),
+            "(b)'s copy in the old root is unlinked after the landing"
+        );
+        assert!(
+            bridge
+                .db
+                .staged_payloads_for_signout()
+                .unwrap()
+                .iter()
+                .all(|(path, _, _)| path != b_copy.to_string_lossy().as_ref()),
+            "and its journal row is gone"
+        );
+    }
 }
