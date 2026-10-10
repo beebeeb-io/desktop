@@ -37,4 +37,15 @@ describe('kept-files note (1882)', () => {
     const match = rust.match(/pub const PRESERVED_FILES_SENTENCE: &str =\s*"([^"]*)";/)
     expect(match?.[1]).toBe(PRESERVED_FILES_SENTENCE)
   })
+
+  test('round 2 (review I2): the kept folder\'s path wraps and is never cut off', () => {
+    const css = readFileSync(join(import.meta.dir, '..', 'src', 'macSettings.css'), 'utf8')
+    const rule = css.match(/\.ms-mono--wrap\s*\{([^}]*)\}/)
+    expect(rule).not.toBeNull()
+    const body = rule![1].replace(/\s+/g, ' ')
+    expect(body).toContain('white-space: normal;')
+    expect(body).toContain('overflow-wrap: anywhere;')
+    expect(body).toContain('text-overflow: clip;')
+    expect(body).toContain('overflow: visible;')
+  })
 })

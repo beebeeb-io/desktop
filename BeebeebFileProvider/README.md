@@ -217,9 +217,11 @@ Repair, the Add-to-Finder rollback, the app-start sweep of other domains and
 (macOS 12+; the app requires 14), never the plain `removeDomain:` (which deleted
 Finder-created files that had not uploaded). macOS reports a folder, even when it
 kept nothing, so the bridge checks it first (it must exist and hold at least one
-entry; spec §5). Only then does the app show the person that folder (an alert after a sign-out, a note
-in Settings → Sync after a Repair) and logs only that files were kept, never the
-path. `src-tauri/src/finder_removal.rs` pins every removal in the repo to this
+entry; spec §5). Only then does the app show the person that folder: an alert
+after a sign-out, the add rollback or the app-start sweep, and a row in Settings →
+Sync that stays until the person dismisses it (the latest kept folder is saved in
+`desktop.toml` as `kept_unsynced_folder`). Logs say only that files were kept,
+never the path. `src-tauri/src/finder_removal.rs` pins every removal in the repo to this
 mode. Limit: macOS counts a create or modify as synced once the extension has
 handed it to the app's upload queue, and sign-out purges that queue, so a file
 still queued at sign-out is not kept. Spec:

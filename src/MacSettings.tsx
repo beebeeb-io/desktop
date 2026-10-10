@@ -47,6 +47,7 @@ import {
   keepOnMac,
   NOTIFICATION_ROWS,
   planLine,
+  PRESERVED_FILES_SENTENCE,
   preservedFilesNote,
   REPAIR_BODY,
   REPAIR_TITLE,
@@ -495,9 +496,11 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
-  // Task 1882: where macOS kept the files the repair's removal found un-synced. It stays up
-  // until the next repair: the files stay in that folder whatever happens to the Finder row.
-  const [repairKept, setRepairKept] = useState<{ sentence: string; path: string } | null>(null)
+  // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
+  // reached the server, after a sign-out, a Repair, the add rollback or the app-start sweep. Rust
+  // saves it in desktop.toml; this row shows it until the person dismisses it, so a tab switch,
+  // closing Settings or a restart cannot lose it.
+  const [kept, setKept] = useState<string | null>(null)
   const [tree, setTree] = useState<VaultItem[] | null>(null)
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
   const [chooser, setChooser] = useState(false)
@@ -523,10 +526,33 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     else setTreeLoadFailed(true)
   }, [])
 
+  // A failed read shows no row: the folder stays saved, and the next open shows it again.
+  const loadKept = useCallback(async () => {
+    const result = await command<string | null>('kept_unsynced_folder')
+    const note = result.ok ? preservedFilesNote({ preserved_location: result.value }) : null
+    setKept(note ? note.path : null)
+  }, [])
+
   useEffect(() => {
     void loadFinder()
     void loadTree()
-  }, [loadFinder, loadTree])
+    void loadKept()
+  }, [loadFinder, loadTree, loadKept])
+
+  // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
+  const dismissKept = async () => {
+    if (kept === null) return
+    const result = await command<void>('dismiss_kept_unsynced_folder', { path: kept })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss that note',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsynced_folder') : result.reason,
+      })
+      return
+    }
+    setKept(null)
+  }
 
   const addToFinder = async () => {
     setAttempting(true)
@@ -554,7 +580,6 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setRepair('busy')
     setRepairFailed(false)
     setRepairResult(null)
-    setRepairKept(null)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setRepair('idle')
     if (!result.ok) {
@@ -563,7 +588,11 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
       return
     }
     setRepairResult(repairNote(result.value))
-    setRepairKept(preservedFilesNote(result.value))
+    // Rust saved the kept folder (if any); the row reads it back. If that save failed, the
+    // folder this repair reported is still shown now.
+    await loadKept()
+    const reported = preservedFilesNote(result.value)
+    if (reported) setKept((current) => current ?? reported.path)
     await loadFinder()
   }
 
@@ -667,9 +696,14 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
-        {repairKept ? (
-          <Note kind="status" reason={repairKept.path}>
-            {repairKept.sentence}
+        {kept !== null ? (
+          <Note
+            kind="status"
+            reason={kept}
+            reasonWraps
+            actions={<Btn onClick={() => void dismissKept()}>Dismiss</Btn>}
+          >
+            {PRESERVED_FILES_SENTENCE}
           </Note>
         ) : null}
         <SettingRow

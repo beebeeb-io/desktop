@@ -483,8 +483,9 @@ describe('Account tab', () => {
 describe('Sync tab', () => {
   const ready = (over: object = {}) => ({ state: { status: 'ready', config: { ...config, ...over } }, save: async () => {}, reload: async () => {} })
 
-  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void> } = {}) {
-    const st = { finder: opts.finder ?? finder.installed }
+  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean } = {}) {
+    // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
+    const st: { finder: any; kept: string | null } = { finder: opts.finder ?? finder.installed, kept: opts.kept ?? null }
     return {
       st,
       backend: {
@@ -494,9 +495,17 @@ describe('Sync tab', () => {
           return opts.install ? opts.install(a) : st.finder
         },
         reset_macos_integration: (a: any) => {
-          const result = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
+          const result: any = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
           st.finder = finder.missing
+          // Like Rust: a repair that kept files saves the folder for the row.
+          if (typeof result?.preserved_location === 'string') st.kept = result.preserved_location
           return result
+        },
+        kept_unsynced_folder: () => st.kept,
+        dismiss_kept_unsynced_folder: (a: any) => {
+          if (opts.dismissFails) throw new Error('disk full')
+          if (st.kept === a?.path) st.kept = null
+          return undefined
         },
         list_remote_tree: () => opts.tree ?? [folder('a', 'Photos', true), folder('b', 'Work', false)],
         set_recursive_pin: opts.pin ?? (() => undefined),
@@ -617,13 +626,66 @@ describe('Sync tab', () => {
   const KEPT = '/Users/sam/Library/CloudStorage/Beebeeb (kept)'
   const keptNotes = (m: Mounted) =>
     statuses(m).filter((el) => readable(expand(el)).join(' ').includes(model.PRESERVED_FILES_SENTENCE))
+  const monoLines = (m: Mounted) => find(m, (el) => String(el.props.className ?? '').split(' ').includes('ms-mono'))
+
+  // Round 2 (review I2, lead ruling 2026-10-10): the kept folder is saved by Rust and shown as a
+  // dismissible row until the person dismisses it. A tab switch or closing Settings unmounts
+  // SyncTab, so the row must come from the saved folder, not from this component's state.
+  test('a saved kept folder shows on open, in one status note whose path wraps, with Dismiss', async () => {
+    const { m } = await openSync({ kept: KEPT })
+    expect(keptNotes(m)).toHaveLength(1)
+    const mono = monoLines(m)
+    expect(mono.map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+    expect(String(mono[0].props.className).split(' ')).toContain('ms-mono--wrap')
+    expect(buttons(m)).toContain('Dismiss')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('the row survives a tab switch: a fresh Sync tab shows the same saved folder', async () => {
+    const { backend, st } = syncBackend({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
+    const first = open('SyncTab', backend, { props: { settings: ready() } })
+    await first.flush()
+    await press(first, 'Repair…')
+    await press(first, 'Repair')
+    expect(keptNotes(first)).toHaveLength(1)
+    first.close()
+    mounted.splice(mounted.indexOf(first), 1)
+    expect(st.kept).toBe(KEPT)
+    const again = open('SyncTab', backend, { props: { settings: ready() } })
+    await again.flush()
+    expect(keptNotes(again)).toHaveLength(1)
+    expect(monoLines(again).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+  })
+
+  test('Dismiss sends the exact folder the row showed and the row goes', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }])
+    expect(st.kept).toBeNull()
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+  })
+
+  test('a Dismiss that fails keeps the row and says so once, in a toast', async () => {
+    const { m } = await openSync({ kept: KEPT, dismissFails: true })
+    await press(m, 'Dismiss')
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(m.toasts).toHaveLength(1)
+    expect(m.toasts[0]).toMatchObject({ variant: 'error' })
+  })
+
+  test('nothing saved shows no kept-folder row', async () => {
+    const { m } = await openSync({ kept: null })
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+  })
 
   test('a repair that kept un-synced files says so in one status note, with the folder in mono', async () => {
     const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
     await press(m, 'Repair…')
     await press(m, 'Repair')
     expect(keptNotes(m)).toHaveLength(1)
-    const mono = find(m, (el) => el.props.className === 'ms-mono').map((el) => textOf(el.props.children).trim())
+    const mono = monoLines(m).map((el) => textOf(el.props.children).trim())
     expect(mono).toEqual([KEPT])
     expect(visibleText(m)).toContain(model.PRESERVED_FILES_SENTENCE)
     expect(visibleErrorSurfaces(m)).toEqual([])
@@ -636,7 +698,7 @@ describe('Sync tab', () => {
       await press(m, 'Repair')
       expect(keptNotes(m)).toHaveLength(0)
       expect(visibleText(m)).not.toContain(model.PRESERVED_FILES_SENTENCE)
-      expect(find(m, (el) => el.props.className === 'ms-mono')).toHaveLength(0)
+      expect(monoLines(m)).toHaveLength(0)
       expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('2 changes waiting to upload were kept.')
     }
   })

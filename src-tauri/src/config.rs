@@ -254,6 +254,14 @@ pub struct DesktopConfig {
     /// `DesktopSettings`, so a settings save cannot rewrite update provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_release_channel: Option<ReleaseChannel>,
+
+    /// Task 1882 round 2 (review I2, lead ruling 2026-10-10): the folder where macOS last kept
+    /// Finder files that had not reached the server when Beebeeb's Finder location was removed.
+    /// Settings › Sync shows it until the person dismisses it. Exactly as the system reported it;
+    /// never logged, never sent anywhere. Like `account_id`, it is NOT in
+    /// `DesktopSettings`/`apply_settings`, so a settings save can never clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_unsynced_folder: Option<String>,
 }
 
 /// `#[serde(default = ...)]` needs a function returning the default.
@@ -331,6 +339,7 @@ impl Default for DesktopConfig {
             local_cache_limit_bytes: DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
             release_channel: ReleaseChannel::Stable,
             installed_release_channel: None,
+            kept_unsynced_folder: None,
         }
     }
 }

@@ -2002,7 +2002,8 @@ fn finish_sign_out_after_removal(
 async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let result = clear_session_impl(&state).await;
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
-    show_preserved_files_alert(&app, sign_out_kept_folder(&result));
+    // Review I2: and the folder is saved for the Settings › Sync row.
+    surface_kept_folder(&app, sign_out_kept_folder(&result));
     result.map(|_| ()).map_err(|failure| failure.message)
 }
 
@@ -2027,6 +2028,51 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
             tracing::debug!("kept-folder alert closed");
         });
     tracing::debug!("kept-folder alert shown");
+}
+
+/// Review I2 (lead ruling, round 2): hands a kept folder to the person on the paths that have no
+/// config of their own (sign-out, the app-start sweep): saved for the Settings › Sync row first,
+/// then the alert. Nothing kept → nothing.
+fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
+    let Some(location) = preserved_location else {
+        return;
+    };
+    remember_kept_folder(location);
+    show_preserved_files_alert(app, Some(location));
+}
+
+/// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
+/// a failure is logged without the path, and the alert still names the folder.
+fn remember_kept_folder(location: &str) {
+    let mut cfg = match DesktopConfig::load() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not load the config to save the kept folder");
+            return;
+        }
+    };
+    if finder_removal::record_kept_folder(&mut cfg, location)
+        && let Err(error) = cfg.save()
+    {
+        tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync");
+    }
+}
+
+/// Review I2: the folder Settings › Sync shows until the person dismisses it. `None` = no row.
+#[tauri::command]
+fn kept_unsynced_folder() -> Result<Option<String>, String> {
+    Ok(DesktopConfig::load()?.kept_unsynced_folder)
+}
+
+/// Review I2: the row's "Dismiss". Clears the saved folder only if it is still `path`, the one
+/// the row showed.
+#[tauri::command]
+fn dismiss_kept_unsynced_folder(path: String) -> Result<(), String> {
+    let mut cfg = DesktopConfig::load()?;
+    if finder_removal::dismiss_kept_folder(&mut cfg, &path) {
+        cfg.save()?;
+    }
+    Ok(())
 }
 
 /// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
@@ -3145,8 +3191,13 @@ async fn install_finder_location(
         // Task 1882: `addDomain` also succeeds on a domain that already existed, so this
         // rollback can remove one that holds un-synced files. They are kept; the alert names
         // the folder. A failed rollback stays silent, as before.
-        if let Ok(removal) = remove_file_provider_domain() {
-            show_preserved_files_alert(&app, removal.kept_location("add-to-finder rollback").as_deref());
+        // Review I2: recorded into `cfg`, which `finder_install_failed` saves below, so that
+        // save cannot overwrite the record with a stale copy.
+        if let Ok(removal) = remove_file_provider_domain()
+            && let Some(location) = removal.kept_location("add-to-finder rollback")
+        {
+            finder_removal::record_kept_folder(&mut cfg, &location);
+            show_preserved_files_alert(&app, Some(&location));
         }
         // D1 (task 1683 slice 5): saved OR returned as an error, not both.
         return finder_install_failed(&mut cfg, error);
@@ -3445,6 +3496,10 @@ async fn reset_macos_integration(
     // result to the Sync tab's note (spec 2026-10-09 §5).
     let (removed_file_provider_domain, preserved_location) =
         finder_removal::repair_removal(remove_file_provider_domain(), &mut warnings);
+    // Review I2: saved for the Settings › Sync row, into the config this command saves below.
+    if let Some(location) = preserved_location.as_deref() {
+        finder_removal::record_kept_folder(&mut cfg, location);
+    }
 
     let disabled_autostart = match app.autolaunch().is_enabled() {
         Ok(true) => match app.autolaunch().disable() {
@@ -8906,6 +8961,8 @@ pub fn run() {
             desktop_platform,
             desktop_capabilities,
             finder_location_state,
+            kept_unsynced_folder,
+            dismiss_kept_unsynced_folder,
             install_finder_location,
             continue_without_finder_location,
             // Task 1524 Issue 4 — user-disabled File Provider domain detection
@@ -9106,7 +9163,7 @@ pub fn run() {
                             // Task 1882: a removed domain's un-synced files were kept;
                             // the alert names each folder (the log above only counts them).
                             for location in &cleanup.preserved_locations {
-                                show_preserved_files_alert(&alert_app, Some(location));
+                                surface_kept_folder(&alert_app, Some(location));
                             }
                         }
                         Err(error) => {
@@ -9717,8 +9774,9 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
                 let result = clear_session_impl(&state).await;
                 // Task 1882: the menu's sign-out names the folder of kept
                 // Finder files in the same alert as the `clear_session` command,
-                // also when it failed after the removal (review I1).
-                show_preserved_files_alert(&app, sign_out_kept_folder(&result));
+                // also when it failed after the removal (review I1), and saves it for
+                // the Settings › Sync row (review I2).
+                surface_kept_folder(&app, sign_out_kept_folder(&result));
                 #[cfg(target_os = "windows")]
                 match &result {
                     // Nothing to tear down — tell the user instead of running
@@ -12979,6 +13037,57 @@ mod finder_removal_wiring_tests {
         );
     }
 
+    /// Review I2 (lead ruling, round 2): every removal path saves the kept folder for the
+    /// Settings › Sync row. Paths that hold a loaded config and save it afterwards record into
+    /// THAT config, so their own save cannot overwrite the record with a stale copy.
+    #[test]
+    fn test_1882_r2_every_removal_path_saves_the_kept_folder_for_the_sync_row() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Saved, then shown: one function for the paths without a config of their own.
+        let surface = code_only(&item(&source, "fn surface_kept_folder("));
+        let saved = surface.find("remember_kept_folder(location)").expect("it saves the folder");
+        let shown = surface.find("show_preserved_files_alert(app, Some(location))").expect("it raises the alert");
+        assert!(saved < shown);
+        let remember = code_only(&item(&source, "fn remember_kept_folder("));
+        assert!(remember.contains("finder_removal::record_kept_folder(&mut cfg, location)"));
+        assert!(remember.contains("cfg.save()"));
+        assert!(!remember.contains("location ="), "the log line never carries the path");
+
+        // Sign-out (command and menu) and the sweep.
+        let command = code_only(&item(&source, "async fn clear_session("));
+        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
+        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
+
+        // Repair and the add rollback record into the config they save afterwards.
+        let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        let recorded = repair
+            .find("finder_removal::record_kept_folder(&mut cfg, location);")
+            .expect("Repair records the folder into its config");
+        let saved = repair.find("persist_finder_install_result(&mut cfg, false, None)?;").expect("and saves it");
+        assert!(recorded < saved);
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        let recorded = install
+            .find("finder_removal::record_kept_folder(&mut cfg, &location);")
+            .expect("the rollback records the folder into its config");
+        let saved = install[recorded..].find("return finder_install_failed(&mut cfg, error);").expect("which is saved");
+        assert!(saved > 0);
+
+        // The row's two commands are registered.
+        for name in ["kept_unsynced_folder", "dismiss_kept_unsynced_folder"] {
+            assert_eq!(source.matches(&format!("            {name},\n")).count(), 1, "{name} in generate_handler!");
+        }
+    }
+
     #[test]
     fn test_1882_every_removal_path_surfaces_the_kept_folder() {
         let full = source();
@@ -13008,10 +13117,10 @@ mod finder_removal_wiring_tests {
         );
         // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
         let command = code_only(&item(&source, "async fn clear_session("));
-        assert!(command.contains("show_preserved_files_alert(&app, sign_out_kept_folder(&result));"));
+        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
-        assert!(code_only(menu).contains("show_preserved_files_alert(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
 
         // Repair: the folder goes into the result the Sync tab reads.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
@@ -13020,10 +13129,9 @@ mod finder_removal_wiring_tests {
 
         // The Add-to-Finder rollback and the app-start sweep raise the same alert.
         let install = code_only(&item(&source, "async fn install_finder_location("));
-        assert!(install.contains(
-            "show_preserved_files_alert(&app, removal.kept_location(\"add-to-finder rollback\").as_deref());"
-        ));
-        assert!(code_only(&source).contains("show_preserved_files_alert(&alert_app, Some(location));"));
+        assert!(install.contains("&& let Some(location) = removal.kept_location(\"add-to-finder rollback\")"));
+        assert!(install.contains("show_preserved_files_alert(&app, Some(&location));"));
+        assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 
         // And there is no other removal: three calls, all of them above.
         assert_eq!(

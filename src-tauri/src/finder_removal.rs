@@ -151,6 +151,27 @@ pub fn removal_from_bridge(
     }
 }
 
+/// Saves `location` as the latest kept folder, for the Settings › Sync row (spec §5, lead ruling
+/// I2). A newer folder replaces an older one. Returns whether the config changed (the caller
+/// saves it).
+pub fn record_kept_folder(cfg: &mut crate::config::DesktopConfig, location: &str) -> bool {
+    if cfg.kept_unsynced_folder.as_deref() == Some(location) {
+        return false;
+    }
+    cfg.kept_unsynced_folder = Some(location.to_string());
+    true
+}
+
+/// Dismisses the row: clears the saved folder only if it is still the one the row showed, so a
+/// folder kept in the meantime is never dismissed unseen. Returns whether the config changed.
+pub fn dismiss_kept_folder(cfg: &mut crate::config::DesktopConfig, shown: &str) -> bool {
+    if cfg.kept_unsynced_folder.as_deref() != Some(shown) {
+        return false;
+    }
+    cfg.kept_unsynced_folder = None;
+    true
+}
+
 /// The alert's body: the sentence, a blank line, then the folder (spec §5).
 pub fn preserved_files_message(location: &str) -> String {
     format!("{PRESERVED_FILES_SENTENCE}\n\n{location}")
@@ -441,6 +462,50 @@ mod tests {
         }
         let check = &helper[helper.find("static func keptFolder(").expect("keptFolder()")..];
         assert!(check.contains("startAccessingSecurityScopedResource()"), "it looks through the URL's own scope");
+    }
+
+    // ── round 2: the saved kept folder (review I2, lead ruling) ──────────────
+
+    #[test]
+    fn test_1882_r2_the_latest_kept_folder_is_saved_and_replaces_an_older_one() {
+        let mut cfg = crate::config::DesktopConfig::default();
+        assert!(record_kept_folder(&mut cfg, "/Users/someone/Kept (1)"));
+        assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept (1)"));
+        assert!(record_kept_folder(&mut cfg, "/Users/someone/Kept (2)"));
+        assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept (2)"));
+        assert!(!record_kept_folder(&mut cfg, "/Users/someone/Kept (2)"), "the same folder again changes nothing");
+    }
+
+    #[test]
+    fn test_1882_r2_dismissing_clears_only_the_folder_the_row_showed() {
+        let mut cfg = crate::config::DesktopConfig::default();
+        record_kept_folder(&mut cfg, "/Users/someone/Kept (2)");
+        assert!(
+            !dismiss_kept_folder(&mut cfg, "/Users/someone/Kept (1)"),
+            "a row showing an older folder cannot dismiss a newer one"
+        );
+        assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept (2)"));
+        assert!(dismiss_kept_folder(&mut cfg, "/Users/someone/Kept (2)"));
+        assert_eq!(cfg.kept_unsynced_folder, None);
+        assert!(!dismiss_kept_folder(&mut cfg, "/Users/someone/Kept (2)"), "nothing left to dismiss");
+    }
+
+    #[test]
+    fn test_1882_r2_the_saved_folder_survives_a_settings_save_and_a_restart() {
+        let mut cfg = crate::config::DesktopConfig::default();
+        record_kept_folder(&mut cfg, "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)");
+        let settings = crate::config::DesktopSettings::from(&crate::config::DesktopConfig::default());
+        cfg.apply_settings(settings);
+        assert_eq!(
+            cfg.kept_unsynced_folder.as_deref(),
+            Some("/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)"),
+            "a settings save never clears it"
+        );
+        let toml = toml::to_string(&cfg).expect("serialize");
+        let back: crate::config::DesktopConfig = toml::from_str(&toml).expect("parse");
+        assert_eq!(back.kept_unsynced_folder, cfg.kept_unsynced_folder, "it survives a restart");
+        let fresh = toml::to_string(&crate::config::DesktopConfig::default()).expect("serialize");
+        assert!(!fresh.contains("kept_unsynced_folder"), "absent until something was kept");
     }
 
     #[test]

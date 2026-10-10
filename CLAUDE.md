@@ -190,8 +190,10 @@ rollback, the app-start sweep, `BeebeebFileProviderCtl remove`) passes
 one. macOS reports a folder even when it kept nothing (device, 2026-10-10), so
 the bridge checks it on the returned URL (`BeebeebKeptFolderState`): only a folder
 that exists and holds at least one entry (or that the sandbox will not let it
-list) reaches the person (an alert for sign-out, a note in Settings → Sync for
-Repair), and never the logs. Spec:
+list) reaches the person, and never the logs: an alert (sign-out, add rollback,
+sweep; drawn by macOS's UserNotificationCenter, not a Beebeeb window) plus a row in
+Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; commands
+`kept_unsynced_folder` / `dismiss_kept_unsynced_folder`). Spec:
 `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
 
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
