@@ -40,8 +40,8 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from './accountSession'
-import { useFinderSetup } from './finderSetup'
-import { finderActionButtonLabel, type FinderSetupAction } from './finderSetupCopy'
+import { subscribeKeptFolderChanged, useFinderSetup } from './finderSetup'
+import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
   accountInitial,
@@ -549,7 +549,8 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
   // reached the server, after a sign-out, a Repair, another reconciler removal or the app-start sweep. Rust
   // saves it in desktop.toml; this row shows it until the person dismisses it, so a tab switch,
-  // closing Settings or a restart cannot lose it.
+  // closing Settings or a restart cannot lose it. Rebase re-review I2: Rust says when it saved one
+  // (`kept-folder-changed`), and the row reads it again then.
   const [kept, setKept] = useState<string | null>(null)
   const [tree, setTree] = useState<VaultItem[] | null>(null)
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
@@ -572,8 +573,16 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
 
   useEffect(() => {
     void loadTree()
-    void loadKept()
-  }, [loadTree, loadKept])
+  }, [loadTree])
+
+  // Rebase re-review I2: a removal the reconciler runs in the background (its Try again can start an owed one, and
+  // one can finish after the reconciler's time limit) saves the folder long after this tab opened. Rust then emits
+  // `kept-folder-changed`, and the row reads the folder again. The first read waits for the listener, so a folder
+  // saved between the two is not missed.
+  useEffect(
+    () => subscribeKeptFolderChanged(() => void loadKept(), { onSubscribed: () => void loadKept() }),
+    [loadKept],
+  )
 
   // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
   const dismissKept = async () => {
@@ -590,14 +599,6 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     // 1882 r5: the row goes only if Rust cleared the folder it showed. If a newer folder was kept
     // since the row was drawn, nothing was dismissed, and the row shows the newer one.
     setKept(keptFolderAfterDismiss(result.value))
-  }
-
-  // 1882 r5, inside spec A (lead ruling, rebase onto 1882): a Finder action (the reconciler's Try again) can run a
-  // removal that keeps files (an owed one), and Rust saves the folder while it runs. The row read the saved folder
-  // once, on open, so it reads it again after the action instead of waiting for a tab switch.
-  const runFinderAction = async (action: FinderSetupAction) => {
-    await finder.run(action)
-    await loadKept()
   }
 
   const runRepair = async () => {
@@ -705,7 +706,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             kind={row.tone}
             surface="finder-setup"
             reason={row.tone === 'alert' ? monoReason(row.reason) : null}
-            actions={row.action ? <Btn onClick={() => void runFinderAction(row.action!)}>{finderActionButtonLabel(row.action, row.actionLabel, finder.copied)}</Btn> : null}
+            actions={row.action ? <Btn onClick={() => void finder.run(row.action!)}>{finderActionButtonLabel(row.action, row.actionLabel, finder.copied)}</Btn> : null}
           >
             {row.sentence}
           </Note>

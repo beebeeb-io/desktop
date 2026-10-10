@@ -11,13 +11,16 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import {
   FINDER_ACTION_COMMAND,
   FINDER_SETUP_CHANGED_EVENT,
+  KEPT_FOLDER_CHANGED_EVENT,
   loadFinderSetup,
   parseFinderSetupView,
   runFinderSetupAction,
   subscribeFinderSetup,
+  subscribeKeptFolderChanged,
   type FinderSetupView,
 } from '../src/finderSetup'
 import type { FinderSetupAction } from '../src/finderSetupCopy'
+import { rustStr } from './fixtures/rustConstants'
 
 // The sample from plan Task 7 (finder_setup/driver.rs), verbatim.
 const RUST_SAMPLE = {
@@ -262,5 +265,65 @@ describe('subscribeFinderSetup', () => {
     await settle()
     expect(subscribed).toBe(1)
     expect(() => stop()).not.toThrow()
+  })
+})
+
+// Rebase re-review I2: Rust tells the windows when it saved a kept folder for the Settings › Sync row, so a Sync tab
+// that is open reads it again. The same real `listen` over the scripted bus as above.
+describe('subscribeKeptFolderChanged', () => {
+  test('listens on the name Rust emits and calls back on every event', async () => {
+    const bus = eventBus()
+    let changed = 0
+    const stop = subscribeKeptFolderChanged(() => { changed += 1 })
+    await settle()
+    expect(KEPT_FOLDER_CHANGED_EVENT).toBe('kept-folder-changed')
+    expect(rustStr('lib.rs', 'KEPT_FOLDER_CHANGED_EVENT')).toBe(KEPT_FOLDER_CHANGED_EVENT)
+    expect(bus.log).toContain('plugin:event|listen:kept-folder-changed')
+    bus.emit(null) // Rust sends no payload
+    bus.emit(null)
+    expect(changed).toBe(2)
+    stop()
+  })
+
+  test('the unsubscribe stops delivery and unregisters the listener, also before the registration lands', async () => {
+    const bus = eventBus()
+    let changed = 0
+    const stop = subscribeKeptFolderChanged(() => { changed += 1 })
+    await settle()
+    stop()
+    await settle()
+    expect(bus.listeners()).toBe(0)
+    expect(bus.log).toContain('unregister:kept-folder-changed')
+    bus.emit(null)
+    expect(changed).toBe(0)
+
+    const early = eventBus()
+    early.holdRegistration()
+    const closed = subscribeKeptFolderChanged(() => {})
+    closed()
+    early.registered()
+    await settle()
+    expect(early.listeners()).toBe(0)
+    expect(early.log.filter((line) => line.startsWith('unregister:'))).toEqual(['unregister:kept-folder-changed'])
+  })
+
+  test('onSubscribed fires once the listener is registered, not before, and also with no event bus', async () => {
+    const bus = eventBus()
+    bus.holdRegistration()
+    let subscribed = 0
+    const stop = subscribeKeptFolderChanged(() => {}, { onSubscribed: () => { subscribed += 1 } })
+    await settle()
+    expect(subscribed).toBe(0)
+    bus.registered()
+    await settle()
+    expect(subscribed).toBe(1)
+    stop()
+
+    eventBus({ rejectListen: true })
+    let ready = 0
+    const without = subscribeKeptFolderChanged(() => {}, { onSubscribed: () => { ready += 1 } })
+    await settle()
+    expect(ready).toBe(1)
+    expect(() => without()).not.toThrow()
   })
 })

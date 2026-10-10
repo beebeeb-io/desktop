@@ -45,6 +45,8 @@ const baseBindings = {
   ConfigLoadFailed,
   withPinned,
   finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
+  // The real one: with no event bus here it reports ready at once, so a tab opened without `keptBus` still reads.
+  subscribeKeptFolderChanged: finderSetup.subscribeKeptFolderChanged,
   // The Mac's number format is pinned so the label does not depend on the machine running the test.
   storageLine: (storage: any) => model.storageLine(storage, 'nl-NL'),
 }
@@ -71,6 +73,24 @@ function finderBus() {
       return () => { const at = listeners.indexOf(onView); if (at >= 0) listeners.splice(at, 1) }
     },
     emit(view: unknown) { for (const listener of [...listeners]) listener(view) },
+  }
+}
+
+/**
+ * A scripted stand-in for `subscribeKeptFolderChanged` (rebase re-review I2), like `finderBus`: the registration lands
+ * on the next microtask, as the real one does, and `emit` is Rust's `kept-folder-changed` once it has saved a folder.
+ * `log` gets "subscribed" when the registration lands, so a test can order it against the backend's reads.
+ */
+function keptBus(log: string[] = []) {
+  const listeners: Array<() => void> = []
+  return {
+    get live() { return listeners.length },
+    subscribe(onChanged: () => void, options: { onSubscribed?: () => void } = {}) {
+      listeners.push(onChanged)
+      void Promise.resolve().then(() => { log.push('subscribed'); options.onSubscribed?.() })
+      return () => { const at = listeners.indexOf(onChanged); if (at >= 0) listeners.splice(at, 1) }
+    },
+    emit() { for (const listener of [...listeners]) listener() },
   }
 }
 
@@ -582,7 +602,7 @@ describe('Sync tab', () => {
   const pressFinder = async (m: Mounted, label: string) => { await button(m, label).props.onClick(); await settleFinder(m) }
   const calls = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
 
-  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; refusal?: unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean } = {}) {
+  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; refusal?: unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; log?: string[] } = {}) {
     // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
     const st: { finder: any; unreadable: boolean; kept: string | null } = { finder: opts.finder ?? finder.installed, unreadable: opts.unreadable ?? false, kept: opts.kept ?? null }
     return {
@@ -601,6 +621,7 @@ describe('Sync tab', () => {
           return result
         },
         kept_unsynced_folder: () => {
+          opts.log?.push('read')
           if (opts.keptReadFails) throw new Error('desktop.toml could not be read')
           return st.kept
         },
@@ -621,9 +642,10 @@ describe('Sync tab', () => {
   const openSync = async (opts: Parameters<typeof syncBackend>[0] = {}, settings: any = ready()) => {
     const { backend, st } = syncBackend(opts)
     const harness: FinderHarness = { bus: finderBus(), copied: [] }
-    const m = open('SyncTab', backend, { props: { settings }, finder: harness })
+    const kept = keptBus(opts.log)
+    const m = open('SyncTab', backend, { props: { settings }, finder: harness, bindings: { subscribeKeptFolderChanged: kept.subscribe } })
     await settleFinder(m)
-    return { m, st, bus: harness.bus, copied: harness.copied }
+    return { m, st, bus: harness.bus, copied: harness.copied, kept }
   }
 
   test('an added Finder location reads Added with Repair…, no error, and the ready hint', async () => {
@@ -966,30 +988,46 @@ describe('Sync tab', () => {
     expect(buttons(m)).not.toContain('Dismiss')
   })
 
-  // 1882 r5, inside spec A (lead ruling, rebase onto 1882): a Finder action (the reconciler's Try again) can run a
-  // removal that keeps files, an owed one, and Rust saves the folder while it runs. The open Sync tab read the saved
-  // folder once, on mount, so it reads it again after the action. (On main this was Add to Finder, which spec A's R5
-  // removed from the Mac.)
-  describe('a kept folder saved while a Finder action ran', () => {
+  // Rebase re-review I2 (it replaces the 1882 r5 tests that stood here): a removal the reconciler runs in the
+  // background (its Try again can start an owed one) saves the folder long after the tab read it, and Rust then emits
+  // `kept-folder-changed`. The tab reads the folder again on that event. The old tests faked a save inside the retry
+  // command, which no Rust path does: `finder_setup_retry` only triggers the reconciler and returns.
+  describe('a kept folder saved by a removal in the background', () => {
     const keptReads = (m: Mounted) => m.calls.filter((c) => c.name === 'kept_unsynced_folder')
 
-    test('a Try again whose removal kept files shows the row without leaving the tab', async () => {
-      const held: { st?: { kept: string | null } } = {}
-      const { m, st } = await openSync({ finder: finder.failed, retry: () => { held.st!.kept = KEPT } })
-      held.st = st
+    test('a Try again whose removal keeps files later shows the row when Rust says it saved it', async () => {
+      const { m, st, kept } = await openSync({ finder: finder.failed })
       expect(keptNotes(m)).toHaveLength(0)
       await pressFinder(m, 'Try again')
+      // `finder_setup_retry` has returned; the removal it started has not saved anything yet.
+      expect(keptNotes(m)).toHaveLength(0)
+      st.kept = KEPT // Rust: the removal kept files, and `surface_kept_folder` saved them for the row ...
+      kept.emit() // ... then told the windows
+      await settleFinder(m)
       expect(keptNotes(m)).toHaveLength(1)
       expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toContain(KEPT)
       expect(m.toasts).toEqual([])
     })
 
-    test('a Finder action that kept nothing reads the saved folder again and shows no row', async () => {
-      const { m } = await openSync({ finder: finder.failed })
+    test('a Finder action alone does not read the folder again; the event does', async () => {
+      const { m, kept } = await openSync({ finder: finder.failed })
       expect(keptReads(m)).toHaveLength(1) // on open
       await pressFinder(m, 'Try again')
-      expect(keptReads(m)).toHaveLength(2) // and once after the action
-      expect(keptNotes(m)).toHaveLength(0)
+      expect(keptReads(m)).toHaveLength(1) // the action's answer says nothing about a removal still running
+      kept.emit()
+      await settleFinder(m)
+      expect(keptReads(m)).toHaveLength(2)
+      expect(keptNotes(m)).toHaveLength(0) // nothing was saved
+    })
+
+    test('the first read waits for the listener, so a folder saved in between is not missed', async () => {
+      const log: string[] = []
+      const { m, kept } = await openSync({ kept: KEPT, log })
+      expect(log).toEqual(['subscribed', 'read'])
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(kept.live).toBe(1)
+      m.unmount()
+      expect(kept.live).toBe(0) // and a closed tab stops listening
     })
   })
 

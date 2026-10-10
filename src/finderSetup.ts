@@ -132,6 +132,47 @@ function release(unlisten: () => void): void {
   }
 }
 
+/**
+ * Rebase re-review I2: Rust emits this once it has saved a kept folder for the Settings › Sync row
+ * (`surface_kept_folder` in `src-tauri/src/lib.rs`, its `KEPT_FOLDER_CHANGED_EVENT`; a test pins the two names equal).
+ * A removal the reconciler runs in the background (after "Try again", an owed one, or one that finished after its
+ * time limit) saves the folder long after the row read it. No payload: the row reads the folder through
+ * `kept_unsynced_folder`.
+ */
+export const KEPT_FOLDER_CHANGED_EVENT = 'kept-folder-changed'
+
+/**
+ * Follow `kept-folder-changed`. `onSubscribed` as for {@link subscribeFinderSetup}: read the folder after it, never
+ * before, or a folder saved between the read and the registration is missed. Returns the unsubscribe.
+ */
+export function subscribeKeptFolderChanged(
+  onChanged: () => void,
+  options: Pick<FinderSubscribeOptions, 'onSubscribed'> = {},
+): () => void {
+  let closed = false
+  let stop: (() => void) | null = null
+  listen<unknown>(KEPT_FOLDER_CHANGED_EVENT, () => {
+    if (!closed) onChanged()
+  }).then(
+    (unlisten) => {
+      if (closed) {
+        release(unlisten)
+        return
+      }
+      stop = unlisten
+      options.onSubscribed?.()
+    },
+    () => {
+      // No event bus (a webview without Tauri): the surface reads what it has, once.
+      if (!closed) options.onSubscribed?.()
+    },
+  )
+  return () => {
+    closed = true
+    if (stop) release(stop)
+  }
+}
+
 /** Follow every reconciler transition. Returns the unsubscribe for an effect's cleanup. */
 export function subscribeFinderSetup(onView: (view: FinderSetupView) => void, options: FinderSubscribeOptions = {}): () => void {
   let closed = false
