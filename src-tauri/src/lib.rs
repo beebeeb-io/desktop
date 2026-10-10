@@ -2020,6 +2020,8 @@ fn install_recovered_session(
         });
         drop(guard);
         set_auth_present(state, true);
+        // Ruling F9: the vault is unlocked now (after a replaced key too), so sync resumes.
+        ask_to_resume_auth_paused(&write, acct);
         drop(write);
     }
     bump_vault_epoch();
@@ -2622,6 +2624,7 @@ fn install_new_session(
     drop(guard);
     set_auth_present(state, true);
     set_auth_email(state, email);
+    ask_to_resume_auth_paused(&write, acct);
     drop(write);
     Ok(NewSession::Installed)
 }
@@ -5085,6 +5088,10 @@ fn reauth_swap_token(
         *cached = Some(profile.clone());
     }
     reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
+    // Ruling F9: unlocked, so sync resumes. Without keys here the recovery-phrase unlock asks instead.
+    if vault_unlocked {
+        ask_to_resume_auth_paused(&write, acct);
+    }
     drop(write);
     Ok(vault_unlocked)
 }
@@ -5799,6 +5806,9 @@ fn start_engine_bound(
     spawn: impl FnOnce(PathBuf, zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>) -> EngineRunner,
 ) -> Result<EngineStart, String> {
     let turn = acct.session_generation();
+    // Ruling F9: the ask is read before the keys are, so it is served only by a start that holds the session of the
+    // sign-in that asked, or a later one.
+    let resume_asked = acct.auth_resume_asked.load(Ordering::SeqCst);
     let (token, key) = match authorize_engine_start(state, acct, &*engine_slot, paths)
         .inspect_err(|error| record_engine_refusal(acct, turn, error))?
     {
@@ -5806,12 +5816,43 @@ fn start_engine_bound(
         StartPermit::NoSession => return Ok(EngineStart::NoSession),
         StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed),
     };
+    resume_operations_paused_for_auth(acct, paths, resume_asked);
     **engine_slot = Some(spawn(paths.sync_root.clone(), token, key));
     *acct
         .engine_refusal
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     Ok(EngineStart::Started)
+}
+
+/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in that has put a session in memory asks the engine
+/// start that applies it to make the operations paused for `auth` due again. Only inside the sign-in's checked turn
+/// (`_write`) and after the session is in memory, so a start that sees the ask also holds that session (see
+/// [`resume_operations_paused_for_auth`]).
+fn ask_to_resume_auth_paused(_write: &SessionWrite, acct: &AccountRuntime) {
+    acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Lead ruling F9 (spec 2026-10-06 R8 and §5.6): when a sign-in asked for it (`asked`, read before this start read its
+/// keys) and no start has served that ask yet, every operation paused for `auth` becomes due now, its attempts kept.
+/// It runs under the engine slot, after the binding (so another account's operations were already reset) and before
+/// the engine exists (so its first tick sends them). Operations paused for any other reason stay paused. A database
+/// that cannot be written leaves the ask open for the next start; the engine starts either way.
+fn resume_operations_paused_for_auth(acct: &AccountRuntime, paths: &LocalDataPaths, asked: u64) {
+    if asked <= acct.auth_resume_done.load(Ordering::SeqCst) {
+        return;
+    }
+    let path = state_paths::state_db_path_from_state_dir(&paths.state_dir);
+    match state_db::StateDb::open(&path).and_then(|db| db.resume_operations_paused_for_auth(now_unix_seconds())) {
+        Ok(resumed) => {
+            acct.auth_resume_done.store(asked, Ordering::SeqCst);
+            tracing::info!(resumed, "signed in: the operations paused for auth are due again");
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            "signed in, but the operations paused for auth could not be made due; the next engine start tries again"
+        ),
+    }
 }
 
 /// Ruling P (Task 12 fix round 2): a start refused by the binding leaves its closed code on the account, so
@@ -26145,6 +26186,90 @@ mod reauth_tests {
         assert!(in_place.contains("-> Result<bool, ReauthError>"), "{in_place}");
     }
 
+    /// Lead ruling F9: the operations paused for `auth` are resumed in the one engine start and nowhere else. The start
+    /// reads the ask before it reads the keys (so an ask is served only by a start that holds the session of the sign-in
+    /// that asked, or a later one), and resumes after the binding and before the engine exists. Exactly three sign-in
+    /// writers ask, in their turn and after their session is in memory: the re-sign-in in place (only when unlocked),
+    /// the browser handoff's install and the recovery-phrase unlock. The key-replaced re-sign-in, the Keychain unlock
+    /// after a Lock and the startup restore never ask. Compared with `squeeze`.
+    #[test]
+    fn the_queue_resumes_in_the_one_engine_start_after_a_sign_in_put_its_session_in_memory() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let bound = squeeze(&code_of(&production, "fn start_engine_bound("));
+        let at = |snippet: &str| {
+            bound
+                .find(&squeeze(snippet))
+                .unwrap_or_else(|| panic!("{snippet}:\n{bound}"))
+        };
+        let asked = at("let resume_asked = acct.auth_resume_asked.load(Ordering::SeqCst);");
+        let keys = at("authorize_engine_start(");
+        let bound_or_returned = at("StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed)");
+        let resumed = at("resume_operations_paused_for_auth(acct, paths, resume_asked);");
+        let spawned = at("spawn(paths.sync_root.clone()");
+        assert!(
+            asked < keys && keys < bound_or_returned && bound_or_returned < resumed && resumed < spawned,
+            "the ask before the keys; the resume after the binding and before the engine:\n{bound}"
+        );
+        let squeezed = squeeze(&production);
+        assert_eq!(
+            squeezed.matches("resume_operations_paused_for_auth(").count(),
+            3,
+            "its definition, the start's one call, and the state database call inside it"
+        );
+        let resume = squeeze(&code_of(&production, "fn resume_operations_paused_for_auth("));
+        assert!(
+            resume.contains(&squeeze("if asked <= acct.auth_resume_done.load(Ordering::SeqCst) {"))
+                && resume.contains(&squeeze("acct.auth_resume_done.store(asked, Ordering::SeqCst);")),
+            "an ask is served once:\n{resume}"
+        );
+
+        let ask = squeeze("ask_to_resume_auth_paused(&write, acct);");
+        assert_eq!(squeezed.matches(&ask).count(), 3, "three sign-in writers ask");
+        for (signature, in_memory) in [
+            ("fn install_new_session(", "*guard = Some(Session {"),
+            ("fn install_recovered_session(", "*guard = Some(Session {"),
+            (
+                "fn reauth_swap_token(",
+                "install_unlocked_session(&write, acct, session)",
+            ),
+        ] {
+            let body = squeeze(&code_of(&production, signature));
+            let installed = body.find(&squeeze(in_memory)).expect(signature);
+            let asks = body.find(&ask).unwrap_or_else(|| panic!("{signature} asks"));
+            let released = body
+                .rfind("drop(write)")
+                .unwrap_or_else(|| panic!("{signature} ends its turn"));
+            assert!(
+                installed < asks && asks < released,
+                "{signature}: in its turn, after the session is in memory:\n{body}"
+            );
+        }
+        assert!(
+            squeeze(&code_of(&production, "fn reauth_swap_token(")).contains(&squeeze(
+                "if vault_unlocked { ask_to_resume_auth_paused(&write, acct); }"
+            )),
+            "the re-sign-in in place asks only when the vault is unlocked"
+        );
+        for signature in [
+            "fn reauth_swap_token_without_key(",
+            "async fn reauth_without_the_kept_key(",
+            "fn install_keychain_session(",
+            "async fn unlock_vault(",
+            "async fn restore_stored_session(",
+        ] {
+            assert!(
+                !code_of(&production, signature).contains("ask_to_resume_auth_paused"),
+                "{signature} is not a sign-in that unlocks"
+            );
+        }
+        let writer = code_of(&production, "fn ask_to_resume_auth_paused(");
+        assert!(
+            writer[..writer.find(") {").unwrap()].contains("write: &SessionWrite"),
+            "the ask is made only inside a checked turn:\n{writer}"
+        );
+    }
+
     /// Spec §5.6: a re-sign-in whose kept key the server no longer accepts removes only that key. It never purges,
     /// never removes the domain, never signs out, never writes a key and never starts an engine; the session in memory
     /// ends the Lock way (the turn first, then the reconciler's hold, then the engine stop, all before the writes, which
@@ -29071,6 +29196,222 @@ mod reauth_tests {
                 rx.recv_timeout(Duration::from_secs(20))
                     .expect("a writer finishes once the lock is free");
             }
+        }
+
+        // -- lead ruling F9: the queue kept across a re-sign-in resumes --
+
+        /// What the device run left in the queue: an edit the server refused while the session was revoked (`auth`,
+        /// one earlier attempt, its retry far away), and one held back by the quota.
+        fn edits_paused_while_revoked(db: &state_db::StateDb) {
+            some_operation(db, "op-auth");
+            db.record_operation_attempt("op-auth", 1, 4_000_000_000, Some("timed out"))
+                .unwrap();
+            db.record_operation_pause(
+                "op-auth",
+                state_db::OperationPauseReason::Auth,
+                Some("HTTP 401 Unauthorized"),
+                1,
+            )
+            .unwrap();
+            some_operation(db, "op-quota");
+            db.record_operation_pause(
+                "op-quota",
+                state_db::OperationPauseReason::Quota,
+                Some("quota exceeded"),
+                1,
+            )
+            .unwrap();
+        }
+
+        /// The operations that are due now, with their attempts.
+        fn due_now(db: &state_db::StateDb) -> Vec<(String, i64)> {
+            let mut due: Vec<_> = db
+                .list_due_operations(now_unix_seconds())
+                .unwrap()
+                .into_iter()
+                .map(|op| (op.op_id, op.attempts))
+                .collect();
+            due.sort();
+            due
+        }
+
+        /// The one engine start (`start_engine_bound`, as `spawn_bound_engine` makes it) onto this Mac's throwaway state
+        /// dir. Returns what was due at the moment the engine would have come to exist, before its first tick; `None`
+        /// when no engine started. The slot is left empty.
+        async fn due_when_the_engine_starts(fx: &Fixture) -> Option<Vec<(String, i64)>> {
+            let root = tempfile::tempdir().unwrap();
+            let paths = LocalDataPaths::for_test(fx.dir.path(), root.path());
+            let mut slot = fx.acct.engine.lock().await;
+            let seen = std::cell::RefCell::new(None);
+            let started = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                *seen.borrow_mut() = Some(due_now(&fx.db()));
+                EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
+            drop(slot.take());
+            match started {
+                Ok(EngineStart::Started) => Some(seen.into_inner().expect("the engine was constructed")),
+                Ok(_) => None,
+                Err(error) => panic!("the engine start failed: {error}"),
+            }
+        }
+
+        /// Ruling F9 (spec R8: "sync resumes"): the same account signs in again, with its keys in memory (revoked from
+        /// the web while Beebeeb ran) or kept only in the Keychain (after a relaunch while revoked). The edit the server
+        /// refused while revoked is due by the time the engine exists, with its attempt kept; the one held back by the
+        /// quota stays paused.
+        #[tokio::test]
+        async fn a_same_account_re_sign_in_makes_the_edits_paused_for_auth_due_before_the_engine_starts() {
+            for keys_in_memory in [true, false] {
+                let fx = Fixture::new();
+                let id = fx.id().to_string();
+                persist_session_to_keychain(
+                    &SessionWrite::for_test(),
+                    &id,
+                    "tok-old",
+                    &[7u8; 32],
+                    Some("sam@beebeeb.io"),
+                )
+                .unwrap();
+                if keys_in_memory {
+                    fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+                }
+                let db = fx.db();
+                db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                    .unwrap();
+                edits_paused_while_revoked(&db);
+                assert_eq!(due_now(&db), vec![], "precondition: nothing is due");
+
+                let unlocked = reauth_swap_token(
+                    &fx.state,
+                    &fx.acct,
+                    &fx.sources(),
+                    "tok-new",
+                    &sam(),
+                    &mut fx.acct.session_generation(),
+                )
+                .unwrap();
+                assert!(unlocked, "keys in memory: {keys_in_memory}");
+
+                assert_eq!(
+                    due_when_the_engine_starts(&fx).await,
+                    Some(vec![("op-auth".to_string(), 1)]),
+                    "keys in memory: {keys_in_memory}"
+                );
+                assert_eq!(
+                    db.queue_diagnostics(now_unix_seconds()).unwrap().paused_by_reason,
+                    std::collections::BTreeMap::from([("quota".to_string(), 1)]),
+                    "the quota pause stays (keys in memory: {keys_in_memory})"
+                );
+            }
+        }
+
+        /// Ruling F9 with spec §5.6: the server says the key this Mac kept was replaced. The re-sign-in ends at the
+        /// recovery-phrase step with no keys, so no engine starts and the edit stays paused; once the phrase unlocks the
+        /// vault, the edit is due by the time the engine exists.
+        #[tokio::test]
+        async fn after_a_replaced_key_the_edits_paused_for_auth_wait_for_the_recovery_phrase() {
+            let fx = Fixture::new();
+            after_a_first_sign_in(&fx, true, true);
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            edits_paused_while_revoked(&db);
+            let settled = reauth_without_the_kept_key(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                &mut fx.acct.session_generation(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(settled, KEY_REPLACED);
+
+            assert_eq!(due_when_the_engine_starts(&fx).await, None, "no keys, no engine");
+            assert_eq!(
+                due_now(&db),
+                vec![],
+                "the edit stays paused at the recovery-phrase step"
+            );
+
+            install_recovered_session(
+                &fx.state,
+                &fx.acct,
+                &mut fx.acct.session_generation(),
+                "tok-new",
+                Some("sam@beebeeb.io".to_string()),
+                &[9u8; 32],
+            )
+            .unwrap();
+            assert_eq!(
+                due_when_the_engine_starts(&fx).await,
+                Some(vec![("op-auth".to_string(), 1)]),
+                "unlocked: due before the engine's first tick"
+            );
+        }
+
+        /// Ruling F9: a re-sign-in that fails asks for nothing, and an account switch resumes nothing of the account
+        /// before. (1) Another sign-in wrote first, so this one is refused and stores nothing: the engine that starts
+        /// with the session already here finds the edit still paused. (2) kim's session arrives over sam's local data:
+        /// the binding resets that data before anything is resumed, so kim's engine finds none of sam's edits.
+        #[tokio::test]
+        async fn a_sign_in_that_fails_and_an_account_switch_make_nothing_due() {
+            let fx = Fixture::new();
+            let id = fx.id().to_string();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                &id,
+                "tok-old",
+                &[7u8; 32],
+                Some("sam@beebeeb.io"),
+            )
+            .unwrap();
+            fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+            *fx.acct.cached_profile.lock().unwrap() = Some(sam());
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            edits_paused_while_revoked(&db);
+            let mut turn = fx.acct.session_generation();
+            drop(claim_session_write(&fx.acct, &mut fx.acct.session_generation()).unwrap());
+            let refused = reauth_swap_token(&fx.state, &fx.acct, &fx.sources(), "tok-new", &sam(), &mut turn);
+            assert!(matches!(&refused, Err(error) if !error.token_stored), "{refused:?}");
+            assert_eq!(
+                due_when_the_engine_starts(&fx).await,
+                Some(vec![]),
+                "(1) the failed sign-in resumed nothing"
+            );
+
+            let other = Fixture::new();
+            let db = other.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            edits_paused_while_revoked(&db);
+            assert_eq!(
+                install_new_session(
+                    &other.state,
+                    &other.acct,
+                    &mut other.acct.session_generation(),
+                    "tok-kim",
+                    &[3u8; 32],
+                    Some("kim@beebeeb.io".to_string()),
+                    Some(kim()),
+                ),
+                Ok(NewSession::Installed)
+            );
+            assert_eq!(
+                due_when_the_engine_starts(&other).await,
+                None,
+                "the reset owes the Finder removal first"
+            );
+            clear_finder_removal_owed_in(other.dir.path());
+            assert_eq!(
+                due_when_the_engine_starts(&other).await,
+                Some(vec![]),
+                "(2) none of sam's edits is due for kim"
+            );
+            assert_eq!(db.queued_or_staged_count().unwrap(), 0, "they were reset");
         }
     }
 }

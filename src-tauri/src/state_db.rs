@@ -3175,6 +3175,21 @@ impl StateDb {
         Ok(())
     }
 
+    /// Lead ruling F9 (spec 2026-10-06 R8): make every operation paused because the server refused the session
+    /// (`auth`) due again at `now`, keeping its attempts. Operations paused for any other reason stay paused. Returns how
+    /// many were resumed.
+    pub fn resume_operations_paused_for_auth(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET paused_reason = NULL,
+                 next_retry_at = ?1,
+                 updated_at = ?1
+             WHERE paused_reason = ?2",
+            params![now, OperationPauseReason::Auth.as_str()],
+        )
+    }
+
     pub fn record_operation_pause(
         &self,
         op_id: &str,
@@ -4398,6 +4413,70 @@ mod tests {
         assert_eq!(backlog.upload_files, 0);
         assert_eq!(backlog.paused_for_quota, 0);
         assert_eq!(backlog.queued_ops, 2);
+    }
+
+    /// Lead ruling F9: after a sign-in, the operations paused for `auth` are due again at once with their attempts kept,
+    /// and the ones paused for quota, permission or a lock stay paused.
+    #[test]
+    fn only_the_operations_paused_for_auth_are_due_again_with_their_attempts_kept() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut auth = queued_op("a1", OperationKind::CreateFolder, "f-a");
+        auth.attempts = 2;
+        auth.next_retry_at = 10_000;
+        db.enqueue_operation(&auth).unwrap();
+        for (id, reason) in [
+            ("a1", OperationPauseReason::Auth),
+            ("q1", OperationPauseReason::Quota),
+            ("p1", OperationPauseReason::Permission),
+            ("l1", OperationPauseReason::Locked),
+        ] {
+            if id != "a1" {
+                db.enqueue_operation(&queued_op(id, OperationKind::UploadFile, id))
+                    .unwrap();
+            }
+            db.record_operation_pause(id, reason, Some("HTTP 401 Unauthorized"), 5)
+                .unwrap();
+        }
+        let mut unpaused = queued_op("d1", OperationKind::UploadFile, "f-d");
+        unpaused.created_at = 2; // listed after a1, which was queued first
+        db.enqueue_operation(&unpaused).unwrap();
+        let due = |now| {
+            db.list_due_operations(now)
+                .unwrap()
+                .into_iter()
+                .map(|op| (op.op_id, op.attempts, op.next_retry_at))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            due(500),
+            vec![("d1".to_string(), 0, 0)],
+            "precondition: only the unpaused one is due"
+        );
+
+        assert_eq!(db.resume_operations_paused_for_auth(500).unwrap(), 1);
+
+        assert_eq!(
+            due(500),
+            vec![("a1".to_string(), 2, 500), ("d1".to_string(), 0, 0)],
+            "the auth-paused one is due now, its attempts kept"
+        );
+        let diagnostics = db.queue_diagnostics(500).unwrap();
+        assert_eq!(
+            diagnostics.paused_by_reason,
+            BTreeMap::from([
+                ("locked".to_string(), 1),
+                ("permission".to_string(), 1),
+                ("quota".to_string(), 1)
+            ]),
+            "every other pause stays"
+        );
+        assert_eq!(
+            db.resume_operations_paused_for_auth(600).unwrap(),
+            0,
+            "nothing left to resume"
+        );
+        assert_eq!(due(500).len(), 2, "and a second call moves nothing");
     }
 
     #[test]

@@ -176,6 +176,12 @@ pub struct AccountRuntime {
     /// The last binding refusal of an engine start for the current session (Task 12 fix round 2, ruling P), shown as
     /// `sync_status.engine_refusal`. A start that runs clears it, and so does every session transition.
     pub(crate) engine_refusal: Mutex<Option<crate::account_binding::Refusal>>,
+    /// Lead ruling F9 (spec 2026-10-06 R8): how many sign-ins have asked for the operations paused for `auth` to be due
+    /// again. A sign-in that puts a session in memory moves it on in its write turn, after the session is there.
+    pub(crate) auth_resume_asked: AtomicU64,
+    /// The ask the last engine start served (it made those operations due before the engine existed). Written only
+    /// under the engine slot.
+    pub(crate) auth_resume_done: AtomicU64,
 }
 
 impl AccountRuntime {
@@ -201,6 +207,8 @@ impl AccountRuntime {
             identify_flight: Mutex::new(IdentifyFlight::default()),
             keychain_email_pending: AtomicBool::new(false),
             engine_refusal: Mutex::new(None),
+            auth_resume_asked: AtomicU64::new(0),
+            auth_resume_done: AtomicU64::new(0),
         }
     }
 
